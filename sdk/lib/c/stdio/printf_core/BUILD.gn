@@ -14,7 +14,6 @@ llvm_libc_source_set("printf_core") {
     "printf_main.h",
     "writer.h",
   ]
-  public_configs = [ ":printf-options" ]
   functions = []
 
   # Each implementation pieces has its own tests.
@@ -28,29 +27,6 @@ llvm_libc_source_set("printf_core") {
   ]
 }
 
-config("printf-options") {
-  visibility = [ ":*" ]
-
-  defines = [
-    # Never support %n.
-    "LIBC_COPT_PRINTF_DISABLE_WRITE_INT",
-
-    # Don't support %m since it uses problematic llvm-libc internals.
-    "LIBC_COPT_PRINTF_DISABLE_STRERROR",
-
-    # Don't support %lc since it's not used anywhere in the internal uses,
-    # and this implementation is not yet used for public printf.
-    "LIBC_COPT_PRINTF_DISABLE_WIDE",
-  ]
-
-  # Don't support FP types if the toolchain doesn't.
-  _no_floating_point = toolchain_variant.tags + [ "no-floating-point" ] -
-                       [ "no-floating-point" ] != toolchain_variant.tags
-  if (_no_floating_point) {
-    defines += [ "LIBC_COPT_PRINTF_DISABLE_FLOAT" ]
-  }
-}
-
 libc_source_set("wrapper") {
   visibility = [ "//sdk/lib/ld/*" ]
 
@@ -60,7 +36,7 @@ libc_source_set("wrapper") {
   }
 
   sources = [ "wrapper.cc" ]
-  deps = [ ":printf_core" ]
+  libc_deps = [ ":printf_core" ]
 }
 
 config("wrapper.config") {

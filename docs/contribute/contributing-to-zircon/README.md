@@ -58,7 +58,7 @@ typedef int ZX_RESUME_NOT_HANDLED_DEPRECATION __attribute__((deprecated));
 
 [contribute-changes]: /docs/development/source_code/contribute_changes.md
 [gerrir-code-review]: https://fuchsia-review.googlesource.com/#/q/project:zircon
-[build-zircon-for-all]: /docs/development/kernel/getting_started.md#building_zircon_for_all_targets
+[build-zircon-for-all]: /docs/development/kernel/getting_started.md#building-zircon-for-all-targets
 [run-the-tests]: /docs/development/testing/testing.md
 [googlesource-docs]: /docs/concepts/kernel
 [cmdline-doc]: /docs/reference/kernel/kernel_cmdline.md

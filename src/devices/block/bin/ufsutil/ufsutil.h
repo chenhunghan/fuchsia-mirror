@@ -6,15 +6,20 @@
 #define SRC_DEVICES_BLOCK_BIN_UFSUTIL_UFSUTIL_H_
 
 #include <fidl/fuchsia.hardware.ufs/cpp/wire.h>
+#include <lib/zx/result.h>
+
+#include <ostream>
 
 namespace ufsutil {
 
-int RunUfsUtils(fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs> client, int argc, char** argv);
+zx::result<> RunUfsUtils(fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs> client, int argc,
+                         char** argv, std::ostream& out, std::ostream& err);
 
 zx::result<fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>> OpenDevice(const char* dev);
 
-void PrintUsage();
+void PrintUsage(std::ostream& out);
 void Initialize();
+
 }  // namespace ufsutil
 
 #endif  // SRC_DEVICES_BLOCK_BIN_UFSUTIL_UFSUTIL_H_

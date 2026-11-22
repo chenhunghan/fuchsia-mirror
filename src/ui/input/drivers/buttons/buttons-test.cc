@@ -149,8 +149,18 @@ class LocalFakeGpio : public fake_gpio::FakeGpio {
   void SetExpectedInterruptMode(fuchsia_hardware_gpio::InterruptMode mode) {
     expected_interrupt_mode_ = mode;
   }
+  void CloseOnOutputSetBufferMode() { close_on_output_set_buffer_mode_ = true; }
 
  private:
+  void SetBufferMode(SetBufferModeRequestView request,
+                     SetBufferModeCompleter::Sync& completer) override {
+    if (close_on_output_set_buffer_mode_ &&
+        request->mode != fuchsia_hardware_gpio::BufferMode::kInput) {
+      completer.Close(ZX_ERR_PEER_CLOSED);
+      return;
+    }
+    FakeGpio::SetBufferMode(request, completer);
+  }
   void ConfigureInterrupt(ConfigureInterruptRequestView request,
                           ConfigureInterruptCompleter::Sync& completer) override {
     ASSERT_TRUE(request->config.has_mode());
@@ -169,6 +179,7 @@ class LocalFakeGpio : public fake_gpio::FakeGpio {
   fuchsia_hardware_gpio::InterruptMode expected_interrupt_mode_ =
       fuchsia_hardware_gpio::InterruptMode::kEdgeHigh;
   bool check_interrupt_mode_ = true;
+  bool close_on_output_set_buffer_mode_ = false;
 };
 
 class FakeSystemActivityGovernor
@@ -733,6 +744,21 @@ TEST_P(ParameterizedButtonsTest, MatrixButtonPush) {
     ASSERT_EQ(fake_gpio::WriteSubState{.value = gpio_3_matrix_output_value},
               (gpio_3_states.end() - 1)->sub_state);  // Restore column.
   });
+}
+
+TEST_P(ParameterizedButtonsTest, MatrixScanSetBufferModeChannelClosed) {
+  auto init_result = Init(kMetadataMatrix, /* suspend_enabled */ GetParam());
+  ASSERT_TRUE(init_result.is_ok());
+
+  driver_test().RunInEnvironmentTypeContext(
+      [](ButtonsTestEnvironment& env) { env.fake_gpio_servers_[2].CloseOnOutputSetBufferMode(); });
+
+  fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2> endpoints =
+      fidl::Endpoints<fuchsia_input_report::InputReportsReaderV2>::Create();
+  fidl::ClientEnd<fuchsia_input_report::InputDevice> client = GetClient();
+  fidl::WireResult<fuchsia_input_report::InputDevice::GetInputReportsReaderV2> result =
+      fidl::WireCall(client)->GetInputReportsReaderV2(std::move(endpoints.server), 10);
+  ASSERT_TRUE(result.ok());
 }
 
 TEST_P(ParameterizedButtonsTest, DuplicateReports) {

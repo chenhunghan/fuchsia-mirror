@@ -117,7 +117,7 @@ validate that the `magic_number` represents a wire format revision that is
 Bindings MUST check that the `disambiguator` byte is zero. Having a zero byte in
 the front of the metadata prevents programs from mistaking a FIDL message as
 text when the message is persisted as a file (see
-[Convention for data persistence](#convention_for_data_persistence)).
+[Convention for data persistence](#convention-for-data-persistence)).
 
 Note that the information contained in a FIDL transactional header is a superset
 of that in the wire format metadata. The semantics of the `at_rest_flags` field
@@ -145,7 +145,7 @@ or associated with the encoded message. For example, the metadata could be
 derived from the transactional message header when FIDL is used in a production
 IPC context.
 
-### Convention for data persistence
+### Convention for data persistence {:#convention-for-data-persistence}
 
 To better support the motivating use cases, we would like to specify a
 convention for attaching the metadata to the encoded message, where the byte
@@ -556,11 +556,11 @@ of APIs in this alternative together.
 [go-i2i-persistent-fidl]: http://go/i2i-persistent-fidl-messages
 [go-phickle]: http://go/phickle
 [llcpp-bindings-reference]: /docs/reference/fidl/bindings/cpp-bindings.md
-[llcpp-encoding-decoding]: /docs/reference/fidl/bindings/cpp-bindings.md#encoding-decoding
+[llcpp-encoding-decoding]: /docs/reference/fidl/bindings/cpp-bindings.md
 [unknown-interactions-rfc]: /docs/contribute/governance/rfcs/0138_handling_unknown_interactions.md
 [rust-encoding-decoding]: /docs/reference/fidl/bindings/rust-bindings.md#encoding-decoding
 [rust-persistence-impl]: https://cs.opensource.google/fuchsia/fuchsia/+/b9b8d7aae9cff4398182a0e125055950556178e1:src/lib/fidl/rust/fidl/src/encoding.rs;l=3662
-[supported-magic-number]: /docs/contribute/governance/rfcs/0037_transactional_message_header_v3.md#when_should_a_new_magic_number_be_assigned
+[supported-magic-number]: /docs/contribute/governance/rfcs/0037_transactional_message_header_v3.md#new-magic-number
 [transactional-message-header-rfc]: /docs/contribute/governance/rfcs/0037_transactional_message_header_v3.md
 [transactional-message-header-spec]: /docs/reference/fidl/language/wire-format/README.md#transactional-messages
 [padding]: /docs/reference/fidl/language/wire-format/README.md#padding

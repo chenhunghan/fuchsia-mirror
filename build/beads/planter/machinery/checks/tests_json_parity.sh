@@ -89,7 +89,7 @@ project_dir = os.path.realpath(
 
 SOURCE = vtp.SOURCE
 # Bump when the cached baseline format or test normalization changes.
-BASELINE_VERSION = "3"
+BASELINE_VERSION = "6"
 # A change touching more files than this is not a migration on top of
 # $PLANTER_CHANGE_BASE (e.g. a stale base); reverting it would be slow and risky.
 MAX_REVERTED_PATHS = 2000
@@ -243,22 +243,186 @@ journal_path = os.path.join(state_dir, "restore.json")
 backup_dir = os.path.join(state_dir, "backup")
 lock_path = os.path.join(state_dir, "lock")
 
+EMPTY_FILE_STATE = "file:" + sha(b"")
+
+
+# Report an environment/filesystem write failure (such as ENOENT or EROFS on a
+# degraded FUSE/casfs mount) as a structured finding instead of crashing or
+# blaming the migration change.
+def report_workspace_write_error(stage, error, has_pending_restore=False):
+    pending_note = (
+        f" Original working-tree files remain backed up in {journal_path} and "
+        f"{backup_dir} and will be restored automatically once writes succeed."
+        if has_pending_restore
+        else ""
+    )
+    msg = (
+        f"Filesystem write failed during {stage} ({error}). The checkout or "
+        "git/build directory mount is rejecting file writes (for example a "
+        "degraded FUSE/casfs mount), so `tests.json` parity and `fx gen` "
+        f"cannot run.{pending_note}"
+    )
+    rem = (
+        "This is a workspace filesystem/mount write failure, not a BUILD.bazel "
+        "or BUILD.gn defect. Do not edit build files or delete "
+        "`planter-tests-json-parity/restore.json` or `backup` to work around "
+        "it; stop retrying failing build or `git commit` write commands, keep "
+        "the task commit's changed files (`git diff --name-only HEAD~1 HEAD` "
+        "when `HEAD` already has the local migration commit) in "
+        "`CoderReport.modified_files` rather than `[]` (so "
+        "`PLANTER_CHANGE_BASE=HEAD` retries do not fail with "
+        "`empty_migration_diff`), set `test_footers` to `[\"fx lint\"]` and "
+        "`disputed_findings` to `[]` in `CoderReport` (an empty `test_footers` "
+        "fails `test_verifier` with `missing_test_footer`, while target-bearing "
+        "`Test:` commands trigger spurious `test_verifier` query errors on an "
+        "unwritable mount), and report the mount write error in `summary`."
+    )
+    add("workspace_write_error", "ERROR", msg, remediation=rem)
+    finish()
+
+
+# Probe that each existing directory in `candidate_dirs` accepts non-empty file
+# writes (degraded FUSE/casfs mounts allow 0-byte O_CREAT metadata ops while
+# rejecting write()). Returns `(probe_dir, error)` on failure or `None` when ok.
+def probe_workspace_writable(candidate_dirs):
+    probe_bytes = b"planter-write-probe\n"
+    probe_dirs = list(
+        dict.fromkeys(d for d in candidate_dirs if d and os.path.isdir(d))
+    )
+    for probe_dir in probe_dirs:
+        fd = None
+        probe_path = None
+        try:
+            fd, probe_path = tempfile.mkstemp(
+                dir=probe_dir, prefix=".planter-write-probe."
+            )
+            os.write(fd, probe_bytes)
+            os.close(fd)
+            fd = None
+            with open(probe_path, "rb") as rf:
+                if rf.read() != probe_bytes:
+                    raise OSError("short write during writability probe")
+            os.unlink(probe_path)
+        except OSError as e:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if probe_path and os.path.lexists(probe_path):
+                try:
+                    os.unlink(probe_path)
+                except OSError:
+                    pass
+            return probe_dir, e
+    return None
+
+
+# Stage file bytes in a sibling temporary file and atomically replace `dst` so a
+# failing write() on a degraded mount never truncates or unlinks `dst` or leaves
+# orphaned 0-byte temporary files behind.
+def atomic_write_bytes(dst, data, mode=0o644):
+    parent = os.path.dirname(dst) or workdir
+    os.makedirs(parent, exist_ok=True)
+    fd = None
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix=".planter-tjp.")
+        view = memoryview(data)
+        total = 0
+        while total < len(view):
+            written = os.write(fd, view[total:])
+            if written <= 0:
+                raise OSError("short write while staging file")
+            total += written
+        os.chmod(fd, mode)
+        os.close(fd)
+        fd = None
+        os.replace(tmp, dst)
+        tmp = None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp is not None and os.path.lexists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+# Stage a symlink at a sibling temporary path and atomically replace `dst`.
+def atomic_write_symlink(dst, target_str):
+    parent = os.path.dirname(dst) or workdir
+    os.makedirs(parent, exist_ok=True)
+    fd = None
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix=".planter-tjp-lnk.")
+        os.close(fd)
+        fd = None
+        os.unlink(tmp)
+        os.symlink(target_str, tmp)
+        os.replace(tmp, dst)
+        tmp = None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp is not None and os.path.lexists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+# Copy a regular file or symlink to `dst` via atomic replacement rather than
+# in-place O_TRUNC (`shutil.copy2`), preserving `dst` if `write()` fails.
+def atomic_copy_entry(src, dst):
+    if os.path.islink(src):
+        atomic_write_symlink(dst, os.readlink(src))
+        return
+    st_mode = os.stat(src).st_mode & 0o777
+    with open(src, "rb") as sf:
+        data = sf.read()
+    atomic_write_bytes(dst, data, st_mode or 0o644)
+
+
 # Serialize concurrent tests_json_parity invocations across background and post-report
 # check runs so an overlapping run never restores or deletes an active run's backup_dir.
-os.makedirs(state_dir, exist_ok=True)
-lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-if skip_build:
-    try:
+lock_fd = None
+try:
+    os.makedirs(state_dir, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    if skip_build:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    elif not dry_run:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+except BlockingIOError:
+    add(
+        "tests_json_parity_skipped",
+        "INFO",
+        "PLANTER_SKIP_BUILD is set; tests.json parity was not checked.",
+    )
+    finish()
+except OSError as e:
+    if skip_build:
         add(
             "tests_json_parity_skipped",
             "INFO",
             "PLANTER_SKIP_BUILD is set; tests.json parity was not checked.",
         )
         finish()
-else:
-    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    if not dry_run:
+        report_workspace_write_error(
+            f"lock initialization in {state_dir}",
+            e,
+            has_pending_restore=os.path.exists(journal_path),
+        )
 
 
 def remove_file(path):
@@ -425,10 +589,8 @@ def recover_missing_backup_bytes(entry):
 
 
 def write_journal(entries):
-    fd, tmp = tempfile.mkstemp(dir=state_dir, prefix=".restore.")
-    with os.fdopen(fd, "w") as f:
-        json.dump({"paths": entries}, f)
-    os.replace(tmp, journal_path)
+    payload = json.dumps({"paths": entries}).encode("utf-8")
+    atomic_write_bytes(journal_path, payload, 0o600)
 
 
 def back_up(entries):
@@ -440,8 +602,7 @@ def back_up(entries):
         e["backup_state"] = state(src)
         if e["backup_state"] != "absent":
             dst = os.path.join(backup_dir, e["path"])
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst, follow_symlinks=False)
+            atomic_copy_entry(src, dst)
             if os.path.isfile(src) and not os.path.islink(src):
                 try:
                     if os.path.getsize(src) <= 2 * 1024 * 1024:
@@ -452,6 +613,31 @@ def back_up(entries):
                 except OSError:
                     pass
     write_journal(entries)
+
+
+# Collect existing directories that `restore_from_journal` will write into so
+# writability is verified before touching any journaled working-tree file.
+def restore_probe_dirs():
+    git_probe = state_dir if os.path.isdir(state_dir) else git_dir
+    dirs_to_probe = [git_probe, workdir]
+    try:
+        with open(journal_path, encoding="utf-8") as jf:
+            entries = json.load(jf).get("paths") or []
+        for e in entries:
+            rel = e.get("path") if isinstance(e, dict) else ""
+            if not rel:
+                continue
+            cur_parent = os.path.dirname(os.path.join(workdir, rel))
+            while cur_parent and not os.path.isdir(cur_parent):
+                nxt = os.path.dirname(cur_parent)
+                if nxt == cur_parent:
+                    break
+                cur_parent = nxt
+            if cur_parent and os.path.isdir(cur_parent):
+                dirs_to_probe.append(cur_parent)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return dirs_to_probe
 
 
 def restore_from_journal():
@@ -465,10 +651,11 @@ def restore_from_journal():
         current = state(dst)
         backup_st = e.get("backup_state", "absent")
         written_sts = e.get("written_states") or []
-        lost_during_restore = (
-            current == "absent"
-            and backup_st.startswith("file:")
-            and "absent" not in written_sts
+        # Also treat 0-byte files left by a prior interrupted O_TRUNC copy/write
+        # as un-restored when the backed-up original was non-empty.
+        lost_during_restore = backup_st.startswith("file:") and (
+            (current == "absent" and "absent" not in written_sts)
+            or (current == EMPTY_FILE_STATE and backup_st != EMPTY_FILE_STATE)
         )
         if current == backup_st or (
             current not in written_sts and not lost_during_restore
@@ -479,15 +666,15 @@ def restore_from_journal():
             remove_file(dst)
             prune_empty_dirs(rel)
         else:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
             bkp_src = os.path.join(backup_dir, rel)
-            if os.path.lexists(bkp_src):
-                shutil.copy2(bkp_src, dst, follow_symlinks=False)
+            if os.path.lexists(bkp_src) and (
+                not backup_st or state(bkp_src) == backup_st
+            ):
+                atomic_copy_entry(bkp_src, dst)
             else:
                 recovered = recover_missing_backup_bytes(e)
                 if recovered is not None:
-                    with open(dst, "wb") as wf:
-                        wf.write(recovered)
+                    atomic_write_bytes(dst, recovered, 0o644)
                 else:
                     conflicts.append(e)
     if conflicts:
@@ -530,17 +717,33 @@ def acquire_workdir_build_lock(gdir):
 
 _workdir_build_lock = acquire_workdir_build_lock(git_dir)
 
-if os.path.exists(journal_path):
-    try:
-        restore_from_journal()
-        add(
-            "tests_json_parity_restored",
-            "INFO",
-            "Restored the files of an interrupted tests_json_parity run.",
-        )
-    except (RestoreConflict, OSError, ValueError, KeyError) as e:
-        report_restore_failure(e)
-        finish()
+if os.path.exists(journal_path) and not dry_run:
+    probe_err = probe_workspace_writable(restore_probe_dirs())
+    if probe_err is not None:
+        if not skip_build:
+            report_workspace_write_error(
+                f"writability probe in {probe_err[0]}",
+                probe_err[1],
+                has_pending_restore=True,
+            )
+    else:
+        try:
+            restore_from_journal()
+            add(
+                "tests_json_parity_restored",
+                "INFO",
+                "Restored the files of an interrupted tests_json_parity run.",
+            )
+        except OSError as e:
+            if not skip_build:
+                report_workspace_write_error(
+                    "working-tree restore",
+                    e,
+                    has_pending_restore=os.path.exists(journal_path),
+                )
+        except (RestoreConflict, ValueError, KeyError) as e:
+            report_restore_failure(e)
+            finish()
 
 if skip_build:
     add(
@@ -670,25 +873,55 @@ def path_conflict(rel):
     return False
 
 
-def run_gen():
-    """Runs `fx gen`; returns None on success or the tail of its output."""
+# Terminate an `fx gen` process group cleanly on timeout or interrupt so child
+# `gn` / `regenerator.py` processes do not hold pipes open or block tree restore.
+def _terminate_gen_process_group(proc):
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2 if sig == signal.SIGTERM else 5)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    if proc.stdout is not None:
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
     try:
-        proc = subprocess.run(
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def run_gen():
+    """Runs `fx gen` in its own process group; returns None on success or error tail."""
+    try:
+        proc = subprocess.Popen(
             [fx, "gen"],
             cwd=workdir,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=timeout,
+            start_new_session=True,
         )
+    except OSError as e:
+        return f"failed to start fx gen: {e}"
+    try:
+        out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        _terminate_gen_process_group(proc)
         return f"timed out after {timeout}s"
+    except BaseException:
+        _terminate_gen_process_group(proc)
+        raise
     if proc.returncode == 0:
         return None
-    return f"exit {proc.returncode}:\n" + "\n".join(
-        proc.stdout.splitlines()[-40:]
-    )
+    return f"exit {proc.returncode}:\n" + "\n".join(out.splitlines()[-40:])
 
 
 def run_gn_refs(lbl):
@@ -727,7 +960,16 @@ def merge_tests(primary_list, secondary_list):
 
 
 original_args = read(args_gn_rel)
-product_args = vtp.build_product_args_gn(original_args)
+after_gn_by_dir = {d: read(f"{d}/BUILD.gn") for d in sorted(touched_dirs)}
+base_sanitized_args = vtp.sanitize_args_gn(
+    original_args, gn_by_dir=base_gn_by_dir
+)
+product_args = vtp.build_product_args_gn(
+    original_args, gn_by_dir=base_gn_by_dir
+)
+after_product_args = vtp.build_product_args_gn(
+    original_args, gn_by_dir=after_gn_by_dir
+)
 
 commit_msg = ""
 msg_file = os.environ.get("PLANTER_COMMIT_MSG_FILE", "").strip()
@@ -746,19 +988,27 @@ else:
         commit_msg = ""
 
 jiri_digest = file_digest(os.path.join(workdir, ".jiri_root", "update_history", "latest"))
+# Key baseline cache on base commit + product args + jiri state so ancillary
+# touched_dirs edits without uncovered off-CQ GN test targets reuse the baseline
+# instead of re-reverting the live working tree.
+base_key = sha(
+    json.dumps(
+        [
+            BASELINE_VERSION,
+            base_commit,
+            os.path.realpath(args_gn),
+            sha(product_args.encode()),
+            jiri_digest,
+        ]
+    ).encode()
+)
 key_material = json.dumps(
     [
-        BASELINE_VERSION,
-        base_commit,
-        os.path.realpath(args_gn),
-        sha(product_args.encode()),
+        base_key,
         sha(json.dumps(sorted(touched_dirs)).encode()),
-        jiri_digest,
     ]
 )
-baseline_path = os.path.join(
-    state_dir, "baseline-" + sha(key_material.encode())[:24] + ".json"
-)
+baseline_path = os.path.join(state_dir, "baseline-" + base_key[:24] + ".json")
 result_cache_path = os.path.join(state_dir, "result-cache.json")
 result_key = sha(
     json.dumps(
@@ -794,14 +1044,51 @@ if not dry_run and not no_reuse:
             finish()
     except (OSError, ValueError):
         pass
-baseline = None
-try:
-    with open(baseline_path, encoding="utf-8") as f:
-        loaded = json.load(f)
-        if isinstance(loaded, dict) and "tests" in loaded and not loaded.get("error"):
-            baseline = loaded
-except (OSError, ValueError):
-    pass
+# Check whether a cached baseline already covers every GN test target in `gn_targets`.
+def _baseline_covers_gn_targets(loaded_data, gn_targets):
+    if (
+        not isinstance(loaded_data, dict)
+        or "tests" not in loaded_data
+        or loaded_data.get("error")
+    ):
+        return False
+    covered = set(loaded_data.get("covered_gn_labels") or ())
+    unchecked = [t for t in gn_targets if t["label"] not in covered]
+    if not unchecked:
+        return True
+    return not vtp.find_uncovered_gn_test_targets(unchecked, loaded_data["tests"])
+
+
+# Load a valid cached baseline for `base_key` without reverting working-tree files.
+def _load_reusable_baseline():
+    cand_paths = [baseline_path]
+    if os.path.isdir(state_dir):
+        try:
+            for name in sorted(os.listdir(state_dir)):
+                if name.startswith("baseline-") and name.endswith(".json"):
+                    full = os.path.join(state_dir, name)
+                    if full != baseline_path:
+                        cand_paths.append(full)
+        except OSError:
+            pass
+    for cpath in cand_paths:
+        try:
+            with open(cpath, encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        if cpath != baseline_path and loaded.get("base_key") != base_key:
+            continue
+        if loaded.get("base_key") not in (None, base_key):
+            continue
+        if _baseline_covers_gn_targets(loaded, base_gn_targets):
+            return loaded
+    return None
+
+
+baseline = _load_reusable_baseline()
 
 if dry_run:
     plan = []
@@ -825,88 +1112,33 @@ if dry_run:
 
 def write_bytes(rel, content, mode="100644"):
     dst = os.path.join(workdir, rel)
-    remove_file(dst)
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
     if mode == "120000":
-        os.symlink(content.decode(), dst)
+        atomic_write_symlink(dst, content.decode())
     else:
-        with open(dst, "wb") as f:
-            f.write(content)
-        os.chmod(dst, 0o755 if mode == "100755" else 0o644)
-
-
-# Report an environment/filesystem write failure (such as ENOENT or EROFS on a
-# degraded FUSE/casfs mount) as a structured finding instead of crashing.
-def report_workspace_write_error(stage, error):
-    msg = (
-        f"Filesystem write failed during {stage} ({error}). The checkout or git/build "
-        "directory mount is rejecting file writes (for example a degraded FUSE/casfs "
-        "mount), so `tests.json` parity and `fx gen` cannot run."
-    )
-    rem = (
-        "This is a workspace filesystem/mount write failure, not a BUILD.bazel or "
-        "BUILD.gn defect. Do not edit build files to work around it; stop retrying "
-        "failing build or `git commit` write commands, set `test_footers` to "
-        '`["fx lint"]` and `disputed_findings` to `[]` in '
-        "`CoderReport` (an empty `test_footers` fails `test_verifier` with "
-        "`missing_test_footer`, while `fx bazel`/`fx build`/`fx test` target "
-        "commands trigger spurious `test_verifier` query errors on an unwritable "
-        "mount), and report the mount write error in `summary`."
-    )
-    add("workspace_write_error", "ERROR", msg, remediation=rem)
-    finish()
+        atomic_write_bytes(dst, content, 0o755 if mode == "100755" else 0o644)
 
 
 # Verify that git_dir/state_dir, the build directory, and the checkout accept
-# non-empty file writes before backing up or mutating any working-tree files
-# (degraded FUSE/casfs mounts allow 0-byte O_CREAT metadata ops while rejecting
-# write()). Probe git_dir when state_dir does not exist yet so failed probes do
-# not leave empty directories behind in .git.
+# non-empty file writes before backing up or mutating any working-tree files.
+# Probe git_dir when state_dir does not exist yet so failed probes do not leave
+# empty directories behind in .git.
 def verify_workspace_writable():
-    probe_bytes = b"planter-write-probe\n"
     git_probe_dir = state_dir if os.path.isdir(state_dir) else git_dir
-    probe_dirs = list(
-        dict.fromkeys(
-            d
-            for d in (git_probe_dir, os.path.dirname(args_gn), workdir)
-            if os.path.isdir(d)
-        )
+    probe_err = probe_workspace_writable(
+        (git_probe_dir, os.path.dirname(args_gn), workdir)
     )
-    for probe_dir in probe_dirs:
-        fd = None
-        probe_path = None
-        try:
-            fd, probe_path = tempfile.mkstemp(
-                dir=probe_dir, prefix=".planter-write-probe."
-            )
-            os.write(fd, probe_bytes)
-            os.close(fd)
-            fd = None
-            with open(probe_path, "rb") as rf:
-                if rf.read() != probe_bytes:
-                    raise OSError("short write during writability probe")
-            os.unlink(probe_path)
-        except OSError as e:
-            if fd is not None:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            if probe_path and os.path.lexists(probe_path):
-                try:
-                    os.unlink(probe_path)
-                except OSError:
-                    pass
-            report_workspace_write_error(f"writability probe in {probe_dir}", e)
+    if probe_err is not None:
+        report_workspace_write_error(
+            f"writability probe in {probe_err[0]}", probe_err[1]
+        )
 
 
 def save_baseline(data):
     try:
         os.makedirs(state_dir, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=state_dir, prefix=".baseline.")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, baseline_path)
+        atomic_write_bytes(
+            baseline_path, json.dumps(data).encode("utf-8"), 0o600
+        )
         # Each change base and build config adds a baseline; keep the newest few.
         old = sorted(
             (p for p in os.listdir(state_dir) if p.startswith("baseline-")),
@@ -951,12 +1183,15 @@ def with_written_files(writes, action):
         write_bytes(rel, new_bytes, mode)
 
     try:
+        # Stage all non-empty writes before unlinking newly added files so a
+        # failing write() aborts before removing any working-tree file.
         for rel, (content, mode) in writes.items():
+            if content is not None:
+                write_bytes(rel, content, mode)
+        for rel, (content, _mode) in writes.items():
             if content is None:
                 remove_file(os.path.join(workdir, rel))
                 prune_empty_dirs(rel)
-            else:
-                write_bytes(rel, content, mode)
         return action(rewrite_tracked_file)
     except OSError as e:
         write_err = e
@@ -964,11 +1199,21 @@ def with_written_files(writes, action):
     finally:
         try:
             restore_from_journal()
-        except (RestoreConflict, OSError, ValueError, KeyError) as e:
+        except OSError as e:
+            report_workspace_write_error(
+                "working-tree restore",
+                e,
+                has_pending_restore=os.path.exists(journal_path),
+            )
+        except (RestoreConflict, ValueError, KeyError) as e:
             report_restore_failure(e)
             finish()
         if write_err is not None:
-            report_workspace_write_error("working-tree write", write_err)
+            report_workspace_write_error(
+                "working-tree write",
+                write_err,
+                has_pending_restore=os.path.exists(journal_path),
+            )
 
 
 def gen_and_load():
@@ -979,6 +1224,59 @@ def gen_and_load():
         return {"tests": vtp.load_tests_file(tests_json)}
     except (OSError, ValueError) as e:
         return {"error": f"cannot read <build dir>/tests.json: {e}"}
+
+
+# Check whether a GN group root label still has its BUILD.gn file and target
+# on disk (full BUILD.gn removal or wrapper-only BUILD.gn retention deletes
+# an off-CQ leaf package's `group("tests")`).
+def _gn_root_pkg_has_build_gn(lbl):
+    if not lbl.startswith("//"):
+        return True
+    rel_pkg, sep, raw_tgt = lbl[2:].partition(":")
+    rel_pkg = rel_pkg.strip("/")
+    tgt_name = (
+        raw_tgt.split("(", 1)[0].strip()
+        if sep
+        else os.path.basename(rel_pkg)
+    )
+    gn_p = (
+        os.path.join(workdir, rel_pkg, "BUILD.gn")
+        if rel_pkg
+        else os.path.join(workdir, "BUILD.gn")
+    )
+    if (
+        not os.path.isfile(gn_p)
+        and rel_pkg
+        and not rel_pkg.startswith("build/secondary/")
+    ):
+        gn_p = os.path.join(workdir, "build", "secondary", rel_pkg, "BUILD.gn")
+    if not os.path.isfile(gn_p):
+        return False
+    if rel_pkg not in touched_dirs or not tgt_name:
+        return True
+    try:
+        with open(gn_p, encoding="utf-8", errors="replace") as fh:
+            gn_clean = vtp._blank_gn_comments(fh.read())
+    except OSError:
+        return False
+    if re.search(
+        r'\b[A-Za-z_]\w*\(\s*"' + re.escape(tgt_name) + r'"\s*\)', gn_clean
+    ):
+        return True
+    if re.search(r"\bstandardized_test_groups\s*\(", gn_clean):
+        return True
+    for suffix, tmpl_re in (
+        ("_test", r"rustc_library|rustc_binary|rustc_proc_macro"),
+        ("_tests", r"ffx_plugin"),
+    ):
+        if tgt_name.endswith(suffix) and len(tgt_name) > len(suffix):
+            owner = tgt_name[: -len(suffix)]
+            if re.search(
+                r"\b(?:" + tmpl_re + r')\(\s*"' + re.escape(owner) + r'"\s*\)',
+                gn_clean,
+            ):
+                return True
+    return False
 
 
 verify_workspace_writable()
@@ -1040,28 +1338,91 @@ if baseline is None:
         scoped_host_roots = []
         scoped_dev_roots = []
         if uncovered:
+            def _read_gn_dir(rel_dir):
+                txt = read(f"{rel_dir}/BUILD.gn" if rel_dir else "BUILD.gn")
+                if (
+                    txt is not None
+                    or not rel_dir
+                    or rel_dir.startswith("build/secondary/")
+                ):
+                    return txt
+                return read(f"build/secondary/{rel_dir}/BUILD.gn")
+
             scoped_host_roots, scoped_dev_roots = (
                 vtp.resolve_highest_enclosing_groups(
                     uncovered,
                     run_gn_refs,
                     {d: t for d, t in base_gn_by_dir.items() if t},
-                    read_gn_fn=lambda rel_dir: read(f"{rel_dir}/BUILD.gn"),
+                    read_gn_fn=_read_gn_dir,
                 )
             )
+            # Drop roots already covered by the primary CQ product pass (`//bundles/buildbot/core`
+            # and `//bundles/buildbot/host`, including normalized `:core` / `:host` labels).
+            primary_covered_roots = {
+                vtp.PRODUCT_TARGET_ROOT,
+                vtp.normalize_label(vtp.PRODUCT_TARGET_ROOT),
+                vtp.PRODUCT_HOST_ROOT,
+                vtp.normalize_label(vtp.PRODUCT_HOST_ROOT),
+            }
+            scoped_host_roots = [
+                r for r in scoped_host_roots if r not in primary_covered_roots
+            ]
+            scoped_dev_roots = [
+                r for r in scoped_dev_roots if r not in primary_covered_roots
+            ]
             scoped_args = vtp.build_scoped_args_gn(
-                original_args, scoped_host_roots, scoped_dev_roots
+                original_args,
+                scoped_host_roots,
+                scoped_dev_roots,
+                gn_by_dir=base_gn_by_dir,
             )
-            if scoped_args not in (original_args, product_args):
+            if (scoped_host_roots or scoped_dev_roots) and (
+                scoped_args != product_args
+            ):
                 rewrite_file(args_gn_rel, scoped_args.encode(), "100644")
                 scoped_res = gen_and_load()
                 if scoped_res.get("error") is not None:
-                    return {
-                        "error": (
-                            "scoped developer-root `fx gen` failed: "
-                            + scoped_res["error"]
-                        )
-                    }
-                merged_tests = merge_tests(merged_tests, scoped_res["tests"])
+                    # Off-CQ leaf groups disconnected from CQ product roots may have
+                    # pre-existing dangling BUILD.gn deps at $PLANTER_CHANGE_BASE
+                    # (e.g. after an upstream Case 1 BUILD.gn removal); keep only
+                    # off-CQ roots that actually generate cleanly at baseline.
+                    total_scoped = len(scoped_host_roots) + len(scoped_dev_roots)
+                    valid_host = []
+                    valid_dev = []
+                    if 1 < total_scoped <= 8:
+                        for hr in scoped_host_roots:
+                            cand_a = vtp.build_scoped_args_gn(
+                                original_args, [hr], [], gn_by_dir=base_gn_by_dir
+                            )
+                            rewrite_file(args_gn_rel, cand_a.encode(), "100644")
+                            r_res = gen_and_load()
+                            if r_res.get("error") is None:
+                                valid_host.append(hr)
+                                merged_tests = merge_tests(
+                                    merged_tests, r_res["tests"]
+                                )
+                        for dr in scoped_dev_roots:
+                            cand_a = vtp.build_scoped_args_gn(
+                                original_args, [], [dr], gn_by_dir=base_gn_by_dir
+                            )
+                            rewrite_file(args_gn_rel, cand_a.encode(), "100644")
+                            r_res = gen_and_load()
+                            if r_res.get("error") is None:
+                                valid_dev.append(dr)
+                                merged_tests = merge_tests(
+                                    merged_tests, r_res["tests"]
+                                )
+                    elif total_scoped > 8:
+                        return {
+                            "error": (
+                                "scoped developer-root `fx gen` failed: "
+                                + scoped_res["error"]
+                            )
+                        }
+                    scoped_host_roots = valid_host
+                    scoped_dev_roots = valid_dev
+                else:
+                    merged_tests = merge_tests(merged_tests, scoped_res["tests"])
         return {
             "tests": merged_tests,
             "scoped_host_roots": scoped_host_roots,
@@ -1071,20 +1432,37 @@ if baseline is None:
     ran_revert_or_custom_args = True
     baseline = with_written_files(writes, _compute_baseline)
     if baseline.get("error") is None:
+        baseline["base_key"] = base_key
+        baseline["covered_gn_labels"] = sorted(
+            {t["label"] for t in base_gn_targets}
+            | set(baseline.get("covered_gn_labels") or ())
+        )
         save_baseline(baseline)
 
 after = None
 if baseline.get("error") is None:
-    scoped_host = baseline.get("scoped_host_roots") or []
-    scoped_dev = baseline.get("scoped_dev_roots") or []
+    scoped_host = [
+        r
+        for r in (baseline.get("scoped_host_roots") or [])
+        if _gn_root_pkg_has_build_gn(r)
+    ]
+    scoped_dev = [
+        r
+        for r in (baseline.get("scoped_dev_roots") or [])
+        if _gn_root_pkg_has_build_gn(r)
+    ]
     scoped_after_args = (
-        vtp.build_scoped_args_gn(original_args, scoped_host, scoped_dev)
+        vtp.build_scoped_args_gn(
+            original_args, scoped_host, scoped_dev, gn_by_dir=after_gn_by_dir
+        )
         if (scoped_host or scoped_dev)
-        else original_args
+        else after_product_args
     )
-    need_scoped_after = scoped_after_args not in (original_args, product_args)
+    need_scoped_after = bool(scoped_host or scoped_dev) and (
+        scoped_after_args != after_product_args
+    )
 
-    if product_args == original_args and not need_scoped_after:
+    if after_product_args == original_args and not need_scoped_after:
         after = gen_and_load()
     else:
         ran_revert_or_custom_args = True
@@ -1108,21 +1486,34 @@ if baseline.get("error") is None:
             return {"tests": merged_after}
 
         after = with_written_files(
-            {args_gn_rel: (product_args.encode(), "100644")}, _compute_after
+            {args_gn_rel: (after_product_args.encode(), "100644")},
+            _compute_after,
         )
 
+# Check whether a post-restore `fx gen` failure is caused solely by pre-refresh
+# `# planter-managed` test labels in `args.gn` (GN `Unresolved dependencies`
+# diagnostics do not include `# planter-managed` comments from `args.gn`).
+def is_stale_planter_managed_restore_failure(gen_err):
+    if after is None or after.get("error") is not None:
+        return False
+    stripped_args = vtp.strip_planter_managed_args_gn(original_args)
+    if stripped_args == original_args:
+        return False
+    if "planter-managed" in gen_err:
+        return True
+    stripped_gen_err = with_written_files(
+        {args_gn_rel: (stripped_args.encode(), "100644")},
+        lambda _rewrite: run_gen(),
+    )
+    return stripped_gen_err is None
+
+
 # Regenerate with original `args.gn` whenever files or `args.gn` were swapped so
-# Ninja sees the exact post-change build graph.
-if ran_revert_or_custom_args:
-    restore_gen_err = run_gen()
-    if restore_gen_err is not None:
-        add(
-            "tests_json_parity_fx_gen_failed",
-            "ERROR",
-            f"`fx gen` after restoring the change and args.gn failed ({restore_gen_err}).",
-            remediation=FX_GEN_REMEDIATION,
-        )
-        finish()
+# Ninja sees the exact post-change build graph, then report any baseline or
+# post-change product-root `fx gen` failure before inspecting `restore_gen_err`
+# so pre-refresh `# planter-managed` labels in `args.gn` never mask real build
+# graph errors.
+restore_gen_err = run_gen() if ran_revert_or_custom_args else None
 
 if baseline.get("error") is not None:
     add(
@@ -1144,6 +1535,24 @@ if after is None or after.get("error") is not None:
         remediation=FX_GEN_REMEDIATION,
     )
     finish()
+
+if restore_gen_err is not None:
+    if is_stale_planter_managed_restore_failure(restore_gen_err):
+        add(
+            "tests_json_parity_planter_args_stale",
+            "INFO",
+            "`fx gen` succeeded with CQ product roots; restoring pre-refresh "
+            f"`# planter-managed` `args.gn` labels reported: {restore_gen_err}",
+        )
+    else:
+        add(
+            "tests_json_parity_fx_gen_failed",
+            "ERROR",
+            f"`fx gen` after restoring the change and args.gn failed "
+            f"({restore_gen_err}).",
+            remediation=FX_GEN_REMEDIATION,
+        )
+        finish()
 
 package_states = {}
 for d in sorted(touched_dirs):

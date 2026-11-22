@@ -109,7 +109,7 @@ class BasicWlanSoftmacServer : public UnimplementedWlanSoftmacServer {
     usme_bootstrap_client_.value()
         ->Start(fuchsia_wlan_sme::UsmeBootstrapStartRequest(
             std::move(generic_sme_endpoints.value().server),
-            fuchsia_wlan_sme::LegacyPrivacySupport(false, false)))
+            fuchsia_wlan_sme::LegacyPrivacySupport(false, false), nullptr))
         .Then([&](fidl::Result<fuchsia_wlan_sme::UsmeBootstrap::Start>& result) mutable {
           ZX_ASSERT(result.is_ok());
           inspect_vmo_ = std::move(result->inspect_vmo());

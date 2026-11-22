@@ -9,12 +9,13 @@ framework and checks for Bazel files (e.g., `*.bazel`, `*.bzl`) invoked by
 If you believe a Bazel lint check finding is a false positive or an exception is
 needed:
 
-1. Reach out to the Build team (see [`//build/OWNERS`](/build/OWNERS)).
+1. Reach out to the Build team (see [`//build/BUILD_OWNERS`](/build/BUILD_OWNERS)).
 2. File a bug in the Build > Bazel component:
    <https://issues.fuchsia.dev/issues/new?component=1477645>.
 3. Add an entry referencing that bug to the check's allowlist following
    [`allowlists/README.md`](./allowlists/README.md) and get it reviewed by a
-   member of [`//build/OWNERS`](/build/OWNERS).
+   member of [`//build/bazel/BAZEL_OWNERS`](/build/bazel/BAZEL_OWNERS) or
+   [`//build/BUILD_OWNERS`](/build/BUILD_OWNERS).
 
 ## Running Checks Locally
 

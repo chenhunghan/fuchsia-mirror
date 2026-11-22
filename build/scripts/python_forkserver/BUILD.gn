@@ -1,0 +1,76 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/python/python_library.gni")
+import("//build/testing/python_build_time_tests.gni")
+
+if (is_host) {
+  python_library("setting") {
+    sources = [ "setting.py" ]
+    library_deps = [ "//build/scripts:properties_lib" ]
+  }
+
+  python_build_time_tests("setting_test") {
+    tests = [ "setting_test.py" ]
+    deps = [ ":setting" ]
+  }
+
+  python_library("client") {
+    sources = [ "client.py" ]
+  }
+
+  python_library("worker") {
+    sources = [ "worker.py" ]
+    library_deps = [ ":client" ]
+  }
+
+  python_library("stats") {
+    sources = [ "stats.py" ]
+  }
+
+  python_library("forker") {
+    sources = [ "forker.py" ]
+    library_deps = [
+      ":client",
+      ":stats",
+      ":worker",
+    ]
+  }
+
+  python_library("server") {
+    sources = [ "server.py" ]
+    library_deps = [
+      ":forker",
+      ":stats",
+      ":worker",
+    ]
+  }
+
+  python_build_time_tests("client_test") {
+    tests = [ "client_test.py" ]
+    deps = [ ":client" ]
+  }
+
+  python_build_time_tests("server_test") {
+    tests = [ "server_test.py" ]
+    inputs = [
+      "test_data/fake_wrapper.py",
+      "test_data/remote_action.py",
+    ]
+    deps = [
+      ":client",
+      ":server",
+      ":worker",
+    ]
+  }
+}
+
+group("tests") {
+  testonly = true
+  deps = [
+    ":client_test($host_toolchain)",
+    ":server_test($host_toolchain)",
+    ":setting_test($host_toolchain)",
+  ]
+}

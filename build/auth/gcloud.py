@@ -10,6 +10,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping, Sequence
 
 from build.auth import apt
 
@@ -29,13 +30,16 @@ def get_default_adc_path() -> pathlib.Path:
     return home_dir / ADC_SUBPATH
 
 
-def resolve_global_adc_path() -> pathlib.Path:
+def resolve_global_adc_path(
+    env: Mapping[str, str] | None = None,
+) -> pathlib.Path:
     """Resolves and returns the active absolute path of global ADC.
 
     Prioritizes GOOGLE_APPLICATION_CREDENTIALS if defined in the environment,
     falling back to the standard gcloud ADC path.
     """
-    env_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    active_env = os.environ if env is None else env
+    env_path = active_env.get("GOOGLE_APPLICATION_CREDENTIALS")
     if env_path:
         return pathlib.Path(env_path)
     return get_default_adc_path()
@@ -52,7 +56,30 @@ def path() -> pathlib.Path | None:
     return apt.get_binary_path("google-cloud-cli", "gcloud")
 
 
-def login() -> None:
+def has_valid_adc_token() -> bool:
+    """Returns True if gcloud reports a valid Application Default Credentials access token."""
+    gcloud_path = path()
+    if gcloud_path is None:
+        return False
+    result = subprocess.run(
+        (
+            str(gcloud_path),
+            "auth",
+            "application-default",
+            "print-access-token",
+        ),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    token = result.stdout.strip()
+    return bool(token) and not any(c.isspace() for c in token)
+
+
+def login(extra_args: Sequence[str] = ()) -> None:
     """Launches the standard gcloud Application Default Credentials (ADC) login workflow.
 
     Raises:
@@ -66,11 +93,17 @@ def login() -> None:
         # Standard streams are forwarded to let the browser or code-based login flows
         # run perfectly in the active terminal/TTY.
         subprocess.run(
-            [str(gcloud_path), "auth", "application-default", "login"],
+            (
+                str(gcloud_path),
+                "auth",
+                "application-default",
+                "login",
+                *extra_args,
+            ),
             stdin=sys.stdin,
             stdout=sys.stdout,
             stderr=sys.stderr,
             check=True,
         )
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Interactive gcloud login failed: {e}")
+        raise RuntimeError(f"Interactive gcloud login failed: {e}") from e

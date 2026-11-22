@@ -1,9 +1,0 @@
-{
-    "short_description": "Designware USB3.1 DCI driver",
-    "manufacturer": "Designware",
-    "families": [],
-    "models": [],
-    "areas": [
-        "USB"
-    ]
-}

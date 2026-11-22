@@ -4,7 +4,7 @@
 
 #include "src/developer/forensics/utils/utc_clock_ready_watcher.h"
 
-#include <fuchsia/time/cpp/fidl.h>
+#include <fidl/fuchsia.time/cpp/fidl.h>
 
 #include <memory>
 
@@ -34,7 +34,7 @@ class UtcClockReadyWatcherTest : public UnitTestFixture {
   void SignalLoggingQualityClock() {
     if (const zx_status_t status =
             clock_handle_.signal(/*clear_mask=*/0,
-                                 /*set_mask=*/fuchsia::time::SIGNAL_UTC_CLOCK_LOGGING_QUALITY);
+                                 /*set_mask=*/fuchsia_time::kSignalUtcClockLoggingQuality);
         status != ZX_OK) {
       FX_PLOGS(FATAL, status) << "Failed to achieve logging quality clock";
     }
@@ -100,7 +100,7 @@ TEST_F(UtcClockReadyWatcherTest, Check_NotReadyOnClockSynchronized) {
   ASSERT_FALSE(clock_synced);
 
   ASSERT_EQ(clock_handle_.signal(
-                /*clear_mask=*/0, /*set_mask=*/fuchsia::time::SIGNAL_UTC_CLOCK_SYNCHRONIZED),
+                /*clear_mask=*/0, /*set_mask=*/fuchsia_time::kSignalUtcClockSynchronized),
             ZX_OK);
   RunLoopUntilIdle();
 

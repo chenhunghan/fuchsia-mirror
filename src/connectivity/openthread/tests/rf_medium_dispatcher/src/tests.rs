@@ -12,6 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::pin;
 use std::task::Poll;
+use test_case::test_case;
 
 const NODE_A: rfsim::NodeId = 7;
 const NODE_B: rfsim::NodeId = 3;
@@ -104,6 +105,58 @@ impl Harness {
         self.run_until_stalled();
     }
 
+    /// A `Receive` that must complete now.
+    #[track_caller]
+    fn receive(&mut self, node_id: rfsim::NodeId) -> rfsim::ReceivedFrame {
+        let radio = self.radio(node_id);
+        let (frame, rssi_dbm, lqi) = self.ready(radio.receive()).expect("Radio.Receive");
+        rfsim::ReceivedFrame { frame, rssi_dbm, lqi }
+    }
+
+    /// Asserts that `Radio.Receive` on `node_id` hangs (queue is empty). Leaves that `Receive`
+    /// parked on the server, so only call once no further `Receive` is issued on `node_id`.
+    #[track_caller]
+    fn assert_receive_pending(&mut self, node_id: rfsim::NodeId) {
+        let radio = self.radio(node_id);
+        let mut receive = pin!(radio.receive());
+        assert_matches!(
+            self.poll(&mut receive),
+            Poll::Pending,
+            "node {node_id} had an unexpected queued frame"
+        );
+    }
+
+    /// The destination node ids of each transmission `watcher` captured since its last reply,
+    /// each sorted by id (the API promises no order).
+    #[track_caller]
+    fn destination_ids(
+        &mut self,
+        watcher: &rfsim::TransmissionWatcherProxy,
+    ) -> Vec<Vec<rfsim::NodeId>> {
+        let (transmissions, dropped) = self.watch_transmissions(watcher);
+        assert_eq!(dropped, 0);
+        transmissions
+            .iter()
+            .map(|tx| {
+                let mut ids: Vec<_> = tx.destinations.iter().map(|d| d.node_id).collect();
+                ids.sort();
+                ids
+            })
+            .collect()
+    }
+
+    /// `GetNeighbors` that must complete now, sorted by id (the API promises no order).
+    #[track_caller]
+    fn neighbors(&mut self, node_id: rfsim::NodeId) -> Result<Vec<rfsim::NodeId>, zx::Status> {
+        let monitor = self.monitor.clone();
+        let mut neighbors = self
+            .ready(monitor.get_neighbors(node_id))
+            .expect("GetNeighbors")
+            .map_err(zx::Status::err_from_raw)?;
+        neighbors.sort();
+        Ok(neighbors)
+    }
+
     #[track_caller]
     fn node_event_watcher(&mut self) -> rfsim::NodeEventWatcherProxy {
         let (watcher, server_end) = create_proxy::<rfsim::NodeEventWatcherMarker>();
@@ -188,13 +241,23 @@ fn frame(psdu: &[u8]) -> rfsim::Frame {
 }
 
 /// The transmission a watcher captures for `frame` sent by `node_id` at `timestamp`; with no
-/// destinations, since there is no delivery yet.
+/// destinations, since no other node is attached.
 fn captured(
     node_id: rfsim::NodeId,
     frame: &rfsim::Frame,
     timestamp: zx::MonotonicInstant,
 ) -> rfsim::Transmission {
     rfsim::Transmission { node_id, frame: frame.clone(), timestamp, destinations: vec![] }
+}
+
+/// What the medium records of a delivery to `node_id`.
+fn destination(node_id: rfsim::NodeId) -> rfsim::Destination {
+    rfsim::Destination { node_id, rssi_dbm: IDEAL_RSSI_DBM, lqi: IDEAL_LQI }
+}
+
+/// What a node receives of `frame`.
+fn received(frame: &rfsim::Frame) -> rfsim::ReceivedFrame {
+    rfsim::ReceivedFrame { frame: frame.clone(), rssi_dbm: IDEAL_RSSI_DBM, lqi: IDEAL_LQI }
 }
 
 fn added(node_id: rfsim::NodeId, timestamp: zx::MonotonicInstant) -> rfsim::NodeEvent {
@@ -303,21 +366,23 @@ fn transmissions_follow_medium_order() {
     let second = h.transmission_watcher();
     h.transmit(NODE_A, &frames[4]);
 
+    // Each node's frames reach the other node.
     let now = now();
+    let from_a = |frame| rfsim::Transmission {
+        destinations: vec![destination(NODE_B)],
+        ..captured(NODE_A, frame, now)
+    };
+    let from_b = |frame| rfsim::Transmission {
+        destinations: vec![destination(NODE_A)],
+        ..captured(NODE_B, frame, now)
+    };
     assert_eq!(
         h.watch_transmissions(&first),
-        (
-            vec![
-                captured(NODE_B, &frames[2], now),
-                captured(NODE_A, &frames[3], now),
-                captured(NODE_A, &frames[4], now),
-            ],
-            0
-        )
+        (vec![from_b(&frames[2]), from_a(&frames[3]), from_a(&frames[4])], 0)
     );
 
     // The second watcher only sees what came after its registration.
-    assert_eq!(h.watch_transmissions(&second), (vec![captured(NODE_A, &frames[4], now)], 0));
+    assert_eq!(h.watch_transmissions(&second), (vec![from_a(&frames[4])], 0));
 }
 
 #[test]
@@ -332,6 +397,8 @@ fn second_outstanding_receive_closes_radio() {
     let mut second = pin!(radio.receive());
     let second = assert_matches!(h.poll(&mut second), Poll::Ready(result) => result);
     assert_eq!(closed_with(second), zx::Status::BAD_STATE);
+    let first = assert_matches!(h.poll(&mut first), Poll::Ready(result) => result);
+    assert_eq!(closed_with(first), zx::Status::BAD_STATE);
     // A closed radio is a detached node.
     h.run_until_stalled();
     assert_eq!(h.attached_ids(), BTreeSet::new());
@@ -341,9 +408,7 @@ fn second_outstanding_receive_closes_radio() {
 fn get_neighbors_of_unattached_node_is_not_found() {
     let mut h = Harness::new();
     assert_eq!(h.attach(NODE_A), Ok(()));
-    let get = h.monitor.get_neighbors(NODE_B);
-    let result = h.ready(get).expect("GetNeighbors");
-    assert_eq!(result, Err(zx::Status::NOT_FOUND.into_raw()));
+    assert_eq!(h.neighbors(NODE_B), Err(zx::Status::NOT_FOUND));
 }
 
 #[test]
@@ -767,4 +832,180 @@ fn destroying_medium_with_pending_calls_closes_everything() {
     assert!(radio.is_closed());
     assert!(h.monitor.is_closed());
     assert!(h.medium_client.is_closed());
+}
+
+#[test]
+fn pending_receive_completes_on_delivery() {
+    let mut h = Harness::new();
+    assert_eq!(h.attach(NODE_A), Ok(()));
+    assert_eq!(h.attach(NODE_B), Ok(()));
+
+    let radio = h.radio(NODE_B);
+    let mut receive = pin!(radio.receive());
+    assert_matches!(h.poll(&mut receive), Poll::Pending, "nothing transmitted yet, must hang");
+    // The frame reaches the node unchanged, `tx_power_dbm` included.
+    let sent = rfsim::Frame { channel: CHANNEL, psdu: vec![0x41, 0x88, 0x01], tx_power_dbm: -7 };
+    h.transmit(NODE_A, &sent);
+    let (frame, rssi_dbm, lqi) =
+        assert_matches!(h.poll(&mut receive), Poll::Ready(Ok(received)) => received);
+    assert_eq!(rfsim::ReceivedFrame { frame, rssi_dbm, lqi }, received(&sent));
+}
+
+// The medium delivers to every other attached node, whatever the frame's channel, and only those
+// are the transmission's destinations.
+#[test]
+fn frame_reaches_every_other_node() {
+    let mut h = Harness::new();
+    for node_id in [NODE_A, NODE_B, NODE_C] {
+        assert_eq!(h.attach(node_id), Ok(()));
+    }
+    let watcher = h.transmission_watcher();
+
+    h.transmit(NODE_A, &frame(&[0x01]));
+    assert_eq!(h.destination_ids(&watcher), vec![vec![NODE_B, NODE_C]]);
+    let other_channel = rfsim::Frame { channel: CHANNEL + 1, ..frame(&[0x02]) };
+    h.transmit(NODE_B, &other_channel);
+    assert_eq!(h.destination_ids(&watcher), vec![vec![NODE_A, NODE_C]]);
+
+    // The sender does not get its own frame back, and each destination gets each frame once.
+    assert_eq!(h.receive(NODE_A), received(&other_channel));
+    assert_eq!(h.receive(NODE_B), received(&frame(&[0x01])));
+    assert_eq!(h.receive(NODE_C), received(&frame(&[0x01])));
+    assert_eq!(h.receive(NODE_C), received(&other_channel));
+    for node_id in [NODE_A, NODE_B, NODE_C] {
+        h.assert_receive_pending(node_id);
+    }
+}
+
+#[test]
+fn destinations_carry_what_each_node_observes() {
+    let mut h = Harness::new();
+    assert_eq!(h.attach(NODE_A), Ok(()));
+    let watcher = h.transmission_watcher();
+
+    // Nobody else is attached.
+    h.transmit(NODE_A, &frame(&[0x01]));
+    assert_eq!(h.attach(NODE_B), Ok(()));
+    h.transmit(NODE_A, &frame(&[0x02]));
+
+    let now = now();
+    assert_eq!(
+        h.watch_transmissions(&watcher),
+        (
+            vec![
+                captured(NODE_A, &frame(&[0x01]), now),
+                rfsim::Transmission {
+                    destinations: vec![destination(NODE_B)],
+                    ..captured(NODE_A, &frame(&[0x02]), now)
+                },
+            ],
+            0
+        )
+    );
+    // `NODE_B` observes only what was transmitted after it attached, with matching RSSI and LQI.
+    assert_eq!(h.receive(NODE_B), received(&frame(&[0x02])));
+    h.assert_receive_pending(NODE_B);
+}
+
+#[test]
+fn frames_are_queued_while_no_receive_is_pending() {
+    let mut h = Harness::new();
+    assert_eq!(h.attach(NODE_A), Ok(()));
+    assert_eq!(h.attach(NODE_B), Ok(()));
+    for seq in 0..3 {
+        h.transmit(NODE_A, &frame(&seq_psdu(seq)));
+    }
+    for seq in 0..3 {
+        assert_eq!(h.receive(NODE_B), received(&frame(&seq_psdu(seq))));
+    }
+    h.assert_receive_pending(NODE_B);
+}
+
+#[test]
+fn full_receive_queue_drops_oldest() {
+    let mut h = Harness::new();
+    assert_eq!(h.attach(NODE_A), Ok(()));
+    assert_eq!(h.attach(NODE_B), Ok(()));
+    let queue = u16::try_from(MAX_RECEIVE_QUEUE).expect("MAX_RECEIVE_QUEUE fits in u16");
+    for seq in 0..queue + 1 {
+        h.transmit(NODE_A, &frame(&seq_psdu(seq)));
+    }
+    // The oldest frame is gone; the next MAX_RECEIVE_QUEUE come back in order.
+    for seq in 1..queue + 1 {
+        assert_eq!(h.receive(NODE_B), received(&frame(&seq_psdu(seq))));
+    }
+    h.assert_receive_pending(NODE_B);
+}
+
+#[test]
+fn detaching_discards_receive_queue() {
+    let mut h = Harness::new();
+    assert_eq!(h.attach(NODE_A), Ok(()));
+    assert_eq!(h.attach(NODE_B), Ok(()));
+    h.transmit(NODE_A, &frame(&[0x01]));
+    h.detach(NODE_B);
+
+    let watcher = h.transmission_watcher();
+    h.transmit(NODE_A, &frame(&[0x02]));
+    assert_eq!(h.destination_ids(&watcher), vec![vec![]]);
+
+    // Attached again, the node starts with an empty queue.
+    assert_eq!(h.attach(NODE_B), Ok(()));
+    h.transmit(NODE_A, &frame(&[0x03]));
+    assert_eq!(h.destination_ids(&watcher), vec![vec![NODE_B]]);
+    assert_eq!(h.receive(NODE_B), received(&frame(&[0x03])));
+    h.assert_receive_pending(NODE_B);
+}
+
+#[test]
+fn get_neighbors_returns_every_other_node() {
+    let mut h = Harness::new();
+    assert_eq!(h.attach(NODE_A), Ok(()));
+    assert_eq!(h.attach(NODE_B), Ok(()));
+    assert_eq!(h.attach(NODE_D), Ok(()));
+
+    assert_eq!(h.neighbors(NODE_A), Ok(vec![NODE_B, NODE_D]));
+    assert_eq!(h.neighbors(NODE_B), Ok(vec![NODE_D, NODE_A]));
+
+    h.detach(NODE_B);
+    assert_eq!(h.neighbors(NODE_A), Ok(vec![NODE_D]));
+    assert_eq!(h.neighbors(NODE_B), Err(zx::Status::NOT_FOUND));
+}
+
+#[test_case(0; "zero")]
+#[test_case(MIN_CHANNEL - 1; "below_min")]
+#[test_case(MAX_CHANNEL + 1; "above_max")]
+#[test_case(u8::MAX; "max_u8")]
+fn transmit_on_invalid_channel_closes_radio(channel: rfsim::Channel) {
+    let mut h = Harness::new();
+    assert_eq!(h.attach(NODE_A), Ok(()));
+    assert_eq!(h.attach(NODE_B), Ok(()));
+    let watcher = h.transmission_watcher();
+    // A node keeps a `Receive` pending while it transmits; the close fails it too.
+    let radio = h.radio(NODE_A);
+    let mut receive = pin!(radio.receive());
+    assert_matches!(h.poll(&mut receive), Poll::Pending, "nothing transmitted yet, must hang");
+
+    let result = h.ready(radio.transmit(channel, &[0x01], 0));
+    assert_eq!(closed_with(result), zx::Status::INVALID_ARGS);
+    let result = assert_matches!(h.poll(&mut receive), Poll::Ready(r) => r);
+    assert_eq!(closed_with(result), zx::Status::INVALID_ARGS);
+    h.run_until_stalled();
+    assert_eq!(h.attached_ids(), BTreeSet::from([NODE_B]));
+
+    // The frame was neither delivered nor recorded.
+    h.assert_receive_pending(NODE_B);
+    let mut watch = pin!(watcher.watch());
+    assert_matches!(h.poll(&mut watch), Poll::Pending, "nothing recorded, must hang");
+}
+
+#[test_case(MIN_CHANNEL; "min")]
+#[test_case(MAX_CHANNEL; "max")]
+fn transmit_on_band_edge_channel_is_delivered(channel: rfsim::Channel) {
+    let mut h = Harness::new();
+    assert_eq!(h.attach(NODE_A), Ok(()));
+    assert_eq!(h.attach(NODE_B), Ok(()));
+    let sent = rfsim::Frame { channel, ..frame(&[0x01]) };
+    h.transmit(NODE_A, &sent);
+    assert_eq!(h.receive(NODE_B), received(&sent));
 }

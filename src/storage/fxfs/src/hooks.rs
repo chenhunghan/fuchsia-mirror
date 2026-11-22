@@ -32,8 +32,10 @@ type SyncHookFn<'a> = dyn Fn() + Send + Sync + 'a;
 struct HooksTable {
     pre_commit: Option<Arc<PreCommitHookFn<'static>>>,
     before_commit: Option<Arc<SyncHookFn<'static>>>,
+    post_commit: Option<Arc<SyncHookFn<'static>>>,
     unlock_resources_acquired: Option<Arc<SyncHookFn<'static>>>,
     waiting_for_journal_space: Option<Arc<SyncHookFn<'static>>>,
+    before_did_commit: Option<Arc<SyncHookFn<'static>>>,
 }
 
 struct SendOnDrop(mpsc::Sender<()>);
@@ -104,6 +106,19 @@ impl<'a> Hooks<'a> {
         }
     }
 
+    /// Sets the hook executed immediately after a transaction commits and its commit callback
+    /// runs, while transaction locks and the commit mutex are still held.
+    pub fn set_post_commit(&mut self, hook: impl Fn() + Send + Sync + 'a) {
+        let boxed: Box<SyncHookFn<'a>> = Box::new(hook);
+        // SAFETY: `'a` is transmuted to `'static`. This is safe because `Hooks<'a>` owns the
+        // `Arc<HooksInner>` and its `detach` method (or `drop`) blocks until all `Arc<HooksInner>`
+        // references drop.
+        let static_hook: Box<SyncHookFn<'static>> = unsafe { std::mem::transmute(boxed) };
+        if let Some(inner) = &self.inner {
+            inner.table.lock().post_commit = Some(Arc::from(static_hook));
+        }
+    }
+
     /// Sets the hook executed when resources are acquired during unlock.  This is called
     /// after acquiring all the keys that might be required from the crypt service.
     pub fn set_unlock_resources_acquired(&mut self, hook: impl Fn() + Send + Sync + 'a) {
@@ -127,6 +142,20 @@ impl<'a> Hooks<'a> {
         let static_hook: Box<SyncHookFn<'static>> = unsafe { std::mem::transmute(boxed) };
         if let Some(inner) = &self.inner {
             inner.table.lock().waiting_for_journal_space = Some(Arc::from(static_hook));
+        }
+    }
+
+    /// Sets the hook executed in `Journal::write_and_apply_mutations` after writing a
+    /// transaction's records to the journal buffer, right before calling
+    /// `ObjectManager::did_commit_transaction`.
+    pub fn set_before_did_commit(&mut self, hook: impl Fn() + Send + Sync + 'a) {
+        let boxed: Box<SyncHookFn<'a>> = Box::new(hook);
+        // SAFETY: `'a` is transmuted to `'static`. This is safe because `Hooks<'a>` owns the
+        // `Arc<HooksInner>` and its `detach` method (or `drop`) blocks until all `Arc<HooksInner>`
+        // references drop.
+        let static_hook: Box<SyncHookFn<'static>> = unsafe { std::mem::transmute(boxed) };
+        if let Some(inner) = &self.inner {
+            inner.table.lock().before_did_commit = Some(Arc::from(static_hook));
         }
     }
 
@@ -174,6 +203,17 @@ impl HooksHandle {
         }
     }
 
+    /// Invokes the registered `post_commit` hook, if any.
+    pub fn on_post_commit(&self) {
+        if let Some(inner) = self.inner.upgrade() {
+            // The strong is held until after the hook is called.
+            let hook = inner.table.lock().post_commit.clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+    }
+
     /// Invokes the registered `unlock_resources_acquired` hook, if any.
     pub fn on_unlock_resources_acquired(&self) {
         if let Some(inner) = self.inner.upgrade() {
@@ -190,6 +230,17 @@ impl HooksHandle {
         if let Some(inner) = self.inner.upgrade() {
             // The strong is held until after the hook is called.
             let hook = inner.table.lock().waiting_for_journal_space.clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+    }
+
+    /// Invokes the registered `before_did_commit` hook, if any.
+    pub fn on_before_did_commit(&self) {
+        if let Some(inner) = self.inner.upgrade() {
+            // The strong is held until after the hook is called.
+            let hook = inner.table.lock().before_did_commit.clone();
             if let Some(hook) = hook {
                 hook();
             }
@@ -234,6 +285,20 @@ mod tests {
     }
 
     #[test]
+    fn test_hooks_before_did_commit() {
+        let called = AtomicBool::new(false);
+        let (mut hooks, handle) = Hooks::new();
+
+        let called_ref = &called;
+        hooks.set_before_did_commit(move || {
+            called_ref.store(true, Ordering::SeqCst);
+        });
+
+        handle.on_before_did_commit();
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn test_hooks_unlock_resources_acquired() {
         let called = AtomicBool::new(false);
         let (mut hooks, handle) = Hooks::new();
@@ -258,6 +323,20 @@ mod tests {
         });
 
         handle.on_waiting_for_journal_space();
+        assert!(called.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_hooks_post_commit() {
+        let called = AtomicBool::new(false);
+        let (mut hooks, handle) = Hooks::new();
+
+        let called_ref = &called;
+        hooks.set_post_commit(move || {
+            called_ref.store(true, Ordering::Relaxed);
+        });
+
+        handle.on_post_commit();
         assert!(called.load(Ordering::Relaxed));
     }
 }

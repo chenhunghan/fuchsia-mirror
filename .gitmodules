@@ -723,3 +723,8 @@
 	url = https://fuchsia.googlesource.com/third_party/google/double-conversion
 	name = third_party/google/double-conversion
 	ignore = all
+[submodule "third_party/android/platform/bootable/libbootloader/src"]
+	path = third_party/android/platform/bootable/libbootloader/src
+	url = https://fuchsia.googlesource.com/third_party/android.googlesource.com/platform/bootable/libbootloader
+	name = third_party/android.googlesource.com/platform/bootable/libbootloader
+	ignore = all

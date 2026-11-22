@@ -8,5 +8,10 @@
                 asserted_by_scrutiny_test: "check this string!",
             },
         },
+        "fuchsia-pkg://fuchsia.com/package_for_scrutiny_testing#meta/packaged_config_component.cm": {
+            fields: {
+                immutable_packaged_config: "check this string!",
+            },
+        },
     },
 }

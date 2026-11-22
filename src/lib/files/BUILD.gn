@@ -62,11 +62,18 @@ source_set("files") {
     "path.h",
     "scoped_temp_dir.h",
   ]
-  deps = [
+  deps = []
+  deps += [
     "//sdk/lib/fit",
     "//sdk/lib/utf-utils",
     "//src/lib/fxl:memory",
   ]
+  if (is_fuchsia) {
+    deps += [
+      "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+      "//sdk/lib/fdio",
+    ]
+  }
   visibility = [
     ":*",
     "//examples/*",
@@ -91,7 +98,8 @@ cc_test_executable("files_unittests") {
     "path_unittest.cc",
     "scoped_temp_dir_unittest.cc",
   ]
-  deps = [
+  deps = []
+  deps += [
     ":files",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fxl:common",
@@ -99,9 +107,14 @@ cc_test_executable("files_unittests") {
     "//src/lib/fxl/test:gtest_main",
     "//third_party/googletest:gtest",
   ]
+  if (is_fuchsia) {
+    deps += [
+      "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+      "//sdk/lib/fdio",
+    ]
+  }
   testonly = true
   emit_tool_path = false
-  deps += [ "//third_party/googletest:gmock" ]
 }
 
 fuchsia_component_manifest("files-tests-manifest") {

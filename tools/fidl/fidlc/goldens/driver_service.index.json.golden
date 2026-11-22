@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/driver_service.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/driver_service.test.fidl",
       "data": "test.driverservice",
       "start_offset": 172,
       "end_offset": 190
@@ -22,7 +22,7 @@
       "identifier": "test.driverservice/SomeDriverProtocol",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/driver_service.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/driver_service.test.fidl",
         "data": "SomeDriverProtocol",
         "start_offset": 230,
         "end_offset": 248

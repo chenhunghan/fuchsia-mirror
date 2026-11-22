@@ -4,7 +4,6 @@
 
 #include "aml-cpu.h"
 
-#include <fuchsia/hardware/thermal/cpp/banjo.h>
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
 #include <lib/ddk/driver.h>
@@ -28,29 +27,6 @@ using fuchsia_hardware_thermal::wire::kMaxDvfsDomains;
 using fuchsia_hardware_thermal::wire::PowerDomain;
 
 constexpr zx_off_t kCpuVersionOffset = 0x220;
-
-fidl::WireSyncClient<amlogic_cpu::fuchsia_thermal::Device> CreateFidlClient(
-    const ddk::ThermalProtocolClient& protocol_client, zx_status_t* status) {
-  // This channel pair will be used to talk to the Thermal Device's FIDL
-  // interface.
-  zx::result endpoints = fidl::CreateEndpoints<amlogic_cpu::fuchsia_thermal::Device>();
-  *status = endpoints.status_value();
-  if (*status != ZX_OK) {
-    zxlogf(ERROR, "aml-cpu: Failed to create channel pair, st = %d\n", *status);
-    return {};
-  }
-  auto& [channel_local, channel_remote] = endpoints.value();
-
-  // Pass one end of the channel to the Thermal driver. The thermal driver will
-  // serve its FIDL interface over this channel.
-  *status = protocol_client.Connect(channel_remote.TakeChannel());
-  if (*status != ZX_OK) {
-    zxlogf(ERROR, "aml-cpu: failed to connect to thermal driver, st = %d\n", *status);
-    return {};
-  }
-
-  return fidl::WireSyncClient{std::move(channel_local)};
-}
 
 zx_status_t GetDeviceName(bool big_little, PowerDomain power_domain, char const** name) {
   if (!big_little) {
@@ -90,20 +66,16 @@ zx_status_t AmlCpu::Create(void* context, zx_device_t* parent) {
     cluster_info_map[cluster_info.pd_id] = cluster_info;
   }
 
-  // The Thermal Driver is our parent and it exports an interface with one
-  // method (Connect) which allows us to connect to its FIDL interface.
-  ddk::ThermalProtocolClient thermal_protocol_client;
-  status =
-      ddk::ThermalProtocolClient::CreateFromDevice(parent, "thermal", &thermal_protocol_client);
-  if (status != ZX_OK) {
-    zxlogf(ERROR, "aml-cpu: Failed to get thermal protocol client, st = %d", status);
-    return status;
+  // The Thermal Driver is our parent and it serves fuchsia_hardware_thermal::Service.
+  zx::result thermal_client_end =
+      DdkConnectFragmentFidlProtocol<fuchsia_hardware_thermal::Service::Device>(parent, "thermal");
+  if (thermal_client_end.is_error()) {
+    zxlogf(ERROR, "aml-cpu: Failed to connect to thermal service, st = %s",
+           thermal_client_end.status_string());
+    return thermal_client_end.status_value();
   }
 
-  auto thermal_fidl_client = CreateFidlClient(thermal_protocol_client, &status);
-  if (!thermal_fidl_client) {
-    return status;
-  }
+  fidl::WireSyncClient thermal_fidl_client{std::move(thermal_client_end.value())};
 
   auto device_info = thermal_fidl_client->GetDeviceInfo();
   if (device_info.status() != ZX_OK) {
@@ -169,11 +141,16 @@ zx_status_t AmlCpu::Create(void* context, zx_device_t* parent) {
 
     // If the FIDL client has been previously consumed, create a new one. Then build the CPU device
     // and consume the FIDL client.
-    if (!thermal_fidl_client) {
-      thermal_fidl_client = CreateFidlClient(thermal_protocol_client, &status);
-      if (!thermal_fidl_client) {
-        return status;
+    if (!thermal_fidl_client.is_valid()) {
+      zx::result client_end =
+          DdkConnectFragmentFidlProtocol<fuchsia_hardware_thermal::Service::Device>(parent,
+                                                                                    "thermal");
+      if (client_end.is_error()) {
+        zxlogf(ERROR, "aml-cpu: Failed to connect to thermal service: %s",
+               client_end.status_string());
+        return client_end.status_value();
       }
+      thermal_fidl_client = fidl::WireSyncClient{std::move(client_end.value())};
     }
     auto cpu_device = std::make_unique<AmlCpu>(parent, std::move(thermal_fidl_client), i,
                                                cluster_core_info.core_count,

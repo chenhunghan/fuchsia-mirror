@@ -55,6 +55,7 @@
 ?kernel.page-scanner.start-at-boot=false
 ?kernel.page-scanner.start-at-boot=true
 ?kernel.page-scanner.zero-page-scans-per-second=*
+?kernel.persistent-dlog.target-size=*
 ?kernel.phys.verbose=false
 ?kernel.phys.verbose=true
 ?kernel.power.rppm=false
@@ -68,6 +69,7 @@
 ?kernel.scheduler.prefer-little-cpus=false
 ?kernel.scheduler.prefer-little-cpus=true
 ?kernel.serial=*
+?kernel.userpager.overtime_timeout_seconds=*
 ?netsvc.all-features=true
 ?netsvc.disable=false
 ?netsvc.disable=true

@@ -65,11 +65,8 @@ bool rust_power_state_scheduler_control_enabled(const power_management::PowerSta
 bool rust_power_state_active_power_level(const power_management::PowerState* state, uint8_t* out);
 bool rust_power_state_desired_active_power_level(const power_management::PowerState* state,
                                                  uint8_t* out);
-bool rust_power_state_max_idle_power_level(const power_management::PowerState* state, uint8_t* out);
 uint64_t rust_power_state_active_power_coefficient_nw(const power_management::PowerState* state);
-uint64_t rust_power_state_max_idle_power_coefficient_nw(const power_management::PowerState* state);
-bool rust_power_state_max_idle_power_level_interface(const power_management::PowerState* state,
-                                                     power_management::ControlInterface* out);
+uint64_t rust_power_state_idle_power_nw(const power_management::PowerState* state);
 bool rust_power_state_is_valid_active_power_level(const power_management::PowerState* state,
                                                   uint8_t power_level);
 power_management::ProcessingRate rust_power_state_max_processing_rate(
@@ -155,7 +152,8 @@ class PowerState {
     return std::nullopt;
   }
 
-  // Returns the active power level the device is in the processo of transitioning to.
+  // Returns the 0-based active power level index the processor is in the process of transitioning
+  // to.
   std::optional<uint8_t> desired_active_power_level() const {
     uint8_t level = 0;
     if (rust_power_state_desired_active_power_level(this, &level)) {
@@ -164,36 +162,16 @@ class PowerState {
     return std::nullopt;
   }
 
-  // Returns the maximum (i.e. highest power, lowest latency) idle power level.
-  std::optional<uint8_t> max_idle_power_level() const {
-    uint8_t level = 0;
-    if (rust_power_state_max_idle_power_level(this, &level)) {
-      return level;
-    }
-    return std::nullopt;
-  }
-
-  // Returns the power coefficient of the current active power level. Returns zero if there is no
-  // active power level or no domain is set.
+  // Returns the active power of the current active power level in nanowatts. Returns zero if there
+  // is no active power level or no domain is set.
   uint64_t active_power_coefficient_nw() const {
     return rust_power_state_active_power_coefficient_nw(this);
   }
 
-  // Returns the power coefficient of the maximum idle power level. Returns zero if there is no
-  // idle power level or no domain is set.
-  uint64_t max_idle_power_coefficient_nw() const {
-    return rust_power_state_max_idle_power_coefficient_nw(this);
-  }
-
-  // Returns the control interface of the maximum idle power level. Returns nullopt if there is no
-  // idle power level or no domain is set.
-  std::optional<ControlInterface> max_idle_power_level_interface() const {
-    ControlInterface iface{};
-    if (rust_power_state_max_idle_power_level_interface(this, &iface)) {
-      return iface;
-    }
-    return std::nullopt;
-  }
+  // Returns the steady-state idle power consumption in nanowatts at the current `idle_state_index`
+  // and `active_power_level`. Returns zero if no domain is set, no idle state is configured, or the
+  // current idle state is `ClockGated` and no active OPP has been set yet.
+  uint64_t idle_power_nw() const { return rust_power_state_idle_power_nw(this); }
 
   // Returns true if the given power level is valid active power level.
   bool IsValidActivePowerLevel(uint8_t power_level) const {

@@ -6,7 +6,7 @@ import subprocess
 from os import PathLike
 from typing import IO, Protocol, Sequence, TypeAlias
 
-from mobly import logger, signals
+from libs import errors
 
 StrOrBytesPath: TypeAlias = str | bytes | PathLike[str] | PathLike[bytes]
 _CMD: TypeAlias = StrOrBytesPath | Sequence[StrOrBytesPath]
@@ -14,8 +14,6 @@ _CMD: TypeAlias = StrOrBytesPath | Sequence[StrOrBytesPath]
 
 class Runner(Protocol):
     """A command runner."""
-
-    log: logger.PrefixLoggerAdapter
 
     def run(
         self,
@@ -125,5 +123,5 @@ class CalledProcessError(subprocess.CalledProcessError):
         return out
 
 
-class CalledProcessTransportError(signals.TestError):
+class CalledProcessTransportError(errors.TestError):
     """Error in process's underlying transport."""

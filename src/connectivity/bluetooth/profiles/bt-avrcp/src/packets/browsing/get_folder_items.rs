@@ -470,8 +470,7 @@ impl Encodable for MediaPlayerItem {
         buf[8..16].copy_from_slice(&self.feature_bit_mask[0].to_be_bytes());
         buf[16..24].copy_from_slice(&self.feature_bit_mask[1].to_be_bytes());
 
-        let charset_id = u16::from(&CharsetId::Utf8);
-        buf[24..26].copy_from_slice(&charset_id.to_be_bytes());
+        buf[24..26].copy_from_slice(&CharsetId::Utf8.to_be_bytes());
 
         let name_len = self.name.len();
         let name_length = u16::try_from(name_len).map_err(|_| Error::ParameterEncodingError)?;
@@ -504,7 +503,7 @@ impl AdvancedDecodable for MediaPlayerItem {
             u64::from_be_bytes(buf[8..16].try_into().unwrap()),
             u64::from_be_bytes(buf[16..24].try_into().unwrap()),
         ];
-        let is_utf8 = CharsetId::is_utf8_charset_id(&buf[24..26].try_into().unwrap());
+        let charset_id = CharsetId::from_be_bytes(buf[24..26].try_into().unwrap());
 
         let mut name_len = u16::from_be_bytes(buf[26..28].try_into().unwrap()) as usize;
         if should_adjust {
@@ -514,14 +513,10 @@ impl AdvancedDecodable for MediaPlayerItem {
         if buf.len() < Self::MIN_PACKET_SIZE + name_len {
             return Err(Error::InvalidMessageLength);
         }
-        // TODO(fxdev.bug/100467): add support to appropriately convert non-utf8
-        // charset ID media player name to utf8 name.
-        let name = if is_utf8 {
-            String::from_utf8(buf[Self::MIN_PACKET_SIZE..Self::MIN_PACKET_SIZE + name_len].to_vec())
-                .or(Err(Error::ParameterEncodingError))?
-        } else {
-            "Media Player".to_string()
-        };
+        let name = charset_id.decode_str(
+            &buf[Self::MIN_PACKET_SIZE..Self::MIN_PACKET_SIZE + name_len],
+            "Media Player",
+        );
         let decoded_len = Self::MIN_PACKET_SIZE + name_len;
         if decoded_len != buf.len() {
             return Err(Error::InvalidMessageLength);
@@ -591,8 +586,7 @@ impl Encodable for FolderItem {
         buf[8] = u8::from(&self.folder_type);
         buf[9] = u8::from(self.is_playable);
 
-        let charset_id = u16::from(&CharsetId::Utf8);
-        buf[10..12].copy_from_slice(&charset_id.to_be_bytes());
+        buf[10..12].copy_from_slice(&CharsetId::Utf8.to_be_bytes());
 
         let name_len = self.name.len();
         let name_length = u16::try_from(name_len).map_err(|_| Error::ParameterEncodingError)?;
@@ -619,7 +613,7 @@ impl AdvancedDecodable for FolderItem {
             return Err(Error::OutOfRange);
         }
         let is_playable = buf[9] == 1;
-        let is_utf8 = CharsetId::is_utf8_charset_id(&buf[10..12].try_into().unwrap());
+        let charset_id = CharsetId::from_be_bytes(buf[10..12].try_into().unwrap());
 
         let mut name_len = u16::from_be_bytes(buf[12..14].try_into().unwrap()) as usize;
         if should_adjust {
@@ -628,14 +622,8 @@ impl AdvancedDecodable for FolderItem {
         if buf.len() < Self::MIN_PACKET_SIZE + name_len {
             return Err(Error::InvalidMessageLength);
         }
-        // TODO(fxdev.bug/100467): add support to appropriately convert non-utf8
-        // charset ID folder name to utf8 name.
-        let name = if is_utf8 {
-            String::from_utf8(buf[Self::MIN_PACKET_SIZE..Self::MIN_PACKET_SIZE + name_len].to_vec())
-                .or(Err(Error::ParameterEncodingError))?
-        } else {
-            "Folder".to_string()
-        };
+        let name = charset_id
+            .decode_str(&buf[Self::MIN_PACKET_SIZE..Self::MIN_PACKET_SIZE + name_len], "Folder");
         let decoded_len = Self::MIN_PACKET_SIZE + name_len;
         if decoded_len != buf.len() {
             return Err(Error::InvalidMessageLength);
@@ -695,8 +683,7 @@ impl Encodable for MediaElementItem {
         buf[0..8].copy_from_slice(&self.element_uid.to_be_bytes());
         buf[8] = u8::from(&self.media_type);
 
-        let charset_id = u16::from(&CharsetId::Utf8);
-        buf[9..11].copy_from_slice(&charset_id.to_be_bytes());
+        buf[9..11].copy_from_slice(&CharsetId::Utf8.to_be_bytes());
 
         let name_len = self.name.len();
         let len = u16::try_from(name_len).map_err(|_| Error::ParameterEncodingError)?;
@@ -720,7 +707,7 @@ impl AdvancedDecodable for MediaElementItem {
         let element_uid = u64::from_be_bytes(buf[0..8].try_into().unwrap());
         let media_type = MediaType::try_from(buf[8])?;
 
-        let is_utf8 = CharsetId::is_utf8_charset_id(&buf[9..11].try_into().unwrap());
+        let charset_id = CharsetId::from_be_bytes(buf[9..11].try_into().unwrap());
 
         let mut name_len = u16::from_be_bytes(buf[11..13].try_into().unwrap()) as usize;
         if should_adjust {
@@ -730,14 +717,7 @@ impl AdvancedDecodable for MediaElementItem {
             return Err(Error::InvalidMessageLength);
         }
 
-        // TODO(fxdev.bug/100467): add support to appropriately convert non-utf8
-        // charset ID folder names to utf8 names.
-        let name = if is_utf8 {
-            String::from_utf8(buf[13..13 + name_len].to_vec())
-                .or(Err(Error::ParameterEncodingError))?
-        } else {
-            "Media Element".to_string()
-        };
+        let name = charset_id.decode_str(&buf[13..13 + name_len], "Media Element");
 
         let mut next_idx = 13 + name_len;
         if buf.len() <= next_idx {
@@ -1452,6 +1432,16 @@ mod tests {
                 name: "Media Player".to_string(),
             }
         );
+
+        // Invalid UTF-8 bytes under UTF-8 charset ID are replaced lossily.
+        let buf = [
+            0, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 1, 0, 106, 0, 2,
+            0xFF, 0xFE,
+        ];
+        let (item, decoded_len) =
+            MediaPlayerItem::try_decode(&buf[..], false).expect("should have succeeded");
+        assert_eq!(decoded_len, buf.len());
+        assert_eq!(item.name, "\u{FFFD}\u{FFFD}");
     }
 
     #[fuchsia::test]
@@ -1561,6 +1551,13 @@ mod tests {
                 name: "Folder".to_string(),
             }
         );
+
+        // Invalid UTF-8 bytes under UTF-8 charset ID are replaced lossily.
+        let buf = [0, 0, 0, 0, 0, 0, 0, 1, 3, 1, 0, 106, 0, 2, 0xFF, 0xFE];
+        let (item, decoded_len) =
+            FolderItem::try_decode(&buf[..], false).expect("should have succeeded");
+        assert_eq!(decoded_len, buf.len());
+        assert_eq!(item.name, "\u{FFFD}\u{FFFD}");
     }
 
     #[fuchsia::test]
@@ -1671,6 +1668,20 @@ mod tests {
                 },
             }
         );
+
+        // Non-UTF-8 charset ID falls back to "Media Element", and invalid UTF-8 bytes are replaced
+        // lossily.
+        let non_utf8_buf = [0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 5, 0, 2, 0x61, 0x62, 0];
+        let (item, decoded_len) =
+            MediaElementItem::try_decode(&non_utf8_buf[..], false).expect("should have succeeded");
+        assert_eq!(decoded_len, non_utf8_buf.len());
+        assert_eq!(item.name, "Media Element");
+
+        let invalid_utf8_buf = [0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 106, 0, 2, 0xFF, 0xFE, 0];
+        let (item, decoded_len) = MediaElementItem::try_decode(&invalid_utf8_buf[..], false)
+            .expect("should have succeeded");
+        assert_eq!(decoded_len, invalid_utf8_buf.len());
+        assert_eq!(item.name, "\u{FFFD}\u{FFFD}");
     }
 
     /// Tests decoding a MediaElementItem succeeds.

@@ -2,15 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fidl/fuchsia.io/cpp/wire.h>
 #include <fidl/fuchsia.metrics/cpp/markers.h>
 #include <fidl/fuchsia.metrics/cpp/wire.h>
-#include <fuchsia/metrics/cpp/fidl.h>
 #include <lib/async-loop/default.h>
 #include <lib/async-loop/loop.h>
 #include <lib/async/cpp/task.h>
+#include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/fidl/cpp/wire/server.h>
-#include <lib/sys/cpp/outgoing_directory.h>
-#include <lib/vfs/cpp/pseudo_dir.h>
 #include <lib/zx/time.h>
 #include <zircon/types.h>
 
@@ -21,7 +20,6 @@
 #include <gtest/gtest.h>
 
 #include "lib/sync/completion.h"
-#include "lib/sys/cpp/service_directory.h"
 #include "log.h"
 #include "src/lib/metrics_buffer/metrics_buffer.h"
 
@@ -39,48 +37,41 @@ class ServerAndClient {
     zx_status_t status = loop_.StartThread("MetricsBufferTest");
     ZX_ASSERT(status == ZX_OK);
 
-    auto [aux_svc_client, aux_svc_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
+    auto [root_client, root_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
     sync_completion_t server_create_done;
-    status = async::PostTask(dispatcher_, [this, aux_svc_server = std::move(aux_svc_server),
-                                           &server_create_done]() mutable {
-      outgoing_aux_service_directory_parent_.emplace();
-      zx_status_t status =
-          outgoing_aux_service_directory_parent_
-              ->AddPublicService<fuchsia::metrics::MetricEventLoggerFactory>(
-                  [this](
-                      fidl::InterfaceRequest<fuchsia::metrics::MetricEventLoggerFactory> request) {
-                    fidl::ServerEnd<fuchsia_metrics::MetricEventLoggerFactory> llcpp_server_end(
-                        request.TakeChannel());
+    status = async::PostTask(
+        dispatcher_, [this, root_server = std::move(root_server), &server_create_done]() mutable {
+          outgoing_.emplace(dispatcher_);
+          zx::result<> add_result =
+              outgoing_->AddUnmanagedProtocol<fuchsia_metrics::MetricEventLoggerFactory>(
+                  [this](fidl::ServerEnd<fuchsia_metrics::MetricEventLoggerFactory> server_end) {
                     auto logger_factory = std::make_unique<MetricEventLoggerFactory>(this);
                     // Ignore the result - logger_factory will be destroyed and the channel will be
                     // closed on error.
-                    fidl::BindServer(loop_.dispatcher(), std::move(llcpp_server_end),
+                    fidl::BindServer(loop_.dispatcher(), std::move(server_end),
                                      std::move(logger_factory));
                   });
-      outgoing_aux_service_directory_ =
-          outgoing_aux_service_directory_parent_->GetOrCreateDirectory("svc");
-      ZX_ASSERT(outgoing_aux_service_directory_);
-      status = outgoing_aux_service_directory_->Serve(fuchsia_io::wire::kPermReadable,
-                                                      std::move(aux_svc_server), dispatcher_);
-      ZX_ASSERT(status == ZX_OK);
-      sync_completion_signal(&server_create_done);
-    });
+          ZX_ASSERT(add_result.is_ok());
+          zx::result<> serve_result = outgoing_->Serve(std::move(root_server));
+          ZX_ASSERT(serve_result.is_ok());
+          sync_completion_signal(&server_create_done);
+        });
     ZX_ASSERT(status == ZX_OK);
     sync_completion_wait(&server_create_done, ZX_TIME_INFINITE);
 
     // Client end
-    ZX_ASSERT(!aux_service_directory_);
-    aux_service_directory_ = std::make_shared<sys::ServiceDirectory>(aux_svc_client.TakeChannel());
-    ZX_ASSERT(aux_service_directory_);
+    ZX_ASSERT(!root_client_.is_valid());
+    root_client_ = std::move(root_client);
+    ZX_ASSERT(root_client_.is_valid());
   }
 
   ~ServerAndClient() {
-    aux_service_directory_ = nullptr;
+    root_client_.reset();
     zx::event server_delete_done;
     zx_status_t status = zx::event::create(0, &server_delete_done);
     ZX_ASSERT(status == ZX_OK);
     status = async::PostTask(dispatcher_, [this, &server_delete_done] {
-      outgoing_aux_service_directory_parent_.reset();
+      outgoing_.reset();
       zx_status_t status = server_delete_done.signal(0, ZX_EVENT_SIGNALED);
       ZX_ASSERT(status == ZX_OK);
     });
@@ -234,9 +225,14 @@ class ServerAndClient {
     event_count_ += 1;
   }
 
-  std::shared_ptr<sys::ServiceDirectory> aux_service_directory() {
+  fidl::ClientEnd<fuchsia_io::Directory> aux_service_directory() {
     std::lock_guard<std::mutex> lock(lock_);
-    return aux_service_directory_;
+    auto [svc_client, svc_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
+    fidl::OneWayStatus status =
+        fidl::WireCall(root_client_)
+            ->Open("svc", fuchsia_io::kPermReadable, {}, svc_server.TakeChannel());
+    ZX_ASSERT(status.ok());
+    return std::move(svc_client);
   }
 
  protected:
@@ -345,11 +341,10 @@ class ServerAndClient {
   // server end
   async::Loop loop_;
   async_dispatcher_t* dispatcher_ = nullptr;
-  std::optional<sys::OutgoingDirectory> outgoing_aux_service_directory_parent_;
-  vfs::PseudoDir* outgoing_aux_service_directory_ = nullptr;
+  std::optional<component::OutgoingDirectory> outgoing_;
 
   // client end
-  std::shared_ptr<sys::ServiceDirectory> aux_service_directory_;
+  fidl::ClientEnd<fuchsia_io::Directory> root_client_;
 };
 
 class MetricsBufferTest : public ::testing::Test {
@@ -358,7 +353,7 @@ class MetricsBufferTest : public ::testing::Test {
 
   ServerAndClient& state() { return *state_; }
 
-  std::shared_ptr<sys::ServiceDirectory> aux_service_directory() {
+  fidl::ClientEnd<fuchsia_io::Directory> aux_service_directory() {
     return state_->aux_service_directory();
   }
 

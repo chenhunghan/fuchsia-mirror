@@ -63,6 +63,7 @@ IDENTIFIERS = [
     Identifier("become", RUST_KEYWORD),
     Identifier("bitand"),
     Identifier("bitor"),
+    Identifier("body"),
     Identifier("bool", FIDL_PRIMITIVE),
     # TODO(https://fxbug.dev/42157590): this can be re-enabled once builtin shadowing works.
     # Identifier('box', RUST_KEYWORD),
@@ -316,7 +317,6 @@ IDENTIFIERS = [
     Identifier("with"),
     Identifier("xor"),
     Identifier("xor_eq"),
-    Identifier("xunion"),
     Identifier("yield", RUST_KEYWORD),
     Identifier("zx"),
 ]

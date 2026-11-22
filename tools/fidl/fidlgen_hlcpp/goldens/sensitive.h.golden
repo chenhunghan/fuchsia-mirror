@@ -161,10 +161,10 @@ class SensitiveUnion final {
 
   static SensitiveUnion WithField(::std::string&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kField = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<SensitiveUnion> New();
@@ -197,7 +197,7 @@ class SensitiveUnion final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -205,9 +205,9 @@ class SensitiveUnion final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid);
   union {
     ::std::string field_;
   };
@@ -393,11 +393,11 @@ class NonSensitiveUnion final {
   static NonSensitiveUnion WithSensitiveField(::std::string&&);
   static NonSensitiveUnion WithSensitiveStructField(::test::sensitive::SensitiveStruct&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kSensitiveField = 1,        // 0x1
     kSensitiveStructField = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<NonSensitiveUnion> New();
@@ -443,7 +443,7 @@ class NonSensitiveUnion final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -451,9 +451,9 @@ class NonSensitiveUnion final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid);
   union {
     ::std::string sensitive_field_;
     ::test::sensitive::SensitiveStruct sensitive_struct_field_;
@@ -543,7 +543,7 @@ struct Equality<::test::sensitive::SensitiveTable> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::sensitive::SensitiveUnion> : public std::true_type {};
+struct IsFidlUnion<::test::sensitive::SensitiveUnion> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::sensitive::SensitiveUnion>
@@ -555,9 +555,9 @@ struct CodingTraits<std::unique_ptr<::test::sensitive::SensitiveUnion>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::sensitive::SensitiveUnion>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -587,7 +587,7 @@ struct Equality<::test::sensitive::SensitiveUnion> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid):
         return true;
       case ::test::sensitive::SensitiveUnion::Tag::kField:
         return ::fidl::Equals(_lhs.field_, _rhs.field_);
@@ -694,7 +694,7 @@ struct Equality<::test::sensitive::NonSensitiveTable> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::sensitive::NonSensitiveUnion> : public std::true_type {};
+struct IsFidlUnion<::test::sensitive::NonSensitiveUnion> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::sensitive::NonSensitiveUnion>
@@ -706,9 +706,9 @@ struct CodingTraits<std::unique_ptr<::test::sensitive::NonSensitiveUnion>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::sensitive::NonSensitiveUnion>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -738,7 +738,7 @@ struct Equality<::test::sensitive::NonSensitiveUnion> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid):
         return true;
       case ::test::sensitive::NonSensitiveUnion::Tag::kSensitiveField:
         return ::fidl::Equals(_lhs.sensitive_field_, _rhs.sensitive_field_);

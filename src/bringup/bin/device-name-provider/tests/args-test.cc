@@ -22,7 +22,6 @@ TEST(ArgsTest, DeviceNameProviderNoneProvided) {
   ASSERT_TRUE(args.interface.empty());
   ASSERT_TRUE(args.nodename.empty());
   ASSERT_EQ(args.namegen, 1);
-  ASSERT_EQ(args.devdir, kDefaultDevdir);
   ASSERT_EQ(error, nullptr);
 }
 
@@ -37,29 +36,19 @@ TEST(ArgsTest, DeviceNameConfigCapabilityProvided) {
   ASSERT_EQ(args.interface, kInterface);
   ASSERT_TRUE(args.nodename.empty());
   ASSERT_EQ(args.namegen, 1);
-  ASSERT_EQ(args.devdir, kDefaultDevdir);
   ASSERT_EQ(error, nullptr);
 }
 
 TEST(ArgsTest, DeviceNameProviderAllProvided) {
-  int argc = 9;
-  constexpr char kDevDir[] = "/foo";
-  const char* argv[] = {"device-name-provider",
-                        "--nodename",
-                        kNodename,
-                        "--interface",
-                        kInterface,
-                        "--devdir",
-                        kDevDir,
-                        "--namegen",
-                        "0"};
+  int argc = 7;
+  const char* argv[] = {
+      "device-name-provider", "--nodename", kNodename, "--interface", kInterface, "--namegen", "0"};
   const char* error = nullptr;
   device_name_provider_config::Config config;
   DeviceNameProviderArgs args;
   ASSERT_EQ(ParseArgs(argc, const_cast<char**>(argv), config, &error, &args), 0, "%s", error);
   ASSERT_EQ(args.interface, std::string(kInterface));
   ASSERT_EQ(args.nodename, std::string(kNodename));
-  ASSERT_EQ(args.devdir, std::string(kDevDir));
   ASSERT_EQ(args.namegen, 0);
   ASSERT_EQ(error, nullptr);
 }

@@ -5,6 +5,7 @@
 #ifndef SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_ADAPTER_EVENTS_H_
 #define SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_ADAPTER_EVENTS_H_
 
+#include <fidl/fuchsia.media/cpp/fidl.h>
 #include <fuchsia/media/cpp/fidl.h>
 #include <lib/media/codec_impl/codec_metrics.h>
 
@@ -31,7 +32,10 @@ class CodecAdapterEvents {
 
   // The core codec should only call this method at times when there is a
   // current stream, not between streams.
-  virtual void onCoreCodecFailStream(fuchsia::media::StreamError error) = 0;
+  virtual void onCoreCodecFailStream(fuchsia_media::StreamError error);
+  // Deprecated HLCPP soft-transition overload; prefer the natural overload above.
+  // Override exactly one of this pair; overriding neither panics at runtime.
+  virtual void onCoreCodecFailStream(fuchsia::media::StreamError error);
 
   // The core codec should only call this method at times when there is a
   // current stream, not between streams.  If the core codec calls this method,

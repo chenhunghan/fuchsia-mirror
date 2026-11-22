@@ -5,6 +5,10 @@
 """All Fuchsia Providers."""
 
 load(
+    "@fuchsia_rules_common//bind:providers.bzl",
+    _FuchsiaBindLibraryInfo = "FuchsiaBindLibraryInfo",
+)
+load(
     "@fuchsia_rules_common//components:providers.bzl",
     _FuchsiaComponentInfo = "FuchsiaComponentInfo",
     _FuchsiaComponentManifestInfo = "FuchsiaComponentManifestInfo",
@@ -18,6 +22,10 @@ load(
     _make_fuchsia_unstripped_binary_info = "make_fuchsia_unstripped_binary_info",
 )
 load(
+    "@fuchsia_rules_common//devicetree:providers.bzl",
+    _FuchsiaDeviceTreeSegmentInfo = "FuchsiaDeviceTreeSegmentInfo",
+)
+load(
     "@fuchsia_rules_common//packages:providers.bzl",
     _FuchsiaCollectedPackageResourcesInfo = "FuchsiaCollectedPackageResourcesInfo",
     _FuchsiaDriverToolInfo = "FuchsiaDriverToolInfo",
@@ -25,6 +33,7 @@ load(
     _FuchsiaStructuredConfigInfo = "FuchsiaStructuredConfigInfo",
 )
 
+FuchsiaBindLibraryInfo = _FuchsiaBindLibraryInfo
 FuchsiaCollectedPackageResourcesInfo = _FuchsiaCollectedPackageResourcesInfo
 FuchsiaComponentInfo = _FuchsiaComponentInfo
 FuchsiaDriverToolInfo = _FuchsiaDriverToolInfo
@@ -49,13 +58,7 @@ FuchsiaConfigDataInfo = provider(
     },
 )
 
-FuchsiaDeviceTreeSegmentInfo = provider(
-    "Contains information about a fuchsia devicetree fragment",
-    fields = {
-        "includes": "A depset of include directory paths used when compiling the devicetree binary.",
-        "files": "A depset of transitive dependencies needed for future devicetree compile.",
-    },
-)
+FuchsiaDeviceTreeSegmentInfo = _FuchsiaDeviceTreeSegmentInfo
 
 FuchsiaCollectedUnstrippedBinariesInfo = _FuchsiaCollectedUnstrippedBinariesInfo
 FuchsiaUnstrippedBinaryInfo = _FuchsiaUnstrippedBinaryInfo
@@ -83,14 +86,6 @@ FuchsiaFidlLibraryInfo = provider(
         "info": "List of structs(name, files) representing the library's dependencies",
         "name": "Name of the FIDL library",
         "ir": "Path to the JSON file with the library's intermediate representation",
-    },
-)
-
-FuchsiaBindLibraryInfo = provider(
-    "Contains information about a Bind Library.",
-    fields = {
-        "name": "Name of the Bind Library.",
-        "transitive_sources": "A depset containing transitive sources of the Bind Library.",
     },
 )
 

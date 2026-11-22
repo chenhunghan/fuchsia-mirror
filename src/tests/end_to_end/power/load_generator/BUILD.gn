@@ -4,6 +4,9 @@
 
 import("//build/components.gni")
 
+# Kept in GN because there is no in-tree
+# `fuchsia_structured_config_cpp_elf_lib` Bazel rule for `:params` (`:bin`
+# depends on `:params`).
 executable("bin") {
   output_name = "load_generator"
 
@@ -15,26 +18,19 @@ executable("bin") {
   ]
 }
 
+# LINT.IfChange
 fuchsia_component_manifest("manifest") {
   component_name = "load_generator"
   manifest = "meta/load_generator.cml"
 }
 
+# LINT.ThenChange(BUILD.bazel)
+
 fuchsia_structured_config_cpp_elf_lib("params") {
   cm_label = ":manifest"
 }
 
-fuchsia_structured_config_values("config") {
-  cm_label = ":manifest"
-  values = {
-    load_pattern = []
-  }
-}
-
 fuchsia_package_with_single_component("load_generator") {
   cm_label = ":manifest"
-  deps = [
-    ":bin",
-    ":config",
-  ]
+  deps = [ ":bin" ]
 }

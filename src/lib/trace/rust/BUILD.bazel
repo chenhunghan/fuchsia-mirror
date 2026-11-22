@@ -2,7 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
@@ -24,12 +26,8 @@ rustc_library(
     ],
 )
 
-# The C++ trace provider that `:trace-provider` wraps.
-#
-# In GN this is `shared_library("rust-trace-provider")`, defined by hand in
-# BUILD.gn, which produces librust-trace-provider.so. That file is also included
-# in bootfs (see `bootfs_files_for_assembly("bootfs")` in BUILD.gn). Bazel links
-# the trace provider statically for now.
+# The C++ trace provider that `:trace-provider` wraps, built into
+# `:rust-trace-provider` below.
 fx_cc_library(
     name = "rust-trace-provider-cpp",
     srcs = ["trace-provider/trace_provider.cc"],
@@ -42,6 +40,26 @@ fx_cc_library(
     alwayslink = True,
 )
 
+# librust-trace-provider.so, which holds the process-global trace provider state
+# and is included in the packages of Rust components that use `:trace-provider`.
+#
+# Not converted to GN: BUILD.gn defines `shared_library("rust-trace-provider")`
+# by hand, because that file is also included in bootfs (see
+# `bootfs_files_for_assembly("bootfs")` in BUILD.gn).
+# @bazel2gn:skip
+fx_cc_shared_library(
+    name = "rust-trace-provider",
+    deps = [":rust-trace-provider-cpp"],
+)
+
+# rules_rust `link_deps` require `CcInfo`, which `cc_shared_library()` doesn't
+# provide, so `:trace-provider` depends on this wrapper instead.
+# @bazel2gn:skip
+cc_import(
+    name = "rust-trace-provider-import",
+    shared_library = ":rust-trace-provider",
+)
+
 rustc_library(
     name = "trace-provider",
     srcs = ["trace-provider/src/lib.rs"],
@@ -52,7 +70,7 @@ rustc_library(
         # GN links Rust binaries with rustc, which needs the C++ standard
         # library to be linked dynamically for librust-trace-provider.so; see
         # group("rust-trace-provider-for-rust") in BUILD.gn.
-        ":rust-trace-provider-cpp",  # @bazel2gn:path_overwrite::rust-trace-provider-for-rust
+        ":rust-trace-provider-import",  # @bazel2gn:path_overwrite::rust-trace-provider-for-rust
         "//zircon/system/ulib/trace-provider",
     ],
     visibility = ["//:__subpackages__"],
@@ -71,9 +89,10 @@ rustc_library(
     edition = "2024",
     link_deps = ["//zircon/system/ulib/trace"],
     visibility = [
-        "//src/performance/memory/attribution/monitor:__pkg__",
+        "//src/memory/attribution/monitor:__pkg__",
         "//src/starnix/kernel/core:__pkg__",
         "//src/starnix/modules/perfetto_consumer:__pkg__",
+        "//src/sysmem/server:__subpackages__",
         "//vendor/google:__subpackages__",
     ],
     deps = [

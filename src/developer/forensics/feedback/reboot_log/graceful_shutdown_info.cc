@@ -5,6 +5,7 @@
 #include "src/developer/forensics/feedback/reboot_log/graceful_shutdown_info.h"
 
 #include <fcntl.h>
+#include <fidl/fuchsia.hardware.power.statecontrol/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <string>
@@ -64,6 +65,8 @@ constexpr char kNoReasons[] = "NONE";
 
 constexpr char kActionKey[] = "action";
 constexpr char kReasonsKey[] = "reasons";
+constexpr char kUptimeKey[] = "uptime_ms";
+constexpr char kRuntimeKey[] = "runtime_ms";
 
 // This schema cannot become more strict over time because future versions of Fuchsia may read json
 // written by a previous version. For example, we cannot add any more required fields because
@@ -87,6 +90,12 @@ constexpr char kJsonSchema[] = R"({
       "items": {
         "type": "string"
       }
+    },
+    "uptime_ms": {
+      "type": "integer"
+    },
+    "runtime_ms": {
+      "type": "integer"
     }
   },
   "required": [
@@ -167,52 +176,71 @@ GracefulShutdownReason GracefulShutdownReasonFromString(const std::string_view r
 }
 
 GracefulShutdownReason FromReason(
-    const fuchsia::hardware::power::statecontrol::ShutdownReason& reason) {
-  using fuchsia::hardware::power::statecontrol::ShutdownReason;
+    const fuchsia_hardware_power_statecontrol::ShutdownReason& reason) {
+  using fuchsia_hardware_power_statecontrol::ShutdownReason;
   switch (reason) {
-    case ShutdownReason::USER_REQUEST:
+    case ShutdownReason::kUserRequest:
       return GracefulShutdownReason::kUserRequest;
-    case ShutdownReason::SYSTEM_UPDATE:
+    case ShutdownReason::kSystemUpdate:
       return GracefulShutdownReason::kSystemUpdate;
-    case ShutdownReason::RETRY_SYSTEM_UPDATE:
+    case ShutdownReason::kRetrySystemUpdate:
       return GracefulShutdownReason::kRetrySystemUpdate;
-    case ShutdownReason::HIGH_TEMPERATURE:
+    case ShutdownReason::kHighTemperature:
       return GracefulShutdownReason::kHighTemperature;
-    case ShutdownReason::SESSION_FAILURE:
+    case ShutdownReason::kSessionFailure:
       return GracefulShutdownReason::kSessionFailure;
-    case ShutdownReason::CRITICAL_COMPONENT_FAILURE:
+    case ShutdownReason::kCriticalComponentFailure:
       return GracefulShutdownReason::kCriticalComponentFailure;
-    case ShutdownReason::CRITICAL_DRIVER_FAILURE:
+    case ShutdownReason::kCriticalDriverFailure:
       return GracefulShutdownReason::kCriticalDriverFailure;
-    case ShutdownReason::POWER_LEVEL_TRANSITION_STUCK:
+    case ShutdownReason::kPowerLevelTransitionStuck:
       return GracefulShutdownReason::kPowerLevelTransitionStuck;
-    case ShutdownReason::FACTORY_DATA_RESET:
+    case ShutdownReason::kFactoryDataReset:
       return GracefulShutdownReason::kFdr;
-    case ShutdownReason::ZBI_SWAP:
+    case ShutdownReason::kZbiSwap:
       return GracefulShutdownReason::kZbiSwap;
-    case ShutdownReason::OUT_OF_MEMORY:
+    case ShutdownReason::kOutOfMemory:
       return GracefulShutdownReason::kOutOfMemory;
-    case ShutdownReason::NETSTACK_MIGRATION:
+    case ShutdownReason::kNetstackMigration:
       return GracefulShutdownReason::kNetstackMigration;
-    case ShutdownReason::ANDROID_UNEXPECTED_REASON:
+    case ShutdownReason::kAndroidUnexpectedReason:
       return GracefulShutdownReason::kAndroidUnexpectedReason;
-    case ShutdownReason::STARNIX_CONTAINER_NO_REASON:
+    case ShutdownReason::kStarnixContainerNoReason:
       return GracefulShutdownReason::kAndroidNoReason;
-    case ShutdownReason::ANDROID_RESCUE_PARTY:
+    case ShutdownReason::kAndroidRescueParty:
       return GracefulShutdownReason::kAndroidRescueParty;
-    case ShutdownReason::ANDROID_CRITICAL_PROCESS_FAILURE:
+    case ShutdownReason::kAndroidCriticalProcessFailure:
       return GracefulShutdownReason::kAndroidCriticalProcessFailure;
-    case ShutdownReason::DEVELOPER_REQUEST:
+    case ShutdownReason::kDeveloperRequest:
       return GracefulShutdownReason::kDeveloperRequest;
-    case ShutdownReason::USER_REQUEST_DEVICE_STUCK:
+    case ShutdownReason::kUserRequestDeviceStuck:
       return GracefulShutdownReason::kUserRequestDeviceStuck;
-    case ShutdownReason::SUSPENSION_FAILURE:
+    case ShutdownReason::kSuspensionFailure:
       return GracefulShutdownReason::kSuspensionFailure;
-    case ShutdownReason::BATTERY_DRAINED:
+    case ShutdownReason::kBatteryDrained:
       return GracefulShutdownReason::kBatteryDrained;
     default:
       return GracefulShutdownReason::kNotSupported;
   }
+}
+
+std::optional<zx::duration> ExtractDuration(const rapidjson::Document& json, const char* key) {
+  if (!json.HasMember(key)) {
+    return std::nullopt;
+  }
+
+  if (!json[key].IsInt64()) {
+    FX_LOGS(ERROR) << "'" << key << "' is not an int64";
+    return std::nullopt;
+  }
+
+  const int64_t val = json[key].GetInt64();
+  if (val < 0) {
+    FX_LOGS(ERROR) << "'" << key << "' is " << val << ", but durations can't be negative";
+    return std::nullopt;
+  }
+
+  return zx::msec(val);
 }
 
 }  // namespace
@@ -375,7 +403,8 @@ std::vector<std::string> ToReasonStrings(const std::vector<GracefulShutdownReaso
 }
 
 std::string ToJson(const GracefulShutdownAction action,
-                   const std::vector<GracefulShutdownReason>& reasons) {
+                   const std::vector<GracefulShutdownReason>& reasons, const zx::duration uptime,
+                   const zx::duration runtime) {
   rapidjson::Document json;
   json.SetObject();
   auto& allocator = json.GetAllocator();
@@ -389,6 +418,8 @@ std::string ToJson(const GracefulShutdownAction action,
     json_reasons.PushBack(rapidjson::Value(reason, allocator), allocator);
   }
   json.AddMember(kReasonsKey, json_reasons, allocator);
+  json.AddMember(kUptimeKey, uptime.to_msecs(), allocator);
+  json.AddMember(kRuntimeKey, runtime.to_msecs(), allocator);
 
   if (!IsSchemaValid(json)) {
     FX_LOGS(ERROR) << "Failed to create json matching the schema.";
@@ -494,23 +525,26 @@ GracefulShutdownInfo FromJson(const std::string& content) {
     shutdown_info.reasons.push_back(GracefulShutdownReasonFromString(k.GetString()));
   }
 
+  shutdown_info.uptime = ExtractDuration(json, kUptimeKey);
+  shutdown_info.runtime = ExtractDuration(json, kRuntimeKey);
+
   return shutdown_info;
 }
 
 GracefulShutdownAction ToGracefulShutdownAction(
-    const fuchsia::hardware::power::statecontrol::ShutdownOptions& options) {
-  FX_CHECK(options.has_action());
+    const fuchsia_hardware_power_statecontrol::ShutdownOptions& options) {
+  FX_CHECK(options.action().has_value());
 
-  using ::fuchsia::hardware::power::statecontrol::ShutdownAction;
+  using ::fuchsia_hardware_power_statecontrol::ShutdownAction;
 
-  switch (options.action()) {
-    case ShutdownAction::POWEROFF:
+  switch (*options.action()) {
+    case ShutdownAction::kPoweroff:
       return GracefulShutdownAction::kPoweroff;
-    case ShutdownAction::REBOOT:
+    case ShutdownAction::kReboot:
       return GracefulShutdownAction::kReboot;
-    case ShutdownAction::REBOOT_TO_RECOVERY:
+    case ShutdownAction::kRebootToRecovery:
       return GracefulShutdownAction::kRebootToRecovery;
-    case ShutdownAction::REBOOT_TO_BOOTLOADER:
+    case ShutdownAction::kRebootToBootloader:
       return GracefulShutdownAction::kRebootToBootloader;
     default:
       return GracefulShutdownAction::kNotSupported;
@@ -518,14 +552,14 @@ GracefulShutdownAction ToGracefulShutdownAction(
 }
 
 std::vector<GracefulShutdownReason> ToGracefulShutdownReasons(
-    const fuchsia::hardware::power::statecontrol::ShutdownOptions& options) {
-  if (!options.has_reasons()) {
+    const fuchsia_hardware_power_statecontrol::ShutdownOptions& options) {
+  if (!options.reasons().has_value()) {
     return {};
   }
 
   std::vector<GracefulShutdownReason> reasons;
-  reasons.reserve(options.reasons().size());
-  for (const fuchsia::hardware::power::statecontrol::ShutdownReason& reason : options.reasons()) {
+  reasons.reserve(options.reasons()->size());
+  for (const fuchsia_hardware_power_statecontrol::ShutdownReason& reason : *options.reasons()) {
     reasons.push_back(FromReason(reason));
   }
   return reasons;
@@ -533,6 +567,7 @@ std::vector<GracefulShutdownReason> ToGracefulShutdownReasons(
 
 void WriteGracefulShutdownInfo(const GracefulShutdownAction action,
                                const std::vector<GracefulShutdownReason>& reasons,
+                               const zx::duration uptime, const zx::duration runtime,
                                const std::string& path) {
   fbl::unique_fd fd(open(path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR));
   if (!fd.is_valid()) {
@@ -540,7 +575,7 @@ void WriteGracefulShutdownInfo(const GracefulShutdownAction action,
     return;
   }
 
-  if (const std::string content = ToJson(action, reasons);
+  if (const std::string content = ToJson(action, reasons, uptime, runtime);
       !fxl::WriteFileDescriptor(fd.get(), content.data(), content.size())) {
     FX_LOGS(ERROR) << "Failed to write shutdown info to: " << path;
   }

@@ -3,8 +3,6 @@
 # found in the LICENSE file.
 
 import("//build/components.gni")
-import("//build/rust/rustc_library.gni")
-import("//build/rust/rustc_macro.gni")
 
 group("tests") {
   testonly = true
@@ -20,7 +18,11 @@ group("benchmarks") {
   deps = [ "benchmarks" ]
 }
 
+# bazel2gn does not yet support `parallel` on `fx_unittest_package()`, so the GN
+# copies are defined by hand here while GN callers remain.
 fuchsia_unittest_package("fuchsia-rcu-tests") {
+  package_name = "fuchsia-rcu-tests-gn"
+  component_name = "fuchsia-rcu-tests"
   deps = [ ":fuchsia-rcu_test" ]
 
   # The state machine tests spawn multiple threads and make assertion about
@@ -31,7 +33,8 @@ fuchsia_unittest_package("fuchsia-rcu-tests") {
 }
 
 fuchsia_unittest_package("fuchsia-rcu-atomic-tests-pkg") {
-  package_name = "fuchsia-rcu-atomic-tests"
+  package_name = "fuchsia-rcu-atomic-tests-gn"
+  component_name = "fuchsia-rcu-atomic-tests"
   deps = [ ":fuchsia-rcu-atomic-tests" ]
 
   # The state machine tests spawn multiple threads and make assertion about
@@ -87,16 +90,6 @@ _COMMON_SRCS = [
 # It's possible this variable is only used in if conditions (e.g. is_host).
 not_needed([ "_COMMON_SRCS" ])
 
-_COMMON_DEPS = [
-  ":fuchsia-rcu-traits",
-  "//sdk/rust/zx",
-  "//src/lib/fuchsia-sync",
-]
-
-# To avoid "Assignment had no effect" from GN.
-# It's possible this variable is only used in if conditions (e.g. is_host).
-not_needed([ "_COMMON_DEPS" ])
-
 rustc_macro("fuchsia-rcu-derive") {
   sources = [ "macro/src/lib.rs" ]
   source_root = "macro/src/lib.rs"
@@ -115,7 +108,12 @@ rustc_library("fuchsia-rcu-traits") {
   edition = "2024"
   proc_macro_deps = [ ":fuchsia-rcu-derive" ]
   version = "0.1.0"
-  with_unit_tests = true
+  visibility = [
+    ":*",
+    "//src/lib/fuchsia-sync:*",
+    "//src/lib/trace/rust:*",
+    "//src/starnix/lib/starnix_types:*",
+  ]
   deps = []
   deps += [
     "//third_party/rust_crates:bstr",
@@ -125,28 +123,80 @@ rustc_library("fuchsia-rcu-traits") {
     deps += [ "//sdk/rust/zx" ]
   }
 }
-
-rustc_library("fuchsia-rcu") {
-  sources = _COMMON_SRCS
-  features = [ "rseq_backend" ]
-  edition = "2024"
-  version = "0.1.0"
-  with_unit_tests = true
-  deps = _COMMON_DEPS + [ "//src/lib/fuchsia-rseq" ]
+if (is_host) {
+  rustc_test("fuchsia-rcu-traits_test") {
+    sources = [ "traits/src/lib.rs" ]
+    source_root = "traits/src/lib.rs"
+    edition = "2024"
+    proc_macro_deps = [ ":fuchsia-rcu-derive" ]
+    deps = []
+    deps += [
+      "//third_party/rust_crates:bstr",
+      "//third_party/rust_crates:lock_api",
+    ]
+    if (is_fuchsia) {
+      deps += [ "//sdk/rust/zx" ]
+    }
+    features = [ "std" ]
+  }
 }
-
-rustc_library("fuchsia-rcu-atomic") {
-  testonly = true
-  sources = _COMMON_SRCS
-  crate_name = "fuchsia_rcu"
-  edition = "2024"
-  version = "0.1.0"
-  deps = _COMMON_DEPS
+if (is_fuchsia) {
+  rustc_library("fuchsia-rcu") {
+    sources = _COMMON_SRCS
+    features = [ "rseq_backend" ]
+    edition = "2024"
+    version = "0.1.0"
+    visibility = [
+      "./*",
+      "//examples/rcu:*",
+      "//src/lib/fuchsia-rcu-collections:*",
+      "//src/starnix/*",
+    ]
+    deps = [
+      ":fuchsia-rcu-traits",
+      "//sdk/rust/zx",
+      "//src/lib/fuchsia-rseq",
+      "//src/lib/fuchsia-sync",
+    ]
+  }
 }
-
-rustc_test("fuchsia-rcu-atomic-tests") {
-  sources = _COMMON_SRCS
-  edition = "2024"
-  version = "0.1.0"
-  deps = _COMMON_DEPS
+if (is_fuchsia) {
+  rustc_test("fuchsia-rcu_test") {
+    sources = _COMMON_SRCS
+    edition = "2024"
+    deps = [
+      ":fuchsia-rcu-traits",
+      "//sdk/rust/zx",
+      "//src/lib/fuchsia-rseq",
+      "//src/lib/fuchsia-sync",
+    ]
+    features = [ "rseq_backend" ]
+  }
+}
+if (is_fuchsia) {
+  rustc_library("fuchsia-rcu-atomic") {
+    testonly = true
+    sources = _COMMON_SRCS
+    crate_name = "fuchsia_rcu"
+    edition = "2024"
+    version = "0.1.0"
+    visibility = [ "./*" ]
+    deps = [
+      ":fuchsia-rcu-traits",
+      "//sdk/rust/zx",
+      "//src/lib/fuchsia-sync",
+    ]
+  }
+}
+if (is_fuchsia) {
+  rustc_test("fuchsia-rcu-atomic-tests") {
+    sources = _COMMON_SRCS
+    edition = "2024"
+    deps = [
+      ":fuchsia-rcu-traits",
+      "//sdk/rust/zx",
+      "//src/lib/fuchsia-sync",
+    ]
+    version = "0.1.0"
+  }
 }

@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":watchdog-unittest"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
+fx_cc_library(
+    name = "watchdog",
+    srcs = ["watchdog.cc"],
+    hdrs = [
+        "operations.h",
+        "watchdog.h",
+    ],
+    implementation_deps = [
+        "//zircon/system/ulib/inspector",
+        "//zircon/system/ulib/sync",
+    ],
+    # Uses Zircon/Fuchsia-only headers (<lib/zx/result.h>, <lib/sync/completion.h>,
+    # <inspector/inspector.h>).
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/storage/blobfs:__pkg__"],
+    deps = [
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "watchdog_unittest",
+    srcs = ["watchdog_test.cc"],
+    # Uses Zircon/FIDL headers and Fuchsia-only :watchdog target.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":watchdog",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/diagnostics/fake-log-sink/cpp",
+        "//src/lib/diagnostics/log/message/rust/cpp-log-decoder:headers",
+        "//src/lib/fsl",
+        "//src/lib/uuid",
+        "//src/storage/lib/vfs/cpp",
+        "//third_party/rapidjson",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "watchdog-unittest",
+    unit_tests = [":watchdog_unittest"],
+)

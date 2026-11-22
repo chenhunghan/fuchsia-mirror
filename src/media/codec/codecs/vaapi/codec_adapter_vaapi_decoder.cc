@@ -4,8 +4,8 @@
 
 #include "codec_adapter_vaapi_decoder.h"
 
-#include <fuchsia/media/cpp/fidl.h>
-#include <fuchsia/sysmem/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
+#include <fidl/fuchsia.sysmem/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/fit/defer.h>
 #include <lib/media/codec_impl/fourcc.h>
@@ -211,7 +211,7 @@ class LinearBufferManager : public SurfaceBufferManager {
     ext_attrib.fourcc = VA_FOURCC_NV12;  // 2 plane YCbCr
     ext_attrib.num_objects = 1;
     ext_attrib.objects[0].fd = vmo_dup.release();
-    ext_attrib.objects[0].drm_format_modifier = fuchsia::sysmem::FORMAT_MODIFIER_LINEAR;
+    ext_attrib.objects[0].drm_format_modifier = fuchsia_sysmem::kFormatModifierLinear;
     ext_attrib.objects[0].size = static_cast<uint32_t>(buffer->size());
     ext_attrib.num_layers = 1;
     ext_attrib.layers[0].drm_format = make_fourcc('N', 'V', '1', '2');
@@ -572,8 +572,7 @@ class TiledBufferManager : public SurfaceBufferManager {
       ext_attrib.fourcc = VA_FOURCC_NV12;  // 2 plane YCbCr
       ext_attrib.num_objects = 1;
       ext_attrib.objects[0].fd = vmo_dup.release();
-      ext_attrib.objects[0].drm_format_modifier =
-          fuchsia::sysmem::FORMAT_MODIFIER_INTEL_I915_Y_TILED;
+      ext_attrib.objects[0].drm_format_modifier = fuchsia_sysmem::kFormatModifierIntelI915YTiled;
       ext_attrib.objects[0].size = pic_size_checked.ValueOrDie();
       ext_attrib.num_layers = 1;
       ext_attrib.layers[0].drm_format = make_fourcc('N', 'V', '1', '2');
@@ -769,15 +768,19 @@ class TiledBufferManager : public SurfaceBufferManager {
 };
 
 void CodecAdapterVaApiDecoder::CoreCodecInit(
-    const fuchsia::media::FormatDetails& initial_input_format_details) {
-  if (!initial_input_format_details.has_format_details_version_ordinal()) {
+    std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) {
+  if (!initial_input_format_details->format_details_version_ordinal().has_value()) {
     SetCodecFailure("CoreCodecInit(): Initial input format details missing version ordinal.");
     return;
   }
   input_format_details_version_ordinal_ =
-      initial_input_format_details.format_details_version_ordinal();
+      initial_input_format_details->format_details_version_ordinal().value();
 
-  const std::string& mime_type = initial_input_format_details.mime_type();
+  if (!initial_input_format_details->mime_type().has_value()) {
+    SetCodecFailure("CoreCodecInit(): Initial input format details missing mime_type.");
+    return;
+  }
+  const std::string& mime_type = initial_input_format_details->mime_type().value();
   auto maybe_media_codec = CodecTypeFromMime(mime_type);
   if (!maybe_media_codec.has_value()) {
     SetCodecFailure("CodecCodecInit(): Unknown mime_type %s\n", mime_type.c_str());
@@ -805,27 +808,27 @@ void CodecAdapterVaApiDecoder::CoreCodecInit(
 
   switch (media_codec_.value()) {
     case CodecType::kMJPEG:
-      if (initial_input_format_details.has_profile() &&
-          (initial_input_format_details.profile() !=
-           fuchsia::media::CodecProfile::MJPEG_BASELINE)) {
+      if (initial_input_format_details->profile().has_value() &&
+          (initial_input_format_details->profile().value() !=
+           fuchsia_media::CodecProfile::kMjpegBaseline)) {
         SetCodecFailure("CodecCodecInit(): MJPEG decoder only supports BASELINE profile");
         return;
       }
       va_profile = VAProfileJPEGBaseline;
       break;
     case CodecType::kH264:
-      if (initial_input_format_details.has_profile() &&
-          (initial_input_format_details.profile() !=
-           fuchsia::media::CodecProfile::H264PROFILE_HIGH)) {
+      if (initial_input_format_details->profile().has_value() &&
+          (initial_input_format_details->profile().value() !=
+           fuchsia_media::CodecProfile::kH264ProfileHigh)) {
         SetCodecFailure("CodecCodecInit(): H.264 decoder only supports HIGH profile");
         return;
       }
       va_profile = VAProfileH264High;
       break;
     case CodecType::kVP9:
-      if (initial_input_format_details.has_profile() &&
-          (initial_input_format_details.profile() !=
-           fuchsia::media::CodecProfile::VP9PROFILE_PROFILE0)) {
+      if (initial_input_format_details->profile().has_value() &&
+          (initial_input_format_details->profile().value() !=
+           fuchsia_media::CodecProfile::kVp9ProfileProfile0)) {
         SetCodecFailure("CodecCodecInit(): VP9 decoder only supports PROFILE0 profile");
         return;
       }
@@ -1349,18 +1352,20 @@ void CodecAdapterVaApiDecoder::ProcessInputLoop() {
     }
     CodecInputItem input_item = std::move(maybe_input_item.value());
     if (input_item.is_format_details()) {
-      const std::string& mime_type = input_item.format_details().mime_type();
+      const auto& mime_type_opt = input_item.format_details2().mime_type();
+      const std::string_view mime_type =
+          mime_type_opt.has_value() ? std::string_view(*mime_type_opt) : std::string_view();
       const auto allow_mime_type = CodecMimeFromType(media_codec_.value());
       if (!allow_mime_type.has_value() || (allow_mime_type.value() != mime_type)) {
         SetCodecFailure(
             "CodecCodecInit(): Can not switch codec type after setting it in CoreCodecInit(). "
             "Attempting to switch it to %s\n",
-            mime_type.c_str());
+            mime_type_opt.has_value() ? mime_type_opt->c_str() : "");
         return;
       }
 
       if (media_codec_.value() == CodecType::kH264) {
-        avcc_processor_.ProcessOobBytes(input_item.format_details());
+        avcc_processor_.ProcessOobBytes(input_item.format_details2());
       }
     } else if (input_item.is_end_of_stream()) {
       if (media_codec_.value() == CodecType::kH264) {

@@ -5,8 +5,8 @@
 """Defines an IDK C/C++ source library."""
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
-load("//build/bazel/rules:zx_library.bzl", "apply_common_zx_library_modifications")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:zx_library_utils.bzl", "apply_common_zx_library_modifications")
 load(
     ":cc_verification.bzl",
     "create_verify_no_duplicate_files_target",

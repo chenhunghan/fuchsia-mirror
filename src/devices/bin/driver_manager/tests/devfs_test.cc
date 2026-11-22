@@ -252,12 +252,12 @@ TEST(Devfs, DeviceTopologyUseAfterFree) {
       [](fidl::ServerEnd<fuchsia_device::Controller> server_end) { return ZX_OK; });
 
   DevfsDevice child;
-  ASSERT_OK(root_node.add_child("test-network", "network", passthrough, child));
+  ASSERT_OK(root_node.add_child("test-device", "devfs_service_test", passthrough, child));
 
-  auto network_class_dir = devfs.get_class_entry("network");
-  ASSERT_NE(network_class_dir, nullptr);
-  ASSERT_EQ(1u, network_class_dir->unpublished.size());
-  std::string instance_name(network_class_dir->unpublished.begin()->first);
+  auto test_class_dir = devfs.get_class_entry("devfs_service_test");
+  ASSERT_NE(test_class_dir, nullptr);
+  ASSERT_EQ(1u, test_class_dir->unpublished.size());
+  std::string instance_name(test_class_dir->unpublished.begin()->first);
   ASSERT_FALSE(instance_name.empty());
 
   child.publish();
@@ -269,7 +269,7 @@ TEST(Devfs, DeviceTopologyUseAfterFree) {
   child.unpublish();
 
   // Try to connect to the device_topology protocol of the destroyed node.
-  std::string topo_path = "svc/fuchsia.hardware.network.Service/" + instance_name + "/" +
+  std::string topo_path = "svc/fuchsia.services.test.Device/" + instance_name + "/" +
                           fuchsia_device_fs::wire::kDeviceTopologyName;
   auto [topo_client, topo_server] = fidl::Endpoints<fuchsia_device_fs::TopologicalPath>::Create();
 

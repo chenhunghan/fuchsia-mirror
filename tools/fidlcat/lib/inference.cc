@@ -161,6 +161,8 @@ void Inference::InferMessage(const OutputEvent* event,
       case fidl_codec::semantic::ContextType::kCall:
         if (sent != nullptr) {
           request = sent->decoded_request();
+        }
+        if (received != nullptr) {
           response = received->decoded_response();
         }
         break;

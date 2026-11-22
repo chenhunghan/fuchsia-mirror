@@ -154,7 +154,7 @@ class LoadInfoMutableMemory {
   using MutableMemory =
       std::invoke_result_t<GetMutableMemory, Diagnostics&, LoadSegment&>::value_type;
   static_assert(
-      !std::is_const_v<LoadSegment> || std::is_copy_constructible_v<MutableMemory>,
+      !std::is_const_v<LoadSegment> || std::copy_constructible<MutableMemory>,
       "elfldltl::LoadInfoMutableMemory requires copyable GetMutableMemory return values when LoadInfo template parameter is const");
 
   class MutableSegment {
@@ -192,8 +192,7 @@ class LoadInfoMutableMemory {
     size_type filesz_;
     std::optional<MutableMemory> memory_;
   };
-  static_assert(std::is_move_constructible_v<MutableSegment> ||
-                std::is_copy_constructible_v<MutableSegment>);
+  static_assert(std::move_constructible<MutableSegment> || std::copy_constructible<MutableSegment>);
 
   using SegmentList = Container<MutableSegment>;
   using SegmentListIterator = typename SegmentList::iterator;

@@ -5,6 +5,7 @@
 import json
 import tempfile
 import unittest
+from pathlib import Path
 from typing import Any, Dict, List
 
 import images_json
@@ -15,7 +16,7 @@ def images_json_parse(content: List[Dict[str, Any]]) -> List[Image]:
     with tempfile.NamedTemporaryFile("wt") as tf:
         json.dump(content, tf)
         tf.flush()
-        return images_json.parse(tf.name)
+        return images_json.parse(Path(tf.name))
 
 
 class ImagesJsonTest(unittest.TestCase):

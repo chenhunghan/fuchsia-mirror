@@ -1,0 +1,27 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [ "syslog/client.shard.cml" ],
+    program: {
+        runner: "elf",
+        binary: "bin/loadbench",
+        args: [
+            "-v",
+            "/pkg/data/asymmetric_fair_starvation.json",
+        ],
+    },
+    use: [
+        {
+            protocol: [
+                "fuchsia.kernel.InfoResource",
+                "fuchsia.kernel.ProfileResource",
+                "fuchsia.kernel.TracingResource",
+            ],
+        },
+        {
+            storage: "tmp",
+            path: "/tmp",
+        },
+    ],
+}

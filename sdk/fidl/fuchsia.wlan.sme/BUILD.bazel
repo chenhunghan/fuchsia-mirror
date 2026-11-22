@@ -11,13 +11,13 @@ fidl_library(
     srcs = [
         "sme.fidl",
     ],
-    enable_hlcpp = True,
     # TODO(https://fxbug.dev/42111344): Remove lint exclusions by fixing known FIDL lint violations in this target
     excluded_checks = [
         "vector-bounds-not-specified",
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//sdk/fidl/fuchsia.power.system",
         "//sdk/fidl/fuchsia.wlan.common",
         "//sdk/fidl/fuchsia.wlan.ieee80211",
         "//sdk/fidl/fuchsia.wlan.internal",

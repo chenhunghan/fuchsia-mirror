@@ -37,7 +37,7 @@ use pin_init::stack_pin_init;
 use super::cmpctmalloc::cmpct_get_size;
 use super::cmpctmalloc::{
     HEAP_MAX_ALLOC_SIZE, cmpct_alloc, cmpct_free, cmpct_get_cookie, cmpct_get_info, cmpct_init,
-    cmpct_memalign, cmpct_set_cookie, cmpct_set_fill_on_alloc_threshold, cmpct_sized_free,
+    cmpct_memalign, cmpct_set_cookie, cmpct_sized_free,
 };
 #[cfg(kernel_memory_profiler)]
 use super::profile::HeapProfileMap;
@@ -297,11 +297,11 @@ fn is_size_in_range(size: usize) -> bool {
 ///
 /// The caller must ensure this is called once during early boot before concurrent heap operations.
 #[inline(always)]
-pub(crate) unsafe fn rust_heap_init() {
+pub unsafe fn heap_init() {
     #[cfg(not(kernel_memory_profiler))]
     {
         // Initialize the LazyInit static since DoublyLinkedList::new() returns impl PinInit.
-        // SAFETY: rust_heap_init is called once during early boot.
+        // SAFETY: heap_init is called once during early boot.
         unsafe {
             core::pin::Pin::static_ref(&STAT_STATE)
                 .init_pin(KCell::pin_init(pin_init::pin_init!(StatState {
@@ -321,12 +321,12 @@ pub(crate) unsafe fn rust_heap_init() {
     // Note: VIRTUAL_ALLOC is already const-initialized with VmPageState::HEAP at compile time
     // (`static VIRTUAL_ALLOC: SyncVirtualAlloc = SyncVirtualAlloc::new(VmPageState::HEAP);`),
     // matching `virtual_alloc.Initialize(vm_page_state::HEAP)` in C++.
-    // SAFETY: `vm_init_preheap` runs before `heap_init` during early boot.
+    // `vm_init_preheap` runs before `heap_init` during early boot.
     if vm_using_virtual_heap() {
         // SAFETY: `heap_init` runs once during single-threaded early boot before `cmpct_init`.
         let va = unsafe { VIRTUAL_ALLOC.get_mut() };
-        // SAFETY: `vm_init_preheap` has completed and `cpp_vm_using_virtual_heap()` returned true,
-        // so the kernel heap VMAR is initialized.
+        // `vm_init_preheap` has completed and `vm_using_virtual_heap()` returned true, so the
+        // kernel heap VMAR is initialized.
         let (heap_base, heap_size) = (vm_get_kernel_heap_base(), vm_get_kernel_heap_size());
         if let Err(status) = va.init(heap_base, heap_size, 1, ARCH_HEAP_ALIGNMENT_BITS) {
             {
@@ -387,11 +387,8 @@ pub(crate) unsafe fn malloc(size: usize) -> *mut c_void {
         kprintln!("caller {:p} malloc {} -> {:p}", tr_caller, size, ptr);
     }
 
-    if HEAP_PANIC_ON_ALLOC_FAIL && ptr.is_null() && is_size_in_range(size) {
-        {
-            core::hint::cold_path();
-            panic!("malloc of size {} failed", size)
-        };
+    if HEAP_PANIC_ON_ALLOC_FAIL {
+        assert!(!ptr.is_null() || !is_size_in_range(size), "malloc of size {} failed", size);
     }
 
     ptr
@@ -425,11 +422,13 @@ pub(crate) unsafe fn memalign(alignment: usize, size: usize) -> *mut c_void {
         kprintln!("caller {:p} memalign {}, {} -> {:p}", tr_caller, alignment, size, ptr);
     }
 
-    if HEAP_PANIC_ON_ALLOC_FAIL && ptr.is_null() && is_size_in_range(size) {
-        {
-            core::hint::cold_path();
-            panic!("memalign of size {} align {} failed", size, alignment)
-        };
+    if HEAP_PANIC_ON_ALLOC_FAIL {
+        assert!(
+            !ptr.is_null() || !is_size_in_range(size),
+            "memalign of size {} align {} failed",
+            size,
+            alignment
+        );
     }
 
     ptr
@@ -560,7 +559,7 @@ pub(crate) fn profile_track_alloc(size: usize) -> u32 {
         current_get_backtrace(&mut bt);
         lock!(let mut guard = StatLock::get().lock());
         let alloc_map = ALLOC_MAP.get(guard.token_mut());
-        let (counters, handle) = alloc_map.try_get(bt.as_slice());
+        let (counters, handle) = alloc_map.try_get(bt.data());
         if let Some(counters) = counters {
             counters.allocate(size as u64);
             return handle as u32;
@@ -613,7 +612,7 @@ pub fn heap_get_info() -> (usize, usize) {
 pub unsafe fn heap_page_alloc(pages: usize) -> *mut c_void {
     debug_assert!(pages > 0);
 
-    // SAFETY: `heap_page_alloc` is only called after `vm_init_preheap` and `heap_init`.
+    // `heap_page_alloc` is only called after `vm_init_preheap` and `heap_init`.
     if vm_using_virtual_heap() {
         // SAFETY: `TheHeapLock` is held by the caller, granting exclusive access to
         // `VIRTUAL_ALLOC`.
@@ -685,7 +684,7 @@ pub unsafe fn heap_page_free(ptr: *mut c_void, mut pages: usize) {
 
     ltracef!("ptr {:p}, pages {}\n", ptr, pages);
 
-    // SAFETY: `heap_page_free` is only called after `vm_init_preheap` and `heap_init`.
+    // `heap_page_free` is only called after `vm_init_preheap` and `heap_init`.
     if vm_using_virtual_heap() {
         let vaddr = ptr.addr();
         // SAFETY: `TheHeapLock` is held by the caller, granting exclusive access to
@@ -728,13 +727,6 @@ pub unsafe fn heap_report_alloc_failure(size: usize) {
         size,
         free_count: 0,
     });
-}
-
-/// FFI entry point for [`cmpct_set_fill_on_alloc_threshold`].
-// SAFETY: The symbol name is unique and matches the C FFI declaration in cmpctmalloc.h.
-#[inline(always)]
-pub(crate) fn rust_cmpct_set_fill_on_alloc_threshold(size: usize) {
-    cmpct_set_fill_on_alloc_threshold(size);
 }
 
 /// Console diagnostic helpers for the kernel heap.

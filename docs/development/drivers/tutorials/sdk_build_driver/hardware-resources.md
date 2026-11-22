@@ -283,5 +283,5 @@ by the bound device node.
 
 <!-- Reference links -->
 
-[concepts-kernel-vmo]: /docs/concepts/kernel/concepts.md#shared_memory_virtual_memory_objects_vmos
+[concepts-kernel-vmo]: /docs/concepts/kernel/concepts.md#shared-memory-virtual-memory-objects-vmos
 [edu-device-spec]: https://fuchsia.googlesource.com/third_party/qemu/+/refs/heads/main/docs/specs/edu.txt

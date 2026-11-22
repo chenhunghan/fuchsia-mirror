@@ -22,11 +22,11 @@ rustc_library(
     deps = [
         "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
         "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
-        "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
         "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_rust",
         "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
         "//sdk/rust/zx",
         "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-component",
         "//third_party/rust_crates/vendor:futures",
     ],
 )

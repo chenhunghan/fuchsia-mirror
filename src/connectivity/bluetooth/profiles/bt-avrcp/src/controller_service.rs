@@ -459,7 +459,7 @@ mod tests {
         let remote_avctp_peer = AvctpPeer::new(remote_avctp);
 
         peer.set_control_connection(AvcPeer::new(local_avc));
-        peer.set_browse_connection(AvctpPeer::new(local_avctp));
+        peer.set_browse_connection(local_avctp);
 
         let controller = Controller::new(peer);
 

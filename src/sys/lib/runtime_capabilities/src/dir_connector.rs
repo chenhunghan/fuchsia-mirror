@@ -4,14 +4,21 @@
 
 use crate::{CapabilityBound, DirReceiver};
 use cm_types::RelativePath;
+#[cfg(target_os = "fuchsia")]
 use fidl::endpoints::ServerEnd;
+#[cfg(target_os = "fuchsia")]
 use fidl_fuchsia_io as fio;
+#[cfg(not(target_os = "fuchsia"))]
+use fidl_fuchsia_io_common as fio;
 use futures::channel::mpsc;
 use std::fmt::Debug;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
+#[cfg(target_os = "fuchsia")]
+use std::sync::LazyLock;
 
 /// These are the flags which may always be set when opening something through a DirConnector. See
 /// the comment on [`DirConnectable::maximum_flags`] for more information.
+#[cfg(target_os = "fuchsia")]
 static ALWAYS_ALLOWED_FLAGS: LazyLock<fio::Flags> = LazyLock::new(|| {
     fio::Flags::PROTOCOL_SERVICE
         | fio::Flags::PROTOCOL_NODE
@@ -57,6 +64,7 @@ pub trait DirConnectable: Send + Sync + Debug {
     /// will be stripped from any flags passed to `send` if it is set.
     fn maximum_flags(&self) -> fio::Flags;
 
+    #[cfg(target_os = "fuchsia")]
     fn send(
         &self,
         dir: ServerEnd<fio::DirectoryMarker>,
@@ -66,6 +74,7 @@ pub trait DirConnectable: Send + Sync + Debug {
 }
 
 pub struct DirConnectorMessage {
+    #[cfg(target_os = "fuchsia")]
     pub dir: ServerEnd<fio::DirectoryMarker>,
     pub subdir: RelativePath,
     pub flags: Option<fio::Flags>,
@@ -80,6 +89,7 @@ impl DirConnectable for mpsc::UnboundedSender<DirConnectorMessage> {
         fio::PERM_READABLE | fio::PERM_WRITABLE | fio::PERM_EXECUTABLE
     }
 
+    #[cfg(target_os = "fuchsia")]
     fn send(
         &self,
         dir: ServerEnd<fio::DirectoryMarker>,
@@ -121,6 +131,7 @@ impl DirConnector {
         (receiver, this)
     }
 
+    #[cfg(target_os = "fuchsia")]
     pub fn from_proxy(
         proxy: fio::DirectoryProxy,
         subdir: RelativePath,
@@ -133,6 +144,7 @@ impl DirConnector {
         Arc::new(Self { inner: Box::new(connector) })
     }
 
+    #[cfg(target_os = "fuchsia")]
     pub fn send(
         &self,
         dir: ServerEnd<fio::DirectoryMarker>,
@@ -176,6 +188,7 @@ impl DirConnectable for DirConnector {
         self.inner.maximum_flags()
     }
 
+    #[cfg(target_os = "fuchsia")]
     fn send(
         &self,
         channel: ServerEnd<fio::DirectoryMarker>,
@@ -189,6 +202,7 @@ impl DirConnectable for DirConnector {
 #[derive(Debug)]
 struct DirConnectorSubdir {
     parent_dir_connector: Arc<DirConnector>,
+    #[cfg_attr(not(target_os = "fuchsia"), allow(dead_code))]
     subdir: RelativePath,
 }
 
@@ -197,6 +211,7 @@ impl DirConnectable for DirConnectorSubdir {
         self.parent_dir_connector.maximum_flags()
     }
 
+    #[cfg(target_os = "fuchsia")]
     fn send(
         &self,
         channel: ServerEnd<fio::DirectoryMarker>,
@@ -213,6 +228,7 @@ impl DirConnectable for DirConnectorSubdir {
     }
 }
 
+#[cfg(target_os = "fuchsia")]
 #[derive(Debug)]
 struct DirectoryProxyForwarder {
     proxy: fio::DirectoryProxy,
@@ -220,6 +236,7 @@ struct DirectoryProxyForwarder {
     flags: fio::Flags,
 }
 
+#[cfg(target_os = "fuchsia")]
 impl DirConnectable for DirectoryProxyForwarder {
     fn maximum_flags(&self) -> fio::Flags {
         self.flags
@@ -249,7 +266,7 @@ impl DirConnectable for DirectoryProxyForwarder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "fuchsia"))]
 mod tests {
     use super::*;
     use fidl::endpoints;

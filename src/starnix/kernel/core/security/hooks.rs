@@ -37,13 +37,14 @@
 
 use super::selinux_hooks::audit::Auditable;
 use super::{
-    BpfMapState, BpfProgState, FileObjectState, FileSystemState, KernelState, NonPrivateDirEntry,
-    NonPrivateFsNode, NonPrivateSocket, NonPrivateSocketFile, PerfEventState, SecurityContextToken,
-    common_cap, selinux_hooks, yama,
+    BpfMapState, BpfProgState, CurrentTaskState, FileObjectState, FileSystemState, KernelState,
+    NonPrivateDirEntry, NonPrivateFsNode, NonPrivateSocket, NonPrivateSocketFile, PerfEventState,
+    SecurityContextToken, common_cap, selinux_hooks, yama,
 };
 use crate::mm::{Mapping, MappingOptions, ProtectionFlags};
 use crate::perf::PerfEventFile;
 use crate::security::selinux_hooks::current_task_state;
+use crate::task::container_namespace::NamespaceNodePurpose;
 use crate::task::loader::ResolvedProgram;
 use crate::task::{CurrentTask, Kernel, Task};
 use crate::vfs::fs_args::MountParams;
@@ -53,7 +54,8 @@ use crate::vfs::socket::{
 };
 use crate::vfs::{
     DirEntryHandle, DowncastedFile, FileHandle, FileObject, FileSystem, FileSystemHandle,
-    FileSystemOps, FsNode, FsStr, FsString, Mount, NamespaceNode, ValueOrSize, XattrOp,
+    FileSystemOps, FsNode, FsNodeAttrFlags, FsStr, FsString, Mount, NamespaceNode, ValueOrSize,
+    XattrOp,
 };
 use ebpf::MapFlags;
 use linux_uapi::{
@@ -63,6 +65,7 @@ use linux_uapi::{
 };
 use selinux::{FileSystemMountOptions, InitialSid, SecurityPermission, SecurityServer, TaskAttrs};
 use starnix_logging::{CATEGORY_STARNIX_SECURITY, log_debug};
+use starnix_syscalls::SyscallResult;
 use starnix_uapi::arc_key::WeakKey;
 use starnix_uapi::auth::{CAP_SETUID, Capabilities, Credentials, PtraceAccessMode};
 use starnix_uapi::device_id::DeviceId;
@@ -78,7 +81,6 @@ use starnix_uapi::user_address::UserAddress;
 use starnix_uapi::{bpf_cmd, error, rlimit};
 use std::ops::Range;
 use std::sync::Arc;
-use syncio::zxio_node_attr_has_t;
 use zerocopy::FromBytes;
 
 macro_rules! track_hook_duration {
@@ -244,7 +246,7 @@ pub enum PerfEventOpenType {
 /// and its result returned.
 fn if_selinux_else<F, R, D>(task: &Task, hook: F, default: D) -> R
 where
-    F: FnOnce(&Arc<SecurityServer>) -> R,
+    F: FnOnce(&SecurityServer) -> R,
     D: Fn() -> R,
 {
     if let Some(state) = task.kernel().security_state.state.as_ref() {
@@ -259,7 +261,7 @@ where
 /// configured with a policy.
 fn if_selinux_else_default_ok<R, F>(task: &Task, hook: F) -> Result<R, Errno>
 where
-    F: FnOnce(&Arc<SecurityServer>) -> Result<R, Errno>,
+    F: FnOnce(&SecurityServer) -> Result<R, Errno>,
     R: Default,
 {
     if_selinux_else(task, hook, || Ok(R::default()))
@@ -1069,7 +1071,7 @@ pub fn check_file_fcntl_access(
 pub fn check_fs_node_setattr_access(
     current_task: &CurrentTask,
     node: &FsNode,
-    attributes: &zxio_node_attr_has_t,
+    attributes: FsNodeAttrFlags,
 ) -> Result<(), Errno> {
     track_hook_duration!("security.hooks.check_fs_node_setattr_access");
     let Some(node) = NonPrivateFsNode::new(node) else {
@@ -1090,6 +1092,13 @@ pub fn check_fs_node_setattr_access(
 pub fn task_alloc_for_kernel() -> TaskAttrs {
     track_hook_duration!("security.hooks.task_alloc_for_kernel");
     TaskAttrs::for_kernel()
+}
+
+/// Returns per-thread security state for a child task cloned from `current_task`.
+/// Corresponds to the per-task state allocation portion of the `task_alloc()` LSM hook.
+pub fn task_alloc_current_state(current_task: &CurrentTask) -> CurrentTaskState {
+    track_hook_duration!("security.hooks.task_alloc_current_state");
+    CurrentTaskState { state: selinux_hooks::task::task_alloc_current_state(current_task) }
 }
 
 /// Labels an [`crate::vfs::FsNode`], by attaching a pseudo-label to the `fs_node`, which allows
@@ -1522,12 +1531,17 @@ pub fn socket_getpeersec_stream(
     socket: &Socket,
 ) -> Result<Vec<u8>, Errno> {
     track_hook_duration!("security.hooks.socket_getpeersec_stream");
+    // If no LSM provides a peer label then Linux reports `ENOPROTOOPT`, rather than an empty label.
     let Some(socket) = NonPrivateSocket::new(socket) else {
-        return Ok(Vec::default());
+        return error!(ENOPROTOOPT);
     };
-    if_selinux_else_default_ok(current_task, |security_server| {
-        selinux_hooks::socket::socket_getpeersec_stream(&security_server, current_task, socket)
-    })
+    if_selinux_else(
+        current_task,
+        |security_server| {
+            selinux_hooks::socket::socket_getpeersec_stream(&security_server, current_task, socket)
+        },
+        || error!(ENOPROTOOPT),
+    )
 }
 
 /// Returns an opaque [`SecurityContextToken`] with which the [`crate::vfs::Socket`] is labeled, to
@@ -1751,6 +1765,7 @@ pub fn check_task_getscheduler_access(source: &CurrentTask, target: &Task) -> Re
 /// Corresponds to the `task_setscheduler()` LSM hook.
 pub fn check_task_setscheduler_access(source: &CurrentTask, target: &Task) -> Result<(), Errno> {
     track_hook_duration!("security.hooks.task_setscheduler");
+    common_cap::task_setscheduler(source, target)?;
     if_selinux_else_default_ok(source, |security_server| {
         selinux_hooks::task::check_setsched_access(
             &selinux_hooks::build_permission_check(source, security_server),
@@ -1764,6 +1779,7 @@ pub fn check_task_setscheduler_access(source: &CurrentTask, target: &Task) -> Re
 /// Corresponds to the `task_setnice()` LSM hook.
 pub fn check_task_setnice_access(source: &CurrentTask, target: &Task) -> Result<(), Errno> {
     track_hook_duration!("security.hooks.check_task_setnice_access");
+    common_cap::task_setnice(source, target)?;
     if_selinux_else_default_ok(source, |security_server| {
         selinux_hooks::task::check_setsched_access(
             &selinux_hooks::build_permission_check(source, security_server),
@@ -1851,6 +1867,56 @@ pub fn capset(
             source,
         )
     })
+}
+
+/// Identifies which user ID transition is being performed by a `set*uid(2)` syscall.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetuidFlags {
+    /// `setuid(2)`.
+    Id,
+    /// `setreuid(2)`.
+    Re,
+    /// `setresuid(2)`.
+    Res,
+    /// `setfsuid(2)`.
+    Fs,
+}
+
+/// Updates `new_creds` capability sets after user ID changes from `old_creds`.
+///
+/// Corresponds to the `task_fix_setuid()` LSM hook.
+pub fn task_fix_setuid(
+    _current_task: &CurrentTask,
+    new_creds: &mut Credentials,
+    old_creds: &Credentials,
+    flags: SetuidFlags,
+) -> Result<(), Errno> {
+    track_hook_duration!("security.hooks.task_fix_setuid");
+    common_cap::task_fix_setuid(new_creds, old_creds, flags)
+}
+
+/// Handles security-module-specific `prctl(2)` options, returning `Ok(None)` if `option` is not
+/// handled by any LSM.
+///
+/// Corresponds to the `task_prctl()` LSM hook.
+pub fn task_prctl(
+    current_task: &CurrentTask,
+    option: u32,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+) -> Result<Option<SyscallResult>, Errno> {
+    track_hook_duration!("security.hooks.task_prctl");
+    common_cap::task_prctl(current_task, option, arg2, arg3, arg4, arg5)
+}
+
+/// Checks if `current_task` is allowed to set the system time or timezone.
+///
+/// Corresponds to the `settime()` LSM hook.
+pub fn check_settime_access(current_task: &CurrentTask) -> Result<(), Errno> {
+    track_hook_duration!("security.hooks.check_settime_access");
+    common_cap::settime(current_task)
 }
 
 /// Checks if sending a signal is allowed.
@@ -1993,6 +2059,23 @@ pub fn sb_mount(
             path,
             fs_node,
             flags,
+        )
+    })
+}
+
+/// Checks if `current_task` has permission to open `path` in the container namespace for `purpose`.
+pub fn check_container_namespace_access(
+    current_task: &CurrentTask,
+    path: &str,
+    purpose: NamespaceNodePurpose,
+) -> Result<(), Errno> {
+    track_hook_duration!("security.hooks.check_container_namespace_access");
+    if_selinux_else_default_ok(current_task, |security_server| {
+        selinux_hooks::superblock::check_container_namespace_access(
+            &selinux_hooks::build_permission_check(current_task, security_server),
+            current_task,
+            path,
+            purpose,
         )
     })
 }
@@ -2189,10 +2272,10 @@ pub fn check_fs_node_removexattr_access(
 /// modified.
 ///
 /// Corresponds to the `inode_need_killpriv()` LSM hook.
-pub fn fs_node_needs_killpriv(current_task: &CurrentTask, fs_node: &FsNode) -> Result<bool, Errno> {
+pub fn fs_node_needs_killpriv(current_task: &CurrentTask, fs_node: &FsNode) -> bool {
     track_hook_duration!("security.hooks.fs_node_needs_killpriv");
     let Some(fs_node) = NonPrivateFsNode::new(fs_node) else {
-        return Ok(false);
+        return false;
     };
     common_cap::fs_node_needs_killpriv(current_task, fs_node)
 }
@@ -2532,7 +2615,6 @@ pub mod testing {
     use super::{Arc, KernelState, SecurityServer, selinux_hooks};
     use starnix_sync::LockDepMutex;
     use std::sync::OnceLock;
-    use std::sync::atomic::AtomicU64;
 
     /// Used by Starnix' `testing.rs` to create `KernelState` wrapping a test-
     /// supplied `SecurityServer`.
@@ -2541,7 +2623,6 @@ pub mod testing {
             server,
             pending_file_systems: LockDepMutex::default(),
             selinuxfs_null: OnceLock::default(),
-            access_denial_count: AtomicU64::new(0u64),
             has_policy: false.into(),
             _inspect_node: fuchsia_inspect::Node::default(),
         });
@@ -2660,6 +2741,43 @@ mod tests {
             assert_eq!(check_task_create_access(current_task), error!(EACCES));
             security_server.set_enforcing(false);
             assert_eq!(check_task_create_access(current_task), Ok(()));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn clone_task_copies_parent_local_cache() {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
+            let lookups_before = security_server.avc_cache_stats().lookups;
+            assert_eq!(check_task_create_access(current_task), error!(EACCES));
+            let lookups_after_parent = security_server.avc_cache_stats().lookups;
+            assert!(lookups_after_parent > lookups_before);
+
+            let child = current_task.clone_task_for_test(0, None);
+            let lookups_before_child = security_server.avc_cache_stats().lookups;
+            assert_eq!(check_task_create_access(&child), error!(EACCES));
+            assert_eq!(security_server.avc_cache_stats().lookups, lookups_before_child);
+
+            testing::mutate_attrs_for_test(&child, |attrs| {
+                attrs.current_sid = security_server
+                    .security_context_to_sid(b"u:object_r:fork_yes_t:s0".into())
+                    .expect("invalid security context");
+            });
+            assert_eq!(check_task_create_access(&child), Ok(()));
+            assert!(security_server.avc_cache_stats().lookups > lookups_before_child);
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn create_task_starts_with_cold_local_cache() {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
+            assert_eq!(check_task_create_access(current_task), error!(EACCES));
+
+            let fresh_task = create_task(&current_task.kernel(), "fresh-task");
+            let lookups_before = security_server.avc_cache_stats().lookups;
+            assert_eq!(check_task_create_access(&fresh_task), error!(EACCES));
+            assert!(security_server.avc_cache_stats().lookups > lookups_before);
         })
         .await;
     }
@@ -2882,16 +3000,13 @@ mod tests {
             // (which would fail with `EPERM` on `capability { setpcap }`), so it reaches
             // `selinux_hooks::task::capset` and fails with `EACCES` on
             // `process { setcap }`.
-            let initial_denials = current_task.kernel().security_state.access_denial_count();
+            let initial_audits = current_task.kernel().audit_logger().audit_count();
             let mut new_creds = caller_creds.clone();
             assert_eq!(
                 capset(current_task, &mut new_creds, CAP_SETPCAP, CAP_NET_RAW, CAP_SETPCAP),
                 error!(EACCES)
             );
-            assert_eq!(
-                current_task.kernel().security_state.access_denial_count(),
-                initial_denials + 1
-            );
+            assert_eq!(current_task.kernel().audit_logger().audit_count(), initial_audits + 1);
 
             security_server.set_enforcing(false);
             let mut new_creds = caller_creds;
@@ -3599,7 +3714,7 @@ mod tests {
             );
 
             // 1. Same UID/GID and dumpable: fails in `selinux_hooks::task::ptrace_access_check`.
-            let initial_denials = current_task.kernel().security_state.access_denial_count();
+            let initial_audits = current_task.kernel().audit_logger().audit_count();
             assert_eq!(
                 tracer_task.check_ptrace_access_mode(
                     PTRACE_MODE_ATTACH_REALCREDS | PTRACE_MODE_NOAUDIT,
@@ -3607,16 +3722,13 @@ mod tests {
                 ),
                 error!(EACCES)
             );
-            assert_eq!(current_task.kernel().security_state.access_denial_count(), initial_denials);
+            assert_eq!(current_task.kernel().audit_logger().audit_count(), initial_audits);
 
             assert_eq!(
                 tracer_task.check_ptrace_access_mode(PTRACE_MODE_ATTACH_REALCREDS, &tracee_task),
                 error!(EACCES)
             );
-            assert_eq!(
-                current_task.kernel().security_state.access_denial_count(),
-                initial_denials + 1
-            );
+            assert_eq!(current_task.kernel().audit_logger().audit_count(), initial_audits + 1);
 
             // 2. Mismatched UID/GID (Step 3 of `CurrentTask::check_ptrace_access_mode`):
             //    fails in `security::check_task_ptrace_capable`.
@@ -3625,7 +3737,7 @@ mod tests {
             diff_uid_creds.uid = 1000;
             tracee_task.set_creds(diff_uid_creds);
 
-            let denials_before_uid = current_task.kernel().security_state.access_denial_count();
+            let audits_before_uid = current_task.kernel().audit_logger().audit_count();
             assert_eq!(
                 tracer_task.check_ptrace_access_mode(
                     PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_NOAUDIT,
@@ -3633,26 +3745,19 @@ mod tests {
                 ),
                 error!(EPERM)
             );
-            assert_eq!(
-                current_task.kernel().security_state.access_denial_count(),
-                denials_before_uid
-            );
+            assert_eq!(current_task.kernel().audit_logger().audit_count(), audits_before_uid);
 
             assert_eq!(
                 tracer_task.check_ptrace_access_mode(PTRACE_MODE_READ_FSCREDS, &tracee_task),
                 error!(EPERM)
             );
-            assert_eq!(
-                current_task.kernel().security_state.access_denial_count(),
-                denials_before_uid + 1
-            );
+            assert_eq!(current_task.kernel().audit_logger().audit_count(), audits_before_uid + 1);
             tracee_task.set_creds(orig_tracee_creds);
 
             // 3. Non-dumpable target (Step 4 of `CurrentTask::check_ptrace_access_mode`):
             //    fails in `security::check_task_ptrace_capable`.
             tracee_task.mm().unwrap().dumpable.store(DumpPolicy::Disable);
-            let denials_before_dumpable =
-                current_task.kernel().security_state.access_denial_count();
+            let audits_before_dumpable = current_task.kernel().audit_logger().audit_count();
             assert_eq!(
                 tracer_task.check_ptrace_access_mode(
                     PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_NOAUDIT,
@@ -3660,18 +3765,15 @@ mod tests {
                 ),
                 error!(EPERM)
             );
-            assert_eq!(
-                current_task.kernel().security_state.access_denial_count(),
-                denials_before_dumpable
-            );
+            assert_eq!(current_task.kernel().audit_logger().audit_count(), audits_before_dumpable);
 
             assert_eq!(
                 tracer_task.check_ptrace_access_mode(PTRACE_MODE_READ_FSCREDS, &tracee_task),
                 error!(EPERM)
             );
             assert_eq!(
-                current_task.kernel().security_state.access_denial_count(),
-                denials_before_dumpable + 1
+                current_task.kernel().audit_logger().audit_count(),
+                audits_before_dumpable + 1
             );
             tracee_task.mm().unwrap().dumpable.store(DumpPolicy::User);
 
@@ -3682,8 +3784,7 @@ mod tests {
             reduced_cap_creds.cap_effective = CAP_SYS_PTRACE;
             tracer_task.set_creds(reduced_cap_creds);
 
-            let denials_before_common_cap =
-                current_task.kernel().security_state.access_denial_count();
+            let audits_before_common_cap = current_task.kernel().audit_logger().audit_count();
             assert_eq!(
                 tracer_task.check_ptrace_access_mode(
                     PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_NOAUDIT,
@@ -3692,8 +3793,8 @@ mod tests {
                 error!(EPERM)
             );
             assert_eq!(
-                current_task.kernel().security_state.access_denial_count(),
-                denials_before_common_cap
+                current_task.kernel().audit_logger().audit_count(),
+                audits_before_common_cap
             );
 
             assert_eq!(
@@ -3701,8 +3802,8 @@ mod tests {
                 error!(EPERM)
             );
             assert_eq!(
-                current_task.kernel().security_state.access_denial_count(),
-                denials_before_common_cap + 1
+                current_task.kernel().audit_logger().audit_count(),
+                audits_before_common_cap + 1
             );
             tracer_task.set_creds(orig_caller_creds);
 
@@ -3710,8 +3811,7 @@ mod tests {
             //    fails in `security::check_task_ptrace_capable`.
             for scope in [yama::SCOPE_RESTRICTED, yama::SCOPE_ADMIN_ONLY] {
                 current_task.kernel().ptrace_scope.store(scope, Ordering::Relaxed);
-                let denials_before_yama =
-                    current_task.kernel().security_state.access_denial_count();
+                let audits_before_yama = current_task.kernel().audit_logger().audit_count();
                 assert_eq!(
                     tracer_task.check_ptrace_access_mode(
                         PTRACE_MODE_ATTACH_REALCREDS | PTRACE_MODE_NOAUDIT,
@@ -3719,10 +3819,7 @@ mod tests {
                     ),
                     error!(EPERM)
                 );
-                assert_eq!(
-                    current_task.kernel().security_state.access_denial_count(),
-                    denials_before_yama
-                );
+                assert_eq!(current_task.kernel().audit_logger().audit_count(), audits_before_yama);
 
                 assert_eq!(
                     tracer_task
@@ -3730,8 +3827,8 @@ mod tests {
                     error!(EPERM)
                 );
                 assert_eq!(
-                    current_task.kernel().security_state.access_denial_count(),
-                    denials_before_yama + 1
+                    current_task.kernel().audit_logger().audit_count(),
+                    audits_before_yama + 1
                 );
             }
             current_task.kernel().ptrace_scope.store(yama::SCOPE_CLASSIC, Ordering::Relaxed);
@@ -3863,7 +3960,7 @@ mod tests {
                 check_socket_shutdown_access(current_task, socket, SocketShutdownFlags::READ),
                 Ok(())
             );
-            assert_eq!(socket_getpeersec_stream(current_task, socket), Ok(Vec::<u8>::new()));
+            assert_eq!(socket_getpeersec_stream(current_task, socket), error!(ENOPROTOOPT));
             assert_eq!(socket_getpeersec_dgram(current_task, socket), None);
         })
         .await;
@@ -3928,6 +4025,192 @@ mod tests {
                 Ok(())
             );
             assert_eq!(socket_accept(current_task, socket_downcasted, socket_downcasted), Ok(()));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn container_namespace_access_allowed_before_policy_load() {
+        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+            assert_eq!(
+                check_container_namespace_access(
+                    current_task,
+                    "/data",
+                    NamespaceNodePurpose::DirectoryMount { read_only: true },
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                check_container_namespace_access(
+                    current_task,
+                    "/data",
+                    NamespaceNodePurpose::DirectoryMount { read_only: false },
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                check_container_namespace_access(
+                    current_task,
+                    "/userdata/fbe_keys",
+                    NamespaceNodePurpose::VolumeKeys,
+                ),
+                Ok(())
+            );
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn container_namespace_access_allowed_without_fuchsia_ns_policy_rules() {
+        spawn_kernel_with_selinux_and_run(async |current_task, security_server| {
+            let policy_without_fuchsia_ns = include_bytes!(
+                "../../../lib/selinux/testdata/composite_policies/compiled/bounded_transition_policy"
+            )
+            .to_vec();
+            security_server.set_enforcing(true);
+            selinux_hooks::selinuxfs::selinuxfs_load_policy(current_task, policy_without_fuchsia_ns)
+                .expect("load policy without fuchsia_ns rules");
+            assert!(!security_server.has_genfscon_for_fs("fuchsia_ns".into()));
+
+            for purpose in [
+                NamespaceNodePurpose::DirectoryMount { read_only: true },
+                NamespaceNodePurpose::DirectoryMount { read_only: false },
+                NamespaceNodePurpose::VolumeKeys,
+            ] {
+                assert_eq!(check_container_namespace_access(current_task, "/data", purpose), Ok(()));
+            }
+
+            // Reloading a policy that defines `genfscon fuchsia_ns` rules activates enforcement.
+            selinux_hooks::selinuxfs::selinuxfs_load_policy(
+                current_task,
+                testing::HOOKS_TESTS_BINARY_POLICY.to_vec(),
+            )
+            .expect("load policy with fuchsia_ns rules");
+            assert!(security_server.has_genfscon_for_fs("fuchsia_ns".into()));
+            assert_eq!(
+                check_container_namespace_access(
+                    current_task,
+                    "/data",
+                    NamespaceNodePurpose::VolumeKeys,
+                ),
+                error!(EACCES)
+            );
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn container_namespace_access_checked_after_policy_load() {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
+            let task_sid = security_server
+                .security_context_to_sid(b"u:object_r:test_fuchsia_ns_t:s0".into())
+                .expect("invalid security context");
+            testing::mutate_attrs_for_test(current_task, |attrs| attrs.current_sid = task_sid);
+
+            // `/pkg/data/system/` is labeled `fuchsia_ns_ro_dir_t`: read-only directory mounts
+            // are allowed on both the directory and subdirectories, while read-write mounts and
+            // volume-key opens are denied.
+            for path in ["/pkg/data/system", "/pkg/data/system/subdir"] {
+                assert_eq!(
+                    check_container_namespace_access(
+                        current_task,
+                        path,
+                        NamespaceNodePurpose::DirectoryMount { read_only: true },
+                    ),
+                    Ok(())
+                );
+                assert_eq!(
+                    check_container_namespace_access(
+                        current_task,
+                        path,
+                        NamespaceNodePurpose::DirectoryMount { read_only: false },
+                    ),
+                    error!(EACCES)
+                );
+                assert_eq!(
+                    check_container_namespace_access(
+                        current_task,
+                        path,
+                        NamespaceNodePurpose::VolumeKeys,
+                    ),
+                    error!(EACCES)
+                );
+            }
+
+            // `/userdata/metadata/` is labeled `fuchsia_ns_rw_dir_t`: both read-only and
+            // read-write directory mounts are allowed on the directory and subdirectories, while
+            // volume-key opens are denied.
+            for path in ["/userdata/metadata", "/userdata/metadata/subdir"] {
+                assert_eq!(
+                    check_container_namespace_access(
+                        current_task,
+                        path,
+                        NamespaceNodePurpose::DirectoryMount { read_only: true },
+                    ),
+                    Ok(())
+                );
+                assert_eq!(
+                    check_container_namespace_access(
+                        current_task,
+                        path,
+                        NamespaceNodePurpose::DirectoryMount { read_only: false },
+                    ),
+                    Ok(())
+                );
+                assert_eq!(
+                    check_container_namespace_access(
+                        current_task,
+                        path,
+                        NamespaceNodePurpose::VolumeKeys,
+                    ),
+                    error!(EACCES)
+                );
+            }
+
+            // Sibling paths that merely share a non-directory string prefix with
+            // `/userdata/metadata/` fall back to `/` (`fuchsia_ns_unlabeled_t`) and are denied.
+            assert_eq!(
+                check_container_namespace_access(
+                    current_task,
+                    "/userdata/metadata_evil",
+                    NamespaceNodePurpose::DirectoryMount { read_only: true },
+                ),
+                error!(EACCES)
+            );
+
+            // `/userdata/fbe_keys/` is labeled `fuchsia_ns_vol_keys_t`: volume-key opens
+            // (`blk_file` `{ open read write }`) are allowed, while directory mounts are denied.
+            assert_eq!(
+                check_container_namespace_access(
+                    current_task,
+                    "/userdata/fbe_keys",
+                    NamespaceNodePurpose::VolumeKeys,
+                ),
+                Ok(())
+            );
+            for read_only in [true, false] {
+                assert_eq!(
+                    check_container_namespace_access(
+                        current_task,
+                        "/userdata/fbe_keys",
+                        NamespaceNodePurpose::DirectoryMount { read_only },
+                    ),
+                    error!(EACCES)
+                );
+            }
+
+            // Unlisted paths fall back to `/` (`fuchsia_ns_unlabeled_t`) and are denied for all
+            // purposes.
+            for purpose in [
+                NamespaceNodePurpose::DirectoryMount { read_only: true },
+                NamespaceNodePurpose::DirectoryMount { read_only: false },
+                NamespaceNodePurpose::VolumeKeys,
+            ] {
+                assert_eq!(
+                    check_container_namespace_access(current_task, "/data", purpose),
+                    error!(EACCES)
+                );
+            }
         })
         .await;
     }

@@ -1,0 +1,39 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.pci",
+    src = "fuchsia.pci.bind",
+    api_area = "Driver SDK",
+    category = "partner",
+    visibility = [
+        "//examples/drivers/bind/bindlib_codegen:__pkg__",
+        "//sdk:__pkg__",
+        "//sdk/lib/driver/devicetree/visitors/drivers/pci/pci-child-visitor:__pkg__",
+        "//src/connectivity:__subpackages__",
+        "//src/devices:__subpackages__",
+        "//src/graphics:__subpackages__",
+        "//src/media:__subpackages__",
+        "//src/ui:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+
+bind_library(
+    name = "fuchsia.pci.serial",
+    src = "fuchsia.pci.serial.bind",
+    category = "partner",
+    visibility = ["//src/devices/usb/drivers/xhci:__pkg__"],
+)
+
+bind_library(
+    name = "fuchsia.pci.serial.usb",
+    src = "fuchsia.pci.serial.usb.bind",
+    category = "partner",
+    visibility = ["//src/devices/usb/drivers/xhci:__pkg__"],
+)

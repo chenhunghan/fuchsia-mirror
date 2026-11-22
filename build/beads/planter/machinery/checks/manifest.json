@@ -1,6 +1,6 @@
 {
     "version": 1,
-    "min_planter_cl": 1010931925,
+    "min_planter_cl": 1022662728,
     "checks": [
         {
             "name": "planter_version",
@@ -16,13 +16,19 @@
         },
         {
             "name": "migration_sanity",
-            "description": "Checks sentinel sync and @bazel2gn:skip rules (skipped_convertible_target, unjustified_test_skip, redundant_bazel2gn_skip, unnecessary_manual_tag).",
+            "description": "Checks sentinel sync, @bazel2gn:skip rules, unexported new_local_repository build_file sources, truncated/unlinked working-tree build files, targetless BUILD.bazel files, duplicated srcs/hdrs headers, disconnected zero-rdep packages, and //docs/ includecode region tags (skipped_convertible_target, unjustified_test_skip, redundant_bazel2gn_skip, unexported_local_repository_file, unnecessary_manual_tag, corrupted_working_tree_build_file, empty_build_bazel, disconnected_zero_rdep_package_migrated, includecode_region_tag_removed, header_duplicated_in_srcs_and_hdrs).",
             "script_file": "migration_sanity.sh",
             "enabled": true
         },
         {
+            "name": "empty_gn_targets",
+            "description": "Flags GN groups (including forwarding groups in ancestor BUILD.gn files) and BUILD.gn files that the change leaves empty, so migrations delete them and their references instead of leaving stubs; groups with a `# Intentionally empty: <reason>` comment are exempt (empty_gn_group, empty_gn_build_file).",
+            "script_file": "empty_gn_targets.sh",
+            "enabled": true
+        },
+        {
             "name": "gn_dep_parity",
-            "description": "Checks GN dep labels, link deps, and public_deps configs (dep_label_removed, dep_label_substituted, dep_link_settings_dropped).",
+            "description": "Checks GN dep labels, link deps, public_deps configs, and unreferenced added Rust crate deps (dep_label_removed, dep_label_substituted, dep_link_settings_dropped, unexpected_rust_dep_added).",
             "script_file": "gn_dep_parity.sh",
             "enabled": true
         },
@@ -40,19 +46,19 @@
         },
         {
             "name": "visibility_audit",
-            "description": "Audits BUILD.bazel visibility via find_rdeps, restricted rust_crates allowlists, and cross-package dep access (overbroad_public_visibility, visibility_narrowed, visibility_widened_beyond_gn, missing_rust_crates_visibility, inaccessible_cross_package_dep).",
+            "description": "Audits BUILD.bazel visibility via find_rdeps, restricted rust_crates allowlists, and cross-package dep access (overbroad_public_visibility, visibility_narrowed, redundant_covered_visibility_entry, visibility_widened_beyond_gn, missing_rust_crates_visibility, inaccessible_cross_package_dep).",
             "script_file": "visibility_audit.sh",
             "enabled": true
         },
         {
             "name": "build_only_scope",
-            "description": "Blocks non-build source edits except allowed test .cml or README labels (non_build_file_modified).",
+            "description": "Blocks non-build source edits except allowed test .cml or README labels, flags unfinished git rebase/merge conflict states, and blocks unconditional GN pre-build deps on global Bazel host build entrypoints (non_build_file_modified, unfinished_git_operation, unconditional_host_gn_prebuild).",
             "script_file": "build_only_scope.sh",
             "enabled": true
         },
         {
             "name": "lint_config_parity",
-            "description": "Flags lint-silencing source edits and custom lint_config missing defaults (lint_driven_source_edit).",
+            "description": "Flags lint-silencing source edits, Rust edition downgrades or unrequested legacy/safety lint overrides, and custom lint_config missing defaults (lint_driven_source_edit, rust_edition_downgrade).",
             "script_file": "lint_config_parity.sh",
             "enabled": true
         },
@@ -64,14 +70,8 @@
         },
         {
             "name": "bazel_minimality",
-            "description": "Audits Starlark wrapper rules, symbolic macro attrs, IDK atom allowlists, default attrs, host constraints, and buildifier (unwrapped_external_language_rule, unsupported_fx_component_attribute, missing_idk_atom_allowlist, buildifier_lint).",
+            "description": "Audits Starlark wrapper rules, symbolic macro attrs, IDK atom allowlists, default attrs, host constraints, and buildifier (unwrapped_external_language_rule, unsupported_fx_component_attribute, missing_idk_atom_allowlist, transitive_legacy_host_constraints, buildifier_lint, invalid_todo_format, cc_binary_raw_output_name_annotation, rustc_test_raw_output_name_annotation, rustc_staticlib_raw_public_annotation).",
             "script_file": "bazel_minimality.sh",
-            "enabled": true
-        },
-        {
-            "name": "cq_reachability",
-            "description": "Verifies tests reach group(\"tests\"), umbrella ffx_plugin test sections/comments, and aggregation test_suite(), and HEAD merges cleanly onto origin/main and any composite dependency stack ref (unexported_bazel_test, stale_plugin_tests_aggregation_comment, ungrouped_migrated_plugin_tests, unrebased_composite_stack, prerequisite_bazel_targets_overwritten).",
-            "script_file": "cq_reachability.sh",
             "enabled": true
         },
         {
@@ -94,7 +94,7 @@
         },
         {
             "name": "commit_message_format",
-            "description": "Validates commit subject/body format, line lengths, footers, test-parity footers (Renamed-Tests:, Skipped-Dual-Tests:, forbidden Deleted-Tests:/Build-Only:), and NO_IFTTT lines (commit_subject_format, commit_subject_overstates_migration, commit_subject_broad_tag, missing_bazel_migration_target_footer, agent_added_no_ifttt).",
+            "description": "Validates commit subject/body format, line lengths, footers, test-parity footers (Renamed-Tests:, Skipped-Dual-Tests:, forbidden Deleted-Tests:/Build-Only:), NO_IFTTT lines, and premature pre-upload Git commits (commit_subject_format, commit_subject_overstates_migration, commit_subject_broad_tag, missing_bazel_migration_target_footer, agent_added_no_ifttt, premature_pre_upload_git_commit).",
             "script_file": "commit_message_format.sh",
             "enabled": true
         },
@@ -106,7 +106,7 @@
         },
         {
             "name": "test_suite_layout",
-            "description": "Enforces two-tier Bazel test_suite() and GN bazel_test_suite() layout, explicit tests = [...] lists, and human review when expanding an existing empty test_suite() (per_package_bazel_test_suite, bazel_test_suite_only_build_gn, nested_test_suite, implicit_test_suite, expanded_empty_test_suite).",
+            "description": "Enforces two-tier Bazel test_suite() and GN bazel_test_suite() layout, explicit tests = [...] lists, upward aggregation flow, host-configuration test_suite() compatibility, and human review when expanding an existing empty test_suite() (per_package_bazel_test_suite, bazel_test_suite_only_build_gn, nested_test_suite, implicit_test_suite, expanded_empty_test_suite, upward_bazel_test_suite_ref, fuchsia_target_in_host_test_suite).",
             "script_file": "test_suite_layout.sh",
             "enabled": true
         },
@@ -130,7 +130,7 @@
         },
         {
             "name": "cc_header_deps_and_annotations",
-            "description": "Requires comments on new @bazel2gn directives, disable_build_flags TODOs on rustc_* configs -= directives, LINT.IfChange guards on inlined file lists, preserved multi-line BUILD.gn explanatory comments on migrated attributes/targets, public header deps in `deps`, and upstream in-tree C/C++ headers declared in `hdrs` (undocumented_bazel2gn_directive, rustc_configs_remove_missing_todo, inlined_file_list_missing_ifttt, dropped_gn_comment_block, undeclared_upstream_cc_header, redundant_builtin_label_directive).",
+            "description": "Requires comments on new @bazel2gn directives, disable_build_flags TODOs on rustc_* configs -= directives, TODO(https://fxbug.dev/582031294) on cc_*_library_zx raw_attribute directives, LINT.IfChange guards on inlined file lists, preserved multi-line BUILD.gn explanatory comments and translated commented-out attributes on migrated targets, non-redundant BUILD.gn comments, public header deps in `deps`, upstream in-tree C/C++ headers declared in `hdrs`, unskipped non-duplicated `hdrs` on C/C++ library rules, and removal of unused C/C++ deps that puncture restricted upstream visibility (undocumented_bazel2gn_directive, rustc_configs_remove_missing_todo, zx_library_raw_attribute_missing_todo, inlined_file_list_missing_ifttt, dropped_gn_comment_block, redundant_gn_comment_block, untranslated_gn_commented_attr, orphaned_test_env_todo_on_library, undeclared_upstream_cc_header, redundant_builtin_label_directive, redundant_hdrs_bazel2gn_skip, duplicate_header_in_srcs_and_hdrs, unused_cc_dep_visibility_puncture).",
             "script_file": "cc_header_deps_and_annotations.sh",
             "enabled": true
         },
@@ -147,9 +147,45 @@
             "enabled": true
         },
         {
+            "name": "idk_attributes",
+            "description": "Checks that idk_cc_* targets set api_area, and correctly map deps to implementation_deps when no_headers is true, and that GN runtime_deps survive migration unchanged (runtime_deps_dropped; WARNING runtime_dep_promoted_to_link_dep).",
+            "script_file": "idk_attributes.sh",
+            "enabled": true
+        },
+        {
             "name": "macro_api_parity",
-            "description": "Audits changed symbolic macros and GN templates for API drift (macro_redeclares_inherited_attr, macro_list_attr_none_compare, gn_template_crate_name_not_forwarded).",
+            "description": "Enforces bazel/style/rules_macros.md on changed .bzl files (configurable symbolic macro attrs, non-None-default None comparisons, _impl defaults and naming, docstrings, keyword-only args, legacy macro visibility, kwargs extraction, target name variables, fx_ prefix, antipatterns), verifies loaded macro/function call kwargs, and audits package rules and GN templates for drift (macro_redeclares_inherited_attr, macro_configurable_attr_misuse, macro_non_none_default_none_compare, macro_impl_default_arg, rule_or_macro_impl_name, missing_bzl_documentation, bzl_docstring_concat, bzl_public_func_positional_defaults, legacy_macro_missing_target_visibility, macro_kwargs_attr_extraction, macro_inline_target_name_duplication, bzl_fuchsia_prefix_outside_sdk, bzl_antipattern, starlark_call_unexpected_kwarg, starlark_call_missing_kwarg, package_macro_duplicates_plumbing, bootfs_package_shared_lib_merkle_conflict, unexplained_no_gn_equivalent, gn_template_crate_name_not_forwarded).",
             "script_file": "macro_api_parity.sh",
+            "enabled": true
+        },
+        {
+            "name": "machinery_script_lint",
+            "description": "Audits active $PLANTER_PROJECT_DIR and modified repo planter shell/Python scripts, inline Python heredocs, and JSON manifests for syntax errors, undefined names/helper imports, module-level and function-local use-before-assignment, uncalled top-level check_* functions, duplicate function/class definitions, and duplicate dict keys (machinery_shell_syntax_error, machinery_python_syntax_error, machinery_undefined_python_name, machinery_python_use_before_def, machinery_uncalled_check_function, machinery_duplicate_python_def, machinery_duplicate_dict_key, machinery_json_syntax_error).",
+            "script_file": "machinery_script_lint.sh",
+            "enabled": true
+        },
+        {
+            "name": "cq_reachability",
+            "description": "Verifies tests reach group(\"tests\"), umbrella ffx_plugin test sections/comments, and aggregation test_suite(), and HEAD stacks cleanly without squashing prerequisite commits onto origin/main or composite dependency stack refs (unexported_bazel_test, stale_plugin_tests_aggregation_comment, ungrouped_migrated_plugin_tests, unrebased_composite_stack, squashed_prerequisite_commit, unstacked_depends_on_commit, prerequisite_bazel_targets_overwritten, upstream_rebase_conflict).",
+            "script_file": "cq_reachability.sh",
+            "enabled": true
+        },
+        {
+            "name": "cutover_consistency",
+            "description": "On a GN-to-Bazel package cutover, builds both packages and compares contents and the x64 and arm64 build commands; records both packages in phase 1 and compares the Bazel package with the recorded GN package again in the final phase (INFO cutover_diff_<kind>, cutover_summary, cutover_info_<kind>).",
+            "script_file": "cutover_consistency.sh",
+            "enabled": true
+        },
+        {
+            "name": "cutover_scope",
+            "description": "On a GN-to-Bazel package cutover, flags edits outside the package's logical group (INFO cutover_scope_outside_group).",
+            "script_file": "cutover_scope.sh",
+            "enabled": true
+        },
+        {
+            "name": "py_library_data_package",
+            "description": "Verifies py_library, py_binary, and py_binary_host_tool targets migrated from GN python_library/python_binary with data_package_name/data_sources stage <data_package_name>/__init__.py (via write_file in srcs) and data files (via copy_file in data, with is_executable = True for executable targets) and retain GN raw_attribute parity in dual builds, and verifies py_zipapp_binary retains native data_package_name/data_sources parity (py_library_missing_data_package_init, py_library_missing_data_source, py_library_data_copy_not_executable, py_library_gn_data_package_dropped, py_zipapp_missing_data_package, py_zipapp_missing_data_source).",
+            "script_file": "py_library_data_package.sh",
             "enabled": true
         }
     ]

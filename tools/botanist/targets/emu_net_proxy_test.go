@@ -10,11 +10,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -25,30 +28,22 @@ import (
 
 // testAllowedDomains is the domain allowlist used by the tests.
 var testAllowedDomains = []string{
-	"google.com",
-	"googleapis.com",
-	"gstatic.com",
-	"googleusercontent.com",
-	"gvt1.com",
-	"gvt2.com",
-	"android.com",
+	"accounts.google.com",
+	"oauth2.googleapis.com",
+	"connectivitycheck.gstatic.com",
+	"unreachable.google.com",
+	"*.gvt1.com",
 }
 
 func TestDomainAllowlist(t *testing.T) {
 	allowed := []string{
-		"google.com",
 		"accounts.google.com",
-		"mail.google.com",
-		"calendar.google.com",
-		"signaler-pa.clients6.google.com.",
-		"oauth2.googleapis.com",
-		"gmail.googleapis.com",
-		"connectivitycheck.gstatic.com",
-		"lh3.googleusercontent.com",
-		"edgedl.me.gvt1.com",
-		"redirector.gvt2.com",
-		"connectivitycheck.android.com",
+		"accounts.google.com.",
 		"ACCOUNTS.GOOGLE.COM:443",
+		"oauth2.googleapis.com",
+		"connectivitycheck.gstatic.com",
+		"edgedl.me.gvt1.com",
+		"r1---sn-a5mekn7s.gvt1.com",
 	}
 	for _, host := range allowed {
 		if !isDomainAllowedInList(host, testAllowedDomains) {
@@ -58,9 +53,15 @@ func TestDomainAllowlist(t *testing.T) {
 
 	blocked := []string{
 		"",
+		"google.com",
+		"mail.google.com",
+		"evil.accounts.google.com",
+		"accounts.google.com.evil.com",
+		"evilaccounts.google.com",
+		"gvt1.com",
+		"evilgvt1.com",
+		"gvt1.com.evil.com",
 		"example.com",
-		"evilgoogle.com",
-		"google.com.evil.com",
 		"localhost",
 		"127.0.0.1",
 		"10.0.2.2",
@@ -71,6 +72,55 @@ func TestDomainAllowlist(t *testing.T) {
 		if isDomainAllowedInList(host, testAllowedDomains) {
 			t.Errorf("expected domain %q to be blocked, but it was allowed", host)
 		}
+	}
+}
+
+func TestParseEmuNetAllowlist(t *testing.T) {
+	got, err := parseEmuNetAllowlist(`
+# Comment lines and blank lines are ignored.
+
+accounts.google.com
+  Mail.Google.com
+*.gvt1.com
+`)
+	if err != nil {
+		t.Fatalf("parseEmuNetAllowlist failed: %v", err)
+	}
+	want := []string{"accounts.google.com", "mail.google.com", "*.gvt1.com"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("parseEmuNetAllowlist() = %q, want %q", got, want)
+	}
+
+	for _, bad := range []string{
+		"com",
+		"*.com",
+		"*",
+		"*.",
+		"foo.*.com",
+		"google.com.",
+		"google..com",
+		"-google.com",
+		"google-.com",
+		"goo gle.com",
+		"google.com # trailing comment",
+		"127.0.0.1",
+		"accounts.google.com\naccounts.google.com",
+		"https://accounts.google.com",
+		"accounts.google.com:443",
+	} {
+		if _, err := parseEmuNetAllowlist(bad); err == nil {
+			t.Errorf("expected parseEmuNetAllowlist(%q) to fail", bad)
+		}
+	}
+}
+
+func TestEmbeddedEmuNetAllowlist(t *testing.T) {
+	allowlist, err := emuNetAllowlist()
+	if err != nil {
+		t.Fatalf("embedded emulator internet allowlist is invalid: %v", err)
+	}
+	if len(allowlist) == 0 {
+		t.Errorf("embedded emulator internet allowlist is empty")
 	}
 }
 
@@ -216,7 +266,8 @@ func TestBuildDNSResponseIsWellFormed(t *testing.T) {
 
 func TestEmuNetProxyDHCPAndDNS(t *testing.T) {
 	startCtx, cancelStart := context.WithCancel(context.Background())
-	proxy, err := newEmuNetProxy(startCtx, testAllowedDomains, "/bin/botanist")
+	logPath := filepath.Join(t.TempDir(), emuNetProxyLogName)
+	proxy, err := newEmuNetProxy(startCtx, testAllowedDomains, "/bin/botanist", logPath)
 	if err != nil {
 		t.Fatalf("newEmuNetProxy failed: %v", err)
 	}
@@ -304,6 +355,16 @@ func TestEmuNetProxyDHCPAndDNS(t *testing.T) {
 	if rcode := nxReply[3] & 0x0f; rcode != 3 {
 		t.Errorf("expected NXDOMAIN (3) for example.com, got rcode=%d", rcode)
 	}
+
+	// 5. Both DNS queries are recorded in the audit log.
+	_ = conn.Close()
+	if err := proxy.Close(); err != nil {
+		t.Fatalf("proxy.Close failed: %v", err)
+	}
+	assertProxyEvents(t, readProxyEvents(t, logPath), []proxyEvent{
+		{Kind: proxyEventDNS, Host: "accounts.google.com", Decision: proxyDecisionAllowed},
+		{Kind: proxyEventDNS, Host: "example.com", Decision: proxyDecisionBlocked},
+	})
 }
 
 func TestEmuNetProxyTLSAndHTTP(t *testing.T) {
@@ -335,7 +396,8 @@ func TestEmuNetProxyTLSAndHTTP(t *testing.T) {
 		return c1, nil
 	}
 
-	proxy, err := newEmuNetProxyWithConfig(ctx, testAllowedDomains, "/bin/botanist", func(p *emuNetProxy) {
+	logPath := filepath.Join(t.TempDir(), emuNetProxyLogName)
+	proxy, err := newEmuNetProxyWithConfig(ctx, testAllowedDomains, "/bin/botanist", logPath, func(p *emuNetProxy) {
 		p.dialer = fakeDialer
 	})
 	if err != nil {
@@ -406,6 +468,103 @@ func TestEmuNetProxyTLSAndHTTP(t *testing.T) {
 		t.Errorf("expected empty response for failed TLS upstream, got %q", string(failTLSResp))
 	}
 
+	// 6. Every request is recorded in the audit log, in order.
+	if err := proxy.Close(); err != nil {
+		t.Fatalf("proxy.Close failed: %v", err)
+	}
+	events := readProxyEvents(t, logPath)
+	assertProxyEvents(t, events, []proxyEvent{
+		{Kind: proxyEventTLS, Host: "oauth2.googleapis.com", Port: 443, Decision: proxyDecisionAllowed},
+		{Kind: proxyEventTLS, Host: "evil.example.com", Port: 443, Decision: proxyDecisionBlocked},
+		{Kind: proxyEventHTTP, Host: "connectivitycheck.gstatic.com", Port: 80, Decision: proxyDecisionAllowed},
+		{Kind: proxyEventHTTP, Host: "evil.example.com", Port: 80, Decision: proxyDecisionBlocked},
+		{Kind: proxyEventTLS, Host: "unreachable.google.com", Port: 443, Decision: proxyDecisionDialFailed},
+	})
+	if len(events) > 0 {
+		allowedTLS := events[0]
+		if allowedTLS.BytesSent == 0 || allowedTLS.BytesReceived == 0 {
+			t.Errorf("expected byte counts for allowed TLS connection, got sent=%d received=%d", allowedTLS.BytesSent, allowedTLS.BytesReceived)
+		}
+		if allowedTLS.Upstream == "" {
+			t.Errorf("expected upstream address for allowed TLS connection")
+		}
+		if allowedTLS.Time.IsZero() {
+			t.Errorf("expected timestamp for allowed TLS connection")
+		}
+	}
+	if len(events) == 5 && events[1].Error == "" {
+		t.Errorf("expected an error message for blocked TLS connection")
+	}
+}
+
+func TestProxyEventLogSummary(t *testing.T) {
+	l, err := newProxyEventLog("")
+	if err != nil {
+		t.Fatalf("newProxyEventLog failed: %v", err)
+	}
+	l.record(proxyEvent{Kind: proxyEventTLS, Host: "b.google.com", Port: 443, Decision: proxyDecisionAllowed})
+	l.record(proxyEvent{Kind: proxyEventTLS, Host: "b.google.com", Port: 443, Decision: proxyDecisionAllowed})
+	l.record(proxyEvent{Kind: proxyEventTLS, Host: "b.google.com", Port: 443, Decision: proxyDecisionDialFailed})
+	l.record(proxyEvent{Kind: proxyEventDNS, Host: "evil.example.com", Decision: proxyDecisionBlocked})
+	l.record(proxyEvent{Kind: proxyEventTLS, Host: "a.google.com", Port: 5228, Decision: proxyDecisionAllowed})
+	want := []string{
+		"dns evil.example.com allowed=0 blocked=1 dial_failed=0",
+		"tls a.google.com:5228 allowed=1 blocked=0 dial_failed=0",
+		"tls b.google.com:443 allowed=2 blocked=0 dial_failed=1",
+	}
+	got := l.summary()
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("unexpected summary:\ngot:  %q\nwant: %q", got, want)
+	}
+	if err := l.close(); err != nil {
+		t.Errorf("close failed: %v", err)
+	}
+	// Recording after close must not panic.
+	l.record(proxyEvent{Kind: proxyEventDNS, Host: "late.google.com", Decision: proxyDecisionAllowed})
+}
+
+func TestProxyEventLogCreateError(t *testing.T) {
+	if _, err := newProxyEventLog(filepath.Join(t.TempDir(), "missing", "dir", emuNetProxyLogName)); err == nil {
+		t.Errorf("expected an error when the log directory does not exist")
+	}
+}
+
+// readProxyEvents parses the JSON lines audit log at path.
+func readProxyEvents(t *testing.T, path string) []proxyEvent {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("failed to open proxy log: %v", err)
+	}
+	defer f.Close()
+	var events []proxyEvent
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var ev proxyEvent
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			t.Fatalf("failed to parse proxy log line %q: %v", scanner.Text(), err)
+		}
+		events = append(events, ev)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("failed to read proxy log: %v", err)
+	}
+	return events
+}
+
+// assertProxyEvents checks the kind, host, port, and decision of each event.
+func assertProxyEvents(t *testing.T, got, want []proxyEvent) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("expected %d proxy events, got %d: %+v", len(want), len(got), got)
+	}
+	for i := range want {
+		g, w := got[i], want[i]
+		if g.Kind != w.Kind || g.Host != w.Host || g.Port != w.Port || g.Decision != w.Decision {
+			t.Errorf("proxy event %d: got {%s %s %d %s}, want {%s %s %d %s}",
+				i, g.Kind, g.Host, g.Port, g.Decision, w.Kind, w.Host, w.Port, w.Decision)
+		}
+	}
 }
 
 func TestRunTCPForward(t *testing.T) {
@@ -461,7 +620,7 @@ func TestEmuNetProxyHTTPForwardsOnlyOneRequest(t *testing.T) {
 		}()
 		return c1, nil
 	}
-	proxy, err := newEmuNetProxyWithConfig(ctx, testAllowedDomains, "/bin/botanist", func(p *emuNetProxy) {
+	proxy, err := newEmuNetProxyWithConfig(ctx, testAllowedDomains, "/bin/botanist", "", func(p *emuNetProxy) {
 		p.dialer = fakeDialer
 	})
 	if err != nil {
@@ -508,7 +667,8 @@ func TestEmuNetProxyCloseClosesOpenConnections(t *testing.T) {
 		}()
 		return c1, nil
 	}
-	proxy, err := newEmuNetProxyWithConfig(ctx, testAllowedDomains, "/bin/botanist", func(p *emuNetProxy) {
+	logPath := filepath.Join(t.TempDir(), emuNetProxyLogName)
+	proxy, err := newEmuNetProxyWithConfig(ctx, testAllowedDomains, "/bin/botanist", logPath, func(p *emuNetProxy) {
 		p.dialer = fakeDialer
 	})
 	if err != nil {
@@ -523,7 +683,8 @@ func TestEmuNetProxyCloseClosesOpenConnections(t *testing.T) {
 	if _, err := conn.Write(buildTestTLSClientHello("oauth2.googleapis.com")); err != nil {
 		t.Fatalf("failed to send ClientHello: %v", err)
 	}
-	// An HTTP request to a disallowed Host with a port is blocked.
+	// An HTTP request to a disallowed Host with a port is logged without the
+	// port.
 	if resp := sendAndReadHTTP(t, proxy.http80Ln.Addr().String(), "GET / HTTP/1.1\r\nHost: evil.example.com:8080\r\n\r\n"); !strings.HasPrefix(resp, "HTTP/1.1 403") {
 		t.Errorf("expected 403 for disallowed Host, got %q", resp)
 	}
@@ -563,6 +724,19 @@ func TestEmuNetProxyCloseClosesOpenConnections(t *testing.T) {
 	case <-upstreamClosed:
 	case <-time.After(5 * time.Second):
 		t.Errorf("expected Close to close the upstream connection")
+	}
+
+	var sawBlocked bool
+	for _, ev := range readProxyEvents(t, logPath) {
+		if ev.Kind == proxyEventHTTP && ev.Decision == proxyDecisionBlocked {
+			sawBlocked = true
+			if ev.Host != "evil.example.com" {
+				t.Errorf("expected the blocked HTTP event to record the host without its port, got %q", ev.Host)
+			}
+		}
+	}
+	if !sawBlocked {
+		t.Errorf("expected a blocked HTTP event")
 	}
 }
 

@@ -40,5 +40,4 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "meta/use_info.json"
 }

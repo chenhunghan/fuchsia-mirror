@@ -92,7 +92,6 @@
                 }
             }
         ],
-        "watch_deprecated_v1_drivers": true,
         "gpt_all": true,
         "merge_super_and_userdata": true
     },

@@ -65,11 +65,9 @@ constexpr const char* interrupt_polarity_string(interrupt_polarity pol) {
 }
 
 // (mask|unmask)_interrupt will disable (mask) or enable (unmask) the interrupt
-// specified by |vector|.  In the case of interrupts which target a specific CPU
-// but share an interrupt vector number (for example, SGIs and PPIs in ARM's GIC
-// interrupt controller designs), these functions will affect the
-// masked/unmasked state of the interrupt vector for the caller's CPU only.
-// They will not mask/unmask the specified vector for any of the other CPUs.
+// specified by |vector|.  For per-CPU interrupts such as PPIs and kernel IPIs,
+// these functions affect the caller's CPU only.  For reserved non-kernel SGIs
+// (platform doorbells), they affect all active CPUs.
 zx_status_t mask_interrupt(interrupt_vector_t vector);
 zx_status_t unmask_interrupt(interrupt_vector_t vector);
 zx_status_t deactivate_interrupt(interrupt_vector_t vector);
@@ -139,6 +137,9 @@ static inline zx_status_t unregister_int_handler(interrupt_vector_t vector) {
 // re-registrations with invocations, which can be much more efficient and avoid unneeded
 // serialization of handlers.
 zx_status_t register_permanent_int_handler(interrupt_vector_t vector, interrupt_handler_t handler);
+
+// Flags for is_valid_interrupt()
+constexpr uint32_t INTERRUPT_VALID_KERNEL = (1u << 0);
 
 bool is_valid_interrupt(interrupt_vector_t vector, uint32_t flags);
 

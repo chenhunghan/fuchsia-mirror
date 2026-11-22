@@ -79,9 +79,9 @@ fx_cc_library(
         "//src/lib/fxl",
         "//src/lib/pkg_url",
         "//src/sys/fuzzing/fidl:fuchsia.fuzzer_hlcpp",
+        "//third_party/re2",
         "//zircon/system/ulib/sync",
         "//zircon/system/ulib/zx",
-        "@re2",
     ],
     alwayslink = True,
 )

@@ -4,5 +4,10 @@
 
 group("tests") {
   testonly = true
-  deps = [ "performance:tests" ]
+  deps = [
+    "index_table_builder:tests",
+    "memory_mapped_vmo:tests",
+    "performance:tests",
+    "pprof:tests",
+  ]
 }

@@ -8,8 +8,10 @@
 #include <mntent.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/xattr.h>
 
+#include <filesystem>
 #include <string>
 
 #include <fbl/unique_fd.h>
@@ -22,6 +24,18 @@
 
 namespace {
 constexpr char kProcSelfAttrPath[] = "/proc/self/attr/";
+}
+
+void LoadPolicy(const std::string& name) {
+  auto policy_path = "data/policies/" + name;
+  auto binary_policy = ReadFile(policy_path);
+  ASSERT_THAT(binary_policy, SyscallResultIsOk()) << "Read of policy at " << policy_path;
+  auto result = WriteExistingFile("/sys/fs/selinux/load", binary_policy.value());
+  ASSERT_THAT(result, SyscallResultIsOk()) << "Load of policy from " << policy_path;
+
+  // Ensure that the binary policy is reported by the kernel as having been loaded.
+  auto loaded_policy = ReadFile("/sys/fs/selinux/policy");
+  ASSERT_THAT(loaded_policy, SyscallResultIsOk());
 }
 
 fit::result<int, std::string> ReadPolicyCap(const char* capability) {
@@ -53,6 +67,25 @@ fit::result<int> WriteExistingFile(const std::string& path, std::string_view dat
     return fit::error(errno);
   }
   if (!fxl::WriteFileDescriptor(fd.get(), data.data(), data.size())) {
+    return fit::error(errno);
+  }
+  return fit::ok();
+}
+
+fit::result<int> EnsureDeviceNode(std::string_view path, mode_t mode, dev_t dev) {
+  std::string path_str(path);
+  std::filesystem::path fs_path(path_str);
+  if (fs_path.has_parent_path()) {
+    std::error_code ec;
+    std::filesystem::create_directories(fs_path.parent_path(), ec);
+    if (ec) {
+      return fit::error(ec.value());
+    }
+  }
+  if (mknod(path_str.c_str(), mode, dev) != 0 && errno != EEXIST) {
+    return fit::error(errno);
+  }
+  if (chmod(path_str.c_str(), mode & 07777) != 0) {
     return fit::error(errno);
   }
   return fit::ok();
@@ -107,7 +140,7 @@ ScopedTaskAttrResetter ScopedTaskAttrResetter::SetTaskAttr(std::string_view attr
   auto write_result = WriteTaskAttr(attr_name, new_value);
   if (write_result.is_error()) {
     ADD_FAILURE() << "Setting attr " << attr_name << " to \"" << new_value
-                  << "\" error:" << strerror(old_value.error_value());
+                  << "\" error:" << strerror(write_result.error_value());
     return ScopedTaskAttrResetter("", "");
   }
   return ScopedTaskAttrResetter(attr_name, old_value.value());
@@ -120,13 +153,14 @@ ScopedTaskAttrResetter::ScopedTaskAttrResetter(std::string_view attr_name,
 }
 
 ScopedTaskAttrResetter::~ScopedTaskAttrResetter() {
-  if (attr_name_ == "") {
+  if (attr_name_.empty()) {
     return;
   }
   auto to_write = old_value_.empty() ? std::string(1, 0) : old_value_;
   auto result = WriteTaskAttr(attr_name_, to_write);
   if (result.is_error()) {
-    ADD_FAILURE() << "Restoring task attr " << attr_name_ << " to \"" << old_value_ << "\"";
+    ADD_FAILURE() << "Restoring task attr " << attr_name_ << " to \"" << old_value_
+                  << "\": " << strerror(result.error_value());
   }
 }
 
@@ -141,11 +175,9 @@ fit::result<int, std::string> GetLabel(int fd) {
 
 fit::result<int, std::string> GetLinkLabel(int fd) {
   char buf[256];
-  char proc_path[256];
+  std::string proc_path = fxl::StringPrintf("/proc/self/fd/%d", fd);
 
-  snprintf(proc_path, sizeof(proc_path), "/proc/%d/fd/%d", getpid(), fd);
-
-  ssize_t result = lgetxattr(proc_path, "security.selinux", buf, sizeof(buf) - 1);
+  ssize_t result = lgetxattr(proc_path.c_str(), "security.selinux", buf, sizeof(buf));
   if (result < 0) {
     return fit::error(errno);
   }
@@ -196,6 +228,10 @@ fit::result<int, bool> IsSameInode(int fd_1, int fd_2) {
 
 std::string MountOptionsFor(std::string_view mount_path) {
   FILE* mounts = setmntent("/proc/mounts", "r");
+  if (!mounts) {
+    ADD_FAILURE() << "Failed to open /proc/mounts: " << strerror(errno);
+    return "";
+  }
   std::string result;
   for (struct mntent* entry = nullptr; (entry = getmntent(mounts));) {
     if (mount_path == entry->mnt_dir) {
@@ -212,7 +248,7 @@ pid_t RunInForkedProcessWithLabel(test_helper::ForkHelper& fork_helper, std::str
   return fork_helper.RunInForkedProcess([label = std::string(label), action = std::move(action)] {
     if (auto result = WriteTaskAttr("current", label); result.is_error()) {
       FAIL() << "Could not write \"" << label
-             << "\" to \"current\" (error: " << result.error_value() << ")";
+             << "\" to \"current\": " << strerror(result.error_value());
     }
     action();
   });
@@ -227,13 +263,26 @@ ScopedEnforcement ScopedEnforcement::SetPermissive() {
 }
 
 ScopedEnforcement::ScopedEnforcement(bool enforcing) {
-  EXPECT_TRUE(files::ReadFileToString("/sys/fs/selinux/enforce", &previous_state_));
+  auto prev = ReadFile("/sys/fs/selinux/enforce");
+  if (prev.is_error()) {
+    ADD_FAILURE() << "Failed to read /sys/fs/selinux/enforce: " << strerror(prev.error_value());
+    return;
+  }
   std::string new_state = enforcing ? "1" : "0";
-  EXPECT_TRUE(files::WriteFile("/sys/fs/selinux/enforce", new_state)) << strerror(errno);
+  if (auto write_res = WriteExistingFile("/sys/fs/selinux/enforce", new_state);
+      write_res.is_error()) {
+    ADD_FAILURE() << "Failed to write /sys/fs/selinux/enforce: "
+                  << strerror(write_res.error_value());
+    return;
+  }
+  previous_state_ = std::move(prev.value());
 }
 
 ScopedEnforcement::~ScopedEnforcement() {
-  EXPECT_TRUE(files::WriteFile("/sys/fs/selinux/enforce", previous_state_)) << strerror(errno);
+  if (!previous_state_.empty()) {
+    auto write_res = WriteExistingFile("/sys/fs/selinux/enforce", previous_state_);
+    EXPECT_TRUE(write_res.is_ok()) << strerror(write_res.error_value());
+  }
 }
 
 test_helper::ScopedTempFD ScopedTempFDWithLabel(std::string_view label) {

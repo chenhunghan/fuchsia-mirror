@@ -9,10 +9,10 @@ use the `//src/diagnostics/archivist` package.
 
 * [cargo-bloat](#cargo-bloat)
 * [fargo](#fargo)
-* [Run `fx build`](#run-a-build)
-* [Create Cargo.toml](#create-cargotoml)
+* [Run `fx build`](#run-fx-build)
+* [Create Cargo.toml](#create-cargo-toml)
 
-### cargo-bloat
+### cargo-bloat {:#cargo-bloat}
 
 These instructions cover the installation and use of [cargo-bloat][bloat], a tool for Rust projects
 inspired by [Bloaty McBloatface][google-bloaty].
@@ -26,18 +26,18 @@ cargo install cargo-bloat --features regex-filter [--force]
 If you've installed a previous version or would like to add regex filtering support to an existing
 installation, you may need to add `--force`.
 
-### fargo
+### fargo {:#fargo}
 
 This example uses cargo subcommands from crates.io, so you must [install fargo][fargo].
 
-### Run `fx build`
+### Run fx build {:#run-fx-build}
 
 Consult the [fx common tools documentation][fx-common-tools] for information about including the
 correct binary target in your build args.
 
 Next, run `fx build` within your Fuchsia source directory.
 
-### Create Cargo.toml
+### Create Cargo.toml {:#create-cargo-toml}
 
 Follow the instructions to [generate a `Cargo.toml` for your project][cargo-toml-gen].
 

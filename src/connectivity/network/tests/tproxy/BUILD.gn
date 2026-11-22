@@ -36,13 +36,11 @@ fuchsia_test_component("test") {
 fuchsia_unittest_package("tproxy-test") {
   manifest = "meta/tproxy-test.cml"
   subpackages = [
+    "filter-setup:package",
     "//src/connectivity/network/testing/netemul/configurable-netstack",
     "//src/connectivity/network/testing/netemul/sync-manager",
   ]
-  deps = [
-    ":test",
-    "filter-setup",
-  ]
+  deps = [ ":test" ]
 }
 
 group("tests") {

@@ -126,6 +126,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
         )
         c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
             ["--", *command],
+            env={},
             exec_root=fake_root,
             working_dir=fake_cwd,
             host_platform=fuchsia.REMOTE_PLATFORM,  # host = remote exec
@@ -189,6 +190,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
         )
         c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
             ["--", *command],
+            env={},
             exec_root=fake_root,
             working_dir=fake_cwd,
             host_platform=fuchsia.REMOTE_PLATFORM,  # host = remote exec
@@ -218,6 +220,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
         )
         c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
             ["--", *command],
+            env={},
             exec_root=fake_root,
             working_dir=fake_cwd,
             host_platform=fuchsia.REMOTE_PLATFORM,
@@ -246,6 +249,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
         )
         c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
             ["--", *command],
+            env={},
             exec_root=fake_root,
             working_dir=fake_cwd,
             host_platform=fuchsia.REMOTE_PLATFORM,
@@ -274,6 +278,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
             with mock.patch.object(remote_action, "PROJECT_ROOT", fake_root):
                 c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
                     ["--", *command],
+                    env={},
                     host_platform=fuchsia.REMOTE_PLATFORM,  # host = remote exec
                     auto_reproxy=False,
                 )
@@ -307,6 +312,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
         with mock.patch.object(remote_action, "PROJECT_ROOT", fake_root):
             c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
                 ["--", *command],
+                env={},
                 working_dir=fake_cwd,
                 host_platform=fuchsia.REMOTE_PLATFORM,  # host = remote exec
                 auto_reproxy=False,
@@ -355,6 +361,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
             with mock.patch.object(remote_action, "PROJECT_ROOT", fake_root):
                 c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
                     ["--disable-xattr", "--", *command],
+                    env={},
                     working_dir=fake_cwd,
                     host_platform=fuchsia.REMOTE_PLATFORM,
                     auto_reproxy=False,
@@ -409,6 +416,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
 
         c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
             ["--", *command],
+            env={},
             host_platform=fuchsia.REMOTE_PLATFORM,  # host = remote exec
             auto_reproxy=False,
         )
@@ -441,6 +449,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
         )
         c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
             ["--", *command],
+            env={},
             host_platform=fuchsia.REMOTE_PLATFORM,
             auto_reproxy=False,
         )
@@ -463,6 +472,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
         )
         c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
             ["--", *command],
+            env={},
             working_dir=fake_cwd,
             exec_root=fake_root,
             host_platform=fuchsia.REMOTE_PLATFORM,  # host = remote exec
@@ -540,6 +550,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
             c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
                 # For this test, make the remote/local working dirs match
                 ["--canonicalize_working_dir=false", "--", *command],
+                env={},
                 working_dir=fake_cwd,
                 exec_root=fake_root,
                 host_platform=fuchsia.REMOTE_PLATFORM,  # host = remote exec
@@ -589,6 +600,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
             )
             c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
                 ["--", *command],
+                env={},
                 exec_root=fake_root,
                 working_dir=fake_cwd,
                 host_platform=fuchsia.REMOTE_PLATFORM,  # host = remote exec
@@ -631,6 +643,7 @@ class CxxLinkRemoteActionTests(unittest.TestCase):
             )
             c = cxx_link_remote_wrapper.CxxLinkRemoteAction(
                 ["--scandeps", "--", *command],
+                env={},
                 exec_root=fake_root,
                 working_dir=fake_cwd,
                 host_platform=fuchsia.REMOTE_PLATFORM,  # host = remote exec
@@ -669,7 +682,7 @@ class MainTests(unittest.TestCase):
                 sys, "exit", side_effect=ImmediateExit
             ) as mock_exit:
                 with self.assertRaises(ImmediateExit):
-                    cxx_link_remote_wrapper.main([])
+                    cxx_link_remote_wrapper.main([], {})
         mock_exit.assert_called_with(0)
 
     def test_help_flag(self) -> None:
@@ -681,7 +694,7 @@ class MainTests(unittest.TestCase):
                 sys, "exit", side_effect=ImmediateExit
             ) as mock_exit:
                 with self.assertRaises(ImmediateExit):
-                    cxx_link_remote_wrapper.main(["--help"])
+                    cxx_link_remote_wrapper.main(["--help"], {})
         mock_exit.assert_called_with(0)
 
     def test_local_mode_forced(self) -> None:
@@ -703,7 +716,8 @@ class MainTests(unittest.TestCase):
                             "foo.o",
                             "-o",
                             "foo",
-                        ]
+                        ],
+                        {},
                     ),
                     exit_code,
                 )
@@ -745,7 +759,8 @@ class MainTests(unittest.TestCase):
                                     "--target=powerpc64-apple-darwin9",
                                     # This gets sifted to the outer argparser.
                                     "--remote-flag=--scandeps",
-                                ]
+                                ],
+                                {},
                             ),
                             exit_code,
                         )
@@ -756,24 +771,23 @@ class MainTests(unittest.TestCase):
     def test_auto_relaunched_with_reproxy(self) -> None:
         argv = ["--", "clang++", "foo.o", "-o", "foo"]
         with mock.patch.object(
-            os.environ, "get", return_value=None
-        ) as mock_env:
-            with mock.patch.object(
-                cl_utils, "exec_relaunch", side_effect=ImmediateExit
-            ) as mock_relaunch:
-                with self.assertRaises(ImmediateExit):
-                    cxx_link_remote_wrapper.main(argv)
-        mock_env.assert_called()
+            cl_utils, "exec_relaunch", side_effect=ImmediateExit
+        ) as mock_relaunch:
+            with self.assertRaises(ImmediateExit):
+                cxx_link_remote_wrapper.main(argv, {})
         mock_relaunch.assert_called_once()
         args, kwargs = mock_relaunch.call_args_list[0]
         relaunch_cmd = args[0]
-        self.assertEqual(relaunch_cmd[0], str(fuchsia.REPROXY_WRAP))
-        cmd_slices = cl_utils.split_into_subsequences(relaunch_cmd[1:], "--")
-        reproxy_args, self_script, wrapped_command = cmd_slices
-        self.assertEqual(reproxy_args, ["-v"])
+        self.assertIn("python", relaunch_cmd[0])
+        self.assertEqual(relaunch_cmd[1], "-S")
+        self.assertTrue(relaunch_cmd[2].endswith("reproxy_wrap.py"))
+        cmd_slices = cl_utils.split_into_subsequences(relaunch_cmd, "--")
+        reproxy_prefix, self_script, wrapped_command = cmd_slices
+        self.assertIn("-v", reproxy_prefix)
         self.assertIn("python", self_script[0])
         self.assertTrue(self_script[-1].endswith("cxx_link_remote_wrapper.py"))
         self.assertEqual(wrapped_command, argv[1:])
+        self.assertIn("PYTHONPATH", kwargs["env"])
 
 
 if __name__ == "__main__":

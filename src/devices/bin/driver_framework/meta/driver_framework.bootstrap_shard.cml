@@ -142,6 +142,7 @@
         {
             config: [
                 "fuchsia.storage.ufs.AutoHibernateTimerUs",
+                "fuchsia.storage.ufs.CommandTimeoutSec",
                 "fuchsia.storage.ufs.EnableAutoHibernate",
                 "fuchsia.storage.ufs.LinkIdleAhitMultiplier",
                 "fuchsia.usb.dwc3.BypassPlatformExtension",
@@ -623,7 +624,6 @@
                 "fuchsia.hardware.audio.StreamConfigConnectorOutputService",
                 "fuchsia.hardware.ax88179.Service",
                 "fuchsia.hardware.backlight.Service",
-                "fuchsia.hardware.bluetooth.EmulatorService",
                 "fuchsia.hardware.bluetooth.Service",
                 "fuchsia.hardware.camera.Service",
                 "fuchsia.hardware.clock.measure.Service",

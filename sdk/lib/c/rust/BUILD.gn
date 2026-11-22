@@ -47,7 +47,7 @@ if (is_fuchsia) {
       "//sdk/lib/c/test/sanitizer:*",
       "//src/bringup/*",
       "//src/lib/fuchsia-runtime:*",
-      "//src/performance/*",
+      "//src/memory/*",
       "//src/starnix/kernel/core:*",
     ]
     deps = [ "//sdk/rust/zx" ]

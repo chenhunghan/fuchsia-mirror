@@ -3,23 +3,18 @@
 // found in the LICENSE file.
 
 use anyhow::{Context as _, Error, format_err};
+use bt_repl::{CommandSet, Commands, ReplControl, ReplHandler};
 use fidl::endpoints::create_endpoints;
 use fidl_fuchsia_bluetooth_avdtp_test::*;
-use fuchsia_async as fasync;
 use fuchsia_sync::RwLock;
-use futures::channel::mpsc::{SendError, channel};
-use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, TryStreamExt, try_join};
+use futures::{FutureExt, TryStreamExt, select};
 use log::info;
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
-use rustyline::{CompletionType, Config, EditMode, Editor};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::pin::pin;
 use std::sync::Arc;
-use std::thread;
 
-use crate::commands::{Cmd, CmdHelper, ReplControl};
+use crate::commands::Cmd;
 use crate::types::{CLEAR_LINE, PROMPT, PeerFactoryMap};
 
 mod commands;
@@ -207,144 +202,49 @@ fn get_controller_from_args<'a>(
     peer_map: Arc<RwLock<PeerFactoryMap>>,
 ) -> Result<PeerControllerProxy, Error> {
     if args.len() < 1 {
-        return Err(format_err!("usage: {}", cmd.cmd_help()));
+        return Err(format_err!("usage: {}", cmd.usage()));
     }
 
     // Handle the case where user wants to understand command usage.
     if args[0] == "help" {
-        return Err(format_err!("{}", cmd.cmd_help()));
+        return Err(format_err!("{}", cmd.usage()));
     }
 
     let id = args[0];
     match peer_map.write().entry(id.to_string()) {
         Entry::Occupied(entry) => Ok(entry.get().clone()),
-        Entry::Vacant(_) => {
-            Err(format_err!("No peer with id: {:?}.\n Usage: {}", id, cmd.cmd_help()))
-        }
+        Entry::Vacant(_) => Err(format_err!("No peer with id: {:?}.\n Usage: {}", id, cmd.usage())),
     }
 }
 
-fn handle_help<'a>(args: &'a [&'a str]) -> Result<String, Error> {
-    if args.len() == 0 {
-        Ok(Cmd::help_msg().to_string())
-    } else {
-        match args[0].parse::<Cmd>() {
-            Err(_) => Err(format_err!("Unsupported command: {}", args[0])),
-            Ok(cmd) => Ok(cmd.cmd_help().to_string()),
-        }
-    }
-}
-
-/// Handle a single raw input command from a user and indicate whether the command should
-/// result in continuation or breaking of the read evaluate print loop.
-async fn handle_cmd<'a>(
+/// Handles the commands entered into the bt-avdtp-tool REPL.
+struct AvdtpHandler {
     peer_map: Arc<RwLock<PeerFactoryMap>>,
-    line: String,
-) -> Result<ReplControl, Error> {
-    let components: Vec<_> = line.trim().split_whitespace().collect();
-    if components.is_empty() {
-        return Ok(ReplControl::Continue);
-    }
-    let (raw_cmd, args) = components.split_first().expect("not empty");
-    let cmd = raw_cmd.parse();
-
-    let res = match cmd {
-        Ok(Cmd::AbortStream) => abort_stream(args, peer_map).await,
-        Ok(Cmd::EstablishStream) => establish_stream(args, peer_map).await,
-        Ok(Cmd::ReleaseStream) => release_stream(args, peer_map).await,
-        Ok(Cmd::StartStream) => start_stream(args, peer_map).await,
-        Ok(Cmd::SetConfig) => set_configuration(args, peer_map).await,
-        Ok(Cmd::GetConfig) => get_configuration(args, peer_map).await,
-        Ok(Cmd::GetCapabilities) => get_capabilities(args, peer_map).await,
-        Ok(Cmd::GetAllCapabilities) => get_all_capabilities(args, peer_map).await,
-        Ok(Cmd::Reconfigure) => reconfigure(args, peer_map).await,
-        Ok(Cmd::Suspend) => suspend(args, peer_map).await,
-        Ok(Cmd::SuspendReconfigure) => suspend_reconfigure(args, peer_map).await,
-        Ok(Cmd::Help) => handle_help(args),
-        Ok(Cmd::Exit) | Ok(Cmd::Quit) => return Ok(ReplControl::Break),
-        Err(_) => {
-            info!("{} is not a valid command.", raw_cmd);
-            Ok(format!("\"{}\" is not a valid command", raw_cmd))
-        }
-    }?;
-    if res != "" {
-        println!("{}", res);
-    }
-    Ok(ReplControl::Continue)
 }
 
-/// Generates a rustyline `Editor` in a separate thread to manage user input. This input is returned
-/// as a `Stream` of lines entered by the user.
-///
-/// The thread exits and the `Stream` is exhausted when an error occurs on stdin or the user
-/// sends a ctrl-c or ctrl-d sequence.
-///
-/// Because rustyline shares control over output to the screen with other parts of the system, a
-/// `Sink` is passed to the caller to send acknowledgements that a command has been processed and
-/// that rustyline should handle the next line of input.
-fn cmd_stream() -> (impl Stream<Item = String>, impl Sink<(), Error = SendError>) {
-    // Editor thread and command processing thread must be synchronized so that output
-    // is printed in the correct order.
-    let (mut cmd_sender, cmd_receiver) = channel(512);
-    let (ack_sender, mut ack_receiver) = channel(512);
+impl ReplHandler for AvdtpHandler {
+    type Command = Cmd;
 
-    let _ = thread::spawn(move || -> Result<(), Error> {
-        let mut exec = fasync::LocalExecutorBuilder::new().build();
-
-        let fut = async {
-            let config = Config::builder()
-                .auto_add_history(true)
-                .history_ignore_space(true)
-                .completion_type(CompletionType::List)
-                .edit_mode(EditMode::Emacs)
-                .build();
-            let mut rl: Editor<CmdHelper, DefaultHistory> = Editor::with_config(config)?;
-            rl.set_helper(Some(CmdHelper::new()));
-            loop {
-                let readline = rl.readline(PROMPT);
-                match readline {
-                    Ok(line) => {
-                        cmd_sender.try_send(line)?;
-                    }
-                    Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => {
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        println!("Error: {:?}", e);
-                        return Err(e.into());
-                    }
-                }
-                // wait until processing thread is finished evaluating the last command
-                // before running the next loop in the repl
-                if ack_receiver.next().await.is_none() {
-                    return Ok(());
-                }
-            }
-        };
-        exec.run_singlethreaded(fut)
-    });
-    (cmd_receiver, ack_sender)
-}
-
-/// REPL execution
-async fn run_repl<'a>(peer_map: Arc<RwLock<PeerFactoryMap>>) -> Result<(), Error> {
-    // `cmd_stream` blocks on input in a separate thread and passes commands and acks back to
-    // the main thread via async channels.
-    let (mut commands, mut acks) = cmd_stream();
-    while let Some(cmd) = commands.next().await {
-        match handle_cmd(peer_map.clone(), cmd).await {
-            Ok(ReplControl::Continue) => {}
-            Ok(ReplControl::Break) => {
-                println!("\n");
-                break;
-            }
-            Err(e) => {
-                println!("Error handling command: {}", e);
-            }
+    async fn handle(&mut self, command: Cmd, args: &[&str]) -> Result<ReplControl, Error> {
+        let peer_map = self.peer_map.clone();
+        let res = match command {
+            Cmd::AbortStream => abort_stream(args, peer_map).await,
+            Cmd::EstablishStream => establish_stream(args, peer_map).await,
+            Cmd::ReleaseStream => release_stream(args, peer_map).await,
+            Cmd::StartStream => start_stream(args, peer_map).await,
+            Cmd::SetConfig => set_configuration(args, peer_map).await,
+            Cmd::GetConfig => get_configuration(args, peer_map).await,
+            Cmd::GetCapabilities => get_capabilities(args, peer_map).await,
+            Cmd::GetAllCapabilities => get_all_capabilities(args, peer_map).await,
+            Cmd::Reconfigure => reconfigure(args, peer_map).await,
+            Cmd::Suspend => suspend(args, peer_map).await,
+            Cmd::SuspendReconfigure => suspend_reconfigure(args, peer_map).await,
+        }?;
+        if !res.is_empty() {
+            println!("{}", res);
         }
-        acks.send(()).await?;
+        Ok(ReplControl::Continue)
     }
-    Ok(())
 }
 
 #[fuchsia::main]
@@ -359,12 +259,18 @@ async fn main() -> Result<(), Error> {
     let peer_map: Arc<RwLock<PeerFactoryMap>> = Arc::new(RwLock::new(HashMap::new()));
 
     let event_fut = peer_manager_listener(&avdtp_svc, evt_stream, peer_map.clone()).fuse();
-    let repl_fut = run_repl(peer_map.clone()).fuse();
+    let repl_fut =
+        bt_repl::run(PROMPT, Commands::<Cmd>::new(), AvdtpHandler { peer_map: peer_map.clone() })
+            .fuse();
 
-    let event_fut = pin!(event_fut);
-    let repl_fut = pin!(repl_fut);
+    let mut event_fut = pin!(event_fut);
+    let mut repl_fut = pin!(repl_fut);
 
-    try_join!(event_fut, repl_fut).map(|((), ())| ())
+    // Exit when either the REPL ends or the AVDTP Peer Manager closes.
+    select! {
+        result = event_fut => result.context("AVDTP Peer Manager event stream failed"),
+        result = repl_fut => result,
+    }
 }
 
 #[cfg(test)]
@@ -396,21 +302,11 @@ mod tests {
     }
 
     #[fuchsia::test]
-    /// Tests parsing the help command works as intended.
-    fn test_handle_help() {
-        let invalid_cmd = ["foobar"];
-        let res = handle_help(&invalid_cmd);
-        assert_eq!(
-            res.map_err(|e| format!("{:?}", e)),
-            Err("Unsupported command: foobar".to_string())
-        );
-
-        let generic_help = [];
-        let res = handle_help(&generic_help);
-        assert!(res.is_ok());
-
-        let cmd_help = ["set-configuration"];
-        let res = handle_help(&cmd_help);
-        assert!(res.is_ok());
+    /// Tests that a command for an unknown peer returns an error that includes the command usage.
+    async fn test_handler_reports_unknown_peer() {
+        let mut handler = AvdtpHandler { peer_map: Arc::new(RwLock::new(HashMap::new())) };
+        let error =
+            handler.handle(Cmd::StartStream, &["2"]).await.expect_err("peer 2 is not connected");
+        assert!(error.to_string().contains(&Cmd::StartStream.usage()));
     }
 }

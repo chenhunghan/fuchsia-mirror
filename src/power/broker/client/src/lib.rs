@@ -18,7 +18,6 @@ pub const BINARY_POWER_LEVELS: [fbroker::PowerLevel; 2] = [
 
 pub struct PowerElementContext {
     pub element_control: fbroker::ElementControlProxy,
-    pub lessor: fbroker::LessorProxy,
     assertive_dependency_token: Option<fbroker::DependencyToken>,
     name: String,
     initial_level: fbroker::PowerLevel,
@@ -139,7 +138,6 @@ impl<'a> PowerElementContextBuilder<'a> {
     }
 
     pub async fn build(self) -> Result<PowerElementContext> {
-        let (lessor, lessor_server_end) = create_proxy::<fbroker::LessorMarker>();
         let (element_control, element_control_server_end) =
             create_proxy::<fbroker::ElementControlMarker>();
         self.topology
@@ -148,7 +146,6 @@ impl<'a> PowerElementContextBuilder<'a> {
                 initial_current_level: Some(self.initial_current_level),
                 valid_levels: Some(self.valid_levels.to_vec()),
                 dependencies: Some(self.dependencies),
-                lessor_channel: Some(lessor_server_end),
                 element_control: Some(element_control_server_end),
                 element_runner: Some(self.element_runner_client),
                 ..Default::default()
@@ -174,7 +171,6 @@ impl<'a> PowerElementContextBuilder<'a> {
 
         Ok(PowerElementContext {
             element_control,
-            lessor,
             assertive_dependency_token,
             name: self.element_name.to_string(),
             initial_level: self.initial_current_level,
@@ -214,14 +210,11 @@ mod tests {
 
         let (element_control, _element_control_stream) =
             fidl::endpoints::create_proxy_and_stream::<fbroker::ElementControlMarker>();
-        let (lessor, _lessor_stream) =
-            fidl::endpoints::create_proxy_and_stream::<fbroker::LessorMarker>();
         let (element_runner_client, element_runner) =
             create_endpoints::<fbroker::ElementRunnerMarker>();
         drive_element_runner(element_runner_client, vec![1, 2]);
         let power_element = PowerElementContext {
             element_control,
-            lessor,
             assertive_dependency_token: Some(fbroker::DependencyToken::create()),
             name: "test_element".to_string(),
             initial_level: 0,
@@ -253,15 +246,12 @@ mod tests {
 
         let (element_control, _element_control_stream) =
             fidl::endpoints::create_proxy_and_stream::<fbroker::ElementControlMarker>();
-        let (lessor, _lessor_stream) =
-            fidl::endpoints::create_proxy_and_stream::<fbroker::LessorMarker>();
         let (element_runner_client, element_runner) =
             create_endpoints::<fbroker::ElementRunnerMarker>();
         drive_element_runner(element_runner_client, vec![3, 1, 1, 2, 2, initial_level]);
 
         let power_element = PowerElementContext {
             element_control,
-            lessor,
             assertive_dependency_token: Some(fbroker::DependencyToken::create()),
             name: "test_element".to_string(),
             initial_level,
@@ -296,15 +286,12 @@ mod tests {
 
         let (element_control, _element_control_stream) =
             fidl::endpoints::create_proxy_and_stream::<fbroker::ElementControlMarker>();
-        let (lessor, _lessor_stream) =
-            fidl::endpoints::create_proxy_and_stream::<fbroker::LessorMarker>();
         let (element_runner_client, element_runner) =
             create_endpoints::<fbroker::ElementRunnerMarker>();
         drive_element_runner(element_runner_client, vec![1, 4, 0, 3]);
 
         let power_element = PowerElementContext {
             element_control,
-            lessor,
             assertive_dependency_token: Some(fbroker::DependencyToken::create()),
             name: "test_element".to_string(),
             initial_level: 0,

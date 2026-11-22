@@ -33,8 +33,8 @@ use derivative::Derivative;
 use lock_order::lock::{OrderedLockAccess, OrderedLockRef};
 use log::{debug, error};
 use net_types::ip::{
-    GenericOverIp, Ip, IpAddr, IpAddress, IpVersion, IpVersionMarker, Ipv4, Ipv4Addr, Ipv6,
-    Ipv6Addr,
+    GenericOverIp, Ip, IpAddr, IpAddress, IpMtu as _, IpVersion, IpVersionMarker, Ipv4, Ipv4Addr,
+    Ipv6, Ipv6Addr,
 };
 use net_types::{
     AddrAndPortFormatter, AddrAndZone, MulticastAddress as _, SpecifiedAddr, ZonedAddr,
@@ -57,7 +57,7 @@ use netstack3_base::{
     EitherDeviceId, ExistsError, HandleableTimer, IcmpErrorCode, Inspector, InspectorDeviceExt,
     InspectorExt, InstantBindingsTypes, InstantContext, IpDeviceAddr, IpExt,
     IpSocketPropertiesMatcher, LocalAddressError, Mark, MarkDomain, Marks, MatcherBindingsTypes,
-    Mss, OwnedOrRefsBidirectionalConverter, PortAllocImpl, ReferenceNotifiers,
+    Mss, OwnedOrRefsBidirectionalConverter, Payload, PortAllocImpl, ReferenceNotifiers,
     ReferenceNotifiersExt as _, RemoveResourceResultWithContext, ResourceCounterContext as _,
     RngContext, Segment, SeqNum, SettingsContext, SocketDiagnosticsSeed, StrongDeviceIdentifier,
     TimerBindingsTypes, TimerContext, TxMetadataBindingsTypes, WeakDeviceIdentifier,
@@ -67,11 +67,11 @@ use netstack3_filter::{FilterIpExt, SocketOpsFilterBindingContext, TransportTupl
 use netstack3_hashmap::{HashMap, hash_map};
 use netstack3_ip::socket::{
     DeviceIpSocketHandler, IpSock, IpSockCreateAndSendError, IpSockCreationError, IpSocketArgs,
-    IpSocketHandler,
+    IpSocketHandler, TransportGsoInfo,
 };
 use netstack3_ip::{
-    self as ip, BaseTransportIpContext, IpLayerIpExt, MarksBindingsContext, SocketMetadata,
-    TransportIpContext,
+    self as ip, BaseTransportIpContext, IpLayerIpExt, MarksBindingsContext, PmtuHandler,
+    SocketMetadata, TransportIpContext,
 };
 use netstack3_trace::{TraceResourceId, trace_duration};
 use packet_formats::ip::{DscpAndEcn, IpProto, Ipv4Proto, Ipv6Proto};
@@ -79,7 +79,7 @@ use smallvec::{SmallVec, smallvec};
 use thiserror::Error;
 
 use crate::internal::base::{
-    BufferSizes, BuffersRefMut, ConnectionError, SocketOptions, TcpIpSockOptions,
+    BufferSizes, BuffersRefMut, ConnectionError, IcmpErrorResult, SocketOptions, TcpIpSockOptions,
     TcpSocketTxMetadata,
 };
 use crate::internal::buffer::{Buffer, IntoBuffers, ReceiveBuffer, SendBuffer};
@@ -1786,17 +1786,40 @@ impl<SockI: DualStackIpExt, WireI: DualStackIpExt, D: WeakDeviceIdentifier, BT: 
     /// Updates this connection's state to reflect the error.
     ///
     /// The connection's soft error, if previously unoccupied, holds the error.
-    fn on_icmp_error<CC: TcpCounterContext<SockI, D, BT>>(
+    fn on_icmp_error<CC: TcpCounterContext<SockI, D, BT> + PmtuHandler<WireI, BT>>(
         &mut self,
         core_ctx: &mut CC,
+        bindings_ctx: &mut BT,
         id: &TcpSocketId<SockI, D, BT>,
         seq: SeqNum,
         error: IcmpErrorCode,
     ) -> (NewlyClosed, ShouldRetransmit) {
-        let Connection { soft_error, state, .. } = self;
+        let Some(result) = IcmpErrorResult::try_from_icmp_error(error) else {
+            return (NewlyClosed::No, ShouldRetransmit::No);
+        };
+        let pmtu_update = match result {
+            IcmpErrorResult::ConnectionError(_) => None,
+            IcmpErrorResult::PmtuUpdate { mtu, mms: _ } => Some(mtu),
+        };
+        let Connection { soft_error, state, ip_sock, .. } = self;
         let (new_soft_error, newly_closed, should_send) =
-            state.on_icmp_error(&TcpCountersRefs::from_ctx(core_ctx, id), error, seq);
+            state.on_icmp_error(&TcpCountersRefs::from_ctx(core_ctx, id), result, seq);
         *soft_error = soft_error.or(new_soft_error);
+        // Only update the PMTU cache once the connection has accepted the PMTU
+        // update and reduced its MSS.
+        match should_send {
+            ShouldRetransmit::No => {}
+            ShouldRetransmit::Yes => {
+                if let Some(mtu) = pmtu_update.and_then(WireI::Mtu::new) {
+                    let _: WireI::Mtu = core_ctx.update_pmtu_if_less(
+                        bindings_ctx,
+                        *ip_sock.local_ip(),
+                        *ip_sock.remote_ip(),
+                        mtu,
+                    );
+                }
+            }
+        }
         (newly_closed, should_send)
     }
 }
@@ -3384,6 +3407,7 @@ where
                                 addr.ip,
                                 ack.into_empty(),
                                 &socket_options.ip_options,
+                                None,
                             )
                         }
                     }
@@ -3399,6 +3423,7 @@ where
                                         addr.ip,
                                         ack.into_empty(),
                                         &socket_options.ip_options,
+                                        None,
                                     )
                                 }
                             }
@@ -3412,6 +3437,7 @@ where
                                         addr.ip,
                                         ack.into_empty(),
                                         &socket_options.ip_options,
+                                        None,
                                     )
                                 }
                             }
@@ -4136,7 +4162,8 @@ where
             ) = match core_ctx {
                 MaybeDualStack::NotDualStack((core_ctx, converter)) => {
                     let (conn, addr) = converter.convert(conn_and_addr);
-                    let (newly_closed, should_send) = conn.on_icmp_error(core_ctx, &id, seq, error);
+                    let (newly_closed, should_send) =
+                        conn.on_icmp_error(core_ctx, bindings_ctx, &id, seq, error);
                     let core_ctx = core_ctx.as_this_stack();
                     let demux_id = I::into_demux_socket_id(id.clone());
 
@@ -4168,7 +4195,7 @@ where
                     match converter.convert(conn_and_addr) {
                         EitherStack::ThisStack((conn, addr)) => {
                             let (newly_closed, should_send) =
-                                conn.on_icmp_error(core_ctx, &id, seq, error);
+                                conn.on_icmp_error(core_ctx, bindings_ctx, &id, seq, error);
                             let core_ctx = core_ctx.as_this_stack();
                             let demux_id = I::into_demux_socket_id(id.clone());
 
@@ -4200,7 +4227,7 @@ where
                         }
                         EitherStack::OtherStack((conn, addr)) => {
                             let (newly_closed, should_send) =
-                                conn.on_icmp_error(core_ctx, &id, seq, error);
+                                conn.on_icmp_error(core_ctx, bindings_ctx, &id, seq, error);
                             let demux_id = core_ctx.into_other_demux_socket_id(id.clone());
 
                             match should_send {
@@ -4283,6 +4310,7 @@ where
 
     fn on_icmp_error(
         &mut self,
+        device: <C::CoreContext as DeviceIdContext<AnyDevice>>::WeakDeviceId,
         orig_src_ip: SpecifiedAddr<I::Addr>,
         orig_dst_ip: SpecifiedAddr<I::Addr>,
         orig_src_port: NonZeroU16,
@@ -4314,14 +4342,11 @@ where
 
         let id = TcpDemuxContext::<I, _, _>::with_demux(core_ctx, |DemuxState { socketmap }| {
             socketmap
-                .conns()
-                .get_by_addr(&ConnAddr {
-                    ip: ConnIpAddr {
-                        local: (orig_src_ip, orig_src_port),
-                        remote: (orig_dst_ip, orig_dst_port),
-                    },
-                    device: None,
-                })
+                .lookup_connected(
+                    (orig_dst_ip, orig_dst_port),
+                    (orig_src_ip, orig_src_port),
+                    device,
+                )
                 .map(|ConnAddrState { sharing: _, id }| id.clone())
         });
 
@@ -4957,6 +4982,7 @@ fn abort_socket<WireI, SockI, DC, BC>(
             *ip,
             reset.into_empty(),
             &socket_options.ip_options,
+            None,
         );
     }
 }
@@ -5029,19 +5055,26 @@ where
     BC: TcpBindingsContext<CC::DeviceId>,
     CC: TransportIpContext<WireI, BC> + TcpSocketContext<SockI, CC::WeakDeviceId, BC>,
 {
+    let gso = match limit {
+        DoSendLimit::OneSegment => Gso::Disabled,
+        DoSendLimit::MultipleSegments => {
+            if SettingsContext::<TcpSettings>::settings(bindings_ctx).gso_enabled {
+                Gso::Enabled
+            } else {
+                Gso::Disabled
+            }
+        }
+    };
     let newly_closed = loop {
         match conn.state.poll_send(
             &conn_id.either(),
             &TcpCountersRefs::from_ctx(core_ctx, conn_id),
             bindings_ctx.now(),
             socket_options,
-            // TODO(https://fxbug.dev/565891068): Enable GSO when configured.
-            Gso::Disabled,
+            gso,
         ) {
-            Ok(TxSegment { segment, gso_size }) => {
-                // TODO(https://fxbug.dev/565891068): Remove this assertion once
-                // GSO is wired up in the socket layer.
-                assert_eq!(gso_size, None);
+            Ok(tx_segment) => {
+                let (segment, gso_info) = tx_segment.into_segment_and_gso_info();
                 send_tcp_segment(
                     core_ctx,
                     bindings_ctx,
@@ -5050,6 +5083,7 @@ where
                     addr.ip.clone(),
                     segment,
                     &socket_options.ip_options,
+                    gso_info,
                 );
                 match limit {
                     DoSendLimit::OneSegment => break NewlyClosed::No,
@@ -5633,6 +5667,7 @@ where
             conn_addr.ip,
             syn.into_empty(),
             &socket_options.ip_options,
+            None,
         );
 
         let mut timer = bindings_ctx.new_timer(convert_timer(sock_id.downgrade()));
@@ -5753,13 +5788,40 @@ where
     }
 }
 
+impl<P: Payload> TxSegment<P> {
+    /// Splits this [`TxSegment`] into its segment and the GSO metadata to send
+    /// it with, if any.
+    ///
+    /// GSO metadata is only returned when the payload exceeds `gso_size` (and
+    /// therefore splits into at least 2 segments). The state machine bounds
+    /// the payload by `TCP_GSO_MAX_PAYLOAD`, so the segment count fits in a
+    /// `NonZeroU16`.
+    fn into_segment_and_gso_info(self) -> (Segment<P>, Option<TransportGsoInfo>) {
+        let Self { segment, gso_size } = self;
+        let len = segment.data().len();
+        let gso_info =
+            gso_size.filter(|gso_size| len > usize::from(gso_size.get())).map(|gso_size| {
+                let gso_segs = u16::try_from(len.div_ceil(usize::from(gso_size.get())))
+                    .ok()
+                    .and_then(NonZeroU16::new)
+                    .expect("GSO segment count must be in [2, u16::MAX]");
+                TransportGsoInfo { gso_size, gso_segs }
+            });
+        (segment, gso_info)
+    }
+}
+
 /// Send the given TCP Segment.
 ///
 /// A centralized send path for TCP segments that increments counters and logs
 /// errors.
 ///
 /// When `ip_sock` is some, it is used to send the segment, otherwise, one is
-/// constructed on demand to send a oneshot segment.
+/// constructed on demand to send a oneshot segment (`gso_info` must be `None`).
+///
+/// When `gso_info` is `Some`, the IP layer splits the segment into
+/// `gso_info.gso_segs` segments on egress (see
+/// [`TxSegment::into_segment_and_gso_info`]).
 fn send_tcp_segment<'a, WireI, SockI, CC, BC, D>(
     core_ctx: &mut CC,
     bindings_ctx: &mut BC,
@@ -5768,6 +5830,7 @@ fn send_tcp_segment<'a, WireI, SockI, CC, BC, D>(
     conn_addr: ConnIpAddr<WireI::Addr, NonZeroU16, NonZeroU16>,
     segment: Segment<<BC::SendBuffer as SendBuffer>::Payload<'a>>,
     ip_sock_options: &TcpIpSockOptions,
+    gso_info: Option<TransportGsoInfo>,
 ) where
     WireI: IpExt + FilterIpExt,
     SockI: IpExt + DualStackIpExt,
@@ -5789,16 +5852,20 @@ fn send_tcp_segment<'a, WireI, SockI, CC, BC, D>(
 
     let (header, data) = segment.into_parts();
     let control = header.control;
+    let num_segments =
+        gso_info.map_or(1, |TransportGsoInfo { gso_size: _, gso_segs }| gso_segs.get());
     let result = match ip_sock {
         Some(ip_sock) => {
             let body = tcp_serialize_segment(&header, data, conn_addr);
-            // TODO(https://fxbug.dev/565891068): Support TCP GSO by providing
-            // GSO metadata when segment offloading is enabled for the socket.
             core_ctx
-                .send_ip_packet(bindings_ctx, ip_sock, body, None, ip_sock_options, tx_metadata)
+                .send_ip_packet(bindings_ctx, ip_sock, body, gso_info, ip_sock_options, tx_metadata)
                 .map_err(|err| IpSockCreateAndSendError::Send(err))
         }
         None => {
+            // The only segments sent without an IP socket are RSTs in reply to
+            // segments that match no socket, which carry no payload.
+            // `send_oneshot_ip_packet` doesn't accept GSO metadata.
+            debug_assert_eq!(gso_info, None);
             let ConnIpAddr { local: (local_ip, _), remote: (remote_ip, _) } = conn_addr;
             core_ctx.send_oneshot_ip_packet(
                 bindings_ctx,
@@ -5816,9 +5883,12 @@ fn send_tcp_segment<'a, WireI, SockI, CC, BC, D>(
     };
     match result {
         Ok(()) => {
-            counters::increment_counter_with_optional_socket_id(core_ctx, socket_id, |counters| {
-                &counters.segments_sent
-            });
+            counters::add_counter_with_optional_socket_id(
+                core_ctx,
+                socket_id,
+                num_segments.into(),
+                |counters| &counters.segments_sent,
+            );
             if let Some(control) = control {
                 counters::increment_counter_with_optional_socket_id(
                     core_ctx,
@@ -5832,9 +5902,12 @@ fn send_tcp_segment<'a, WireI, SockI, CC, BC, D>(
             }
         }
         Err(err) => {
-            counters::increment_counter_with_optional_socket_id(core_ctx, socket_id, |counters| {
-                &counters.segment_send_errors
-            });
+            counters::add_counter_with_optional_socket_id(
+                core_ctx,
+                socket_id,
+                num_segments.into(),
+                |counters| &counters.segment_send_errors,
+            );
             match socket_id {
                 Some(socket_id) => debug!("{:?}: failed to send segment: {:?}", socket_id, err),
                 None => debug!("TCP: failed to send segment: {:?}", err),
@@ -5878,17 +5951,18 @@ mod tests {
     use net_types::{LinkLocalAddr, Witness};
     use netstack3_base::sync::DynDebugReferences;
     use netstack3_base::testutil::{
-        AlwaysDefaultsSettingsContext, FakeAtomicInstant, FakeCoreCtx, FakeCryptoRng, FakeDeviceId,
-        FakeInstant, FakeNetwork, FakeNetworkSpec, FakeStrongDeviceId, FakeTimerCtx, FakeTimerId,
-        FakeTxMetadata, FakeWeakDeviceId, InstantAndData, MultipleDevicesId, PendingFrameData,
-        StepResult, TestIpExt, WithFakeFrameContext, WithFakeTimerContext, new_rng,
-        run_with_many_seeds, set_logger_for_test,
+        FakeAtomicInstant, FakeCoreCtx, FakeCryptoRng, FakeDeviceId, FakeInstant, FakeNetwork,
+        FakeNetworkSpec, FakeStrongDeviceId, FakeTimerCtx, FakeTimerId, FakeTxMetadata,
+        FakeWeakDeviceId, InstantAndData, MultipleDevicesId, PendingFrameData, StepResult,
+        TestIpExt, WithFakeFrameContext, WithFakeTimerContext, new_rng, run_with_many_seeds,
+        set_logger_for_test,
     };
     use netstack3_base::{
-        ContextProvider, CounterCollection, CounterContext, IcmpIpExt, Icmpv4ErrorCode,
-        Icmpv6ErrorCode, Instant as _, InstantContext, LinkDevice, Mark, MarkDomain,
-        MatcherBindingsTypes, Mms, NetworkSerializationContext, ReferenceNotifiers,
-        ResourceCounterContext, StrongDeviceIdentifier, Uninstantiable, UninstantiableWrapper,
+        ContextProvider, CounterCollection, CounterContext, EffectiveMss, IcmpIpExt,
+        Icmpv4ErrorCode, Icmpv6ErrorCode, Instant as _, InstantContext, LinkDevice, Mark,
+        MarkDomain, MatcherBindingsTypes, Mms, MssSizeLimiters, NetworkSerializationContext,
+        ReferenceNotifiers, ResourceCounterContext, StrongDeviceIdentifier, Uninstantiable,
+        UninstantiableWrapper,
     };
     use netstack3_filter::testutil::NoOpSocketOpsFilter;
     use netstack3_filter::{SocketOpsFilter, TransportPacketSerializer, Tuple};
@@ -5902,7 +5976,7 @@ mod tests {
     use netstack3_ip::testutil::DualStackSendIpPacketMeta;
     use netstack3_ip::{
         BaseTransportIpContext, HopLimits, IpTransportContext, LocalDeliveryPacketInfo,
-        MaybeSegmentableTransportSerializer,
+        MaybeSegmentableTransportSerializer, PmtuDstAddr, PmtuSrcAddr,
     };
     use packet::{Buf, BufferMut, NestablePacketBuilder as _, ParseBuffer as _, Serializer as _};
     use packet_formats::icmp::{
@@ -6009,6 +6083,7 @@ mod tests {
         ip_socket_ctx: InnerCoreCtx<D>,
         // Marks to attach for incoming packets.
         recv_packet_marks: netstack3_base::Marks,
+        sent_gso_info: Vec<Option<TransportGsoInfo>>,
     }
 
     impl<D: FakeStrongDeviceId, BT: TcpBindingsTypes> ContextProvider for TcpCoreCtx<D, BT> {
@@ -6134,6 +6209,7 @@ mod tests {
     pub(crate) struct TcpBindingsCtx<D: FakeStrongDeviceId> {
         rng: FakeCryptoRng,
         timers: FakeTimerCtx<TcpTimerId<D::Weak, Self>>,
+        settings: TcpSettings,
     }
 
     type Mutex<T> = netstack3_base::sync::Mutex<T, netstack3_base::sync::lock_impl::RawMutex>;
@@ -6279,7 +6355,11 @@ mod tests {
         }
     }
 
-    impl<D: FakeStrongDeviceId> AlwaysDefaultsSettingsContext for TcpBindingsCtx<D> {}
+    impl<D: FakeStrongDeviceId> SettingsContext<TcpSettings> for TcpBindingsCtx<D> {
+        fn settings(&self) -> impl Deref<Target = TcpSettings> + '_ {
+            &self.settings
+        }
+    }
 
     impl<D: FakeStrongDeviceId> TcpSocketDestructionContext for TcpBindingsCtx<D> {
         fn defer_tcp_socket_destruction<I, S>(
@@ -6381,6 +6461,7 @@ mod tests {
             S::Buffer: BufferMut,
             O: SendOptions<I> + RouteResolutionOptions<I>,
         {
+            self.sent_gso_info.push(gso_info);
             self.ip_socket_ctx.send_ip_packet(
                 bindings_ctx,
                 socket,
@@ -6400,6 +6481,24 @@ mod tests {
             O: RouteResolutionOptions<I>,
         {
             self.ip_socket_ctx.confirm_reachable(bindings_ctx, socket, options)
+        }
+    }
+
+    impl<I: Ip, D: FakeStrongDeviceId, BC: TcpBindingsTypes> PmtuHandler<I, BC> for TcpCoreCtx<D, BC> {
+        fn update_pmtu_if_less(
+            &mut self,
+            bindings_ctx: &mut BC,
+            src_ip: PmtuSrcAddr<I::Addr>,
+            dst_ip: PmtuDstAddr<I::Addr>,
+            new_mtu: I::Mtu,
+        ) -> I::Mtu {
+            PmtuHandler::<I, BC>::update_pmtu_if_less(
+                &mut self.ip_socket_ctx,
+                bindings_ctx,
+                src_ip,
+                dst_ip,
+                new_mtu,
+            )
         }
     }
 
@@ -6690,6 +6789,7 @@ mod tests {
                 tcp: Default::default(),
                 ip_socket_ctx: FakeCoreCtx::with_state(state),
                 recv_packet_marks: Default::default(),
+                sent_gso_info: Default::default(),
             }
         }
     }
@@ -9043,28 +9143,28 @@ mod tests {
         );
     }
 
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestNetworkUnreachable, IcmpDestUnreachable::default()) => ConnectionError::NetworkUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestHostUnreachable, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestProtocolUnreachable, IcmpDestUnreachable::default()) => ConnectionError::ProtocolUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestPortUnreachable, IcmpDestUnreachable::default()) => ConnectionError::PortUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::SourceRouteFailed, IcmpDestUnreachable::default()) => ConnectionError::SourceRouteFailed)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestNetworkUnknown, IcmpDestUnreachable::default()) => ConnectionError::NetworkUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestHostUnknown, IcmpDestUnreachable::default()) => ConnectionError::DestinationHostDown)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::SourceHostIsolated, IcmpDestUnreachable::default()) => ConnectionError::SourceHostIsolated)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::NetworkAdministrativelyProhibited, IcmpDestUnreachable::default()) => ConnectionError::NetworkUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::HostAdministrativelyProhibited, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::NetworkUnreachableForToS, IcmpDestUnreachable::default()) => ConnectionError::NetworkUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::HostUnreachableForToS, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::CommAdministrativelyProhibited, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::HostPrecedenceViolation, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::PrecedenceCutoffInEffect, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestNetworkUnreachable, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::NetworkUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestHostUnreachable, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestProtocolUnreachable, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::ProtocolUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestPortUnreachable, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::PortUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::SourceRouteFailed, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::SourceRouteFailed)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestNetworkUnknown, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::NetworkUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestHostUnknown, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::DestinationHostDown)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::SourceHostIsolated, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::SourceHostIsolated)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::NetworkAdministrativelyProhibited, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::NetworkUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::HostAdministrativelyProhibited, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::NetworkUnreachableForToS, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::NetworkUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::HostUnreachableForToS, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::CommAdministrativelyProhibited, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::HostPrecedenceViolation, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::PrecedenceCutoffInEffect, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
     #[test_case(Icmpv4ErrorCode::ParameterProblem(Icmpv4ParameterProblemCode::PointerIndicatesError) => ConnectionError::ProtocolError)]
     #[test_case(Icmpv4ErrorCode::ParameterProblem(Icmpv4ParameterProblemCode::MissingRequiredOption) => ConnectionError::ProtocolError)]
     #[test_case(Icmpv4ErrorCode::ParameterProblem(Icmpv4ParameterProblemCode::BadLength) => ConnectionError::ProtocolError)]
     #[test_case(Icmpv4ErrorCode::TimeExceeded(Icmpv4TimeExceededCode::TtlExpired) => ConnectionError::HostUnreachable)]
     #[test_case(Icmpv4ErrorCode::TimeExceeded(Icmpv4TimeExceededCode::FragmentReassemblyTimeExceeded) => ConnectionError::TimedOut)]
     fn icmp_destination_unreachable_connect_v4(error: Icmpv4ErrorCode) -> ConnectionError {
-        icmp_destination_unreachable_connect_inner::<Ipv4>(error)
+        icmp_destination_unreachable_connect_inner::<Ipv4>(error, false)
     }
 
     #[test_case(Icmpv6ErrorCode::DestUnreachable(Icmpv6DestUnreachableCode::NoRoute) => ConnectionError::NetworkUnreachable)]
@@ -9080,11 +9180,12 @@ mod tests {
     #[test_case(Icmpv6ErrorCode::TimeExceeded(Icmpv6TimeExceededCode::HopLimitExceeded) => ConnectionError::HostUnreachable)]
     #[test_case(Icmpv6ErrorCode::TimeExceeded(Icmpv6TimeExceededCode::FragmentReassemblyTimeExceeded) => ConnectionError::HostUnreachable)]
     fn icmp_destination_unreachable_connect_v6(error: Icmpv6ErrorCode) -> ConnectionError {
-        icmp_destination_unreachable_connect_inner::<Ipv6>(error)
+        icmp_destination_unreachable_connect_inner::<Ipv6>(error, false)
     }
 
     fn icmp_destination_unreachable_connect_inner<I: TcpTestIpExt + IcmpIpExt>(
         icmp_error: I::ErrorCode,
+        bind_to_device: bool,
     ) -> ConnectionError
     where
         TcpCoreCtx<FakeDeviceId, TcpBindingsCtx<FakeDeviceId>>: TcpContext<I, TcpBindingsCtx<FakeDeviceId>>
@@ -9097,6 +9198,9 @@ mod tests {
         let mut api = ctx.tcp_api::<I>();
 
         let connection = api.create(Default::default());
+        if bind_to_device {
+            api.set_device(&connection, Some(FakeDeviceId)).expect("failed to set device");
+        }
         api.connect(&connection, Some(ZonedAddr::Unzoned(I::TEST_ADDRS.remote_ip)), PORT_1)
             .expect("failed to create a connection socket");
 
@@ -9122,21 +9226,43 @@ mod tests {
         assert_matches!(err, ConnectError::ConnectionError(e) => e)
     }
 
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestNetworkUnreachable, IcmpDestUnreachable::default()) => ConnectionError::NetworkUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestHostUnreachable, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestProtocolUnreachable, IcmpDestUnreachable::default()) => ConnectionError::ProtocolUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestPortUnreachable, IcmpDestUnreachable::default()) => ConnectionError::PortUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::SourceRouteFailed, IcmpDestUnreachable::default()) => ConnectionError::SourceRouteFailed)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestNetworkUnknown, IcmpDestUnreachable::default()) => ConnectionError::NetworkUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::DestHostUnknown, IcmpDestUnreachable::default()) => ConnectionError::DestinationHostDown)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::SourceHostIsolated, IcmpDestUnreachable::default()) => ConnectionError::SourceHostIsolated)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::NetworkAdministrativelyProhibited, IcmpDestUnreachable::default()) => ConnectionError::NetworkUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::HostAdministrativelyProhibited, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::NetworkUnreachableForToS, IcmpDestUnreachable::default()) => ConnectionError::NetworkUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::HostUnreachableForToS, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::CommAdministrativelyProhibited, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::HostPrecedenceViolation, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
-    #[test_case(Icmpv4ErrorCode::DestUnreachable(Icmpv4DestUnreachableCode::PrecedenceCutoffInEffect, IcmpDestUnreachable::default()) => ConnectionError::HostUnreachable)]
+    #[test]
+    fn icmp_destination_unreachable_device_bound_connect_v4() {
+        let error = Icmpv4ErrorCode::DestUnreachable {
+            code: Icmpv4DestUnreachableCode::DestPortUnreachable,
+            message: IcmpDestUnreachable::default(),
+            original_packet_length: 0,
+        };
+        assert_eq!(
+            icmp_destination_unreachable_connect_inner::<Ipv4>(error, true),
+            ConnectionError::PortUnreachable
+        );
+    }
+
+    #[test]
+    fn icmp_destination_unreachable_device_bound_connect_v6() {
+        let error = Icmpv6ErrorCode::DestUnreachable(Icmpv6DestUnreachableCode::PortUnreachable);
+        assert_eq!(
+            icmp_destination_unreachable_connect_inner::<Ipv6>(error, true),
+            ConnectionError::PortUnreachable
+        );
+    }
+
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestNetworkUnreachable, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::NetworkUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestHostUnreachable, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestProtocolUnreachable, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::ProtocolUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestPortUnreachable, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::PortUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::SourceRouteFailed, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::SourceRouteFailed)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestNetworkUnknown, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::NetworkUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::DestHostUnknown, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::DestinationHostDown)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::SourceHostIsolated, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::SourceHostIsolated)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::NetworkAdministrativelyProhibited, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::NetworkUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::HostAdministrativelyProhibited, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::NetworkUnreachableForToS, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::NetworkUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::HostUnreachableForToS, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::CommAdministrativelyProhibited, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::HostPrecedenceViolation, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable { code: Icmpv4DestUnreachableCode::PrecedenceCutoffInEffect, message: IcmpDestUnreachable::default(), original_packet_length: 0 } => ConnectionError::HostUnreachable)]
     #[test_case(Icmpv4ErrorCode::ParameterProblem(Icmpv4ParameterProblemCode::PointerIndicatesError) => ConnectionError::ProtocolError)]
     #[test_case(Icmpv4ErrorCode::ParameterProblem(Icmpv4ParameterProblemCode::MissingRequiredOption) => ConnectionError::ProtocolError)]
     #[test_case(Icmpv4ErrorCode::ParameterProblem(Icmpv4ParameterProblemCode::BadLength) => ConnectionError::ProtocolError)]
@@ -9270,11 +9396,13 @@ mod tests {
         });
         let icmp_error = I::map_ip(
             (),
-            |()| {
-                Icmpv4ErrorCode::DestUnreachable(
-                    Icmpv4DestUnreachableCode::DestPortUnreachable,
-                    IcmpDestUnreachable::default(),
+            |()| Icmpv4ErrorCode::DestUnreachable {
+                code: Icmpv4DestUnreachableCode::DestPortUnreachable,
+                message: IcmpDestUnreachable::default(),
+                original_packet_length: u16::try_from(
+                    packet_formats::ipv4::HDR_PREFIX_LEN + original_body.len(),
                 )
+                .unwrap(),
             },
             |()| Icmpv6ErrorCode::DestUnreachable(Icmpv6DestUnreachableCode::PortUnreachable),
         );
@@ -10514,14 +10642,16 @@ mod tests {
     #[derive(PartialEq)]
     enum MssUpdate {
         Decrease,
-        DecreaseBelowMin,
+        DecreaseBelowMinMss,
+        DecreaseBelowMinIpMtu,
         Same,
         Increase,
     }
 
     #[ip_test(I)]
     #[test_case(MssUpdate::Decrease; "update if decrease")]
-    #[test_case(MssUpdate::DecreaseBelowMin; "update to min if decreased below min")]
+    #[test_case(MssUpdate::DecreaseBelowMinMss; "update to min if decreased below min")]
+    #[test_case(MssUpdate::DecreaseBelowMinIpMtu; "ignore if below min IP MTU")]
     #[test_case(MssUpdate::Same; "ignore if same")]
     #[test_case(MssUpdate::Increase; "ignore if increase")]
     fn pmtu_update_mss<I: TcpTestIpExt + IcmpIpExt>(mss_update: MssUpdate)
@@ -10559,40 +10689,82 @@ mod tests {
         let initial_mss = client.mss();
 
         // The minimum link MTU needed to support TCP connections.
-        let min_mtu = u32::from(Mss::MIN)
-            + I::IP_HEADER_LENGTH.get()
-            + packet_formats::tcp::HDR_PREFIX_LEN as u32;
+        let tcp_min_mtu = Mtu::new(
+            u32::from(Mss::MIN)
+                + I::IP_HEADER_LENGTH.get()
+                + packet_formats::tcp::HDR_PREFIX_LEN as u32,
+        );
+        let ip_min_mtu = I::MINIMUM_LINK_MTU.get();
 
         let pmtu_update = match mss_update {
-            MssUpdate::DecreaseBelowMin => Mtu::new(min_mtu - 1),
-            MssUpdate::Decrease => Mtu::new(min_mtu),
+            MssUpdate::DecreaseBelowMinMss => Mtu::new(tcp_min_mtu.get() - 1),
+            MssUpdate::DecreaseBelowMinIpMtu => Mtu::new(ip_min_mtu.get() - 1),
+            MssUpdate::Decrease => tcp_min_mtu.max(ip_min_mtu),
             MssUpdate::Same => LINK_MTU,
-            MssUpdate::Increase => Mtu::max(),
+            MssUpdate::Increase => Mtu::new(u32::from(u16::MAX)),
         };
-        let icmp_error = I::map_ip(
-            (),
-            |()| {
-                let mtu = u16::try_from(pmtu_update.get()).unwrap_or(u16::MAX);
-                let mtu = NonZeroU16::new(mtu).unwrap();
-                Icmpv4ErrorCode::DestUnreachable(
-                    Icmpv4DestUnreachableCode::FragmentationRequired,
-                    IcmpDestUnreachable::new_for_frag_req(mtu),
-                )
-            },
-            |()| Icmpv6ErrorCode::PacketTooBig(pmtu_update),
-        );
+        // Whether or not the `pmtu_update` constitutes a valid IP layer MTU.
+        let valid_pmtu = I::Mtu::new(pmtu_update);
+        if matches!(mss_update, MssUpdate::DecreaseBelowMinMss) {
+            match I::VERSION {
+                IpVersion::V4 => assert_matches!(valid_pmtu, Some(_)),
+                IpVersion::V6 => {
+                    assert_matches!(valid_pmtu, None);
+                    // NB: IPv6's minimum MTU is greater than TCP's minimum MSS.
+                    // This case is effectively a repeat of
+                    // `MssUpdate::DecreaseBelowMinIpMtu`.
+                    return;
+                }
+            }
+        }
+        let icmp_error = netstack3_ip::path_mtu::testutil::new_pmtu_error::<I>(pmtu_update);
+        let pmtu_src = PmtuSrcAddr::new(I::TEST_ADDRS.local_ip.get()).unwrap();
+        let pmtu_dst = PmtuDstAddr::try_from(I::TEST_ADDRS.remote_ip).unwrap();
 
         // Send a payload that is large enough that it will need to be re-segmented if
         // the PMTU decreases, and deliver a PMTU update.
         let ClientBuffers { send: client_snd_end, receive: _ } =
             client_buffers.0.as_ref().lock().take().unwrap();
-        let payload = vec![0xFF; min_mtu.try_into().unwrap()];
+        let payload = vec![0xFF; usize::from(initial_mss)];
         client_snd_end.lock().extend_from_slice(&payload);
         net.with_context(LOCAL, |ctx| {
             ctx.tcp_api().do_send(&client);
             let (core_ctx, bindings_ctx) = ctx.contexts();
             let frames = core_ctx.ip_socket_ctx.take_frames();
             let frame = assert_matches!(&frames[..], [(_meta, frame)] => frame);
+
+            // An error for a non-existent connection must not update the PMTU
+            // cache.
+            let mut wrong_port = frame[0..8].to_vec();
+            wrong_port[2..4].copy_from_slice(&PORT_2.get().to_be_bytes());
+            deliver_icmp_error::<I, _, _>(
+                core_ctx,
+                bindings_ctx,
+                I::TEST_ADDRS.local_ip,
+                I::TEST_ADDRS.remote_ip,
+                &wrong_port,
+                icmp_error,
+            );
+            assert_eq!(core_ctx.ip_socket_ctx.state.get_pmtu::<I>(pmtu_src, pmtu_dst), None);
+            assert_eq!(client.mss(), initial_mss);
+            assert!(core_ctx.ip_socket_ctx.frames().is_empty());
+
+            // An error whose sequence number does not correspond to an
+            // in-flight segment must not update the PMTU cache or MSS.
+            let mut out_of_window = frame[0..8].to_vec();
+            let seq = u32::from_be_bytes(out_of_window[4..8].try_into().unwrap());
+            out_of_window[4..8].copy_from_slice(&seq.wrapping_sub(1).to_be_bytes());
+            deliver_icmp_error::<I, _, _>(
+                core_ctx,
+                bindings_ctx,
+                I::TEST_ADDRS.local_ip,
+                I::TEST_ADDRS.remote_ip,
+                &out_of_window,
+                icmp_error,
+            );
+            assert_eq!(core_ctx.ip_socket_ctx.state.get_pmtu::<I>(pmtu_src, pmtu_dst), None);
+            assert_eq!(client.mss(), initial_mss);
+            assert!(core_ctx.ip_socket_ctx.frames().is_empty());
 
             deliver_icmp_error::<I, _, _>(
                 core_ctx,
@@ -10607,9 +10779,13 @@ mod tests {
         let requested_mms = Mms::from_mtu::<I>(pmtu_update, 0 /* no IP options */).unwrap();
         let requested_mss = Mss::from_mms(requested_mms);
         match mss_update {
-            MssUpdate::DecreaseBelowMin => {
+            MssUpdate::DecreaseBelowMinMss => {
                 // NB: The requested MSS is invalid.
                 assert_eq!(requested_mss, None);
+            }
+            MssUpdate::DecreaseBelowMinIpMtu => {
+                // NB: The requested MTU is invalid at the IP layer.
+                assert_eq!(valid_pmtu, None);
             }
             MssUpdate::Decrease => {
                 assert_matches!(requested_mss, Some(mss) if mss < initial_mss);
@@ -10622,12 +10798,22 @@ mod tests {
             }
         };
 
-        // The socket should only update its MSS if the new MSS is a decrease.
-        match mss_update {
-            MssUpdate::Decrease | MssUpdate::DecreaseBelowMin => {}
-            MssUpdate::Same | MssUpdate::Increase => {
+        // The socket should only update its MSS and the PMTU cache if the error
+        // reported a valid PMTU and the new MSS is a decrease.
+        let cached_pmtu = net.with_context(LOCAL, |ctx| {
+            ctx.core_ctx().ip_socket_ctx.state.get_pmtu::<I>(pmtu_src, pmtu_dst)
+        });
+        match (valid_pmtu, mss_update) {
+            (Some(_), MssUpdate::Decrease | MssUpdate::DecreaseBelowMinMss) => {
+                assert_eq!(cached_pmtu, valid_pmtu);
+            }
+            (None, _) | (Some(_), MssUpdate::Same | MssUpdate::Increase) => {
+                assert_eq!(cached_pmtu, None);
                 assert_eq!(client.mss(), initial_mss);
                 return;
+            }
+            (Some(_), MssUpdate::DecreaseBelowMinIpMtu) => {
+                unreachable!("DecreaseBelowMinIpMtu cannot have a valid_pmtu");
             }
         }
 
@@ -10812,5 +10998,141 @@ mod tests {
                 assert_eq!(accept_queue.pending_len(), 0);
             }
         );
+    }
+
+    #[ip_test(I)]
+    fn send_with_gso<I: TcpTestIpExt>()
+    where
+        TcpCoreCtx<FakeDeviceId, TcpBindingsCtx<FakeDeviceId>>: TcpContext<
+                I,
+                TcpBindingsCtx<FakeDeviceId>,
+                SingleStackConverter = I::SingleStackConverter,
+                DualStackConverter = I::DualStackConverter,
+            >,
+    {
+        set_logger_for_test();
+        let (mut net, client, client_snd_end, _accepted) = bind_listen_connect_accept_inner::<I>(
+            I::UNSPECIFIED_ADDRESS,
+            BindConfig {
+                client_port: None,
+                server_port: PORT_1,
+                client_reuse_addr: false,
+                send_test_data: false,
+            },
+            0,
+            0.0,
+        );
+
+        let mss = EffectiveMss::from_mss(
+            Mss::from_mms(Mms::from_mtu::<I>(LINK_MTU, 0).unwrap()).unwrap(),
+            MssSizeLimiters { timestamp_enabled: true },
+        );
+        let mss_usize = usize::from(mss.get());
+
+        // `bind_listen_connect_accept_inner` creates `net` internally, so enable
+        // GSO now and reset handshake tracking before sending payload data.
+        let (init_stack_sent, init_sock_sent, init_stack_fins, init_sock_fins) =
+            net.with_context(LOCAL, |ctx| {
+                ctx.bindings_ctx.settings.gso_enabled = true;
+                ctx.core_ctx.sent_gso_info.clear();
+                let stack = CounterContext::<TcpCountersWithSocket<I>>::counters(&ctx.core_ctx);
+                let sock = client.counters();
+                (
+                    stack.as_ref().segments_sent.get(),
+                    sock.as_ref().segments_sent.get(),
+                    stack.as_ref().fins_sent.get(),
+                    sock.as_ref().fins_sent.get(),
+                )
+            });
+
+        // Write `2 * MSS + 10` bytes with Nagle enabled (default): `do_send`
+        // emits a 2-segment GSO burst and holds back the 10-byte partial tail.
+        client_snd_end.lock().extend(vec![0xaa; 2 * mss_usize + 10]);
+        net.with_context(LOCAL, |ctx| {
+            ctx.tcp_api::<I>().do_send(&client);
+            assert_eq!(
+                ctx.core_ctx.sent_gso_info,
+                [Some(TransportGsoInfo {
+                    gso_size: NonZeroU16::new(mss.get()).unwrap(),
+                    gso_segs: NonZeroU16::new(2).unwrap(),
+                })]
+            );
+            let stack = CounterContext::<TcpCountersWithSocket<I>>::counters(&ctx.core_ctx);
+            let sock = client.counters();
+            assert_eq!(stack.as_ref().segments_sent.get(), init_stack_sent + 2);
+            assert_eq!(sock.as_ref().segments_sent.get(), init_sock_sent + 2);
+            assert_eq!(stack.as_ref().fins_sent.get(), init_stack_fins);
+            assert_eq!(sock.as_ref().fins_sent.get(), init_sock_fins);
+        });
+
+        // Deliver the burst and receive the peer's ACK, which flushes the
+        // held-back 10-byte partial tail as a single non-GSO segment.
+        net.run_until_idle();
+        net.with_context(LOCAL, |ctx| {
+            assert_eq!(
+                ctx.core_ctx.sent_gso_info,
+                [
+                    Some(TransportGsoInfo {
+                        gso_size: NonZeroU16::new(mss.get()).unwrap(),
+                        gso_segs: NonZeroU16::new(2).unwrap(),
+                    }),
+                    None,
+                ]
+            );
+            let stack = CounterContext::<TcpCountersWithSocket<I>>::counters(&ctx.core_ctx);
+            let sock = client.counters();
+            assert_eq!(stack.as_ref().segments_sent.get(), init_stack_sent + 3);
+            assert_eq!(sock.as_ref().segments_sent.get(), init_sock_sent + 3);
+        });
+
+        // Enqueue `2 * MSS + 10` bytes and shut down the send side: `FIN`
+        // allows the trailing 10-byte partial segment to go out immediately in
+        // a 3-segment GSO burst, counting 3 segments sent and 1 FIN sent.
+        client_snd_end.lock().extend(vec![0xbb; 2 * mss_usize + 10]);
+        net.with_context(LOCAL, |ctx| {
+            ctx.core_ctx.sent_gso_info.clear();
+            assert_eq!(ctx.tcp_api::<I>().shutdown(&client, ShutdownType::Send), Ok(true));
+            assert_eq!(
+                ctx.core_ctx.sent_gso_info,
+                [Some(TransportGsoInfo {
+                    gso_size: NonZeroU16::new(mss.get()).unwrap(),
+                    gso_segs: NonZeroU16::new(3).unwrap(),
+                })]
+            );
+            let stack = CounterContext::<TcpCountersWithSocket<I>>::counters(&ctx.core_ctx);
+            let sock = client.counters();
+            assert_eq!(stack.as_ref().segments_sent.get(), init_stack_sent + 6);
+            assert_eq!(sock.as_ref().segments_sent.get(), init_sock_sent + 6);
+            assert_eq!(stack.as_ref().fins_sent.get(), init_stack_fins + 1);
+            assert_eq!(sock.as_ref().fins_sent.get(), init_sock_fins + 1);
+        });
+    }
+
+    #[test_case(0 => None; "empty")]
+    #[test_case(100 => None; "single segment")]
+    #[test_case(101 => Some(2); "partial final segment")]
+    #[test_case(300 => Some(3); "full final segment")]
+    fn tx_segment_into_segment_and_gso_info(payload_len: usize) -> Option<u16> {
+        let gso_size = NonZeroU16::new(100).unwrap();
+        let payload = vec![0xaa; payload_len];
+        let (segment, discarded) = Segment::new(
+            netstack3_base::SegmentHeader {
+                seq: SeqNum::new(1),
+                ack: Some(SeqNum::new(1)),
+                wnd: netstack3_base::UnscaledWindowSize::from(u16::MAX),
+                control: None,
+                options: netstack3_base::Options::Segment(netstack3_base::SegmentOptions::default()),
+                push: false,
+            },
+            &payload[..],
+        );
+        assert_eq!(discarded, 0);
+        let (segment, gso_info) =
+            TxSegment { segment, gso_size: Some(gso_size) }.into_segment_and_gso_info();
+        assert_eq!(segment.data().len(), payload_len);
+        gso_info.map(|TransportGsoInfo { gso_size: info_gso_size, gso_segs }| {
+            assert_eq!(info_gso_size, gso_size);
+            gso_segs.get()
+        })
     }
 }

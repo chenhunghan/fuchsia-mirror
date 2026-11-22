@@ -2,23 +2,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import csv
 import importlib.resources
 import io
 import json
 import os
 import pathlib
 import re
-import statistics
+import shlex
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
-import unittest.mock
-from typing import Any, Callable, Dict, List, Tuple, Union
 
-import local_workflow
 import perfcompare
 
 # The following allows perfcompare_test.py to be run either:
@@ -35,12 +31,6 @@ except ModuleNotFoundError:
     RESOURCES_DIR = pathlib.Path(__file__).parent
 else:
     RESOURCES_DIR = importlib.resources.files(perfcompare_test_data)
-
-Behavior = Union[
-    str,
-    Callable[[List[str]], subprocess.CompletedProcess],
-    Exception,
-]
 
 
 # Test case helper class for creating temporary directories that will
@@ -663,6 +653,7 @@ class PerfCompareTest(TempDirTestCase):
         # software-under-test.
         interval_test = Interval(10, 20)
         interval_real = perfcompare.Stats([1, 2, 3], "some_unit").interval
+        assert interval_real is not None
         self.assertEqual(type(interval_test[0]), type(interval_real[0]))
         self.assertEqual(type(interval_test[1]), type(interval_real[1]))
 
@@ -828,15 +819,23 @@ class RunLocalTest(TempDirTestCase):
                 dest_dir,
             ]
 
+        write_empty_json_cmd = "echo '[]' > %s" % shlex.quote(iter_temp_file)
         perfcompare.Main(
-            get_args() + ["--iter_cmd", "true", "--reboot_cmd", "true"], stdout
+            get_args()
+            + ["--iter_cmd", write_empty_json_cmd, "--reboot_cmd", "true"],
+            stdout,
         )
         # Check that the failure of the "false" command gets caught.
         self.assertRaises(
             subprocess.CalledProcessError,
             lambda: perfcompare.Main(
                 get_args()
-                + ["--iter_cmd", "false; true", "--reboot_cmd", "true"],
+                + [
+                    "--iter_cmd",
+                    "false; " + write_empty_json_cmd,
+                    "--reboot_cmd",
+                    "true",
+                ],
                 stdout,
             ),
         )
@@ -844,445 +843,120 @@ class RunLocalTest(TempDirTestCase):
             subprocess.CalledProcessError,
             lambda: perfcompare.Main(
                 get_args()
-                + ["--iter_cmd", "true", "--reboot_cmd", "false; true"],
+                + [
+                    "--iter_cmd",
+                    write_empty_json_cmd,
+                    "--reboot_cmd",
+                    "false; true",
+                ],
                 stdout,
             ),
         )
 
+    # Check that "run_local" supports recursive "**" globs and deduplicates
+    # files reached through directory symlinks such as Lacewing's "latest"
+    # symlink.
+    def test_run_local_recursive_glob_and_symlink_dedup(self):
+        dest_dir = os.path.join(self.MakeTempDir(), "new_dir")
+        iter_temp_dir = self.MakeTempDir()
+        iter_temp_glob = os.path.join(iter_temp_dir, "**", "*.fuchsiaperf.json")
+        samples = [100, 110]
 
-class LocalWorkflowTest(TempDirTestCase):
-    def setUp(self):
-        super().setUp()
-        self.state_file = os.path.join(self.MakeTempDir(), "state.json")
-        state_data = {
-            "2026-04-09": {
-                "launched": {
-                    "builder1": {"build_id": "1001"},
-                }
-            },
-            "2026-04-10": {
-                "launched": {
-                    "builder1": {"build_id": "1002"},
-                    "builder2": {"build_id": "1003"},
-                }
-            },
-        }
-        with open(self.state_file, "w") as f:
-            json.dump(state_data, f)
-
-        # Patch the code for finding the "bb" and "cas" tools so that the
-        # test does not depend on the FUCHSIA_DIR env var being set and the
-        # tools being present.
-        self.enterContext(
-            unittest.mock.patch(
-                "local_workflow._find_bb_tool", lambda: "bb_for_testing"
-            )
-        )
-        self.enterContext(
-            unittest.mock.patch(
-                "local_workflow._find_cas_tool", lambda: "cas_for_testing"
-            )
-        )
-
-    @staticmethod
-    def _make_cas_download_fake(
-        content: str,
-    ) -> Callable[[List[str]], subprocess.CompletedProcess]:
-        def handler(cmd: List[str]) -> subprocess.CompletedProcess:
-            dir_index = cmd.index("-dir")
-            target_dir = cmd[dir_index + 1]
-            os.makedirs(target_dir, exist_ok=True)
-            with open(os.path.join(target_dir, "metrics.json"), "w") as f:
-                f.write(content)
-            return subprocess.CompletedProcess(cmd, 0, stdout="download ok")
-
-        return handler
-
-    @staticmethod
-    def _make_bb_cas_fake(
-        mapping: Dict[Tuple[str, ...], Behavior]
-    ) -> Callable[[List[str]], subprocess.CompletedProcess]:
-        def side_effect(
-            cmd: List[str], **kwargs: Any
-        ) -> subprocess.CompletedProcess:
-            for patterns, behavior in mapping.items():
-                if all(p in cmd for p in patterns):
-                    if callable(behavior):
-                        return behavior(cmd)
-                    elif isinstance(behavior, Exception):
-                        raise behavior
-                    elif isinstance(behavior, str):
-                        return subprocess.CompletedProcess(
-                            cmd, 0, stdout=behavior, stderr=""
-                        )
-                    else:
-                        raise ValueError(
-                            f"Unexpected behavior type: {type(behavior)}"
-                        )
-            raise RuntimeError(f"No match found for command: {cmd}")
-
-        return side_effect
-
-    def test_download_metrics(self):
-        # Use unittest.TestCase.subTest rather than third_party/parameterized
-        # so perfcompare_test.py remains runnable directly via python3 (e.g.
-        # with --generate to update golden files) without requiring non-stdlib
-        # packages to be installed or packaged via GN.
-        for build_id in ("1000", "b1000"):
-            with (
-                self.subTest(build_id=build_id),
-                unittest.mock.patch("subprocess.run") as mock_run,
-            ):
-                mock_run.side_effect = self._make_bb_cas_fake(
-                    {
-                        ("auth-info",): "auth ok",
-                        ("get", "-p"): json.dumps(
-                            {
-                                "output": {
-                                    "properties": {
-                                        "cas_instance": "chromium_swarm",
-                                        "perf_dataset_digest": "123abc/82",
-                                    }
-                                }
-                            }
-                        ),
-                        ("download",): self._make_cas_download_fake(
-                            '{"metric": 1.0}'
-                        ),
-                    }
+        def DummyRunCmd(cmd, shell=False):
+            self.assertEqual(shell, True)
+            if cmd == "set -o errexit -o nounset; my_iter_cmd":
+                testbed_dir = os.path.join(
+                    iter_temp_dir, "0", "GeneratedLocalTestbed"
                 )
-
-                out_dir = self.MakeTempDir()
-                stdout = io.StringIO()
-                perfcompare.Main(
-                    ["download_metrics", build_id, out_dir], stdout
+                timestamp_dir = os.path.join(testbed_dir, "11-11-2026_12-00-00")
+                case_dir = os.path.join(
+                    timestamp_dir, "test_fuchsia_component", "ffx_test_0"
                 )
-
-                expected_file = os.path.join(out_dir, "metrics.json")
-                self.assertTrue(os.path.exists(expected_file))
-                with open(expected_file) as f:
-                    self.assertEqual(f.read(), '{"metric": 1.0}')
-
-                output = stdout.getvalue()
-                self.assertIn("Fetching build info for 1000 using bb", output)
-                self.assertIn("Downloading from cas to", output)
-                bb_get_cmd = [
-                    call[0][0]
-                    for call in mock_run.call_args_list
-                    if "get" in call[0][0]
-                ][0]
-                self.assertEqual(bb_get_cmd[-1], "1000")
-
-    def test_normalize_build_id(self):
-        self.assertEqual(local_workflow._normalize_build_id("1000"), "1000")
-        self.assertEqual(local_workflow._normalize_build_id("b1000"), "1000")
-        self.assertEqual(local_workflow._normalize_build_id("B1000"), "1000")
-        self.assertEqual(local_workflow._normalize_build_id(" b1000 "), "1000")
-
-    @unittest.mock.patch("subprocess.run")
-    def test_download_metrics_perfcompare_digest(self, mock_run):
-        mock_run.side_effect = self._make_bb_cas_fake(
-            {
-                ("auth-info",): "auth ok",
-                ("get", "-p"): json.dumps(
-                    {
-                        "output": {
-                            "properties": {
-                                "cas_instance": "chromium_swarm",
-                                "perfcompare_dataset_digest": "123abc/82",
-                            }
+                os.makedirs(case_dir, exist_ok=True)
+                latest_link = os.path.join(testbed_dir, "latest")
+                if os.path.lexists(latest_link):
+                    os.unlink(latest_link)
+                os.symlink("11-11-2026_12-00-00", latest_link)
+                WriteJsonFile(
+                    os.path.join(case_dir, "results.fuchsiaperf.json"),
+                    [
+                        {
+                            "label": "MyTest",
+                            "test_suite": "example_suite",
+                            "unit": "nanoseconds",
+                            "values": [samples.pop(0)],
                         }
-                    }
-                ),
-                ("download",): self._make_cas_download_fake('{"metric": 1.0}'),
-            }
-        )
+                    ],
+                )
 
-        out_dir = self.MakeTempDir()
         stdout = io.StringIO()
-        perfcompare.Main(["download_metrics", "1000", out_dir], stdout)
-
-        expected_file = os.path.join(out_dir, "metrics.json")
-        self.assertTrue(os.path.exists(expected_file))
-        with open(expected_file) as f:
-            self.assertEqual(f.read(), '{"metric": 1.0}')
-
-        output = stdout.getvalue()
-        self.assertIn("Fetching build info for 1000 using bb", output)
-        self.assertIn("Downloading from cas to", output)
-
-    @unittest.mock.patch("subprocess.run")
-    def test_download_metrics_missing_properties(self, mock_run):
-        mock_run.side_effect = self._make_bb_cas_fake(
-            {
-                ("auth-info",): "auth ok",
-                ("get", "-p"): json.dumps(
-                    {
-                        "output": {
-                            "properties": {"cas_instance": "chromium_swarm"}
-                        }
-                    }
-                ),
-            }
+        perfcompare.Main(
+            [
+                "run_local",
+                "--boots=2",
+                "--iter_file",
+                iter_temp_glob,
+                "--iter_cmd",
+                "my_iter_cmd",
+                "--reboot_cmd",
+                "my_reboot_cmd",
+                "--dest",
+                dest_dir,
+            ],
+            stdout,
+            run_cmd=DummyRunCmd,
         )
-
-        with self.assertRaises(KeyError):
-            perfcompare.Main(
-                ["download_metrics", "1000", self.MakeTempDir()], io.StringIO()
+        for boot_name in ("boot000000", "boot000001"):
+            boot_dir = os.path.join(dest_dir, "by_boot", boot_name)
+            self.assertSequenceEqual(
+                os.listdir(boot_dir), ("results000000.fuchsiaperf.json",)
             )
-
-    @unittest.mock.patch("subprocess.run")
-    def test_download_metrics_bb_get_fails(self, mock_run):
-        mock_run.side_effect = self._make_bb_cas_fake(
-            {
-                ("auth-info",): "auth ok",
-                ("get", "-p"): subprocess.CalledProcessError(
-                    1, ["bb", "get"], stderr="bb error"
-                ),
-            }
-        )
-
-        with self.assertRaises(RuntimeError) as cm:
-            perfcompare.Main(
-                ["download_metrics", "1000", self.MakeTempDir()], io.StringIO()
+            self.assertFalse(
+                os.path.islink(
+                    os.path.join(boot_dir, "results000000.fuchsiaperf.json")
+                )
             )
-        self.assertIn("Download failed for build 1000", str(cm.exception))
+        self.assertIn("example_suite: MyTest", stdout.getvalue())
 
-    @unittest.mock.patch("subprocess.run")
-    def test_download_metrics_cas_download_fails(self, mock_run):
-        mock_run.side_effect = self._make_bb_cas_fake(
-            {
-                ("auth-info",): "auth ok",
-                ("get", "-p"): json.dumps(
-                    {
-                        "output": {
-                            "properties": {
-                                "cas_instance": "chromium_swarm",
-                                "perf_dataset_digest": "123abc/82",
-                            }
-                        }
-                    }
-                ),
-                ("download",): subprocess.CalledProcessError(
-                    1, ["cas", "download"], stderr="cas error"
-                ),
-            }
-        )
+    # "run_local" should fail on the first boot if --iter_cmd produces no
+    # files matching --iter_file rather than silently creating empty boot
+    # directories across all boots.
+    def test_error_if_no_iter_files_produced(self):
+        dest_dir = os.path.join(self.MakeTempDir(), "new_dir")
+        iter_temp_glob = os.path.join(self.MakeTempDir(), "*.fuchsiaperf.json")
+        commands = []
 
-        with self.assertRaises(RuntimeError) as cm:
+        def DummyRunCmd(cmd, shell=False):
+            self.assertEqual(shell, True)
+            commands.append(cmd)
+
+        with self.assertRaisesRegex(AssertionError, "No output files matched"):
             perfcompare.Main(
-                ["download_metrics", "1000", self.MakeTempDir()],
+                [
+                    "run_local",
+                    "--boots=4",
+                    "--iter_file",
+                    iter_temp_glob,
+                    "--iter_cmd",
+                    "my_iter_cmd",
+                    "--reboot_cmd",
+                    "my_reboot_cmd",
+                    "--dest",
+                    dest_dir,
+                ],
                 io.StringIO(),
+                run_cmd=DummyRunCmd,
             )
-        self.assertIn("Download failed for build 1000", str(cm.exception))
-
-    @unittest.mock.patch("subprocess.run")
-    def test_download_baseline_success(self, mock_run):
-        mock_run.side_effect = self._make_bb_cas_fake(
-            {
-                ("auth-info",): "auth ok",
-                # Order matters: check for specific 'get' with '-p' before general 'get'
-                ("get", "-p"): json.dumps(
-                    {
-                        "output": {
-                            "properties": {
-                                "cas_instance": "chromium_swarm",
-                                "perf_dataset_digest": "123abc/82",
-                            }
-                        }
-                    }
-                ),
-                ("get",): json.dumps({"status": "SUCCESS"}),
-                ("download",): self._make_cas_download_fake('{"metric": 1.0}'),
-            }
+        self.assertSequenceEqual(
+            commands,
+            (
+                "set -o errexit -o nounset; my_reboot_cmd",
+                "set -o errexit -o nounset; my_iter_cmd",
+            ),
         )
-
-        out_dir = self.MakeTempDir()
-        stdout = io.StringIO()
-
-        perfcompare.Main(
-            [
-                "download_baseline",
-                "--state_file",
-                self.state_file,
-                "builder2",
-                out_dir,
-            ],
-            stdout,
+        self.assertSequenceEqual(
+            os.listdir(os.path.join(dest_dir, "by_boot")), ()
         )
-
-        expected_file = os.path.join(out_dir, "metrics.json")
-        self.assertTrue(os.path.exists(expected_file))
-        with open(expected_file) as f:
-            self.assertEqual(f.read(), '{"metric": 1.0}')
-
-        output = stdout.getvalue()
-        self.assertIn("1003 (SUCCESS) - Triggering download", output)
-
-    @unittest.mock.patch("subprocess.run")
-    def test_download_baseline_fallback(self, mock_run):
-        mock_run.side_effect = self._make_bb_cas_fake(
-            {
-                ("auth-info",): "auth ok",
-                ("get", "1002"): json.dumps({"status": "FAILURE"}),
-                # Order matters: check for specific 'get' with '-p' before general 'get'
-                ("get", "1001", "-p"): json.dumps(
-                    {
-                        "output": {
-                            "properties": {
-                                "cas_instance": "chromium_swarm",
-                                "perf_dataset_digest": "123abc/82",
-                            }
-                        }
-                    }
-                ),
-                ("get", "1001"): json.dumps({"status": "SUCCESS"}),
-                ("download",): self._make_cas_download_fake('{"metric": 1.0}'),
-            }
-        )
-
-        out_dir = self.MakeTempDir()
-        stdout = io.StringIO()
-
-        perfcompare.Main(
-            [
-                "download_baseline",
-                "--state_file",
-                self.state_file,
-                "builder1",
-                out_dir,
-            ],
-            stdout,
-        )
-
-        expected_file = os.path.join(out_dir, "metrics.json")
-        self.assertTrue(os.path.exists(expected_file))
-        with open(expected_file) as f:
-            self.assertEqual(f.read(), '{"metric": 1.0}')
-
-        output = stdout.getvalue()
-        self.assertIn("1002 (FAILURE) - Skipping", output)
-        self.assertIn("1001 (SUCCESS) - Triggering download", output)
-
-    @unittest.mock.patch("subprocess.run")
-    def test_download_baseline_no_successful_build(self, mock_run):
-        mock_run.side_effect = self._make_bb_cas_fake(
-            {
-                ("auth-info",): "auth ok",
-                ("get",): json.dumps({"status": "FAILURE"}),
-            }
-        )
-
-        out_dir = self.MakeTempDir()
-        stdout = io.StringIO()
-
-        perfcompare.Main(
-            [
-                "download_baseline",
-                "--state_file",
-                self.state_file,
-                "builder1",
-                out_dir,
-            ],
-            stdout,
-        )
-
-        output = stdout.getvalue()
-        self.assertIn("1002 (FAILURE) - Skipping", output)
-        self.assertIn("1001 (FAILURE) - Skipping", output)
-        self.assertIn("No successful sample build IDs found", output)
-
-    def test_extract_metrics(self):
-        data_dir = self.MakeTempDir()
-        WriteJsonFile(
-            os.path.join(data_dir, "test.fuchsiaperf.json"),
-            [
-                {
-                    "test_suite": "fuchsia.test",
-                    "label": "metric1",
-                    "values": [10.5],
-                },
-                {
-                    "test_suite": "fuchsia.test",
-                    "label": "metric2",
-                    "values": [20.0],
-                },
-                {
-                    "test_suite": "other.suite",
-                    "label": "metric3",
-                    "values": [30.0],
-                },
-            ],
-        )
-
-        stdout = io.StringIO()
-        perfcompare.Main(["extract_metrics", "fuchsia", data_dir], stdout)
-
-        output = stdout.getvalue()
-        self.assertIn("fuchsia.test,metric1,10.5", output)
-        self.assertIn("fuchsia.test,metric2,20.0", output)
-        self.assertNotIn("other.suite", output)
-
-    def test_extract_metrics_aggregation(self):
-        data_dir = self.MakeTempDir()
-        WriteJsonFile(
-            os.path.join(data_dir, "test1.fuchsiaperf.json"),
-            [
-                {
-                    "test_suite": "fuchsia.test",
-                    "label": "metric1",
-                    "values": [10.5],
-                }
-            ],
-        )
-        WriteJsonFile(
-            os.path.join(data_dir, "test2.fuchsiaperf.json"),
-            [
-                {
-                    "test_suite": "fuchsia.test",
-                    "label": "metric1",
-                    "values": [15.0],
-                }
-            ],
-        )
-
-        stdout = io.StringIO()
-        perfcompare.Main(["extract_metrics", "fuchsia", data_dir], stdout)
-
-        stdout.seek(0)
-        reader = csv.reader(stdout)
-        rows = list(reader)
-        self.assertEqual(rows, [["fuchsia.test", "metric1", "10.5", "15.0"]])
-
-    def test_extract_metrics_empty_values(self):
-        data_dir = self.MakeTempDir()
-        WriteJsonFile(
-            os.path.join(data_dir, "test.fuchsiaperf.json"),
-            [
-                {
-                    "test_suite": "fuchsia.test",
-                    "label": "metric1",
-                    "values": [],
-                }
-            ],
-        )
-
-        with self.assertRaises(statistics.StatisticsError):
-            perfcompare.Main(
-                ["extract_metrics", "fuchsia", data_dir], io.StringIO()
-            )
-
-    def test_extract_metrics_malformed_json(self):
-        data_dir = self.MakeTempDir()
-        file_path = os.path.join(data_dir, "bad.fuchsiaperf.json")
-        with open(file_path, "w") as f:
-            f.write("{invalid}")
-
-        with self.assertRaises(RuntimeError) as cm:
-            perfcompare.Main(
-                ["extract_metrics", "fuchsia", data_dir], io.StringIO()
-            )
-        self.assertIn("Malformed JSON", str(cm.exception))
 
 
 if __name__ == "__main__":

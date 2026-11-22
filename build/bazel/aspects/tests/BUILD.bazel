@@ -5,10 +5,13 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files", "host_test_data_map")
 load(":assert_no_deps_test.bzl", "assert_no_deps_test_suite")
 load(":component_manifests_test.bzl", "component_manifests_test_suite")
-load(":pyrefly_test.bzl", "pyrefly_build_only_tests_group", "pyrefly_test_suite")
+load(":pyrefly_test.bzl", "pyrefly_attr_forwarding_test_target", "pyrefly_build_only_tests_group", "pyrefly_test_suite")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -42,6 +45,29 @@ py_library(
     target_compatible_with = HOST_OS_CONSTRAINTS,
 )
 
+# `no-pyrefly` only skips the tagged target's own sources: the checks of its
+# `deps` still run, so tag each dependency that needs an opt-out too.
+py_binary(
+    name = "pyrefly_type_error_optout_bin",
+    testonly = True,
+    srcs = ["testdata/type_error_optout.py"],
+    main = "testdata/type_error_optout.py",
+    tags = ["no-pyrefly"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":pyrefly_valid_lib"],
+)
+
+# Nor does it affect dependants: this untagged binary is still checked, and
+# errors inside the tagged library it imports are not reported.
+py_binary(
+    name = "pyrefly_optout_dependant_bin",
+    testonly = True,
+    srcs = ["testdata/optout_dependant.py"],
+    main = "testdata/optout_dependant.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":pyrefly_type_error_optout"],
+)
+
 py_binary(
     name = "pyrefly_valid_bin",
     testonly = True,
@@ -70,6 +96,83 @@ host_py_test(
     target_compatible_with = HOST_OS_CONSTRAINTS,
 )
 
+# Targets below check that Python targets reached through rules that are not
+# Python rules (e.g. a filegroup, or the `data` of a host_test() whose binary
+# is not a Python binary, as in python_mobly_test()) are still checked.
+
+filegroup(
+    name = "pyrefly_filegroup",
+    testonly = True,
+    srcs = [":pyrefly_valid_lib"],
+)
+
+filegroup(
+    name = "pyrefly_filegroup_optout",
+    testonly = True,
+    srcs = [":pyrefly_type_error_optout"],
+)
+
+fx_cc_binary(
+    name = "pyrefly_non_python_bin",
+    testonly = True,
+    srcs = ["testdata/non_python_main.cc"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_test_data_files(
+    name = "pyrefly_data_files",
+    testonly = True,
+    srcs = [":pyrefly_valid_bin"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_test_data_map(
+    name = "pyrefly_data_map",
+    testonly = True,
+    files_map = {"bin/pyrefly_valid_bin": ":pyrefly_valid_bin"},
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_test(
+    name = "pyrefly_host_test_data",
+    testonly = True,
+    binary = ":pyrefly_non_python_bin",
+    data = [":pyrefly_valid_bin"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_test(
+    name = "pyrefly_host_test_data_files",
+    testonly = True,
+    binary = ":pyrefly_non_python_bin",
+    data = [":pyrefly_data_files"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_test(
+    name = "pyrefly_host_test_data_map",
+    testonly = True,
+    binary = ":pyrefly_non_python_bin",
+    data = [":pyrefly_data_map"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# Checks are forwarded through the keys of a `label_keyed_string_dict`...
+pyrefly_attr_forwarding_test_target(
+    name = "pyrefly_label_keyed_dict",
+    testonly = True,
+    label_dict = {":pyrefly_valid_lib": "lib"},
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# ... but not through `_`-prefixed attributes (here, `_private`, which points
+# to :pyrefly_valid_bin).
+pyrefly_attr_forwarding_test_target(
+    name = "pyrefly_private_attr_only",
+    testonly = True,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
 pyrefly_test_suite(
     name = "pyrefly_test",
 )
@@ -83,7 +186,9 @@ pyrefly_build_only_tests_group(
     deps = [
         ":pyrefly_host_test_default_bin",
         ":pyrefly_host_test_disabled_bin",
+        ":pyrefly_optout_dependant_bin",
         ":pyrefly_type_error_optout",
+        ":pyrefly_type_error_optout_bin",
         ":pyrefly_valid_bin",
         ":pyrefly_valid_lib",
         ":pyrefly_valid_pyi_lib",

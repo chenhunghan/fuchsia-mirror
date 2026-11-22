@@ -21,7 +21,7 @@ use crate::object_store::transaction::{
     ReadGuard, ReservationOptions, Transaction, lock_keys,
 };
 use crate::object_store::{
-    AttributeId, Extent, HandleOptions, HandleOwner, RootDigest, StoreObjectHandle,
+    AttributeId, Extent, HandleOptions, LocalHandleOwner, RootDigest, StoreObjectHandle,
     TRANSACTION_MUTATION_THRESHOLD, TrimMode, TrimResult,
 };
 use crate::range::RangeExt;
@@ -61,7 +61,7 @@ pub const WRITE_ATTR_BATCH_SIZE: usize = 524_288;
 /// It caches the content size of the data attribute it was configured for, and has helpers for
 /// complex extent manipulation, as well as implementations of ReadObjectHandle and
 /// WriteObjectHandle.
-pub struct DataObjectHandle<S: HandleOwner> {
+pub struct DataObjectHandle<S: LocalHandleOwner> {
     handle: StoreObjectHandle<S>,
     attribute_id: AttributeId,
     content_size: AtomicU64,
@@ -170,14 +170,14 @@ impl FsverityStateInner {
     }
 }
 
-impl<S: HandleOwner> Deref for DataObjectHandle<S> {
+impl<S: LocalHandleOwner> Deref for DataObjectHandle<S> {
     type Target = StoreObjectHandle<S>;
     fn deref(&self) -> &Self::Target {
         &self.handle
     }
 }
 
-impl<S: HandleOwner> DataObjectHandle<S> {
+impl<S: LocalHandleOwner> DataObjectHandle<S> {
     pub fn new(
         owner: Arc<S>,
         object_id: u64,
@@ -437,7 +437,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             self.store().store_object_id(),
             device_range.clone(),
         )?;
-        self.txn_update_size(transaction, new_size, None).await?;
+        self.txn_update_size(transaction, new_size).await?;
         let key_id = self.get_key(None).await?.0;
         transaction.add(
             self.store().store_object_id,
@@ -708,9 +708,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         // TODO(b/314194485): Eventually want streaming writes.
         // The merkle tree attribute should not require trimming because it should not
         // exist.
-        let graveyard_guard = self
+        transaction = self
             .handle
-            .write_new_attr(&mut transaction, AttributeId::FSVERITY_MERKLE, &merkle_tree)
+            .write_new_attr(transaction, AttributeId::FSVERITY_MERKLE, &merkle_tree)
             .await?;
         let descriptor_decoded =
             FsVerityDescriptor::new(&merkle_tree[..], self.block_size().get() as usize)?;
@@ -731,13 +731,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             ),
             AssocObj::Borrowed(self),
         );
-        transaction
-            .commit_with_callback(|_| {
-                if let Some(guard) = graveyard_guard {
-                    scopeguard::ScopeGuard::into_inner(guard);
-                }
-            })
-            .await?;
+        transaction.commit().await?;
         scopeguard::ScopeGuard::into_inner(state_guard);
         Ok(())
     }
@@ -748,9 +742,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     /// # Multi-batch partial commits
     ///
     /// Large allocations or mode switches exceeding `TRANSACTION_MUTATION_THRESHOLD` are split
-    /// across multiple transactions via `Transaction::commit_and_continue`. If a later batch fails
-    /// (for example with `FxfsError::NoSpace`) or the future is dropped after earlier batches have
-    /// committed, those earlier batches are **not** rolled back:
+    /// across multiple transactions via `CommittedTransaction::continue_transaction`. If a later
+    /// batch fails (for example with `FxfsError::NoSpace`) or the future is dropped after earlier
+    /// batches have committed, those earlier batches are **not** rolled back:
     /// - Extents switched to `ExtentMode::Overwrite` or newly allocated as
     ///   `ExtentMode::OverwritePartial` in committed batches remain allocated (and accounted in
     ///   `allocated_size` and in-memory `overwrite_ranges`).
@@ -903,7 +897,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                     ),
                     AssocObj::Borrowed(self),
                 );
-                transaction.commit_and_continue(|| {}).await?;
+                transaction = transaction.commit().await?.continue_transaction().await?;
             }
 
             current_max_size =
@@ -947,7 +941,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                         AssocObj::Borrowed(self),
                     );
                     self.update_allocated_size(&mut transaction, allocated, 0).await?;
-                    transaction.commit_and_continue(|| {}).await?;
+                    transaction = transaction.commit().await?.continue_transaction().await?;
                     allocated = 0;
                 }
 
@@ -1131,7 +1125,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         )
         .await?;
         if offset + buf.len() as u64 > self.txn_get_size(transaction) {
-            self.txn_update_size(transaction, offset + buf.len() as u64, None).await?;
+            self.txn_update_size(transaction, offset + buf.len() as u64).await?;
         }
         Ok(())
     }
@@ -1147,6 +1141,28 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         buf: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
         self.handle.multi_write(transaction, attribute_id, None, ranges, buf).await
+    }
+
+    /// Like [`Self::multi_write`], but first consumes space from `preallocation` (if
+    /// present and non-empty) before falling back to regular allocation.
+    pub async fn multi_write_with_preallocation<'a>(
+        &'a self,
+        transaction: &mut Transaction<'a>,
+        attribute_id: AttributeId,
+        preallocation: Option<&mut crate::object_store::allocator::Preallocation>,
+        ranges: &[Range<u64>],
+        buf: MutableBufferRef<'_>,
+    ) -> Result<(), Error> {
+        self.handle
+            .multi_write_with_preallocation(
+                transaction,
+                attribute_id,
+                None,
+                preallocation,
+                ranges,
+                buf,
+            )
+            .await
     }
 
     // `buf` is mutable as an optimization, since the write may require encryption, we can
@@ -1366,7 +1382,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             assert_eq!(options.allow_allocations, true);
             if !transaction.is_empty() {
                 if end > self.get_size() {
-                    self.grow(&mut transaction, self.get_size(), end).await?;
+                    transaction = self.grow(transaction, self.get_size(), end).await?;
                 }
                 transaction.commit().await?;
             }
@@ -1401,9 +1417,6 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         &'a self,
         transaction: &mut Transaction<'a>,
         new_size: u64,
-        // Allow callers to update the has_overwrite_extents metadata if they want. If this is
-        // Some it is set to the value, if None it is left unchanged.
-        update_has_overwrite_extents: Option<bool>,
     ) -> Result<(), Error> {
         let key =
             ObjectKey::attribute(self.object_id(), self.attribute_id(), AttributeKey::Attribute);
@@ -1417,11 +1430,8 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 op: Operation::ReplaceOrInsert,
             }
         };
-        if let ObjectValue::Attribute { size, has_overwrite_extents } = &mut mutation.item.value {
+        if let ObjectValue::Attribute { size, .. } = &mut mutation.item.value {
             *size = new_size;
-            if let Some(update_has_overwrite_extents) = update_has_overwrite_extents {
-                *has_overwrite_extents = update_has_overwrite_extents;
-            }
         } else {
             bail!(anyhow!(FxfsError::Inconsistent).context("Unexpected object value"));
         }
@@ -1442,40 +1452,38 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         self.handle.update_allocated_size(transaction, allocated, deallocated).await
     }
 
-    pub fn truncate_overwrite_ranges(&self, size: u64) -> Result<Option<bool>, Error> {
+    pub fn truncate_overwrite_ranges(&self, size: u64) -> Result<(), Error> {
         let cutoff = self.block_size().align_up(size).ok_or(FxfsError::TooBig)?;
-        if self.with_overwrite_ranges_mut(|ranges| ranges.map_or(false, |r| r.truncate(cutoff))) {
-            // This returns true if there were ranges, but this truncate removed them all, which
-            // indicates that we need to flip the has_overwrite_extents metadata flag to false.
-            Ok(Some(false))
-        } else {
-            Ok(None)
-        }
+        self.with_overwrite_ranges_mut(|ranges| {
+            if let Some(ranges) = ranges {
+                ranges.truncate(cutoff);
+            }
+        });
+        Ok(())
     }
 
     pub async fn shrink<'a>(
         &'a self,
         transaction: &mut Transaction<'a>,
         size: u64,
-        update_has_overwrite_extents: Option<bool>,
     ) -> Result<NeedsTrim, Error> {
         let needs_trim = self.handle.shrink(transaction, self.attribute_id(), size).await?;
-        self.txn_update_size(transaction, size, update_has_overwrite_extents).await?;
+        self.txn_update_size(transaction, size).await?;
         Ok(needs_trim)
     }
 
     pub async fn grow<'a>(
         &'a self,
-        transaction: &mut Transaction<'a>,
+        mut transaction: Transaction<'a>,
         old_size: u64,
         size: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<Transaction<'a>, Error> {
         // Before growing the file, we must make sure that a previous trim has completed.
         let store = self.store();
         while matches!(
             store
                 .trim_some(
-                    transaction,
+                    &mut transaction,
                     self.object_id(),
                     self.attribute_id(),
                     TrimMode::FromOffset(old_size)
@@ -1483,7 +1491,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 .await?,
             TrimResult::Incomplete
         ) {
-            transaction.commit_and_continue(|| {}).await?;
+            transaction = transaction.commit().await?.continue_transaction().await?;
         }
         // We might need to zero out the tail of the old last block.
         let block_size = self.block_size();
@@ -1527,7 +1535,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                         .await?;
                     buf.subslice_mut((old_size % block_size) as usize..buf.len()).fill(0);
                     self.multi_write(
-                        transaction,
+                        &mut transaction,
                         *attribute_id,
                         &[aligned_old_size..aligned_old_size + block_size],
                         buf.as_mut(),
@@ -1536,8 +1544,8 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 }
             }
         }
-        self.txn_update_size(transaction, size, None).await?;
-        Ok(())
+        self.txn_update_size(&mut transaction, size).await?;
+        Ok(transaction)
     }
 
     /// Attempts to pre-allocate a `file_range` of bytes for this object.
@@ -1673,7 +1681,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         }
         // Update the file size if it changed.
         if file_range.start > block_size.align_up(self.txn_get_size(transaction)).unwrap() {
-            self.txn_update_size(transaction, file_range.start, None).await?;
+            self.txn_update_size(transaction, file_range.start).await?;
         }
         self.update_allocated_size(transaction, allocated, 0).await?;
         Ok(ranges)
@@ -1731,7 +1739,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         let store = self.store();
         let mut transaction = self.new_transaction().await?;
         if self.handle.write_attr(&mut transaction, attribute_id, data).await?.0 {
-            transaction.commit_and_continue(|| {}).await?;
+            transaction = transaction.commit().await?.continue_transaction().await?;
             while matches!(
                 store
                     .trim_some(
@@ -1743,7 +1751,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                     .await?,
                 TrimResult::Incomplete
             ) {
-                transaction.commit_and_continue(|| {}).await?;
+                transaction = transaction.commit().await?.continue_transaction().await?;
             }
         }
         transaction.commit().await?;
@@ -1797,10 +1805,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             return Ok(());
         }
         if size < old_size {
-            let update_has_overwrite_ranges = self.truncate_overwrite_ranges(size)?;
-            if self.shrink(&mut transaction, size, update_has_overwrite_ranges).await?.0 {
+            if self.shrink(&mut transaction, size).await?.0 {
                 // The file needs to be trimmed.
-                transaction.commit_and_continue(|| {}).await?;
+                transaction = transaction.commit().await?.continue_transaction().await?;
                 let store = self.store();
                 while matches!(
                     store
@@ -1813,10 +1820,17 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                         .await?,
                     TrimResult::Incomplete
                 ) {
-                    if let Err(error) = transaction.commit_and_continue(|| {}).await {
-                        warn!(error:?; "Failed to trim after truncate");
-                        return Ok(());
-                    }
+                    let result = match transaction.commit().await {
+                        Ok(committed) => committed.continue_transaction().await,
+                        Err(e) => Err(e),
+                    };
+                    transaction = match result {
+                        Ok(transaction) => transaction,
+                        Err(error) => {
+                            warn!(error:?; "Failed to trim after truncate");
+                            return Ok(());
+                        }
+                    };
                 }
                 if let Err(error) = transaction.commit().await {
                     warn!(error:?; "Failed to trim after truncate");
@@ -1824,7 +1838,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 return Ok(());
             }
         } else {
-            self.grow(&mut transaction, old_size, size).await?;
+            transaction = self.grow(transaction, old_size, size).await?;
         }
         transaction.commit().await?;
         Ok(())
@@ -2014,13 +2028,28 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     }
 }
 
-impl<S: HandleOwner> AssociatedObject for DataObjectHandle<S> {
+impl<S: LocalHandleOwner> AssociatedObject for DataObjectHandle<S> {
     fn will_apply_mutation(&self, mutation: &Mutation, _object_id: u64, _manager: &ObjectManager) {
         match mutation {
             Mutation::ObjectStore(ObjectStoreMutation {
-                item: ObjectItem { value: ObjectValue::Attribute { size, .. }, .. },
+                item:
+                    ObjectItem {
+                        key:
+                            ObjectKey {
+                                object_id,
+                                data: ObjectKeyData::Attribute(attr_id, AttributeKey::Attribute),
+                            },
+                        value: ObjectValue::Attribute { size, .. },
+                        ..
+                    },
                 ..
-            }) => self.content_size.store(*size, atomic::Ordering::Relaxed),
+            }) if self.object_id() == *object_id && self.attribute_id() == *attr_id => {
+                let old_size = self.content_size.swap(*size, atomic::Ordering::Relaxed);
+                if *size < old_size {
+                    let res = self.truncate_overwrite_ranges(*size);
+                    debug_assert!(res.is_ok(), "align_up failed on shrunk size {size}: {res:?}");
+                }
+            }
             Mutation::ObjectStore(ObjectStoreMutation {
                 item: ObjectItem { value: ObjectValue::VerifiedAttribute { size, .. }, .. },
                 ..
@@ -2063,7 +2092,7 @@ impl<S: HandleOwner> AssociatedObject for DataObjectHandle<S> {
     }
 }
 
-impl<S: HandleOwner> ObjectHandle for DataObjectHandle<S> {
+impl<S: LocalHandleOwner> ObjectHandle for DataObjectHandle<S> {
     fn set_trace(&self, v: bool) {
         self.handle.set_trace(v)
     }
@@ -2081,7 +2110,7 @@ impl<S: HandleOwner> ObjectHandle for DataObjectHandle<S> {
     }
 }
 
-impl<S: HandleOwner> ReadObjectHandle for DataObjectHandle<S> {
+impl<S: LocalHandleOwner> ReadObjectHandle for DataObjectHandle<S> {
     fn read_aligned<'a, 'b, 'c>(
         &'a self,
         offset: u64,
@@ -2100,9 +2129,9 @@ impl<S: HandleOwner> ReadObjectHandle for DataObjectHandle<S> {
     }
 }
 
-impl<S: HandleOwner> LayerObject for DataObjectHandle<S> {}
+impl<S: LocalHandleOwner> LayerObject for DataObjectHandle<S> {}
 
-impl<S: HandleOwner> WriteObjectHandle for DataObjectHandle<S> {
+impl<S: LocalHandleOwner> WriteObjectHandle for DataObjectHandle<S> {
     async fn write_or_append(&self, offset: Option<u64>, buf: BufferRef<'_>) -> Result<u64, Error> {
         let offset = offset.unwrap_or_else(|| self.get_size());
         let mut transaction = self.new_transaction().await?;
@@ -2123,7 +2152,7 @@ impl<S: HandleOwner> WriteObjectHandle for DataObjectHandle<S> {
 
 /// Like object_handle::Writer, but allows custom transaction options to be set, and makes every
 /// write go directly to the handle in a transaction.
-pub struct DirectWriter<'a, S: HandleOwner> {
+pub struct DirectWriter<'a, S: LocalHandleOwner> {
     handle: &'a DataObjectHandle<S>,
     options: transaction::Options<'a>,
     buffer: Buffer<'a>,
@@ -2133,7 +2162,7 @@ pub struct DirectWriter<'a, S: HandleOwner> {
 
 const BUFFER_SIZE: usize = 1_048_576;
 
-impl<S: HandleOwner> Drop for DirectWriter<'_, S> {
+impl<S: LocalHandleOwner> Drop for DirectWriter<'_, S> {
     fn drop(&mut self) {
         if self.buf_offset != 0 {
             warn!("DirectWriter: dropping data, did you forget to call complete?");
@@ -2141,7 +2170,7 @@ impl<S: HandleOwner> Drop for DirectWriter<'_, S> {
     }
 }
 
-impl<'a, S: HandleOwner> DirectWriter<'a, S> {
+impl<'a, S: LocalHandleOwner> DirectWriter<'a, S> {
     pub async fn new(
         handle: &'a DataObjectHandle<S>,
         options: transaction::Options<'a>,
@@ -2167,7 +2196,7 @@ impl<'a, S: HandleOwner> DirectWriter<'a, S> {
     }
 }
 
-impl<'a, S: HandleOwner> WriteBytes for DirectWriter<'a, S> {
+impl<'a, S: LocalHandleOwner> WriteBytes for DirectWriter<'a, S> {
     fn block_size(&self) -> BlockSize {
         self.handle.block_size()
     }
@@ -2217,8 +2246,11 @@ mod tests {
         ObjectHandle, ObjectProperties, ReadObjectHandle, WriteObjectHandle,
     };
     use crate::object_store::data_object_handle::{OverwriteOptions, WRITE_ATTR_BATCH_SIZE};
-    use crate::object_store::directory::replace_child;
+    use crate::object_store::directory::{ReplacedChild, replace_child, replace_child_with_purge};
     use crate::object_store::object_record::{FsverityMetadata, ObjectKey, ObjectValue, Timestamp};
+    use crate::object_store::store_object_handle::{
+        MAX_INLINE_XATTR_SIZE, SetExtendedAttributeMode,
+    };
     use crate::object_store::transaction::{Mutation, Options, ReservationOptions, lock_keys};
     use crate::object_store::volume::root_volume;
     use crate::object_store::{
@@ -3485,19 +3517,19 @@ mod tests {
                 ),
             );
 
-            // This write should span three transactions. This test mimics the behavior when the
-            // last transaction gets interrupted by a filesystem.close().
-            if let Some(guard) = handle
+            // Stop the background graveyard reaper before writing so the abort tombstone queued
+            // when `transaction` is dropped below is not processed before `fs.close()`. This write
+            // spans three transactions and mimics the last transaction being interrupted by an
+            // unclean shutdown.
+            fs.graveyard().wait_for_reap().await;
+            let _transaction = handle
                 .write_new_attr(
-                    &mut transaction,
+                    transaction,
                     AttributeId::FSVERITY_MERKLE,
                     &vec![0; 2 * WRITE_ATTR_BATCH_SIZE],
                 )
                 .await
-                .expect("failed to write merkle attribute")
-            {
-                scopeguard::ScopeGuard::into_inner(guard);
-            }
+                .expect("failed to write merkle attribute");
 
             handle.object_id()
             // Drop the transaction to simulate interrupting the merkle tree creation as well as to
@@ -5547,6 +5579,625 @@ mod tests {
              allocates past old_size"
         );
         drop(held);
+
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_enable_verity_drop_safety() {
+        use crate::hooks::Hooks;
+
+        let fs;
+        let (mut hooks, fs_hooks) = Hooks::new();
+        let device = DeviceHolder::new(FakeDevice::new(32768, TEST_DEVICE_BLOCK_SIZE));
+        fs =
+            FxFilesystemBuilder::new().hooks(fs_hooks).format(device).await.expect("format failed");
+        let root_store = fs.root_store();
+        let handle = {
+            let mut transaction =
+                root_store.new_transaction(lock_keys![], Options::default()).await.expect("txn");
+            let handle = ObjectStore::create_object(
+                &root_store,
+                &mut transaction,
+                HandleOptions::default(),
+                None,
+            )
+            .await
+            .expect("create_object failed");
+            transaction.commit().await.expect("commit failed");
+            handle
+        };
+
+        // Allocate one block so `overwrite_ranges` is non-empty, then sparse-truncate to 33 MiB so
+        // that a SHA-512 Merkle tree exceeds `WRITE_ATTR_BATCH_SIZE` (512 KiB) and spans two
+        // commits: Commit 1 in `write_new_attr` Batch 0, and Commit 2 in `enable_verity`'s final
+        // `commit`.
+        handle.allocate(0..4096).await.expect("allocate failed");
+        handle.truncate(33 * 1024 * 1024).await.expect("truncate failed");
+        assert!(!handle.overwrite_ranges_is_empty());
+
+        let verity_options = || fio::VerificationOptions {
+            hash_algorithm: Some(fio::HashAlgorithm::Sha512),
+            salt: Some(vec![]),
+            ..Default::default()
+        };
+
+        // 1. Cancelled before Commit 1 (`write_new_attr` Batch 0) commits: `state_guard` resets
+        //    `VerityStarted` to `Standard`, and no tombstone is queued.
+        {
+            let commit_guard = fs.lock_commits().await;
+            {
+                let mut fut = std::pin::pin!(handle.enable_verity(verity_options()));
+                assert!(futures::poll!(fut.as_mut()).is_pending());
+            }
+            drop(commit_guard);
+            assert!(!handle.is_verified_file());
+            assert!(!handle.overwrite_ranges_is_empty());
+            fs.graveyard().flush().await;
+            assert!(handle.read_attr(AttributeId::FSVERITY_MERKLE).await.unwrap().is_none());
+            assert_eq!(root_store.graveyard_count(), 0);
+        }
+
+        // 2. Cancelled after `write_new_attr` commits Batch 0 and returns (while the transaction's
+        //    abort callback is armed and state is `VerityPending`), before Commit 2 commits:
+        //    dropping the transaction queues a tombstone and `state_guard` resets `VerityPending`
+        //    to `Standard`.
+        {
+            {
+                let _guard = crate::testing::block_nth_commit(&mut hooks, &fs, 2);
+                let mut fut = std::pin::pin!(handle.enable_verity(verity_options()));
+                assert!(futures::poll!(fut.as_mut()).is_pending());
+            }
+            assert!(!handle.is_verified_file());
+            assert!(!handle.overwrite_ranges_is_empty());
+            assert!(handle.read_attr(AttributeId::FSVERITY_MERKLE).await.unwrap().is_some());
+            fs.graveyard().flush().await;
+            assert!(handle.read_attr(AttributeId::FSVERITY_MERKLE).await.unwrap().is_none());
+            assert_eq!(root_store.graveyard_count(), 0);
+        }
+
+        // 3. `enable_verity` runs to completion: the final `commit` drops `CommittedTransaction`
+        //    without running `on_abort` and `state_guard` is defused, so the file remains verified
+        //    and the Merkle tree is not tombstoned.
+        handle.enable_verity(verity_options()).await.expect("enable_verity failed");
+        assert!(handle.is_verified_file());
+        fs.graveyard().flush().await;
+        let merkle_attr = handle
+            .read_attr(AttributeId::FSVERITY_MERKLE)
+            .await
+            .unwrap()
+            .expect("merkle attr missing");
+        assert!(merkle_attr.len() > WRITE_ATTR_BATCH_SIZE);
+        assert!(merkle_attr.len() <= 2 * WRITE_ATTR_BATCH_SIZE);
+        assert_eq!(root_store.graveyard_count(), 0);
+
+        drop(hooks);
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("close failed");
+    }
+
+    async fn trim_test_setup(
+        hooks: Option<Arc<crate::hooks::HooksHandle>>,
+    ) -> (OpenFxFilesystem, Arc<ObjectStore>, DataObjectHandle<ObjectStore>) {
+        let device = DeviceHolder::new(FakeDevice::new(32768, TEST_DEVICE_BLOCK_SIZE));
+        let mut builder = FxFilesystemBuilder::new();
+        if let Some(hooks) = hooks {
+            builder = builder.hooks(hooks);
+        }
+        let fs = builder.format(device).await.expect("format failed");
+        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+        let store = root_volume
+            .new_volume("test", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+        let root_dir =
+            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
+        let file = {
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store.store_object_id(), root_dir.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_txn");
+            let file = root_dir.create_child_file(&mut transaction, "trim_test").await.expect("f");
+            transaction.commit().await.expect("commit");
+            file
+        };
+        (fs, store, file)
+    }
+
+    async fn trim_test_setup_with_hooks<'a>()
+    -> (OpenFxFilesystem, Arc<ObjectStore>, DataObjectHandle<ObjectStore>, crate::hooks::Hooks<'a>)
+    {
+        let (hooks, fs_hooks) = crate::hooks::Hooks::new();
+        let (fs, store, file) = trim_test_setup(Some(fs_hooks)).await;
+        (fs, store, file, hooks)
+    }
+
+    async fn drop_at_nth_commit<'a, F: std::future::Future>(
+        hooks: &mut crate::hooks::Hooks<'a>,
+        fs: &'a OpenFxFilesystem,
+        n: usize,
+        fut: F,
+    ) {
+        let _guard = crate::testing::block_nth_commit(hooks, fs, n);
+        let mut fut = std::pin::pin!(fut);
+        assert!(futures::poll!(fut.as_mut()).is_pending());
+    }
+
+    async fn populate_sparse_extents(file: &DataObjectHandle<ObjectStore>, indices: Range<u64>) {
+        const BATCH: usize = 50;
+        let all_ranges: Vec<Range<u64>> = indices.map(|i| (i * 8192)..(i * 8192 + 4096)).collect();
+        let mut buf = file.allocate_buffer(BATCH * 4096).await;
+        buf.as_mut_ptr_slice().fill(0xAA);
+        let mut max_end = file.get_size();
+        for chunk in all_ranges.chunks(BATCH) {
+            let mut transaction = file.new_transaction().await.expect("new_txn");
+            file.multi_write(
+                &mut transaction,
+                file.attribute_id(),
+                chunk,
+                buf.subslice_mut(0..chunk.len() * 4096),
+            )
+            .await
+            .expect("multi_write");
+            let chunk_end = chunk.last().unwrap().end;
+            if chunk_end > max_end {
+                max_end = chunk_end;
+                file.txn_update_size(&mut transaction, max_end).await.expect("txn_update_size");
+            }
+            transaction.commit().await.expect("commit");
+        }
+    }
+
+    async fn has_overwrite_extents_flag(store: &ObjectStore, object_id: u64) -> bool {
+        let item = store
+            .tree()
+            .find(&ObjectKey::attribute(object_id, AttributeId::DATA, AttributeKey::Attribute))
+            .await
+            .expect("find attribute")
+            .expect("attribute missing");
+        match item.value {
+            ObjectValue::Attribute { has_overwrite_extents, .. } => has_overwrite_extents,
+            other => panic!("expected ObjectValue::Attribute, got {other:?}"),
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_truncate_dropped_before_commit_preserves_overwrite_ranges() {
+        let (fs, store, file) = trim_test_setup(None).await;
+        file.allocate(0..8192).await.expect("allocate");
+        populate_sparse_extents(&file, 1..220).await;
+        assert!(!file.overwrite_ranges_is_empty());
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+
+        {
+            let commit_guard = fs.lock_commits().await;
+            {
+                let mut trunc_fut = std::pin::pin!(file.truncate(0));
+                assert!(futures::poll!(trunc_fut.as_mut()).is_pending());
+            }
+            drop(commit_guard);
+        }
+        assert!(!file.overwrite_ranges_is_empty());
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+        assert_eq!(file.get_size(), 219 * 8192 + 4096);
+        assert_eq!(store.graveyard_count(), 0);
+
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_truncate_overwrite_extents_clears_flag_when_last_trimmed() {
+        let (fs, store, file, mut hooks) = trim_test_setup_with_hooks().await;
+
+        // 1. Overwrite extents spanning multiple trim batches: `has_overwrite_extents` must stay
+        //    true while untrimmed overwrite extents remain on disk, and clear once the final batch
+        //    deletes the last overwrite extent.
+        for i in 0..225u64 {
+            file.allocate((i * 8192)..(i * 8192 + 4096)).await.expect("allocate");
+        }
+        assert!(!file.overwrite_ranges_is_empty());
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+
+        let truncate_guard = fs.truncate_guard(store.store_object_id(), file.object_id()).await;
+        drop_at_nth_commit(&mut hooks, &fs, 2, file.truncate(0)).await;
+        assert!(file.overwrite_ranges_is_empty());
+        assert_eq!(file.get_size(), 0);
+        assert!(file.get_properties().await.unwrap().allocated_size > 0);
+        assert_eq!(store.graveyard_count(), 1);
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None).await.expect("fsck before trim");
+
+        // Reopening before trimming finishes must not load untrimmed overwrite extents beyond
+        // `align_up(size)`.
+        let reopened =
+            ObjectStore::open_object(&store, file.object_id(), HandleOptions::default(), None)
+                .await
+                .expect("open_object");
+        assert!(reopened.overwrite_ranges_is_empty());
+        drop(reopened);
+
+        store.trim(file.object_id(), &truncate_guard).await.expect("trim");
+        assert_eq!(file.get_properties().await.unwrap().allocated_size, 0);
+        assert_eq!(store.graveyard_count(), 0);
+        assert!(!has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None).await.expect("fsck after trim");
+
+        // 2. Single overwrite extent deleted in Batch 0 while CoW extents remain untrimmed:
+        //    `has_overwrite_extents` must be cleared immediately in Batch 0.
+        file.allocate(0..8192).await.expect("allocate");
+        populate_sparse_extents(&file, 1..220).await;
+        assert!(!file.overwrite_ranges_is_empty());
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+
+        drop_at_nth_commit(&mut hooks, &fs, 2, file.truncate(0)).await;
+        assert!(file.overwrite_ranges_is_empty());
+        assert_eq!(file.get_size(), 0);
+        assert!(file.get_properties().await.unwrap().allocated_size > 0);
+        assert_eq!(store.graveyard_count(), 1);
+        assert!(!has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None).await.expect("fsck before cow trim");
+
+        store.trim(file.object_id(), &truncate_guard).await.expect("trim cow");
+        assert_eq!(file.get_properties().await.unwrap().allocated_size, 0);
+        assert_eq!(store.graveyard_count(), 0);
+        assert!(!has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None).await.expect("fsck after cow trim");
+
+        // 3. CoW extents preceding a trailing overwrite extent: Batch 0 trims only CoW extents and
+        //    must keep `has_overwrite_extents` true until `store.trim` deletes the trailing
+        //    overwrite extent.
+        populate_sparse_extents(&file, 0..220).await;
+        file.allocate((220 * 8192)..(220 * 8192 + 4096))
+            .await
+            .expect("allocate trailing overwrite");
+        assert!(!file.overwrite_ranges_is_empty());
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+
+        drop_at_nth_commit(&mut hooks, &fs, 2, file.truncate(0)).await;
+        assert!(file.overwrite_ranges_is_empty());
+        assert_eq!(file.get_size(), 0);
+        assert!(file.get_properties().await.unwrap().allocated_size > 0);
+        assert_eq!(store.graveyard_count(), 1);
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None)
+            .await
+            .expect("fsck before trailing overwrite trim");
+
+        store.trim(file.object_id(), &truncate_guard).await.expect("trim trailing overwrite");
+        drop(truncate_guard);
+        fs.graveyard().flush().await;
+        assert_eq!(file.get_properties().await.unwrap().allocated_size, 0);
+        assert_eq!(store.graveyard_count(), 0);
+        assert!(!has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None)
+            .await
+            .expect("fsck after trailing overwrite trim");
+
+        drop(hooks);
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_grow_after_interrupted_truncate_clears_overwrite_flag() {
+        let (fs, store, file, mut hooks) = trim_test_setup_with_hooks().await;
+
+        // Allocate >2x `TRANSACTION_MUTATION_THRESHOLD` extents so both `truncate(0)` Batch 0 and
+        // `grow`'s `trim_some` loop span multiple transactions.
+        let last_offset = 424 * 8192;
+        for i in 0..425u64 {
+            file.allocate((i * 8192)..(i * 8192 + 4096)).await.expect("allocate");
+        }
+        {
+            let mut buf = file.allocate_buffer(4096).await;
+            buf.as_mut_ptr_slice().fill(0x55);
+            let mut transaction = file.new_transaction().await.expect("new_txn");
+            file.multi_overwrite(
+                &mut transaction,
+                AttributeId::DATA,
+                &[last_offset..last_offset + 4096],
+                buf.as_mut(),
+            )
+            .await
+            .expect("multi_overwrite");
+            transaction.commit().await.expect("commit");
+        }
+        assert!(!file.overwrite_ranges_is_empty());
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+
+        let truncate_guard = fs.truncate_guard(store.store_object_id(), file.object_id()).await;
+        drop_at_nth_commit(&mut hooks, &fs, 2, file.truncate(0)).await;
+        assert!(file.overwrite_ranges_is_empty());
+        assert_eq!(file.get_size(), 0);
+        assert!(file.get_properties().await.unwrap().allocated_size > 0);
+        assert_eq!(store.graveyard_count(), 1);
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+
+        // Growing past the untrimmed overwrite extents invokes `DataObjectHandle::grow`, which
+        // loops `trim_some(..., TrimMode::FromOffset(0))` across multiple batches before updating
+        // size. The final trim batch must clear `has_overwrite_extents` and `txn_update_size`
+        // must preserve that cleared flag.
+        let grown_size = last_offset + 4096;
+        file.truncate(grown_size).await.expect("grow after interrupted truncate");
+        assert_eq!(file.get_size(), grown_size);
+        assert_eq!(file.get_properties().await.unwrap().allocated_size, 0);
+        assert!(file.overwrite_ranges_is_empty());
+        assert!(!has_overwrite_extents_flag(&store, file.object_id()).await);
+
+        let mut read_buf = file.allocate_buffer(4096).await;
+        read_buf.as_mut_ptr_slice().fill(0xFF);
+        assert_eq!(file.read_aligned(last_offset, read_buf.as_mut()).await.expect("read"), 4096);
+        assert_eq!(read_buf.to_vec(), vec![0u8; 4096]);
+        fsck_volume(&fs, store.store_object_id(), None).await.expect("fsck after grow");
+
+        drop(truncate_guard);
+        drop(hooks);
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_truncate_partial_overwrite_extents_flag_transitions() {
+        let (fs, store, file, mut hooks) = trim_test_setup_with_hooks().await;
+
+        // 1. Single `OverwritePartial` extent straddling the cutoff keeps `has_overwrite_extents`
+        //    true. Run before fragmenting the allocator so `allocate(0..8192)` produces one extent.
+        file.allocate(0..8192).await.expect("allocate straddling");
+        let extents = file.device_extents().await.expect("device_extents");
+        assert_eq!(extents.len(), 1);
+        assert_eq!(extents[0].logical_offset, 0);
+        assert_eq!(extents[0].length(), 8192);
+        file.truncate(4096).await.expect("truncate straddling");
+        assert_eq!(file.get_properties().await.unwrap().allocated_size, 4096);
+        assert_eq!(
+            file.with_overwrite_ranges(|r| r.unwrap().overlap(0..8192).collect::<Vec<_>>()),
+            vec![super::RangeType::Overwrite(0..4096), super::RangeType::Cow(4096..8192)]
+        );
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None).await.expect("fsck after straddling");
+
+        // 2. Single fully-written `ExtentMode::Overwrite` extent straddling an unaligned cutoff
+        //    keeps `has_overwrite_extents` true and clears it on full truncate.
+        file.truncate(0).await.expect("truncate before written overwrite");
+        assert!(!has_overwrite_extents_flag(&store, file.object_id()).await);
+        file.allocate(0..8192).await.expect("allocate written overwrite");
+        {
+            let mut buf = file.allocate_buffer(8192).await;
+            buf.as_mut_ptr_slice().fill(0x55);
+            let mut transaction = file.new_transaction().await.expect("new_txn");
+            file.multi_overwrite(&mut transaction, AttributeId::DATA, &[0..8192], buf.as_mut())
+                .await
+                .expect("multi_overwrite");
+            transaction.commit().await.expect("commit");
+        }
+        assert_eq!(get_modes(&file, 0..8192).await, vec![(0..8192, ExtentMode::Overwrite)]);
+        let extents = file.device_extents().await.expect("device_extents");
+        assert_eq!(extents.len(), 1);
+        assert_eq!(extents[0].length(), 8192);
+
+        file.truncate(100).await.expect("truncate written overwrite unaligned");
+        assert_eq!(file.get_properties().await.unwrap().allocated_size, 4096);
+        assert_eq!(
+            file.with_overwrite_ranges(|r| r.unwrap().overlap(0..8192).collect::<Vec<_>>()),
+            vec![super::RangeType::Overwrite(0..4096), super::RangeType::Cow(4096..8192)]
+        );
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None)
+            .await
+            .expect("fsck after written overwrite straddling");
+
+        let reopened =
+            ObjectStore::open_object(&store, file.object_id(), HandleOptions::default(), None)
+                .await
+                .expect("open_object");
+        let ranges: Vec<_> =
+            reopened.with_overwrite_ranges(|r| r.unwrap().overlap(0..8192).collect());
+        assert_eq!(
+            ranges,
+            vec![super::RangeType::Overwrite(0..4096), super::RangeType::Cow(4096..8192)]
+        );
+        drop(reopened);
+
+        file.truncate(0).await.expect("truncate written overwrite to 0");
+        assert!(file.overwrite_ranges_is_empty());
+        assert!(!has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None)
+            .await
+            .expect("fsck after clearing written overwrite");
+
+        // 3. Trimming the only overwrite extent above a CoW prefix clears `has_overwrite_extents`.
+        let buf = file.allocate_buffer(4096).await;
+        file.write_or_append(Some(0), buf.as_ref()).await.expect("write cow prefix");
+        file.allocate(4096..8192).await.expect("allocate above cow");
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+        file.truncate(4096).await.expect("truncate back to cow");
+        assert!(file.overwrite_ranges_is_empty());
+        assert!(!has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None)
+            .await
+            .expect("fsck after trimming overwrite above cow");
+
+        // 4. Partial truncate to an unaligned size with overwrite extents both below and spanning
+        //    multiple trim batches above the cutoff: `has_overwrite_extents` remains true
+        //    throughout, and `open_object` clamps loaded overwrite ranges to `align_up(size)`.
+        file.truncate(0).await.expect("truncate before multi-batch partial");
+        for i in 0..226u64 {
+            file.allocate((i * 8192)..(i * 8192 + 4096)).await.expect("allocate");
+        }
+
+        let truncate_guard = fs.truncate_guard(store.store_object_id(), file.object_id()).await;
+        drop_at_nth_commit(&mut hooks, &fs, 2, file.truncate(100)).await;
+        assert_eq!(file.get_size(), 100);
+        assert!(file.get_properties().await.unwrap().allocated_size > 4096);
+        assert_eq!(
+            file.with_overwrite_ranges(|r| r.unwrap().overlap(0..226 * 8192).collect::<Vec<_>>()),
+            vec![super::RangeType::Overwrite(0..4096), super::RangeType::Cow(4096..226 * 8192)]
+        );
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None).await.expect("fsck before trim");
+
+        let reopened =
+            ObjectStore::open_object(&store, file.object_id(), HandleOptions::default(), None)
+                .await
+                .expect("open_object");
+        let ranges: Vec<_> =
+            reopened.with_overwrite_ranges(|r| r.unwrap().overlap(0..226 * 8192).collect());
+        assert_eq!(
+            ranges,
+            vec![super::RangeType::Overwrite(0..4096), super::RangeType::Cow(4096..226 * 8192)]
+        );
+        drop(reopened);
+
+        store.trim(file.object_id(), &truncate_guard).await.expect("trim");
+        drop(truncate_guard);
+        fs.graveyard().flush().await;
+        assert_eq!(file.get_properties().await.unwrap().allocated_size, 4096);
+        assert_eq!(store.graveyard_count(), 0);
+        assert!(has_overwrite_extents_flag(&store, file.object_id()).await);
+        fsck_volume(&fs, store.store_object_id(), None).await.expect("fsck after trim");
+
+        drop(hooks);
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_tombstone_overwrite_extents_clears_flag_for_fsck() {
+        async fn create_file(
+            store: &Arc<ObjectStore>,
+            root_dir: &Directory<ObjectStore>,
+            name: &str,
+        ) -> DataObjectHandle<ObjectStore> {
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store.store_object_id(), root_dir.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_txn");
+            let file = root_dir.create_child_file(&mut transaction, name).await.expect("create");
+            transaction.commit().await.expect("commit");
+            file
+        }
+
+        async fn verify_purge_and_tombstone(
+            fs: &OpenFxFilesystem,
+            store: &Arc<ObjectStore>,
+            root_dir: &Directory<ObjectStore>,
+            name: &str,
+            oid: u64,
+            expected_flag_after_purge: bool,
+        ) {
+            assert!(has_overwrite_extents_flag(store, oid).await);
+            {
+                let mut transaction = store
+                    .new_transaction(
+                        lock_keys![
+                            LockKey::object(store.store_object_id(), root_dir.object_id()),
+                            LockKey::object(store.store_object_id(), oid),
+                        ],
+                        Options::default(),
+                    )
+                    .await
+                    .expect("new_txn");
+                assert_matches!(
+                    replace_child_with_purge(&mut transaction, None, (root_dir, name), true)
+                        .await
+                        .expect("replace_child_with_purge"),
+                    ReplacedChild::Object(id) if id == oid
+                );
+                transaction.commit().await.expect("commit");
+            }
+            assert!(
+                store
+                    .tree()
+                    .find(&ObjectKey::graveyard_entry(store.graveyard_directory_object_id(), oid))
+                    .await
+                    .expect("find graveyard entry")
+                    .is_some()
+            );
+            assert_eq!(has_overwrite_extents_flag(store, oid).await, expected_flag_after_purge);
+            fsck_volume(fs, store.store_object_id(), None)
+                .await
+                .expect("fsck before graveyard purge");
+
+            store.tombstone_object(oid, Options::default(), None).await.expect("tombstone");
+            assert!(
+                store.tree().find(&ObjectKey::object(oid)).await.expect("find object").is_none()
+            );
+            assert!(
+                store
+                    .tree()
+                    .find(&ObjectKey::graveyard_entry(store.graveyard_directory_object_id(), oid))
+                    .await
+                    .expect("find graveyard entry")
+                    .is_none()
+            );
+            fsck_volume(fs, store.store_object_id(), None)
+                .await
+                .expect("fsck after graveyard purge");
+        }
+
+        let (fs, store, _unused_file) = trim_test_setup(None).await;
+        let root_dir =
+            Directory::open(&store, store.root_directory_object_id()).await.expect("open root");
+
+        // 1. File with 1 overwrite extent and an out-of-line extended attribute: unlinking with
+        //    `replace_child_with_purge(..., true)` deletes the DATA overwrite extent in Batch 0,
+        //    stops at the xattr attribute (`Done(Some(xattr_attr))`), and falls back to the
+        //    graveyard. `has_overwrite_extents` must be cleared so fsck succeeds before the
+        //    graveyard purge runs.
+        let file1 = create_file(&store, &root_dir, "xattr_file").await;
+        file1.allocate(0..4096).await.expect("allocate");
+        file1
+            .handle
+            .set_extended_attribute(
+                b"big_xattr".to_vec(),
+                vec![0xAB; MAX_INLINE_XATTR_SIZE + 1],
+                SetExtendedAttributeMode::Set,
+            )
+            .await
+            .expect("set_extended_attribute");
+        let oid1 = file1.object_id();
+        drop(file1);
+        verify_purge_and_tombstone(&fs, &store, &root_dir, "xattr_file", oid1, false).await;
+
+        // 2. File with 1 overwrite extent followed by >200 sparse CoW extents: unlinking with
+        //    `replace_child_with_purge(..., true)` deletes the overwrite extent in Batch 0, hits
+        //    the mutation threshold (`Incomplete`), and falls back to the graveyard.
+        //    `has_overwrite_extents` must be cleared in Batch 0 so fsck succeeds before graveyard
+        //    purge runs.
+        let file2 = create_file(&store, &root_dir, "multi_batch_file").await;
+        file2.allocate(0..4096).await.expect("allocate");
+        populate_sparse_extents(&file2, 1..221).await;
+        let oid2 = file2.object_id();
+        drop(file2);
+        verify_purge_and_tombstone(&fs, &store, &root_dir, "multi_batch_file", oid2, false).await;
+
+        // 3. File with >225 overwrite extents: Batch 0 deletes a prefix of overwrite extents, hits
+        //    the mutation threshold (`Incomplete`), and falls back to the graveyard with overwrite
+        //    extents still remaining. `has_overwrite_extents` must stay true until
+        //    `tombstone_object` finishes purging the remaining extents.
+        let file3 = create_file(&store, &root_dir, "remaining_overwrite_file").await;
+        for i in 0..230u64 {
+            file3.allocate((i * 8192)..(i * 8192 + 4096)).await.expect("allocate");
+        }
+        let oid3 = file3.object_id();
+        drop(file3);
+        verify_purge_and_tombstone(&fs, &store, &root_dir, "remaining_overwrite_file", oid3, true)
+            .await;
+
+        // 4. File with >200 sparse CoW extents preceding a trailing overwrite extent: Batch 0 trims
+        //    only CoW extents, hits `Incomplete`, and falls back to the graveyard with
+        //    `has_overwrite_extents` still true until `tombstone_object` deletes the trailing
+        //    overwrite extent.
+        let file4 = create_file(&store, &root_dir, "trailing_overwrite_file").await;
+        populate_sparse_extents(&file4, 0..220).await;
+        file4.allocate((220 * 8192)..(220 * 8192 + 4096)).await.expect("allocate trailing");
+        let oid4 = file4.object_id();
+        drop(file4);
+        verify_purge_and_tombstone(&fs, &store, &root_dir, "trailing_overwrite_file", oid4, true)
+            .await;
 
         fs.close().await.expect("close failed");
     }

@@ -662,8 +662,8 @@ class LogicalBufferCollection : public fbl::RefCounted<LogicalBufferCollection> 
 #if defined(PRINT_DIFF)
 #error "Let's pick a different name for PRINT_DIFF"
 #endif
-  // If LLCPP had generic field objects, we wouldn't need this macro.  We #undef the macro name
-  // after we're done using it so it doesn't escape this header.
+  // If FIDL C++ natural bindings had generic field objects, we wouldn't need this macro.  We #undef
+  // the macro name after we're done using it so it doesn't escape this header.
 #define PRINT_DIFF(child_field_name)                                                               \
   do {                                                                                             \
     const std::string& parent_field_name = field_name;                                             \

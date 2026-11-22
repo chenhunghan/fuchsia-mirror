@@ -12,7 +12,7 @@ namespace zxdb {
 ArrayType::ArrayType(fxl::RefPtr<Type> value_type, std::optional<size_t> num_elts)
     : Type(DwarfTag::kArrayType), value_type_(std::move(value_type)), num_elts_(num_elts) {
   if (num_elts_)
-    set_byte_size(*num_elts_ * value_type_->byte_size());
+    set_byte_size(static_cast<uint32_t>(*num_elts_ * value_type_->byte_size()));
 }
 
 ArrayType::~ArrayType() = default;

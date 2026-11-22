@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import("//build/bazel/bazel_build_action.gni")
+import("//build/bazel/bazel_fuchsia_package.gni")
 import("//build/bazel/bazel_test_suite.gni")
 import("//build/bazel/bazel_tool_paths.gni")
 
@@ -21,7 +22,10 @@ group("all") {
   deps = [
     ":bazel_tool_paths_test($host_toolchain)",
     ":quick_tests",
+    ":test_shared_name_package_a",
+    ":test_shared_name_package_b",
     ":tests",
+    "//build/bazel/rules/python/tests:py_zipapp_binary_test($host_toolchain)",
   ]
   visibility += [
     # Ensures the test targets are always available.
@@ -34,6 +38,24 @@ group("all") {
     # with all the necessary Bazel inputs.
     "//bundles/buildbot/*",
   ]
+}
+
+# Tests that two `bazel_fuchsia_package()` targets in the same directory can
+# share `package_name` without colliding on `.far` archive outputs.
+bazel_fuchsia_package("test_shared_name_package_a") {
+  testonly = true
+  bazel_config = "fuchsia_platform"
+  bazel_target =
+      "//build/bazel/rules/packages/tests:example_shared_name_package_a"
+  package_name = "example_shared_package_name"
+}
+
+bazel_fuchsia_package("test_shared_name_package_b") {
+  testonly = true
+  bazel_config = "fuchsia_platform"
+  bazel_target =
+      "//build/bazel/rules/packages/tests:example_shared_name_package_b"
+  package_name = "example_shared_package_name"
 }
 
 bazel_build_action("tests") {
@@ -105,8 +127,8 @@ if (is_host) {
   action("bazel_tool_paths_test") {
     testonly = true
     script = "verify_bazel_tool_paths.py"
-    _go_bin = "${root_out_dir}/bazel_tool_paths_test_go_bin"
-    _cc_bin = "${root_out_dir}/bazel_tool_paths_test_cc_bin"
+    _go_bin = "${bazel_host_tool_root_out_dir}/bazel_tool_paths_test_go_bin"
+    _cc_bin = "${bazel_host_tool_root_out_dir}/bazel_tool_paths_test_cc_bin"
     _stamp = "${target_out_dir}/bazel_tool_paths_test.stamp"
     inputs = [
       _tool_paths_manifest,

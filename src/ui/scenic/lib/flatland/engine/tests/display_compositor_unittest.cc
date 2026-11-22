@@ -158,6 +158,8 @@ class FakeFrameScheduler : public scheduling::FrameScheduler {
   void ScheduleUpdateForSession(zx::time requested_presentation_time,
                                 scheduling::SchedulingIdPair id_pair, bool squashable,
                                 bool schedule_asap) override {}
+  void NotifyExpectedPresent(scheduling::SessionId session_id, zx::time expected_present_time,
+                             zx::duration frame_interval, bool schedule_asap) override {}
   std::vector<scheduling::FuturePresentationInfo> GetFuturePresentationInfos(
       zx::duration requested_prediction_span) override {
     return {};
@@ -2643,6 +2645,7 @@ TEST_F(DisplayCompositorTest, RenderScheduledFrameWithoutDisplayLeavesViewTreeEm
   engine.RenderScheduledFrame(
       /*frame_number=*/1, /*presentation_time=*/zx::time(1000), /*display=*/nullptr,
       [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+  RunLoopUntilIdle();
   EXPECT_TRUE(callback_called);
 
   auto snapshot_variant = engine.GenerateViewTreeSnapshot(flatland::TransformHandle(1, 1));
@@ -2764,6 +2767,7 @@ TEST_F(DisplayCompositorTest,
   engine.RenderScheduledFrame(
       /*frame_number=*/1, /*presentation_time=*/zx::time(1000), flatland_display.get(),
       [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+  RunLoopUntilIdle();
   EXPECT_TRUE(callback_called);
 
   // Verify that the ViewTree snapshot was generated with the expected view.
@@ -2907,6 +2911,7 @@ TEST_F(DisplayCompositorTest, RenderAfterSkippedDarkFrame) {
       [&frame_2_callback_called](const scheduling::Timestamps&) {
         frame_2_callback_called = true;
       });
+  RunLoopUntilIdle();
   EXPECT_TRUE(frame_2_callback_called);
   EXPECT_TRUE(utils::IsEventSignalled(frame_2_fences[0], ZX_EVENT_SIGNALED));
 
@@ -3011,6 +3016,7 @@ TEST_F(DisplayCompositorTest, RenderScheduledFrameWithoutDisplayClearsViewTree) 
   engine.RenderScheduledFrame(
       /*frame_number=*/1, /*presentation_time=*/zx::time(1000), flatland_display.get(),
       [&first_callback_called](const scheduling::Timestamps&) { first_callback_called = true; });
+  RunLoopUntilIdle();
   EXPECT_TRUE(first_callback_called);
 
   // Generate the ViewTree snapshot for Frame 1, consuming `MustRecomputeViewTree()`.
@@ -3027,6 +3033,7 @@ TEST_F(DisplayCompositorTest, RenderScheduledFrameWithoutDisplayClearsViewTree) 
   engine.RenderScheduledFrame(
       /*frame_number=*/2, /*presentation_time=*/zx::time(2000), /*display=*/nullptr,
       [&second_callback_called](const scheduling::Timestamps&) { second_callback_called = true; });
+  RunLoopUntilIdle();
   EXPECT_TRUE(second_callback_called);
 
   // Frame 1 consumed `MustRecomputeViewTree()`, but `SceneState::Clear()` reset
@@ -3111,6 +3118,7 @@ TEST_F(DisplayCompositorTest, LayerOnlyFrameReusesSceneState) {
     engine.RenderScheduledFrame(
         /*frame_number=*/1, /*presentation_time=*/zx::time(1000), flatland_display.get(),
         [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+    RunLoopUntilIdle();
     EXPECT_TRUE(callback_called);
     EXPECT_EQ(engine.scene_state_for_test().rebuild_count, 1u);
     EXPECT_FALSE(engine.scene_state_for_test().cleared);
@@ -3130,6 +3138,7 @@ TEST_F(DisplayCompositorTest, LayerOnlyFrameReusesSceneState) {
     engine.RenderScheduledFrame(
         /*frame_number=*/2, /*presentation_time=*/zx::time(2000), flatland_display.get(),
         [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+    RunLoopUntilIdle();
     EXPECT_TRUE(callback_called);
     EXPECT_EQ(engine.scene_state_for_test().rebuild_count, 1u);
     const auto& snapshot_map = engine.scene_state_for_test().snapshot.map;
@@ -3150,6 +3159,7 @@ TEST_F(DisplayCompositorTest, LayerOnlyFrameReusesSceneState) {
     engine.RenderScheduledFrame(
         /*frame_number=*/3, /*presentation_time=*/zx::time(3000), flatland_display.get(),
         [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+    RunLoopUntilIdle();
     EXPECT_TRUE(callback_called);
     EXPECT_EQ(engine.scene_state_for_test().rebuild_count, 2u);
   }
@@ -3192,6 +3202,7 @@ TEST_F(DisplayCompositorTest, LayerOnlyFrameReusesSceneState) {
     engine.RenderScheduledFrame(
         /*frame_number=*/4, /*presentation_time=*/zx::time(4000), flatland_display.get(),
         [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+    RunLoopUntilIdle();
     EXPECT_TRUE(callback_called);
     EXPECT_EQ(engine.scene_state_for_test().rebuild_count, 3u);
   }
@@ -3263,6 +3274,7 @@ TEST_F(DisplayCompositorTest, ViewTreeRegeneratesForLinkChangeAfterRender) {
   engine.RenderScheduledFrame(
       /*frame_number=*/1, /*presentation_time=*/zx::time(1000), flatland_display.get(),
       [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+  RunLoopUntilIdle();
   EXPECT_TRUE(callback_called);
 
   auto first_snapshot = engine.GenerateViewTreeSnapshot(root);
@@ -3307,6 +3319,7 @@ TEST_F(DisplayCompositorTest, ViewTreeRegeneratesForLinkChangeAfterRender) {
   engine.RenderScheduledFrame(
       /*frame_number=*/2, /*presentation_time=*/zx::time(2000), flatland_display.get(),
       [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+  RunLoopUntilIdle();
   EXPECT_TRUE(callback_called);
 
   auto second_snapshot = engine.GenerateViewTreeSnapshot(root);

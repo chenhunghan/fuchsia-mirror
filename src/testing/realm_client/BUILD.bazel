@@ -6,5 +6,11 @@ package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/realm_client.shard.cml"],
-    visibility = ["//src/testing/realm_client/rust:__pkg__"],
+    visibility = [
+        "//sdk/ctf/tests:__subpackages__",
+        "//src/diagnostics/archivist/tests/integration/test_cases:__pkg__",
+        "//src/diagnostics/detect/integration/test_cases:__pkg__",
+        "//src/hwinfo/mock/integration/tests:__pkg__",
+        "//src/testing/realm_client/rust:__pkg__",
+    ],
 )

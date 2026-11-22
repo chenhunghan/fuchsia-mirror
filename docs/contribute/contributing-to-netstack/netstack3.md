@@ -61,10 +61,10 @@ developers, don't hesitate to reach out! We hang out on the
 
 From now on, you will mostly be able to just use `cargo` for development.
 Sometimes, major changes to Netstack3's dependencies may cause your build setup
-to break. See the [Troubleshooting](#Troubleshooting) section for advice on
+to break. See the [Troubleshooting](#troubleshooting) section for advice on
 fixing your build if this happens.
 
-### Troubleshooting
+### Troubleshooting {:#troubleshooting}
 
 * If you can't run `cargo` correctly after pulling the latest changes with `jiri
   update`, try the following:

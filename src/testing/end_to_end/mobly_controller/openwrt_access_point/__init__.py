@@ -10,7 +10,6 @@ import random
 import re
 import string
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Dict, List
@@ -40,6 +39,10 @@ from openwrt_access_point.lib.dhcp_config import Dnsmasq as Dnsmasq
 from openwrt_access_point.lib.dhcp_config import Lan as Lan
 from openwrt_access_point.lib.dhcp_controller import DhcpController
 from openwrt_access_point.lib.extended_capabilities import ExtendedCapabilities
+from openwrt_access_point.lib.uci_commands import (
+    build_custom_uci_commands,
+    format_uci_value,
+)
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -406,8 +409,8 @@ class OpenWrtAP:
             ssh_commands.append(f"uci set wireless.{radio}.country='{country}'")
 
             ssh_commands.extend(
-                _build_custom_uci_commands(
-                    radio, radio_config.custom_uci_options
+                build_custom_uci_commands(
+                    "wireless", radio, radio_config.custom_uci_options
                 )
             )
 
@@ -417,7 +420,7 @@ class OpenWrtAP:
                     option,
                     value,
                 ) in radio_config.custom_hostapd_options.items():
-                    v = _format_uci_value(value)
+                    v = format_uci_value(value)
                     ssh_commands.append(
                         f"uci add_list wireless.{radio}.hostapd_options='{option}={v}'"
                     )
@@ -713,6 +716,66 @@ class OpenWrtAP:
         """Stops the access point."""
         self.ssh.run("wifi down")
 
+    def hard_reboot_and_reset_wifi_config(
+        self,
+        unreachable_timeout: int = 30,
+        ssh_timeout: int = 180,
+    ) -> None:
+        """Simulates a hard reboot on the OpenWrt AP via `reboot -f`.
+
+        Resets wireless config without reloading Wi-Fi so hostapd transmits
+        no deauth frames before reset and does not auto-start Wi-Fi on boot.
+        """
+        hostname = self.ssh_settings.hostname
+        pre_boot_id = (
+            self.ssh.run("cat /proc/sys/kernel/random/boot_id")
+            .stdout.decode("utf-8")
+            .strip()
+        )
+        _LOGGER.info(
+            "OpenWrt AP (%s) pre-reboot boot_id: %s", hostname, pre_boot_id
+        )
+
+        # Reset persisted wireless config (without reloading wifi) so Wi-Fi
+        # stays off after reboot without sending 802.11 deauth frames now.
+        self.reset_wifi_config()
+
+        _LOGGER.info(
+            "Triggering OpenWrt AP (%s) hard reset via reboot -f.", hostname
+        )
+        try:
+            self.ssh.run(
+                "sync && reboot -f",
+                timeout_sec=3.0,
+                ignore_status=True,
+                attempts=1,
+            )
+        except Exception as e:
+            _LOGGER.debug("Expected SSH drop during OpenWrt hard reset: %s", e)
+
+        _LOGGER.info("Verifying OpenWrt AP (%s) becomes unreachable.", hostname)
+        self.ssh.wait_until_unreachable(timeout_sec=unreachable_timeout)
+        _LOGGER.info("OpenWrt AP (%s) is unreachable as expected.", hostname)
+
+        _LOGGER.info(
+            "Waiting for OpenWrt AP (%s) to become available via SSH.", hostname
+        )
+        self.ssh.wait_until_reachable(timeout_sec=ssh_timeout)
+        _LOGGER.info("OpenWrt AP (%s) responded to SSH.", hostname)
+
+        post_boot_id = (
+            self.ssh.run("cat /proc/sys/kernel/random/boot_id")
+            .stdout.decode("utf-8")
+            .strip()
+        )
+        _LOGGER.info(
+            "OpenWrt AP (%s) post-reboot boot_id: %s", hostname, post_boot_id
+        )
+        if post_boot_id == pre_boot_id:
+            raise RuntimeError(
+                f"OpenWrt AP boot_id did not change after hard_reboot_and_reset_wifi_config ({post_boot_id})."
+            )
+
     def ping(self, dest_ip: str, count: int = 3, timeout_sec: int = 1) -> None:
         """Pings from AP to dest_ip.
 
@@ -968,11 +1031,6 @@ class OpenWrtAP:
         return int(match.group(1))
 
 
-def _format_uci_value(value: object) -> str:
-    """Formats a Python value into an OpenWrt UCI string."""
-    return str(int(value)) if isinstance(value, bool) else str(value)
-
-
 def _get_wep_key(password: str) -> str:
     """Formats a WEP password for hostapd.
 
@@ -994,32 +1052,6 @@ def _get_wep_key(password: str) -> str:
         f"WEP key must be a hex string of {_WEP_HEX_LENGTH} characters "
         f"or an ASCII string of {_WEP_STR_LENGTH} characters."
     )
-
-
-def _build_custom_uci_commands(
-    section: str, options: Mapping[str, object]
-) -> list[str]:
-    """Builds UCI commands to apply custom UCI options to a wireless section.
-
-    Args:
-        section: The UCI wireless section name.
-        options: Mapping of UCI option names to scalar or list values.
-
-    Returns:
-        A list of UCI commands setting or appending the custom options.
-    """
-    commands: list[str] = []
-    for option, value in options.items():
-        if isinstance(value, list):
-            for item in value:
-                v = _format_uci_value(item)
-                commands.append(
-                    f"uci add_list wireless.{section}.{option}='{v}'"
-                )
-        else:
-            v = _format_uci_value(value)
-            commands.append(f"uci set wireless.{section}.{option}='{v}'")
-    return commands
 
 
 def _build_wep_commands(section_name: str, bss: BssSettings) -> list[str]:
@@ -1105,7 +1137,9 @@ def _build_owe_transition_commands(
         f"uci set wireless.{owe_iface_section}.hidden='1'",
     ]
     commands.extend(
-        _build_custom_uci_commands(owe_iface_section, bss.custom_uci_options)
+        build_custom_uci_commands(
+            "wireless", owe_iface_section, bss.custom_uci_options
+        )
     )
     return commands
 
@@ -1151,7 +1185,9 @@ def _build_bss_commands(bss: BssSettings, radio: Radio) -> list[str]:
         )
 
     commands.extend(
-        _build_custom_uci_commands(section_name, bss.custom_uci_options)
+        build_custom_uci_commands(
+            "wireless", section_name, bss.custom_uci_options
+        )
     )
     return commands
 
@@ -1206,4 +1242,5 @@ def _build_reset_wifi_config_commands() -> list[str]:
         "wifi config",
         # Delete all default BSSs generated by `wifi config` to ensure a clean slate.
         "while uci -q delete wireless.@wifi-iface[0]; do :; done",
+        "uci commit wireless",
     ]

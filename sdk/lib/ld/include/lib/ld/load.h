@@ -6,6 +6,8 @@
 #define LIB_LD_LOAD_H_
 
 #include <lib/elfldltl/dynamic.h>
+#include <lib/elfldltl/layout.h>
+#include <lib/elfldltl/memory.h>
 #include <lib/elfldltl/note.h>
 #include <lib/elfldltl/phdr.h>
 #include <lib/fit/result.h>
@@ -21,12 +23,13 @@ namespace ld {
 // either after or while setting up LoadInfo and Memory objects.
 
 // Shorthand.
-template <class Elf = elfldltl::Elf<>>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>>
 using AbiModule = abi::Abi<Elf>::Module;
 
 // Set the module Phdrs, which is read directly from the load image, as opposed
 // to from a buffer read from the file.
-template <class Elf = elfldltl::Elf<>, class LoadInfo, class Memory>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>, class LoadInfo,
+          elfldltl::MemoryReader<typename Elf::size_type, typename Elf::Phdr> Memory>
 constexpr void SetModulePhdrs(AbiModule<Elf>& module, const typename Elf::Ehdr& ehdr,
                               const LoadInfo& load_info, Memory& memory) {
   // Find the segment that covers the range of the file occupied by the phdrs:
@@ -53,7 +56,7 @@ constexpr void SetModulePhdrs(AbiModule<Elf>& module, const typename Elf::Ehdr& 
 }
 
 // Set the module vaddr bounds, calculated from the runtime load bias.
-template <class Elf = elfldltl::Elf<>, class LoadInfo>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>, class LoadInfo>
 constexpr void SetModuleVaddrBounds(AbiModule<Elf>& module, const LoadInfo& load_info,
                                     typename Elf::size_type load_bias) {
   module.link_map.addr = load_bias;
@@ -61,7 +64,7 @@ constexpr void SetModuleVaddrBounds(AbiModule<Elf>& module, const LoadInfo& load
   module.vaddr_end = module.vaddr_start + load_info.vaddr_size();
 }
 
-template <class Elf = elfldltl::Elf<>>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>>
 struct ModulePhdrInfo {
   std::optional<typename Elf::Phdr> dyn_phdr;
   std::optional<typename Elf::Phdr> tls_phdr;
@@ -80,7 +83,7 @@ struct ModulePhdrInfo {
 // pass after the LoadInfo has been filled in a first pass and the segments
 // have been mapped; then elfldltl::PhdrMemoryNoteObserver can be used, or
 // similar things that find data via p_vaddr.
-template <class Elf = elfldltl::Elf<>, class Diagnostics, typename... PhdrObservers>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>, class Diagnostics, typename... PhdrObservers>
 constexpr std::optional<ModulePhdrInfo<Elf>> DecodeModulePhdrs(
     Diagnostics& diag, std::span<const typename Elf::Phdr> phdrs,
     PhdrObservers&&... phdr_observers) {
@@ -97,7 +100,8 @@ constexpr std::optional<ModulePhdrInfo<Elf>> DecodeModulePhdrs(
 
 // This uses elfldltl::DecodeDynamic to fill the Module fields.  Additional
 // dynamic section observers can be passed to include in the same scan.
-template <class Elf = elfldltl::Elf<>, class Diagnostics, class Memory,
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>, class Diagnostics,
+          elfldltl::MemoryReader<typename Elf::size_type, typename Elf::Dyn> Memory,
           typename... DynamicObservers>
 constexpr fit::result<bool, std::span<const typename Elf::Dyn>> DecodeModuleDynamic(
     AbiModule<Elf>& module, Diagnostics& diag, Memory& memory,
@@ -145,7 +149,7 @@ constexpr fit::result<bool, std::span<const typename Elf::Dyn>> DecodeModuleDyna
 // The callback always return success so that the NoteObserver will never
 // short-circuit the phdrs scan it's part of, only short-circuit unnecessary
 // note scanning.
-template <class Elf = elfldltl::Elf<>>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>>
 constexpr auto ObserveBuildIdNote(AbiModule<Elf>& module) {
   assert(module.build_id.empty());
   return [&module](const auto& note) -> fit::result<fit::failed, bool> {
@@ -169,14 +173,14 @@ constexpr auto ObserveBuildIdNote(AbiModule<Elf>& module) {
 // are of interest in a phdrs scan.  They return phdr note observers reading
 // from the file or memory, respectively.
 
-template <class Elf = elfldltl::Elf<>, class File, typename Allocator>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>, class File, typename Allocator>
 constexpr auto PhdrFileBuildIdObserver(File&& file, Allocator&& allocator, AbiModule<Elf>& module) {
   return elfldltl::PhdrFileNoteObserver(Elf{}, std::forward<File>(file),
                                         std::forward<Allocator>(allocator),
                                         ObserveBuildIdNote<Elf>(module));
 }
 
-template <class Elf = elfldltl::Elf<>, class Memory>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>, class Memory>
 constexpr auto PhdrMemoryBuildIdObserver(Memory&& memory, AbiModule<Elf>& module) {
   return elfldltl::PhdrMemoryNoteObserver(Elf{}, std::forward<Memory>(memory),
                                           ObserveBuildIdNote<Elf>(module));

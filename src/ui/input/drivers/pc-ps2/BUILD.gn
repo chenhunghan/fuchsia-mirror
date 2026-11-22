@@ -68,7 +68,6 @@ fuchsia_driver_component("pc-ps2") {
     ":i8042_bind",
     ":pc-ps2-driver",
   ]
-  info = "meta/pc-ps2-info.json"
   dml_label = ":pc-ps2-dml"
 }
 

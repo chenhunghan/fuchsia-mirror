@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+"""Defines SHAC checks for documentation files."""
+
 load("./common.star", "compiled_tool_path", "get_fuchsia_dir", "os_exec")
 
 def _doc_checker(ctx):
@@ -10,18 +12,22 @@ def _doc_checker(ctx):
         # doc-checker is only relevant for fuchsia.git.
         return
 
-    affected_files = set(ctx.scm.affected_files())
-
     # doc-checker validates more than Markdown prose: it also checks YAML such
     # as _toc.yaml and the glossary, and in-tree links to images and other
-    # static assets under //docs. Trigger on any change beneath //docs so all
-    # of those are covered. Deletions must be included: removing a file is
-    # precisely what invalidates links elsewhere in the tree.
+    # static assets under //docs, as well as in-tree files outside //docs that
+    # documentation links to. Trigger on any change to Markdown or //docs, or
+    # whenever any file is deleted or renamed (which can invalidate in-tree
+    # links from //docs; git mv is reported at the new path with action "R").
     if not ctx.scm.affected_files(
         glob = ["*.md", "/docs/**"],
         include_deleted = True,
-    ):
+    ) and not any([
+        meta.action in ("D", "R")
+        for meta in ctx.scm.affected_files(include_deleted = True).values()
+    ]):
         return
+
+    affected_files = set(ctx.scm.affected_files())
 
     exe = compiled_tool_path(ctx, "doc-checker")
     res = os_exec(ctx, [exe, "--json", "--root", get_fuchsia_dir(ctx)], ok_retcodes = [0, 1]).wait()
@@ -33,7 +39,7 @@ def _doc_checker(ctx):
         msg = finding["message"]
         if finding["help_suggestion"]:
             msg += "\n\n" + finding["help_suggestion"]
-        msg += "\n\nRun `fx doc-checker --local-links-only` to reproduce."
+        msg += "\n\nRun `fx doc-checker` to reproduce."
         filepath = abspath[len(ctx.scm.root) + 1:]
         level = {
             "Info": "notice",

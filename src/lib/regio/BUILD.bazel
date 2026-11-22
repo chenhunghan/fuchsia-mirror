@@ -1,0 +1,76 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":regio-tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":regio_host_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+regio_sources = [
+    "src/arm64/mod.rs",
+    "src/arm64/spec.rs",
+    "src/lib.rs",
+    "src/mmio.rs",
+    "src/riscv64/encoding.rs",
+    "src/riscv64/mod.rs",
+    "src/testing/mod.rs",
+    "src/testing/x86.rs",
+    "src/traits.rs",
+    "src/x86/cpuid.rs",
+    "src/x86/cr.rs",
+    "src/x86/mod.rs",
+    "src/x86/msr.rs",
+    "src/x86/pio.rs",
+]
+
+rustc_library(
+    name = "regio",
+    srcs = regio_sources,
+    edition = "2024",
+    visibility = ["//zircon/kernel:__subpackages__"],
+    deps = ["//zircon/system/ulib/mmio-ptr:mmio-ptr-rs"],
+)
+
+# The same crate as ":regio", but with the testing feature enabled.
+rustc_library(
+    name = "regio-testing",
+    testonly = True,
+    srcs = regio_sources,
+    crate_features = ["testing"],
+    crate_name = "regio",
+    edition = "2024",
+    visibility = ["//zircon/kernel/lib/arch:__pkg__"],
+    deps = ["//zircon/system/ulib/mmio-ptr:mmio-ptr-rs"],
+)
+
+rustc_test(
+    name = "regio_test",
+    crate = ":regio",
+)
+
+wrap_host_rust_test(
+    name = "regio_host_test",
+    binary_name = "regio_test",
+)
+
+fx_unittest_package(
+    name = "regio-tests",
+    unit_tests = [":regio_test"],
+)

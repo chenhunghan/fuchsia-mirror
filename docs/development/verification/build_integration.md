@@ -23,7 +23,7 @@ In some cases system components are designed to support different configurations
 [build types][build-types]. When components are engineered using this strategy, it is important to
 protect the integrity of non-eng builds by verifying the correct configuration on such builds.
 
-### Verifying structured configuration files
+### Verifying structured configuration files {:#verifying-structured-configuration-files}
 
 To verify non-eng Google product builds for your structured configuration, you must take the
 following steps:

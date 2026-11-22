@@ -6,6 +6,16 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    [
+        "blocking_drain_unittest.cc",
+        "files_unittest.cc",
+        "socket_drainer_unittest.cc",
+        "strings_unittest.cc",
+    ],
+    visibility = ["//src/lib/fsl:__pkg__"],
+)
+
 cc_library(
     name = "socket",
     srcs = [

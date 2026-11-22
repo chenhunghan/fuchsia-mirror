@@ -32,8 +32,6 @@ cc_test_executable("attachment_manager_unittest_exe") {
   sources = [ "attachment_manager_unittest.cc" ]
 
   deps = [
-    "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_hlcpp",
-    "//sdk/fidl/fuchsia.intl:fuchsia.intl_hlcpp",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/fit-promise",
     "//src/developer/forensics/feedback/attachments",
@@ -228,8 +226,8 @@ cc_test_executable("encode_unittest_exe") {
   sources = [ "encode_unittest.cc" ]
 
   deps = [
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//src/developer/forensics/feedback/annotations",
-    "//src/developer/forensics/testing:gpretty_printers",
     "//src/developer/forensics/testing:gtest_with_syslog_main",
     "//src/developer/forensics/testing:unit_test_fixture",
     "//third_party/googletest:gmock",
@@ -341,27 +339,7 @@ cc_test_executable("previous_boot_inspect_unittest_exe") {
     "//src/lib/files",
     "//third_party/googletest:gmock",
     "//third_party/googletest:gtest",
-  ]
-}
-
-cc_test_executable("previous_boot_log_unittest_exe") {
-  testonly = true
-
-  sources = [ "previous_boot_log_unittest.cc" ]
-
-  deps = [
-    "//sdk/lib/sys/cpp/testing:cpp",
-    "//src/developer/forensics/feedback/attachments",
-    "//src/developer/forensics/feedback/attachments:previous_boot_log",
-    "//src/developer/forensics/feedback_data:constants",
-    "//src/developer/forensics/testing:gmatchers",
-    "//src/developer/forensics/testing:gpretty_printers",
-    "//src/developer/forensics/testing:gtest_with_syslog_main",
-    "//src/developer/forensics/testing:unit_test_fixture",
-    "//src/developer/forensics/utils:errors",
-    "//src/lib/timekeeper:testing",
-    "//third_party/googletest:gmock",
-    "//third_party/googletest:gtest",
+    "//third_party/zlib",
   ]
 }
 
@@ -393,7 +371,6 @@ cc_test_executable("last_reboot_unittest_exe") {
   sources = [ "last_reboot_unittest.cc" ]
 
   deps = [
-    "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_hlcpp",
     "//src/developer/forensics/feedback:main_service",
     "//src/developer/forensics/feedback/reboot_log",
     "//src/developer/forensics/testing:gtest_with_syslog_main",
@@ -417,13 +394,16 @@ cc_test_executable("main_service_unittest_exe") {
 
   deps = [
     "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
+    "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_cpp_testing",
     "//src/developer/forensics/feedback:main_service",
     "//src/developer/forensics/feedback/reboot_log",
     "//src/developer/forensics/testing:gtest_with_syslog_main",
     "//src/developer/forensics/testing:unit_test_fixture",
     "//src/developer/forensics/testing/stubs:cobalt",
     "//src/developer/forensics/testing/stubs:crash_reporter",
+    "//src/developer/forensics/testing/stubs:fidl_server",
     "//src/developer/forensics/utils/redact",
+    "//src/lib/files",
     "//src/lib/timekeeper:testing",
     "//third_party/googletest:gmock",
     "//third_party/googletest:gtest",
@@ -552,23 +532,6 @@ cc_test_executable("stop_signals_unittest_exe") {
     "//src/lib/fxl/test:gtest_main",
     "//third_party/googletest:gmock",
     "//third_party/googletest:gtest",
-  ]
-}
-
-cc_test_executable("system_time_tracker_unittest_exe") {
-  testonly = true
-
-  sources = [ "system_time_tracker_unittest.cc" ]
-
-  deps = [
-    "//src/developer/forensics/feedback:constants",
-    "//src/developer/forensics/feedback:system_time_tracker",
-    "//src/developer/forensics/testing:unit_test_fixture",
-    "//src/lib/files",
-    "//src/lib/fxl/test:gtest_main",
-    "//src/lib/timekeeper:testing",
-    "//third_party/googletest:gtest",
-    "//third_party/rapidjson",
   ]
 }
 
@@ -731,14 +694,6 @@ fuchsia_unittest_component("previous_boot_inspect_unittest") {
   ]
 }
 
-fuchsia_unittest_component("previous_boot_log_unittest") {
-  deps = [
-    ":previous_boot_log_unittest_exe",
-    "//src/sys/test_runners:tmp_storage",
-    "//src/sys/test_runners/gtest:death_test",
-  ]
-}
-
 fuchsia_test_component("kernel_log_integration_test") {
   manifest = "meta/kernel_log_integration_test.cml"
 
@@ -795,13 +750,6 @@ fuchsia_unittest_component("stop_signals_unittest") {
   deps = [ ":stop_signals_unittest_exe" ]
 }
 
-fuchsia_unittest_component("system_time_tracker_unittest") {
-  deps = [
-    ":system_time_tracker_unittest_exe",
-    "//src/sys/test_runners:tmp_storage",
-  ]
-}
-
 fuchsia_unittest_component("target_channel_provider_unittest") {
   deps = [ ":target_channel_provider_unittest_exe" ]
 }
@@ -838,7 +786,6 @@ fuchsia_test_package("feedback-tests") {
     ":inspect_unittest",
     ":intl_provider_unittest",
     ":previous_boot_inspect_unittest",
-    ":previous_boot_log_unittest",
     ":main_service_unittest",
     ":namespace_init_unittest",
     ":network_watcher_unittest",
@@ -847,7 +794,6 @@ fuchsia_test_package("feedback-tests") {
     ":redactor_factory_unittest",
     ":startup_annotations_unittest",
     ":stop_signals_unittest",
-    ":system_time_tracker_unittest",
     ":target_channel_provider_unittest",
     ":time_provider_unittest",
     ":ui_state_provider_unittest",

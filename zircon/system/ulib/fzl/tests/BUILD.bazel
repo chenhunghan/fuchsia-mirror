@@ -1,0 +1,79 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":fzl-unittest-package",
+        ":fzl-zxtest-unittest-package",
+    ],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+fx_unittest_package(
+    name = "fzl-zxtest-unittest-package",
+    unit_tests = [":fzl-zxtest"],
+)
+
+fx_unittest_package(
+    name = "fzl-unittest-package",
+    unit_tests = [":fzl"],
+)
+
+fx_cc_test_binary(
+    name = "fzl-zxtest",
+    srcs = [
+        "pinned-vmo-tests.cc",
+        "vmo-pool-tests.cc",
+        "vmo-probe.h",
+    ],
+    gn_output_name = "fzl-zxtest-test",
+    deps = [
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//src/devices/testing/fake-bti",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "fzl",
+    srcs = [
+        "fzl-test.cc",
+        "memory_probe_tests.cc",
+        "owned-vmo-mapper-tests.cc",
+        "resizeable-vmo-mapper-tests.cc",
+        "vmo-probe.cc",
+        "vmo-probe.h",
+        "vmo-vmar-tests.cc",
+    ],
+    gn_output_name = "fzl-test",
+    deps = [
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/sync",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)

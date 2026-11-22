@@ -1,0 +1,79 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/python/python_host_test.gni")
+import("//build/testing/host_test_data.gni")
+
+# Defines a host-side Python unit test that walks the AST of all Python test
+# sources referenced in `tracked_gn_files` (plus any `extra_python_sources`).
+template("wlan_python_architecture_test") {
+  assert(defined(invoker.main_source), "main_source is required")
+  assert(defined(invoker.tracked_gn_files), "tracked_gn_files is required")
+
+  _self_source = "//" + rebase_path(invoker.main_source, "//")
+  _raw_py_sources = []
+
+  foreach(_gn_file, invoker.tracked_gn_files) {
+    _gn_dir = get_path_info(_gn_file, "dir")
+    foreach(_line, read_file(_gn_file, "list lines")) {
+      _code = []
+      _code = string_split(_line, "#")
+      _in_quote = false
+      foreach(_part, string_split(_code[0], "\"")) {
+        if (_in_quote && get_path_info(_part, "extension") == "py") {
+          _raw_py_sources += [ "//" + rebase_path(_part, "//", _gn_dir) ]
+        }
+        _in_quote = !_in_quote
+      }
+    }
+  }
+
+  if (defined(invoker.extra_python_sources)) {
+    _raw_py_sources += invoker.extra_python_sources
+  }
+
+  _discovered_py_sources = []
+  foreach(_py_source, _raw_py_sources) {
+    _resolved = "//" + rebase_path(_py_source, "//")
+    if (_resolved != _self_source) {
+      _discovered_py_sources += [ _resolved ]
+      _discovered_py_sources -= [ _resolved ]
+      _discovered_py_sources += [ _resolved ]
+    }
+  }
+
+  _manifest_target = "${target_name}_manifest"
+  _manifest_path = "${target_gen_dir}/${target_name}_manifest/manifest.json"
+  _sources_target = "${target_name}_sources"
+
+  generated_file(_manifest_target) {
+    testonly = true
+    visibility = [ ":*" ]
+    output_conversion = "json"
+    contents = {
+      source_root = rebase_path("//", root_build_dir)
+      python_files = rebase_path(_discovered_py_sources, "//")
+    }
+    outputs = [ _manifest_path ]
+  }
+
+  host_test_data(_sources_target) {
+    testonly = true
+    visibility = [ ":*" ]
+    sources = _discovered_py_sources
+  }
+
+  python_host_test(target_name) {
+    forward_variables_from(invoker,
+                           [
+                             "main_source",
+                             "visibility",
+                           ])
+    libraries = [ "//src/connectivity/wlan/tests/utils:architecture_check" ]
+    data_package_name = "test_data"
+    data_sources = [ _manifest_path ]
+    deps = [ ":${_manifest_target}" ]
+    test_data_deps = [ ":${_sources_target}" ]
+  }
+}

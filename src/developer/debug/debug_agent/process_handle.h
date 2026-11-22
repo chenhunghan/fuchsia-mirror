@@ -14,11 +14,15 @@
 
 #include "src/developer/debug/shared/status.h"
 
+// TODO(https://fxbug.dev/581892793): Switch to #ifdef and #elifdef once reclient's C++ include
+// scanner supports C++23 preprocessor directives.
+// NOLINTBEGIN(readability-use-concise-preprocessor-directives)
 #if defined(__Fuchsia__)
 #include <lib/zx/process.h>
 #elif defined(__linux__)
 #include "src/developer/debug/debug_agent/linux_task.h"
 #endif
+// NOLINTEND(readability-use-concise-preprocessor-directives)
 
 namespace debug_ipc {
 struct AddressRegion;
@@ -67,6 +71,9 @@ class ThreadHandle;
 // matches the value of ZX_PROP_PROCESS_BREAK_ON_LOAD. If so, it should update the module list and
 // continue the execution.
 // LINT.ThenChange(//src/starnix/kernel/execution/shared.rs)
+// TODO(https://fxbug.dev/581892793): Switch to #ifdef and #elifdef once reclient's C++ include
+// scanner supports C++23 preprocessor directives.
+// NOLINTBEGIN(readability-use-concise-preprocessor-directives)
 #if defined(__Fuchsia__)
 using NativeProcessHandle = zx::process;
 #elif defined(__linux__)
@@ -74,6 +81,7 @@ using NativeProcessHandle = fxl::RefPtr<LinuxTask>;
 #else
 #error Unknown platform
 #endif
+// NOLINTEND(readability-use-concise-preprocessor-directives)
 
 class ProcessHandle {
  public:
@@ -111,6 +119,8 @@ class ProcessHandle {
   // multiple times will replace the observer pointer.
   virtual debug::Status Attach(ProcessHandleObserver* observer, AttachConfig config) = 0;
 
+  // Returns true only when this handle owns the process debugger exception channel, not when it
+  // only watches process termination signals.
   virtual bool IsAttached() const = 0;
 
   // Unregisters for process notifications. See Attach(). It is legal to call Detach() multiple

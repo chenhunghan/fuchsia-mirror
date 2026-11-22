@@ -21,6 +21,10 @@ class UfsMockDevice;
 class RegisterMmioProcessor {
  public:
   using MmioWriteHandler = std::function<void(UfsMockDevice&, uint32_t)>;
+  using MmioReadHandler = std::function<uint32_t(UfsMockDevice&)>;
+
+  void SetReadHook(RegisterMap reg, MmioReadHandler func) { read_handlers_[reg] = std::move(func); }
+  void ResetExtra() { read_handlers_.clear(); }
 
   RegisterMmioProcessor(const RegisterMmioProcessor&) = delete;
   RegisterMmioProcessor& operator=(const RegisterMmioProcessor&) = delete;
@@ -106,6 +110,7 @@ class RegisterMmioProcessor {
   };
 
   UfsMockDevice& mock_device_;
+  std::unordered_map<RegisterMap, MmioReadHandler> read_handlers_;
 };
 
 }  // namespace ufs_mock_device

@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use core::num::NonZeroU64;
 use futures::prelude::*;
+use futures::ready;
 use futures::task::{Context, Poll};
 use netext::TokioAsyncReadExt;
 use std::fmt;
-use std::io::{Error, ErrorKind};
+use std::io::{Error, ErrorKind, IoSlice};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::time::Duration;
@@ -16,43 +16,75 @@ use tokio::net::TcpStream;
 
 const FB_HANDSHAKE: [u8; 4] = *b"FB01";
 
+/// Size of the header of a Fastboot over TCP message: the length of the rest of the message, as
+/// a big-endian u64.
+const HEADER_SIZE: usize = 8;
+
+/// Messages up to this size are read in full before `poll_read` returns any of their data, so
+/// that a read returns a whole message, e.g. a reply, even if TCP splits it. Fastboot replies are
+/// at most 256 bytes.
+const MAX_BUFFERED_MESSAGE_SIZE: usize = 4096;
+
 ///////////////////////////////////////////////////////////////////////////////
 // TcpNetworkInterface
 //
 
+/// A Fastboot over TCP connection.
+///
+/// In TCP mode the Fastboot Protocol expects the first 8 bytes (sizeof u64) of each message to
+/// indicate the size in bytes of the rest of the message. `poll_write` sends each buffer it is
+/// given as one message, and `poll_read` returns the data of the received messages.
 pub struct TcpNetworkInterface<T> {
     stream: T,
-    read_avail_bytes: Option<NonZeroU64>,
-    /// Returns a tuple of (avail_bytes, bytes_read, bytes)
-    read_task:
-        Option<Pin<Box<dyn Future<Output = std::io::Result<(u64, usize, Box<[u8]>)>> + Send>>>,
-    write_task: Option<Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send>>>,
-    /// Flag to indicate if the header for a given Write operation was completed
-    wrote_header: bool,
-    /// Task to write the "header" for the Fastboot over TCP message
-    /// In TCP mode the Fastboot Protocol expects the first 8 bytes (sizeof u64)
-    /// to be prepended to any write operation. These bytes indicate the total
-    /// size in bytes of the message that is about to be sent.
-    ///
-    /// These bytes must be sent in their entirety before execution of `write_task`
-    /// in order to follow the `AsyncWrite` contract correctly. For example, if we
-    /// are writing a `16` byte message, in reality the entirety of the message being
-    /// sent is `16` bytes AND the header, but the total written bytes returned to
-    /// `AsyncWrite` will still only be `16`. If we keep all this in a single task,
-    /// then the total bytes will be larger than intended, causing `AsyncWrite`
-    /// operations like `write_all` to fail in confusing ways.
-    write_header_task: Option<Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>>,
+    read_state: ReadState,
+    /// Holds a message of up to `MAX_BUFFERED_MESSAGE_SIZE` bytes while it is read.
+    read_buffer: Box<[u8; MAX_BUFFERED_MESSAGE_SIZE]>,
+    /// The message being written, if a write is in progress.
+    write_state: Option<WriteState>,
+}
+
+/// Progress of reading a message.
+#[derive(Debug)]
+enum ReadState {
+    /// Reading the header of the next message, of which `pos` bytes are read.
+    Header { header: [u8; HEADER_SIZE], pos: usize },
+    /// Reading a message of `len` bytes into `read_buffer`. `filled` bytes are read and `consumed`
+    /// bytes of those are returned.
+    Buffered { len: usize, filled: usize, consumed: usize },
+    /// Reading a larger message directly into the reader's buffers. `remaining` bytes are left.
+    Streamed { remaining: u64 },
+}
+
+impl Default for ReadState {
+    fn default() -> Self {
+        Self::Header { header: [0; HEADER_SIZE], pos: 0 }
+    }
+}
+
+/// Progress of writing a message.
+#[derive(Debug)]
+struct WriteState {
+    header: [u8; HEADER_SIZE],
+    /// The length of the message's data, without the header.
+    len: usize,
+    /// The number of bytes of the header and data written so far.
+    written: usize,
+}
+
+impl WriteState {
+    fn new(len: usize) -> Self {
+        // usize is at most 64 bits wide on all supported hosts.
+        Self { header: (len as u64).to_be_bytes(), len, written: 0 }
+    }
 }
 
 impl<T> TcpNetworkInterface<T> {
     pub fn new(stream: T) -> Self {
         Self {
             stream,
-            read_avail_bytes: None,
-            read_task: None,
-            write_task: None,
-            wrote_header: false,
-            write_header_task: None,
+            read_state: ReadState::default(),
+            read_buffer: Box::new([0; MAX_BUFFERED_MESSAGE_SIZE]),
+            write_state: None,
         }
     }
 }
@@ -60,152 +92,152 @@ impl<T> TcpNetworkInterface<T> {
 impl<T> fmt::Debug for TcpNetworkInterface<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TcpNetworkInterface")
-            .field("read_avail_bytes", &self.read_avail_bytes)
+            .field("read_state", &self.read_state)
+            .field("write_state", &self.write_state)
             .finish()
     }
 }
 
+fn unexpected_eof(what: &str) -> Error {
+    Error::new(ErrorKind::UnexpectedEof, format!("connection closed in the middle of a {what}"))
+}
+
 impl<T> AsyncRead for TcpNetworkInterface<T>
 where
-    T: AsyncRead + std::marker::Unpin + Clone + Send + 'static,
+    T: AsyncRead + Unpin,
 {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
-        let buf_len = buf.len();
-        let avail_bytes = self.read_avail_bytes;
-        let mut stream = self.stream.clone();
-        let task = self.read_task.get_or_insert_with(|| {
-            Box::pin(async move {
-                let mut avail_bytes = match avail_bytes {
-                    Some(value) => value.into(),
-                    None => {
-                        let mut pkt_len = [0; 8];
-                        let bytes_read = stream.read(&mut pkt_len).await?;
-                        if bytes_read != pkt_len.len() {
-                            return Err(std::io::Error::other(format!(
-                                "Could not read packet header"
-                            )));
+        let this = self.get_mut();
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        // All reads from `stream` either return `Pending`, which registers `cx` for a wake-up
+        // when more data arrives, or make progress.
+        loop {
+            match &mut this.read_state {
+                ReadState::Header { header, pos } => {
+                    while *pos < HEADER_SIZE {
+                        let n =
+                            ready!(Pin::new(&mut this.stream).poll_read(cx, &mut header[*pos..]))?;
+                        if n == 0 {
+                            // The peer may only close the connection between messages.
+                            return Poll::Ready(match *pos {
+                                0 => Ok(0),
+                                _ => Err(unexpected_eof("message header")),
+                            });
                         }
-                        u64::from_be_bytes(pkt_len)
+                        *pos += n;
                     }
-                };
-
-                // Mild TOCTOU issue but better safe than sorry.
-                if avail_bytes > buf_len.try_into().unwrap() {
-                    return Err(std::io::Error::other(format!(
-                        "Expected too many bytes: would read {avail_bytes}, but buf size is {buf_len}"
-                    )));
+                    let len = u64::from_be_bytes(*header);
+                    this.read_state = match usize::try_from(len) {
+                        // An empty message carries nothing to return, and returning no data would
+                        // signal the end of the stream.
+                        Ok(0) => ReadState::default(),
+                        Ok(len) if len <= MAX_BUFFERED_MESSAGE_SIZE => {
+                            ReadState::Buffered { len, filled: 0, consumed: 0 }
+                        }
+                        _ => ReadState::Streamed { remaining: len },
+                    };
                 }
-
-                let mut data_buf = vec![0; avail_bytes.try_into().unwrap()].into_boxed_slice();
-                let bytes_read: u64 = stream.read(&mut data_buf).await?.try_into().unwrap();
-                avail_bytes -= bytes_read;
-
-                Ok((avail_bytes, bytes_read.try_into().unwrap(), data_buf))
-            })
-        });
-
-        match task.as_mut().poll(cx) {
-            Poll::Ready(Ok((avail_bytes, bytes_read, data))) => {
-                self.read_task = None;
-                self.read_avail_bytes = NonZeroU64::new(avail_bytes);
-                if bytes_read > buf_len && bytes_read > data.len() {
-                    return Poll::Ready(Err(Error::new(
-                        ErrorKind::InvalidData,
-                        format!(
-                            "Expected too many bytes: would read {bytes_read}, but buf size is {buf_len}",
-                        ),
-                    )));
+                ReadState::Buffered { len, filled, consumed } => {
+                    while *filled < *len {
+                        let n = ready!(
+                            Pin::new(&mut this.stream)
+                                .poll_read(cx, &mut this.read_buffer[*filled..*len])
+                        )?;
+                        if n == 0 {
+                            return Poll::Ready(Err(unexpected_eof("message")));
+                        }
+                        *filled += n;
+                    }
+                    let n = std::cmp::min(buf.len(), *len - *consumed);
+                    buf[..n].copy_from_slice(&this.read_buffer[*consumed..][..n]);
+                    *consumed += n;
+                    if *consumed == *len {
+                        this.read_state = ReadState::default();
+                    }
+                    return Poll::Ready(Ok(n));
                 }
-                buf[0..bytes_read].copy_from_slice(&data[0..bytes_read]);
-                Poll::Ready(Ok(bytes_read))
+                ReadState::Streamed { remaining } => {
+                    let max = usize::try_from(*remaining).map_or(buf.len(), |v| v.min(buf.len()));
+                    let n = ready!(Pin::new(&mut this.stream).poll_read(cx, &mut buf[..max]))?;
+                    if n == 0 {
+                        return Poll::Ready(Err(unexpected_eof("message")));
+                    }
+                    // `n` is at most `remaining`.
+                    *remaining -= n as u64;
+                    if *remaining == 0 {
+                        this.read_state = ReadState::default();
+                    }
+                    return Poll::Ready(Ok(n));
+                }
             }
-            Poll::Ready(Err(e)) => {
-                self.read_task = None;
-                Poll::Ready(Err(e))
-            }
-            Poll::Pending => Poll::Pending,
         }
     }
 }
 
 impl<T> AsyncWrite for TcpNetworkInterface<T>
 where
-    T: AsyncWrite + std::marker::Unpin + Clone + Send + 'static,
+    T: AsyncWrite + Unpin,
 {
+    /// Sends `buf` as one message.
+    ///
+    /// Reports the length of `buf` as written, without the header, once the whole message is
+    /// written, as `AsyncWrite` operations like `write_all` expect. For example, writing a `16`
+    /// byte message sends `24` bytes but returns `16`. If this returns `Pending`, it must be
+    /// called again with the same `buf`.
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        if self.write_header_task.is_none() && !self.wrote_header {
-            log::trace!("About to start header task");
-            let mut stream = self.stream.clone();
-            let data = TryInto::<u64>::try_into(buf.len()).unwrap().to_be_bytes();
-            self.write_header_task.replace(Box::pin(async move { stream.write_all(&data).await }));
+        let this = self.get_mut();
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
         }
-
-        if let Some(ref mut task) = self.write_header_task {
-            log::trace!("Checking header task status");
-            let res = match task.as_mut().poll(cx) {
-                Poll::Ready(Ok(())) => {
-                    self.write_header_task = None;
-                    self.wrote_header = true;
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
-                Poll::Ready(Err(e)) => {
-                    self.write_header_task = None;
-                    self.wrote_header = true;
-                    Poll::Ready(Err(e))
-                }
-                Poll::Pending => Poll::Pending,
+        let state = this.write_state.get_or_insert_with(|| WriteState::new(buf.len()));
+        if state.len != buf.len() {
+            if state.written > 0 {
+                return Poll::Ready(Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "a write of a different buffer interrupted a partially written message",
+                )));
+            }
+            // A previous write was abandoned before anything was sent: start over with `buf`.
+            *state = WriteState::new(buf.len());
+        }
+        while state.written < HEADER_SIZE + state.len {
+            // Returning `Pending` from the stream registers `cx` for a wake-up once the stream
+            // can accept more data.
+            let n = if state.written < HEADER_SIZE {
+                // Sends the header and the data in one write if possible, so that they can share
+                // a segment instead of the data waiting for the peer to acknowledge the header.
+                let bufs = [IoSlice::new(&state.header[state.written..]), IoSlice::new(buf)];
+                ready!(Pin::new(&mut this.stream).poll_write_vectored(cx, &bufs))?
+            } else {
+                ready!(
+                    Pin::new(&mut this.stream).poll_write(cx, &buf[state.written - HEADER_SIZE..])
+                )?
             };
-            log::trace!("Header Check: returning: {:#?}", res);
-            return res;
-        }
-
-        let mut stream = self.stream.clone();
-        let task = self.write_task.get_or_insert_with(|| {
-            let data = buf.to_vec().into_boxed_slice();
-            Box::pin(async move {
-                let mut start = 0;
-                while start < data.len() {
-                    // We won't always succeed in writing the entire buffer at once, so
-                    // we try repeatedly until everything is written.
-                    let written = stream.write(&data[start..]).await?;
-                    if written == 0 {
-                        return Err(std::io::Error::other(format!("Write made no progress")));
-                    }
-
-                    start += written;
-                }
-                Ok(data.len())
-            })
-        });
-        match task.as_mut().poll(cx) {
-            Poll::Ready(r) => {
-                self.write_task = None;
-                self.wrote_header = false;
-                self.write_header_task = None;
-                Poll::Ready(r)
+            if n == 0 {
+                return Poll::Ready(Err(ErrorKind::WriteZero.into()));
             }
-            Poll::Pending => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
+            state.written += n;
         }
+        this.write_state = None;
+        Poll::Ready(Ok(buf.len()))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        unimplemented!();
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_flush(cx)
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        unimplemented!();
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_close(cx)
     }
 }
 
@@ -243,10 +275,14 @@ pub async fn open_once(
 
     log::debug!("Trying to establish TCP Connection to address: {addr:?}");
     timeout(handshake_timeout, async {
-        let mut stream = TcpStream::connect(addr)
-            .await
-            .map_err(|e| crate::FastbootTransportError::Io(e))?
-            .into_multithreaded_futures_stream();
+        let stream =
+            TcpStream::connect(addr).await.map_err(|e| crate::FastbootTransportError::Io(e))?;
+        // Fastboot is request/response, so don't let Nagle's algorithm hold a message until the
+        // device acknowledges the previous one, which devices may delay.
+        if let Err(e) = stream.set_nodelay(true) {
+            log::warn!("Could not set TCP_NODELAY on the connection to {addr:?}: {e}");
+        }
+        let mut stream = stream.into_multithreaded_futures_stream();
         handshake(&mut stream).await?;
         Ok(TcpNetworkInterface::new(stream))
     })
@@ -258,8 +294,11 @@ pub async fn open_once(
 mod test {
     use super::*;
     use anyhow::Result;
+    use futures::task::noop_waker_ref;
     use pretty_assertions::assert_eq;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::task::{Wake, Waker};
 
     #[derive(Clone)]
     struct TestAsyncIo {
@@ -332,6 +371,160 @@ mod test {
         }
     }
 
+    /// Accepts at most `max_write` bytes per write, including vectored writes, and records the
+    /// size of each write.
+    #[derive(Clone)]
+    struct TestChunkedWriter {
+        inner: Arc<Mutex<Vec<u8>>>,
+        writes: Arc<Mutex<Vec<usize>>>,
+        max_write: usize,
+    }
+
+    impl AsyncWrite for TestChunkedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.poll_write_vectored(cx, &[IoSlice::new(buf)])
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<std::io::Result<usize>> {
+            let mut inner = self.inner.lock().unwrap();
+            let mut len = 0;
+            for buf in bufs {
+                let n = std::cmp::min(buf.len(), self.max_write - len);
+                inner.extend_from_slice(&buf[..n]);
+                len += n;
+            }
+            self.writes.lock().unwrap().push(len);
+            Poll::Ready(Ok(len))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            unimplemented!();
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            unimplemented!();
+        }
+    }
+
+    /// Returns `Pending` for the first `pending` writes without arranging a wake-up, then accepts
+    /// everything.
+    struct TestPendingWriter {
+        pending: usize,
+        inner: Vec<u8>,
+    }
+
+    impl AsyncWrite for TestPendingWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.pending > 0 {
+                self.pending -= 1;
+                return Poll::Pending;
+            }
+            self.inner.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Counts its wake-ups.
+    #[derive(Default)]
+    struct CountingWaker(AtomicUsize);
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Returns `data` at most `max_read` bytes per read, then the end of the stream.
+    struct TestReader {
+        data: Vec<u8>,
+        pos: usize,
+        max_read: usize,
+    }
+
+    impl TestReader {
+        fn new(data: Vec<u8>, max_read: usize) -> Self {
+            Self { data, pos: 0, max_read }
+        }
+    }
+
+    impl AsyncRead for TestReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let len = buf.len().min(self.max_read).min(self.data.len() - self.pos);
+            buf[..len].copy_from_slice(&self.data[self.pos..][..len]);
+            self.pos += len;
+            Poll::Ready(Ok(len))
+        }
+    }
+
+    /// Returns `data` framed as a Fastboot over TCP message.
+    fn message(data: &[u8]) -> Vec<u8> {
+        [&(data.len() as u64).to_be_bytes()[..], data].concat()
+    }
+
+    #[fuchsia::test]
+    async fn test_async_write_sends_header_with_data() -> std::io::Result<()> {
+        let inner = Arc::new(Mutex::new(vec![]));
+        let writes = Arc::new(Mutex::new(vec![]));
+        let stream =
+            TestChunkedWriter { inner: inner.clone(), writes: writes.clone(), max_write: 64 };
+        let mut interface = TcpNetworkInterface::new(stream);
+
+        assert_eq!(interface.write(&[0, 1, 2]).await?, 3, "reported length");
+        assert_eq!(*writes.lock().unwrap(), vec![11], "one write for header and data");
+        assert_eq!(
+            *inner.lock().unwrap(),
+            vec![0, 0, 0, 0, 0, 0, 0, 3, 0, 1, 2],
+            "stream contents"
+        );
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_async_write_partial_writes() -> std::io::Result<()> {
+        let inner = Arc::new(Mutex::new(vec![]));
+        let writes = Arc::new(Mutex::new(vec![]));
+        let stream =
+            TestChunkedWriter { inner: inner.clone(), writes: writes.clone(), max_write: 4 };
+        let mut interface = TcpNetworkInterface::new(stream);
+
+        assert_eq!(interface.write(&[0, 1, 2]).await?, 3, "reported length");
+        assert_eq!(*writes.lock().unwrap(), vec![4, 4, 3], "writes");
+        assert_eq!(
+            *inner.lock().unwrap(),
+            vec![0, 0, 0, 0, 0, 0, 0, 3, 0, 1, 2],
+            "stream contents"
+        );
+        Ok(())
+    }
+
     #[fuchsia::test]
     async fn test_async_write_includes_header() -> Result<()> {
         let inner = Arc::new(Mutex::new(vec![]));
@@ -346,6 +539,60 @@ mod test {
             "stream contents"
         );
         Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_async_write_consecutive_messages() -> Result<()> {
+        let inner = Arc::new(Mutex::new(vec![]));
+        let writes = Arc::new(Mutex::new(vec![]));
+        let stream =
+            TestChunkedWriter { inner: inner.clone(), writes: writes.clone(), max_write: 5 };
+        let mut interface = TcpNetworkInterface::new(stream);
+
+        interface.write_all(b"OKAY").await?;
+        interface.write_all(b"DATA").await?;
+        assert_eq!(*inner.lock().unwrap(), [message(b"OKAY"), message(b"DATA")].concat());
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    fn test_async_write_empty_buffer_writes_nothing() {
+        let inner = Arc::new(Mutex::new(vec![]));
+        let mut interface = TcpNetworkInterface::new(TestInnerWriter { inner: inner.clone() });
+        let mut cx = Context::from_waker(noop_waker_ref());
+        let res = Pin::new(&mut interface).poll_write(&mut cx, &[]);
+        assert!(matches!(res, Poll::Ready(Ok(0))));
+        assert!(inner.lock().unwrap().is_empty());
+    }
+
+    #[fuchsia::test]
+    fn test_async_write_pending_does_not_wake_itself() {
+        let mut interface =
+            TcpNetworkInterface::new(TestPendingWriter { pending: 1, inner: vec![] });
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(counter.clone());
+        let mut cx = Context::from_waker(&waker);
+
+        // A full stream is the stream's to wake up for: waking right away would busy-wait.
+        assert!(Pin::new(&mut interface).poll_write(&mut cx, &[1, 2]).is_pending());
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0, "wake-ups");
+
+        let res = Pin::new(&mut interface).poll_write(&mut cx, &[1, 2]);
+        assert!(matches!(res, Poll::Ready(Ok(2))));
+        assert_eq!(interface.stream.inner, message(&[1, 2]));
+    }
+
+    #[fuchsia::test]
+    fn test_async_write_restarts_abandoned_message() {
+        let mut interface =
+            TcpNetworkInterface::new(TestPendingWriter { pending: 1, inner: vec![] });
+        let mut cx = Context::from_waker(noop_waker_ref());
+
+        // Nothing of the first message was sent, so a write of another buffer replaces it.
+        assert!(Pin::new(&mut interface).poll_write(&mut cx, &[1, 2]).is_pending());
+        let res = Pin::new(&mut interface).poll_write(&mut cx, &[3, 4, 5]);
+        assert!(matches!(res, Poll::Ready(Ok(3))));
+        assert_eq!(interface.stream.inner, message(&[3, 4, 5]));
     }
 
     #[fuchsia::test]
@@ -366,12 +613,81 @@ mod test {
     }
 
     #[fuchsia::test]
-    async fn test_read_too_much_data() {
-        let stream = TestAsyncIo { data: 0x80u64.to_be_bytes().to_vec().into_boxed_slice() };
-        let mut interface = TcpNetworkInterface::new(stream);
+    async fn test_read_returns_whole_messages_split_by_the_stream() -> Result<()> {
+        let data = [message(b"OKAY"), message(b"INFOhello")].concat();
+        let mut interface = TcpNetworkInterface::new(TestReader::new(data, 3));
 
         let mut buf = [0u8; 64];
-        let res = interface.read(&mut buf).await;
-        assert!(res.is_err());
+        let len = interface.read(&mut buf).await?;
+        assert_eq!(&buf[..len], b"OKAY");
+        let len = interface.read(&mut buf).await?;
+        assert_eq!(&buf[..len], b"INFOhello");
+        assert_eq!(interface.read(&mut buf).await?, 0, "end of stream");
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_read_message_larger_than_buffer() -> Result<()> {
+        let data = [message(b"0123456789"), message(b"OKAY")].concat();
+        let mut interface = TcpNetworkInterface::new(TestReader::new(data, 64));
+
+        let mut buf = [0u8; 4];
+        let mut reads = vec![];
+        for _ in 0..4 {
+            let len = interface.read(&mut buf).await?;
+            reads.push(buf[..len].to_vec());
+        }
+        assert_eq!(reads, [&b"0123"[..], b"4567", b"89", b"OKAY"]);
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_read_streams_large_message() -> Result<()> {
+        let payload: Vec<u8> = (0..3 * MAX_BUFFERED_MESSAGE_SIZE).map(|v| v as u8).collect();
+        let data = [message(&payload), message(b"OKAY")].concat();
+        let mut interface = TcpNetworkInterface::new(TestReader::new(data, 1000));
+
+        let mut received = vec![];
+        let mut buf = vec![0u8; 1500];
+        while received.len() < payload.len() {
+            let len = interface.read(&mut buf).await?;
+            assert!(len > 0);
+            received.extend_from_slice(&buf[..len]);
+        }
+        assert_eq!(received, payload);
+        let len = interface.read(&mut buf).await?;
+        assert_eq!(&buf[..len], b"OKAY");
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_read_skips_empty_messages() -> Result<()> {
+        let data = [message(b""), message(b"OKAY")].concat();
+        let mut interface = TcpNetworkInterface::new(TestReader::new(data, 64));
+
+        let mut buf = [0u8; 64];
+        let len = interface.read(&mut buf).await?;
+        assert_eq!(&buf[..len], b"OKAY");
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_read_eof_inside_message_header() {
+        let mut interface = TcpNetworkInterface::new(TestReader::new(vec![0, 0, 0], 64));
+
+        let mut buf = [0u8; 64];
+        let err = interface.read(&mut buf).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+    }
+
+    #[fuchsia::test]
+    async fn test_read_eof_inside_message() {
+        let mut data = message(b"OKAY");
+        data.truncate(10);
+        let mut interface = TcpNetworkInterface::new(TestReader::new(data, 64));
+
+        let mut buf = [0u8; 64];
+        let err = interface.read(&mut buf).await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
     }
 }

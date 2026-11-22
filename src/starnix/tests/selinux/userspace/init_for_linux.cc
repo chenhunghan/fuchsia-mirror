@@ -86,12 +86,12 @@ bool SetupConsole() {
   // We use a polling loop because the kernel does asynchronous work in the
   // background.
   fbl::unique_fd fd;
-  for (int i = 0; i < 100; i++) {
+  for (int i = 0; i < 1000; i++) {
     fd.reset(open("/dev/hvc0", O_RDWR | O_CLOEXEC));
     if (fd.is_valid()) {
       break;
     }
-    usleep(100000);  // Wait 0.1s
+    usleep(10000);  // Wait 0.01s
   }
 
   if (!fd.is_valid()) {

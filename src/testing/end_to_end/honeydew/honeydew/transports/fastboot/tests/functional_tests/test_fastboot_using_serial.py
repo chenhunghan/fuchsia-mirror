@@ -73,9 +73,9 @@ class FastbootUsingSerialTests(fuchsia_base_test.FuchsiaBaseTest):
             power_switch = power_switch_using_dmc.PowerSwitchUsingDmc(
                 device_name=self.dut.device_name
             )
-        except power_switch_using_dmc.PowerSwitchDmcError:
+        except errors.NotSupportedError:
             asserts.fail(
-                "PowerSwitchDmc is not available. This test can't be run."
+                "PowerSwitchUsingDmc is not available. This test can't be run."
             )
 
         try:

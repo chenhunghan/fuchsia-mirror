@@ -4,29 +4,31 @@
 
 # fake-dma-buffer library that should eventually go into SDK
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+fx_cc_source_library_zx(
     name = "fake-dma-buffer",
+    testonly = True,
     srcs = [
         "fake-dma-buffer.cc",
     ],
     hdrs = [
-        "include/lib/fake-dma-buffer/fake-dma-buffer.h",
+        "include/fake-dma-buffer/fake-dma-buffer.h",
     ],
     includes = [
         "include",
     ],
     target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/devices/testing/fake-dma-buffer/test:__pkg__",
+        "//src/devices/usb/drivers/xhci/tests:__pkg__",
+    ],
     deps = [
+        "//sdk/lib/fit",
         "//src/devices/lib/dma-buffer",
         "//zircon/system/ulib/fbl",
-        "@fuchsia_sdk//pkg/fit",
-        "@fuchsia_sdk//pkg/zx",
+        "//zircon/system/ulib/zx",
     ],
 )

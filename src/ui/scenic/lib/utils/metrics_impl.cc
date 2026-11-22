@@ -30,20 +30,28 @@ void MetricsImpl::LogRareEvent(cobalt_registry::ScenicRareEventMigratedMetricDim
 }
 
 void MetricsImpl::LogLatchToActualPresentation(
-    std::optional<
-        cobalt_registry::ScenicLatchToActualPresentationMigratedMetricDimensionFrameStatus>
-        frame_status,
+    cobalt_registry::ScenicLatchToActualPresentationMigratedMetricDimensionFrameStatus frame_status,
     std::vector<fuchsia_metrics::HistogramBucket> histogram) {
   Do([frame_status, histogram = std::move(histogram)](fidl::Client<MetricEventLogger>& logger,
                                                       DoResolver resolver) mutable {
-    uint32_t frame_status_value = 0;
-    if (frame_status) {
-      frame_status_value = frame_status.value();
-    }
     logger
         ->LogIntegerHistogram({cobalt_registry::kScenicLatchToActualPresentationMigratedMetricId,
                                std::move(histogram),
-                               {frame_status_value}})
+                               {frame_status}})
+        .Then([resolver = std::move(resolver)](MetricsResult result) mutable {
+          resolver.resolve(result.is_error() && (result.error_value().is_framework_error() ||
+                                                 result.error_value().domain_error() ==
+                                                     fuchsia_metrics::Error::kBufferFull));
+        });
+  });
+}
+
+void MetricsImpl::LogRenderTime(std::vector<fuchsia_metrics::HistogramBucket> histogram) {
+  Do([histogram = std::move(histogram)](fidl::Client<MetricEventLogger>& logger,
+                                        DoResolver resolver) mutable {
+    logger
+        ->LogIntegerHistogram(
+            {cobalt_registry::kScenicRenderTimeMigratedMetricId, std::move(histogram), {}})
         .Then([resolver = std::move(resolver)](MetricsResult result) mutable {
           resolver.resolve(result.is_error() && (result.error_value().is_framework_error() ||
                                                  result.error_value().domain_error() ==

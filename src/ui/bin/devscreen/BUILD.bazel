@@ -2,9 +2,121 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("//build/bazel/rules:cipd_prebuilt.bzl", "cipd_prebuilt_file")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/devscreen.core_shard.cml"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+# devscreen: boot dashboard for display-only eng builds. See README.md.
+
+# TODO(https://fxbug.dev/570694755): Verify whether bin should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/main.rs",
+        "src/telemetry.rs",
+        "src/ui.rs",
+    ],
+    binary_name = "devscreen",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_rust",
+        "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
+        "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
+        "//sdk/fidl/fuchsia.hardware.cpu.ctrl:fuchsia.hardware.cpu.ctrl_rust",
+        "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_rust",
+        "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_rust",
+        "//sdk/fidl/fuchsia.hardware.power.charger:fuchsia.hardware.power.charger_rust",
+        "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
+        "//sdk/fidl/fuchsia.hardware.temperature:fuchsia.hardware.temperature_rust",
+        "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_rust",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+        "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+        "//sdk/fidl/fuchsia.wlan.device.service:fuchsia.wlan.device.service_rust",
+        "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/ui/carnelian",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:euclid",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "devscreen",
+)
+
+cipd_prebuilt_file(
+    name = "prebuilt_font",
+    path = "//prebuilt/third_party/fonts/robotoslab/RobotoSlab-Regular.ttf",
+)
+
+resource(
+    name = "font",
+    src = ":prebuilt_font",
+    dest = "data/fonts/RobotoSlab-Regular.ttf",
+)
+
+cipd_prebuilt_file(
+    name = "prebuilt_mono_font",
+    path = "//prebuilt/third_party/fonts/robotomono/RobotoMono-Regular.ttf",
+)
+
+resource(
+    name = "mono_font",
+    src = ":prebuilt_mono_font",
+    dest = "data/fonts/RobotoMono-Regular.ttf",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "devscreen",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/devscreen.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [
+        ":bin_packaged_bin",
+        ":font",
+        ":mono_font",
+    ],
+)
+
+fx_package(
+    name = "package",
+    package_name = "devscreen",
+    components = [":component"],
     visibility = ["//bundles/assembly:__subpackages__"],
 )

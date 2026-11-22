@@ -34,7 +34,6 @@ fidl("fuchsia.ui.scenic") {
   ]
   sdk_area = "UI"
   sdk_category = "partner"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [

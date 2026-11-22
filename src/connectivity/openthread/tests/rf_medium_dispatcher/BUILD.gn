@@ -2,38 +2,13 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_library.gni")
+import("//build/bazel/bazel_fuchsia_package.gni")
 
-# The simulated IEEE 802.15.4 medium that hermetic OpenThread tests attach
-# their nodes to.
-
-group("tests") {
+# Kept in GN because the GN packages of
+# //src/connectivity/lowpan/tests/thread-integration-tests subpackage it.
+bazel_fuchsia_package("rf-medium-dispatcher") {
+  bazel_config = "fuchsia_platform"
+  package_name = "rf-medium-dispatcher"
   testonly = true
-  deps = [ ":rf-medium-dispatcher-unittests" ]
-}
-
-rustc_library("lib") {
-  testonly = true
-  name = "rf_medium_dispatcher"
-  edition = "2024"
-  with_unit_tests = true
-  sources = [
-    "src/lib.rs",
-    "src/tests.rs",
-  ]
-  deps = [
-    "fidl/test.lowpan.rfsim:test.lowpan.rfsim_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia-async",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:log",
-  ]
-  test_deps = [ "//third_party/rust_crates:assert_matches" ]
-  configs += [ "//build/config/rust/lints:deny_unused_results" ]
-}
-
-fuchsia_unittest_package("rf-medium-dispatcher-unittests") {
-  deps = [ ":lib_test" ]
+  visibility = [ "//src/connectivity/lowpan/tests/thread-integration-tests/*" ]
 }

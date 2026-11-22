@@ -169,6 +169,7 @@ TEST_getdeviceaddr_singledevice() {
   echo "${ip}" > "${ffx}.mock_stdout.2"
   ${fx} get-device-addr >/dev/null
   expect_args "${ffx}.mock_state.1" "target" "default" "get"
+  expect_args "${ffx}.mock_state.2" "target" "list" "--format" "addresses" "--allow-addrs" "ip"
   not_expect_args "${ffx}.mock_state.2" "-mdns=false"
 }
 
@@ -184,7 +185,17 @@ TEST_getdeviceaddr_multipledevice() {
   # second ffx call is for a -full list. Both require the same network
   # flags.
   expect_args "${ffx}.mock_state.1" "target" "default" "get"
+  expect_args "${ffx}.mock_state.2" "target" "list" "--format" "addresses" "--allow-addrs" "ip"
   not_expect_args "${ffx}.mock_state.2" "-mdns=false"
+}
+
+TEST_getdeviceaddr_nameddevice() {
+  local ip="fe80::c0ff:eec0:ffee%coffee"
+  echo "my-device" > "${ffx}.mock_stdout.1"
+  echo "[${ip}]:22" > "${ffx}.mock_stdout.2"
+  BT_EXPECT_EQ "$(${fx} -t my-device get-device-addr)" "${ip}"
+  expect_args "${ffx}.mock_state.1" "target" "default" "get"
+  expect_args "${ffx}.mock_state.2" "target" "list" "--format" "addresses" "--allow-addrs" "ip" "my-device"
 }
 
 BT_RUN_TESTS "$@"

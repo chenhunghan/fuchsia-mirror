@@ -19,18 +19,18 @@ source_set("reboot_log") {
   ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
-    "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
+    "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_cpp",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/feedback:config",
     "//src/developer/forensics/utils:errors",
     "//src/developer/forensics/utils:time",
     "//src/developer/forensics/utils/cobalt",
     "//src/developer/forensics/utils/redact",
+    "//zircon/system/ulib/zx",
   ]
 
   deps = [
-    "//src/developer/forensics/feedback:system_time_tracker",
     "//src/developer/forensics/feedback_data:constants",
     "//src/lib/files",
     "//src/lib/fxl",

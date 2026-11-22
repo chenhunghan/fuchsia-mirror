@@ -1,0 +1,346 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/ui:target_tests.
+test_suite(
+    name = "tests",
+    tests = [
+        ":keyboard_test",
+        ":keyboard_test_parallel",
+        ":text_manager_test",
+    ],
+    visibility = ["//src/ui:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/570694755): Verify whether bin should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/fidl_helpers.rs",
+        "src/index_convert.rs",
+        "src/keyboard/events.rs",
+        "src/keyboard/keyboard3.rs",
+        "src/keyboard/mod.rs",
+        "src/keyboard/service.rs",
+        "src/legacy_ime/handler.rs",
+        "src/legacy_ime/mod.rs",
+        "src/legacy_ime/position.rs",
+        "src/legacy_ime/state.rs",
+        "src/main.rs",
+        "src/text_manager.rs",
+    ],
+    binary_name = "text_manager",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+        "//sdk/fidl/fuchsia.ui.keyboard.focus:fuchsia.ui.keyboard.focus_rust",
+        "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/ui/fuchsia-scenic",
+        "//src/lib/ui/keymaps",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:unicode-normalization",
+        "//third_party/rust_crates/vendor:unicode-segmentation",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "text_manager",
+)
+
+fx_component_manifest(
+    name = "text_manager_manifest",
+    component_name = "text_manager",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/text_manager.cml",
+)
+
+fx_component(
+    name = "text_manager_comp",
+    compiled_manifest = ":text_manager_manifest",
+    visibility = [
+        "//src/ui/testing/ui_test_realm:__pkg__",
+        "//src/ui/tests:__subpackages__",
+    ],
+    deps = [":bin_packaged"],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Preserves the GN output_name expected by meta/text_manager_bin_test.cml.
+    crate_name = "text_manager_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":test_helpers",
+        "//third_party/rust_crates/vendor:maplit",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_test_packaged",
+    testonly = True,
+    binary = ":bin_test",
+    binary_name = "text_manager_bin_test",
+)
+
+fx_component_manifest(
+    name = "text_manager_bin_test_manifest",
+    testonly = True,
+    component_name = "text_manager_bin_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/text_manager_bin_test.cml",
+)
+
+fx_test_component(
+    name = "text_manager_bin_test",
+    compiled_manifest = ":text_manager_bin_test_manifest",
+    deps = [":bin_test_packaged"],
+)
+
+fx_package(
+    name = "text_manager_test_pkg",
+    package_name = "text_manager_test",
+    test_components = [":text_manager_bin_test"],
+)
+
+# bazel2gn translates `fx_package("text_manager_test_pkg")` into
+# `fuchsia_test_package("text_manager_test_pkg")` and ignores `fx_test()`.
+# @bazel2gn:skip
+fx_test(
+    name = "text_manager_test",
+    package = ":text_manager_test_pkg",
+)
+
+rustc_test(
+    name = "keyboard3_integration_test_bin",
+    srcs = ["tests/keyboard3.rs"],
+    crate_name = "keyboard3_integration_test",
+    crate_root = "tests/keyboard3.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":test_helpers",
+        "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+        "//sdk/fidl/fuchsia.ui.keyboard.focus:fuchsia.ui.keyboard.focus_rust",
+        "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component-test",
+        "//src/lib/ui/fuchsia-scenic",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+rustc_test(
+    name = "text_manager_integration_test_bin",
+    srcs = ["tests/text_manager.rs"],
+    crate_name = "text_manager_integration_test",
+    crate_root = "tests/text_manager.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":test_helpers",
+        "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/ui/keymaps",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "legacy_ime_integration_test_bin",
+    srcs = ["tests/legacy_ime.rs"],
+    crate_name = "legacy_ime_integration_test",
+    crate_root = "tests/legacy_ime.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":test_helpers",
+        "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+rustc_library(
+    name = "test_helpers",
+    testonly = True,
+    srcs = ["tests/test_helpers.rs"],
+    crate_root = "tests/test_helpers.rs",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    deps = [
+        "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "keyboard3_integration_test_bin_packaged",
+    testonly = True,
+    binary = ":keyboard3_integration_test_bin",
+    binary_name = "keyboard3_integration_test",
+)
+
+fx_component_manifest(
+    name = "keyboard3_integration_test_manifest",
+    testonly = True,
+    component_name = "keyboard3_integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/keyboard3_integration_test.cml",
+)
+
+fx_test_component(
+    name = "keyboard3_integration_test",
+    compiled_manifest = ":keyboard3_integration_test_manifest",
+    deps = [":keyboard3_integration_test_bin_packaged"],
+)
+
+fx_package(
+    name = "keyboard_test_parallel_pkg",
+    package_name = "keyboard_test_parallel",
+    components = [
+        ":text_manager_comp",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":keyboard3_integration_test"],
+)
+
+# bazel2gn translates `fx_package("keyboard_test_parallel_pkg")` into
+# `fuchsia_test_package("keyboard_test_parallel_pkg")` and ignores `fx_test()`.
+# @bazel2gn:skip
+fx_test(
+    name = "keyboard_test_parallel",
+    package = ":keyboard_test_parallel_pkg",
+)
+
+fx_packaged_binary(
+    name = "text_manager_integration_test_bin_packaged",
+    testonly = True,
+    binary = ":text_manager_integration_test_bin",
+    binary_name = "text_manager_integration_test",
+)
+
+fx_component_manifest(
+    name = "text_manager_integration_test_manifest",
+    testonly = True,
+    component_name = "text_manager_integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/text_manager_integration_test.cml",
+)
+
+fx_test_component(
+    name = "text_manager_integration_test",
+    compiled_manifest = ":text_manager_integration_test_manifest",
+    deps = [":text_manager_integration_test_bin_packaged"],
+)
+
+fx_packaged_binary(
+    name = "legacy_ime_integration_test_bin_packaged",
+    testonly = True,
+    binary = ":legacy_ime_integration_test_bin",
+    binary_name = "legacy_ime_integration_test",
+)
+
+fx_component_manifest(
+    name = "legacy_ime_integration_test_manifest",
+    testonly = True,
+    component_name = "legacy_ime_integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/legacy_ime_integration_test.cml",
+)
+
+fx_test_component(
+    name = "legacy_ime_integration_test",
+    compiled_manifest = ":legacy_ime_integration_test_manifest",
+    deps = [":legacy_ime_integration_test_bin_packaged"],
+)
+
+# bazel2gn does not support `parallel` on `fx_test()`, so the GN copy stays
+# above the sentinel in BUILD.gn.
+# @bazel2gn:skip
+fx_package(
+    name = "keyboard_test_pkg",
+    package_name = "keyboard_test",
+    components = [":text_manager_comp"],
+    test_components = [
+        ":text_manager_integration_test",
+        ":legacy_ime_integration_test",
+    ],
+)
+
+# These tests use a single instance of the text manager, and since they set
+# up conflicting test cases, they can not run in parallel.
+fx_test(
+    name = "keyboard_test",
+    package = ":keyboard_test_pkg",
+    parallel = 1,
+)

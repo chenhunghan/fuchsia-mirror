@@ -154,7 +154,7 @@ class Value final {
   static Value WithFloating(double&&);
   static Value WithText(::std::string&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
     kUnknown = 0,
     Empty = kUnknown,  // DEPRECATED: use kUnknown instead.
 
@@ -162,7 +162,7 @@ class Value final {
     kUnsignedInt = 2,  // 0x2
     kFloating = 3,     // 0x3
     kText = 4,         // 0x4
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static inline ::std::unique_ptr<Value> New() { return ::std::make_unique<Value>(); }
@@ -237,7 +237,7 @@ class Value final {
     return text_;
   }
   Value& set_text(::std::string value);
-  Value& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes);
+  Value& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes);
 
   ::fuchsia::diagnostics::stream::Value::Tag Which() const {
     switch (tag_) {
@@ -254,7 +254,7 @@ class Value final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal()
   // only when you need access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const { return tag_; }
+  fidl_union_tag_t Ordinal() const { return tag_; }
   const std::vector<uint8_t>* UnknownBytes() const {
     if (Which() != ::fuchsia::diagnostics::stream::Value::Tag::kUnknown) {
       return nullptr;
@@ -266,10 +266,10 @@ class Value final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ =
-      static_cast<fidl_xunion_tag_t>(::fuchsia::diagnostics::stream::Value::Tag::Invalid);
+  ::fidl_union_tag_t tag_ =
+      static_cast<fidl_union_tag_t>(::fuchsia::diagnostics::stream::Value::Tag::Invalid);
   union {
     int64_t signed_int_;
     uint64_t unsigned_int_;
@@ -359,7 +359,7 @@ constexpr uint32_t MAX_ARGS = 15u;
 }  // namespace fuchsia
 namespace fidl {
 template <>
-struct IsFidlXUnion<::fuchsia::diagnostics::stream::Value> : public std::true_type {};
+struct IsFidlUnion<::fuchsia::diagnostics::stream::Value> : public std::true_type {};
 
 template <>
 struct CodingTraits<::fuchsia::diagnostics::stream::Value>
@@ -373,15 +373,15 @@ struct CodingTraits<std::unique_ptr<::fuchsia::diagnostics::stream::Value>> {
   static void Encode(Encoder* encoder,
                      std::unique_ptr<::fuchsia::diagnostics::stream::Value>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
   static void Decode(Decoder* _decoder,
                      std::unique_ptr<::fuchsia::diagnostics::stream::Value>* value, size_t offset) {
-    fidl_xunion_t* encoded = _decoder->GetPtr<fidl_xunion_t>(offset);
+    fidl_union_t* encoded = _decoder->GetPtr<fidl_union_t>(offset);
     if (encoded->tag == 0) {
       value->reset(nullptr);
       return;
@@ -407,7 +407,7 @@ struct Equality<::fuchsia::diagnostics::stream::Value> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::fuchsia::diagnostics::stream::Value::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::fuchsia::diagnostics::stream::Value::Tag::Invalid):
         return true;
       case ::fuchsia::diagnostics::stream::Value::Tag::kSignedInt:
         return ::fidl::Equals(_lhs.signed_int_, _rhs.signed_int_);

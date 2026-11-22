@@ -41,7 +41,7 @@ TEST(SetRLimitTest, ZeroFSizeOnRegularFiles) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    signal(SIGXFSZ, handle_sigxfsz);
+    test_helper::ScopedSigAction scoped_sigaction(SIGXFSZ, handle_sigxfsz);
 
     struct rlimit limit = {
         .rlim_cur = 0,
@@ -63,7 +63,6 @@ TEST(SetRLimitTest, ZeroFSizeOnRegularFiles) {
     EXPECT_EQ(write(fd.get(), buf, sizeof(buf)), -1);
     EXPECT_EQ(errno, EFBIG);
     EXPECT_EQ(g_signal_count, 1u);
-    signal(SIGXFSZ, SIG_DFL);
     ASSERT_EQ(unlink(file_path.c_str()), 0) << "unlink failed" << std::strerror(errno) << '\n';
     ASSERT_EQ(rmdir(tmp_path), 0) << "rmdir failed" << std::strerror(errno) << '\n';
   });
@@ -75,7 +74,7 @@ TEST(SetRLimitTest, ZeroFSizeOnMemFd) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    signal(SIGXFSZ, handle_sigxfsz);
+    test_helper::ScopedSigAction scoped_sigaction(SIGXFSZ, handle_sigxfsz);
 
     struct rlimit limit = {
         .rlim_cur = 0,
@@ -92,7 +91,6 @@ TEST(SetRLimitTest, ZeroFSizeOnMemFd) {
     EXPECT_EQ(write(fd.get(), buf, sizeof(buf)), -1);
     EXPECT_EQ(errno, EFBIG);
     EXPECT_EQ(g_signal_count, 1u);
-    signal(SIGXFSZ, SIG_DFL);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
@@ -103,7 +101,7 @@ TEST(SetRLimitTest, OneFSize) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    signal(SIGXFSZ, handle_sigxfsz);
+    test_helper::ScopedSigAction scoped_sigaction(SIGXFSZ, handle_sigxfsz);
 
     struct rlimit limit = {
         .rlim_cur = 1,
@@ -124,7 +122,6 @@ TEST(SetRLimitTest, OneFSize) {
     EXPECT_EQ(write(fd.get(), buf, sizeof(buf)), -1);
     EXPECT_EQ(errno, EFBIG);
     EXPECT_EQ(g_signal_count, 1u);
-    signal(SIGXFSZ, SIG_DFL);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
@@ -134,7 +131,7 @@ TEST(SetRLimitTest, ZeroFSizeOnPipe) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    signal(SIGXFSZ, handle_sigxfsz);
+    test_helper::ScopedSigAction scoped_sigaction(SIGXFSZ, handle_sigxfsz);
 
     struct rlimit limit = {
         .rlim_cur = 0,
@@ -152,7 +149,6 @@ TEST(SetRLimitTest, ZeroFSizeOnPipe) {
     EXPECT_EQ(g_signal_count, 0u);
 
     EXPECT_EQ(read(pipefd[0], buf, sizeof(buf)), 1);
-    signal(SIGXFSZ, SIG_DFL);
 
     close(pipefd[0]);
     close(pipefd[1]);
@@ -165,7 +161,7 @@ TEST(SetRLimitTest, ZeroFSizeOnFIFO) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    signal(SIGXFSZ, handle_sigxfsz);
+    test_helper::ScopedSigAction scoped_sigaction(SIGXFSZ, handle_sigxfsz);
 
     struct rlimit limit = {
         .rlim_cur = 0,
@@ -202,7 +198,6 @@ TEST(SetRLimitTest, ZeroFSizeOnFIFO) {
     reader.join();
 
     EXPECT_EQ(g_signal_count, 0u);
-    signal(SIGXFSZ, SIG_DFL);
 
     ASSERT_EQ(unlink(file_path.c_str()), 0) << "unlink failed" << std::strerror(errno) << '\n';
     ASSERT_EQ(rmdir(tmp_path), 0) << "rmdir failed" << std::strerror(errno) << '\n';
@@ -215,7 +210,7 @@ TEST(SetRLimitTest, SpliceToRegularFileWithZeroFSize) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    signal(SIGXFSZ, handle_sigxfsz);
+    test_helper::ScopedSigAction scoped_sigaction(SIGXFSZ, handle_sigxfsz);
 
     struct rlimit limit = {
         .rlim_cur = 0,
@@ -239,8 +234,6 @@ TEST(SetRLimitTest, SpliceToRegularFileWithZeroFSize) {
     EXPECT_EQ(splice(pipe_in.get(), nullptr, fd.get(), nullptr, sizeof(buf), 0), -1);
     EXPECT_EQ(errno, EFBIG);
     EXPECT_EQ(g_signal_count, 1u);
-
-    signal(SIGXFSZ, SIG_DFL);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
@@ -250,7 +243,7 @@ TEST(SetRLimitTest, SpliceToRegularFileTruncatedByFSize) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    signal(SIGXFSZ, handle_sigxfsz);
+    test_helper::ScopedSigAction scoped_sigaction(SIGXFSZ, handle_sigxfsz);
 
     struct rlimit limit = {
         .rlim_cur = 10,
@@ -284,8 +277,6 @@ TEST(SetRLimitTest, SpliceToRegularFileTruncatedByFSize) {
     EXPECT_EQ(splice(pipe_in.get(), nullptr, fd.get(), nullptr, 10, 0), -1);
     EXPECT_EQ(errno, EFBIG);
     EXPECT_EQ(g_signal_count, 2u);
-
-    signal(SIGXFSZ, SIG_DFL);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
@@ -295,7 +286,7 @@ TEST(SetRLimitTest, SpliceToRegularFileWithExplicitOffset) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    signal(SIGXFSZ, handle_sigxfsz);
+    test_helper::ScopedSigAction scoped_sigaction(SIGXFSZ, handle_sigxfsz);
 
     struct rlimit limit = {
         .rlim_cur = 10,
@@ -330,8 +321,6 @@ TEST(SetRLimitTest, SpliceToRegularFileWithExplicitOffset) {
     EXPECT_EQ(splice(pipe_in.get(), nullptr, fd.get(), &off_out, 10, 0), -1);
     EXPECT_EQ(errno, EFBIG);
     EXPECT_EQ(g_signal_count, 2u);
-
-    signal(SIGXFSZ, SIG_DFL);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
@@ -341,7 +330,7 @@ TEST(SetRLimitTest, SpliceFromRegularFileToPipeWithZeroFSize) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    signal(SIGXFSZ, handle_sigxfsz);
+    test_helper::ScopedSigAction scoped_sigaction(SIGXFSZ, handle_sigxfsz);
 
     fbl::unique_fd fd(test_helper::MemFdCreate("memfd", 0));
     ASSERT_TRUE(fd.is_valid()) << "failed to create file: " << std::strerror(errno) << '\n';
@@ -366,8 +355,6 @@ TEST(SetRLimitTest, SpliceFromRegularFileToPipeWithZeroFSize) {
     // Splice from regular file to pipe when RLIMIT_FSIZE is 0 should succeed.
     EXPECT_EQ(splice(fd.get(), nullptr, pipe_out.get(), nullptr, 10, 0), 10);
     EXPECT_EQ(g_signal_count, 0u);
-
-    signal(SIGXFSZ, SIG_DFL);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());

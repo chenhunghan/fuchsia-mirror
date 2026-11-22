@@ -16,21 +16,23 @@ namespace impl {
 // DescriptorSetAllocator instances are kept alive by std::shared_ptr held by PipelineLayout.
 class DescriptorSetAllocatorCache {
  public:
-  explicit DescriptorSetAllocatorCache(vk::Device device);
+  DescriptorSetAllocatorCache(vk::Device device, EscherWeakPtr escher);
   ~DescriptorSetAllocatorCache() = default;
 
   DescriptorSetAllocatorPtr ObtainDescriptorSetAllocator(const DescriptorSetLayout& layout,
                                                          const SamplerPtr& immutable_sampler);
 
-  // Cycles through |descriptor_set_allocators_| to filter out the ones that are deleted and calls
-  // BeginFrame() on the ones alive to signal the start of a new lifetime cycle.
-  void BeginFrame();
+  // Cycles through `descriptor_set_allocators_` to filter out the ones that are deleted and calls
+  // `BeginFrame(last_finished_sequence_number)` on the ones alive to signal the start of a new
+  // lifetime cycle.
+  void BeginFrame(uint64_t last_finished_sequence_number);
 
   // Return the number of allocators in the cache.
   size_t size() const { return descriptor_set_allocators_.size(); }
 
  private:
   vk::Device device_;
+  EscherWeakPtr escher_;
 
   HashMap<Hash, std::weak_ptr<DescriptorSetAllocator>> descriptor_set_allocators_;
 };

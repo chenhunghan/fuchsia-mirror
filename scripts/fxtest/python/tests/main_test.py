@@ -23,6 +23,7 @@ import package_server
 from parameterized import parameterized
 
 import args
+import config
 import environment
 import event
 import execution
@@ -512,6 +513,495 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         labels = await app._add_affected_tests(targets, exec_env, recorder)
         self.assertIsNone(labels)
         recorder.emit_warning_message.assert_called_once()
+
+    async def test_on_demand_bazel_test(self) -> None:
+        """Tests running a Bazel test that isn't in tests.json."""
+        os.makedirs(os.path.join(self.fuchsia_dir.name, "src/new"))
+        with open(
+            os.path.join(self.fuchsia_dir.name, "src/new/BUILD.bazel"), "w"
+        ) as f:
+            f.write("")
+
+        new_test = {
+            "environments": [],
+            "expects_ssh": False,
+            "test": {
+                "name": "//src/new:new_test",
+                "label": "@@//src/new:new_test",
+                "os": "linux",
+                "path": "gen/new_test",
+            },
+        }
+        original_run_command = execution.run_command
+        client_calls: list[tuple[typing.Any, ...]] = []
+
+        async def run_command(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> typing.Any:
+            if args[0].endswith("build/api/client"):
+                client_calls.append(args)
+                return mock.MagicMock(
+                    return_code=0, stdout=json.dumps([new_test]), stderr=""
+                )
+            return await original_run_command(*args, **kwargs)
+
+        patch = mock.patch.object(execution, "run_command", run_command)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        recorder = event.EventRecorder()
+        ret = await main.async_main_wrapper(
+            args.parse_args(
+                ["--simple", "--dry", "//src/new:new_test", "foo_test"]
+            ),
+            recorder=recorder,
+        )
+        self.assertEqual(ret, 0)
+
+        # foo_test is in tests.json, so only //src/new:new_test is looked up.
+        self.assertEqual(len(client_calls), 1)
+        self.assertEqual(client_calls[0][-1], "//src/new:new_test")
+
+        selection_events: list[event.TestSelectionPayload] = [
+            e.payload.test_selections
+            async for e in recorder.iter()
+            if e.payload is not None and e.payload.test_selections is not None
+        ]
+        self.assertEqual(len(selection_events), 1)
+        self.assertIn("//src/new:new_test", selection_events[0].selected)
+
+        # The temporary merged tests.json isn't announced like the build's
+        # tests.json. The user just sees how many tests Bazel added.
+        loaded_files = [
+            e.payload.test_file_loaded.file_path
+            async for e in recorder.iter()
+            if e.payload is not None and e.payload.test_file_loaded is not None
+        ]
+        self.assertEqual(len(loaded_files), 1)
+        info_messages = [
+            e.payload.user_message.value
+            async for e in recorder.iter()
+            if e.payload is not None
+            and e.payload.user_message is not None
+            and e.payload.user_message.level == event.MessageLevel.INFO
+        ]
+        self.assertIn("Found 1 test in Bazel", info_messages)
+
+        # --host only asks Bazel for host tests.
+        ret = await main.async_main_wrapper(
+            args.parse_args(
+                ["--simple", "--dry", "--host", "//src/new:new_test"]
+            ),
+            recorder=event.EventRecorder(),
+        )
+        self.assertEqual(ret, 0)
+        self.assertIn("--test-os=host", client_calls[-1])
+
+        # Exact label matching prevents an on-demand Bazel label from
+        # substring-matching another Bazel target whose label shares a prefix.
+        tests_json_path = os.path.join(self.out_dir, "tests.json")
+        with open(tests_json_path) as f:
+            existing_tests = json.load(f)
+        existing_tests.append(
+            {
+                "environments": [],
+                "expects_ssh": False,
+                "test": {
+                    "name": "//src/new:new_test_extra",
+                    "label": "@@//src/new:new_test_extra",
+                    "os": "linux",
+                    "path": "gen/new_test_extra",
+                },
+            }
+        )
+        with open(tests_json_path, "w") as f:
+            json.dump(existing_tests, f)
+        recorder = event.EventRecorder()
+        ret = await main.async_main_wrapper(
+            args.parse_args(["--simple", "--dry", "//src/new:new_test"]),
+            recorder=recorder,
+        )
+        self.assertEqual(ret, 0)
+        selected = [
+            e.payload.test_selections.selected
+            async for e in recorder.iter()
+            if e.payload is not None and e.payload.test_selections is not None
+        ]
+        self.assertEqual(list(selected[0]), ["//src/new:new_test"])
+
+    async def test_on_demand_bazel_test_replaces_gn_twin(self) -> None:
+        """Tests that `@//` replaces a GN twin in tests.json and publishing."""
+        os.makedirs(os.path.join(self.fuchsia_dir.name, "src/sys"))
+        with open(
+            os.path.join(self.fuchsia_dir.name, "src/sys/BUILD.bazel"), "w"
+        ) as f:
+            f.write("")
+
+        url = "fuchsia-pkg://fuchsia.com/foo-test#meta/foo_test.cm"
+        gn_manifest = "obj/src/sys/foo_test/package_manifest.json"
+        bazel_manifest = "bazel_test_packages/manifests/bazel-out/cfg/bin/src/sys/package_manifest.json"
+
+        # Give the GN twin in tests.json and all_package_manifests.list a
+        # manifest on disk so publishing would conflict unless it's excluded.
+        tests_json_path = os.path.join(self.out_dir, "tests.json")
+        with open(tests_json_path) as f:
+            existing_tests = json.load(f)
+        for entry in existing_tests:
+            if entry["test"]["name"] == url:
+                entry["test"]["package_manifests"] = [gn_manifest]
+        with open(tests_json_path, "w") as f:
+            json.dump(existing_tests, f)
+        all_manifests_path = os.path.join(
+            self.out_dir, "all_package_manifests.list"
+        )
+        with open(all_manifests_path) as f:
+            all_manifests = json.load(f)
+        all_manifests["content"]["manifests"].append(f"./{gn_manifest}")
+        with open(all_manifests_path, "w") as f:
+            json.dump(all_manifests, f)
+        gn_manifest_full = os.path.join(self.out_dir, gn_manifest)
+        os.makedirs(os.path.dirname(gn_manifest_full), exist_ok=True)
+        with open(gn_manifest_full, "w") as f:
+            f.write("{}")
+
+        bazel_twin = {
+            "environments": [],
+            "expects_ssh": True,
+            "test": {
+                "name": url,
+                "label": "@@//src/sys:foo_test",
+                "os": "fuchsia",
+                "package_url": url,
+                "package_manifests": [bazel_manifest],
+            },
+        }
+        original_run_command = execution.run_command
+        published_manifests: list[str] = []
+
+        def ok_output(stdout: str = "") -> typing.Any:
+            return mock.MagicMock(
+                return_code=0, stdout=stdout, stderr="", was_timeout=False
+            )
+
+        async def run_command(
+            *cmd_args: typing.Any, **kwargs: typing.Any
+        ) -> typing.Any:
+            argv = [str(a) for a in cmd_args]
+            if argv[0].endswith("build/api/client"):
+                return ok_output(json.dumps([bazel_twin]))
+            if any(a == "dldist" or a.endswith("/dldist") for a in argv):
+                return await original_run_command(*cmd_args, **kwargs)
+            if "build" in argv and "--fuchsia_platform" in argv:
+                for a in argv:
+                    if a.startswith("--export-test-package="):
+                        full_path = os.path.join(
+                            self.out_dir,
+                            a.removeprefix("--export-test-package="),
+                        )
+                        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                        with open(full_path, "w") as f:
+                            f.write("{}")
+                return ok_output()
+            if "publish" in argv and "--package-list" in argv:
+                with open(argv[argv.index("--package-list") + 1]) as f:
+                    published_manifests.extend(
+                        json.load(f)["content"]["manifests"]
+                    )
+                return ok_output()
+            return ok_output()
+
+        patch = mock.patch.object(execution, "run_command", run_command)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self._mock_subprocess_call(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+
+        ret = await main.async_main_wrapper(
+            args.parse_args(["--simple", "@//src/sys:foo_test"]),
+        )
+        self.assertEqual(ret, 0)
+        self.assertIn(bazel_manifest, published_manifests)
+        self.assertNotIn(f"./{gn_manifest}", published_manifests)
+        self.assertNotIn(gn_manifest, published_manifests)
+
+    async def test_on_demand_bazel_test_exact_and_component_filter(
+        self,
+    ) -> None:
+        """Tests `--exact` and `--and --component` on on-demand device tests."""
+        os.makedirs(os.path.join(self.fuchsia_dir.name, "src/new"))
+        with open(
+            os.path.join(self.fuchsia_dir.name, "src/new/BUILD.bazel"), "w"
+        ) as f:
+            f.write("")
+
+        entries = [
+            {
+                "environments": [],
+                "expects_ssh": True,
+                "test": {
+                    "name": f"fuchsia-pkg://fuchsia.com/new-pkg#meta/{comp}.cm",
+                    "label": "@@//src/new:new_test",
+                    "os": "fuchsia",
+                    "package_url": f"fuchsia-pkg://fuchsia.com/new-pkg#meta/{comp}.cm",
+                },
+            }
+            for comp in ("comp_a", "comp_b")
+        ]
+        original_run_command = execution.run_command
+
+        async def run_command(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> typing.Any:
+            if args[0].endswith("build/api/client"):
+                return mock.MagicMock(
+                    return_code=0, stdout=json.dumps(entries), stderr=""
+                )
+            return await original_run_command(*args, **kwargs)
+
+        patch = mock.patch.object(execution, "run_command", run_command)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        recorder = event.EventRecorder()
+        ret = await main.async_main_wrapper(
+            args.parse_args(
+                ["--simple", "--dry", "--exact", "//src/new:new_test"]
+            ),
+            recorder=recorder,
+        )
+        self.assertEqual(ret, 0)
+        selected = [
+            e.payload.test_selections.selected
+            async for e in recorder.iter()
+            if e.payload is not None and e.payload.test_selections is not None
+        ]
+        self.assertEqual(
+            sorted(selected[0]),
+            [
+                "fuchsia-pkg://fuchsia.com/new-pkg#meta/comp_a.cm",
+                "fuchsia-pkg://fuchsia.com/new-pkg#meta/comp_b.cm",
+            ],
+        )
+
+        # Combining an on-demand label with --and --component selects only
+        # that component.
+        recorder = event.EventRecorder()
+        ret = await main.async_main_wrapper(
+            args.parse_args(
+                [
+                    "--simple",
+                    "--dry",
+                    "//src/new:new_test",
+                    "--and",
+                    "--component",
+                    "comp_b",
+                ]
+            ),
+            recorder=recorder,
+        )
+        self.assertEqual(ret, 0)
+        selected = [
+            e.payload.test_selections.selected
+            async for e in recorder.iter()
+            if e.payload is not None and e.payload.test_selections is not None
+        ]
+        self.assertEqual(
+            sorted(selected[0]),
+            ["fuchsia-pkg://fuchsia.com/new-pkg#meta/comp_b.cm"],
+        )
+
+    async def test_builds_and_exports_on_demand_bazel_device_test(self) -> None:
+        """Tests building, exporting, and publishing an unexported fx_test()."""
+        os.makedirs(os.path.join(self.fuchsia_dir.name, "src/new"))
+        with open(
+            os.path.join(self.fuchsia_dir.name, "src/new/BUILD.bazel"), "w"
+        ) as f:
+            f.write("")
+
+        url = "fuchsia-pkg://fuchsia.com/new-device-pkg#meta/new_device_test.cm"
+        manifest = "bazel_test_packages/manifests/bazel-out/cfg/bin/src/new/package_manifest.json"
+        new_device_test = {
+            "environments": [],
+            "expects_ssh": True,
+            "test": {
+                "name": url,
+                "label": "@@//src/new:new_device_test",
+                "os": "fuchsia",
+                "package_url": url,
+                "package_manifests": [manifest],
+            },
+        }
+        with open(self.test_list_input) as f:
+            test_list = json.load(f)
+        test_list["data"].append(
+            {
+                "name": url,
+                "labels": ["@@//src/new:new_device_test"],
+                "tags": [],
+                "execution": {
+                    "type": "fuchsia_component",
+                    "component_url": url,
+                    "max_severity_logs": "WARN",
+                },
+            }
+        )
+        self.test_list_input = os.path.join(self.out_dir, "test-list.json")
+        with open(self.test_list_input, "w") as f:
+            json.dump(test_list, f)
+
+        original_run_command = execution.run_command
+        published_manifests: list[str] = []
+        build_calls: list[tuple[str, ...]] = []
+        gn_build_calls: list[tuple[str, ...]] = []
+
+        def ok_output(stdout: str = "") -> typing.Any:
+            return mock.MagicMock(
+                return_code=0, stdout=stdout, stderr="", was_timeout=False
+            )
+
+        async def run_command(
+            *cmd_args: typing.Any, **kwargs: typing.Any
+        ) -> typing.Any:
+            argv = [str(a) for a in cmd_args]
+            if argv[0].endswith("build/api/client"):
+                return ok_output(json.dumps([new_device_test]))
+            if any(a == "dldist" or a.endswith("/dldist") for a in argv):
+                return await original_run_command(*cmd_args, **kwargs)
+            if "build" in argv and "--fuchsia_platform" in argv:
+                build_calls.append(tuple(argv))
+                # Like `fx build`, only export the manifests passed with
+                # --export-test-package, so that publishing fails otherwise.
+                for a in argv:
+                    if a.startswith("--export-test-package="):
+                        full_path = os.path.join(
+                            self.out_dir,
+                            a.removeprefix("--export-test-package="),
+                        )
+                        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                        with open(full_path, "w") as f:
+                            f.write("{}")
+                return ok_output()
+            if "build" in argv:
+                gn_build_calls.append(tuple(argv))
+                return ok_output()
+            if "publish" in argv and "--package-list" in argv:
+                with open(argv[argv.index("--package-list") + 1]) as f:
+                    published_manifests.extend(
+                        json.load(f)["content"]["manifests"]
+                    )
+                if manifest in published_manifests:
+                    with open(self.package_target_file_path) as f:
+                        targets = json.load(f)
+                    targets["signed"]["targets"]["new-device-pkg/0"] = {
+                        "custom": {"merkle": "aa" * 32}
+                    }
+                    with open(self.package_target_file_path, "w") as f:
+                        json.dump(targets, f)
+                return ok_output()
+            return ok_output()
+
+        patch = mock.patch.object(execution, "run_command", run_command)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self._mock_subprocess_call(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+
+        ret = await main.async_main_wrapper(
+            args.parse_args(["--simple", "//src/new:new_device_test"]),
+        )
+        self.assertEqual(ret, 0)
+        self.assertEqual(gn_build_calls, [])
+        self.assertEqual(len(build_calls), 1)
+        self.assertIn("@@//src/new:new_device_test", build_calls[0])
+        self.assertIn(f"--export-test-package={manifest}", build_calls[0])
+        self.assertIn(manifest, published_manifests)
+
+        # If a later build prunes the on-demand manifest, --no-build reports a
+        # clear error for a selected test, but ignores unselected tests.
+        os.remove(os.path.join(self.out_dir, manifest))
+        recorder = event.EventRecorder()
+        ret = await main.async_main_wrapper(
+            args.parse_args(
+                ["--simple", "--no-build", "//src/new:new_device_test"]
+            ),
+            recorder=recorder,
+        )
+        self.assertEqual(ret, 1)
+        errors = [e.error async for e in recorder.iter() if e.error is not None]
+        self.assertTrue(
+            any("--no-build" in e for e in errors),
+            errors,
+        )
+
+        # Selecting only foo_test via --limit 1 ignores the unselected on-demand
+        # test's missing manifest.
+        ret = await main.async_main_wrapper(
+            args.parse_args(
+                [
+                    "--simple",
+                    "--no-build",
+                    "--limit",
+                    "1",
+                    "foo_test",
+                    "//src/new:new_device_test",
+                ]
+            ),
+        )
+        self.assertEqual(ret, 0)
+
+    async def test_on_demand_bazel_test_lookup_failure(self) -> None:
+        """Tests that a failed Bazel lookup reports a missing test."""
+        os.makedirs(os.path.join(self.fuchsia_dir.name, "src/new"))
+        with open(
+            os.path.join(self.fuchsia_dir.name, "src/new/BUILD.bazel"), "w"
+        ) as f:
+            f.write("")
+
+        original_run_command = execution.run_command
+
+        async def run_command(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> typing.Any:
+            if args[0].endswith("build/api/client"):
+                return mock.MagicMock(
+                    return_code=1, stdout="", stderr="Bazel error"
+                )
+            return await original_run_command(*args, **kwargs)
+
+        patch = mock.patch.object(execution, "run_command", run_command)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        recorder = event.EventRecorder()
+        ret = await main.async_main_wrapper(
+            args.parse_args(
+                [
+                    "--simple",
+                    "--dry",
+                    "--no-show-suggestions",
+                    "//src/new:new_test",
+                ]
+            ),
+            recorder=recorder,
+        )
+        self.assertEqual(ret, 1)
+        # The error is reported once, as the run's end error, rather than
+        # also as a separate warning.
+        errors = [e.error async for e in recorder.iter() if e.error is not None]
+        self.assertEqual(errors, ["Failed to load tests: Bazel error"])
+        warnings = [
+            e.payload.user_message.value
+            async for e in recorder.iter()
+            if e.payload is not None
+            and e.payload.user_message is not None
+            and e.payload.user_message.level == event.MessageLevel.WARNING
+        ]
+        self.assertFalse(
+            any("Bazel error" in w for w in warnings),
+            warnings,
+        )
 
     async def test_fuzzy_dry_run(self) -> None:
         """Test a dry run of the command for fuzzy matching"""
@@ -1926,6 +2416,43 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         # The GN manifests must still be published alongside them.
         self.assertIn("obj/foo/package_manifest.json", published_manifests)
 
+    async def test_publishes_on_demand_bazel_test_packages(self) -> None:
+        """Test that built on-demand Bazel test packages are published."""
+        built_manifest = "bazel-out/fuchsia/bin/built.package_manifest.json"
+        os.makedirs(
+            os.path.join(self.out_dir, os.path.dirname(built_manifest)),
+            exist_ok=True,
+        )
+        with open(os.path.join(self.out_dir, built_manifest), "w") as f:
+            f.write("{}")
+        unbuilt_manifest = "bazel-out/fuchsia/bin/unbuilt.package_manifest.json"
+
+        published_manifests: list[str] = []
+
+        async def capture_publish_list(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> None:
+            argv = [str(arg) for arg in args]
+            if "publish" not in argv or "--package-list" not in argv:
+                return
+            with open(argv[argv.index("--package-list") + 1]) as f:
+                published_manifests.extend(json.load(f)["content"]["manifests"])
+
+        self._mock_run_command(0, async_handler=capture_publish_list)
+
+        app = main.AsyncMain.__new__(main.AsyncMain)
+        app._recorder = event.EventRecorder()
+        app._flags = args.parse_args(["--simple"])
+        app._exec_env = environment.ExecutionEnvironment.initialize_from_args(
+            app._flags
+        )
+        app._on_demand_package_manifests = [built_manifest, unbuilt_manifest]
+        await app._publish_packages(app._recorder.emit_build_start(targets=[]))
+
+        self.assertIn(built_manifest, published_manifests)
+        self.assertNotIn(unbuilt_manifest, published_manifests)
+        self.assertIn("obj/foo/package_manifest.json", published_manifests)
+
     def _add_bazel_device_test(self) -> str:
         """Adds a Bazel-built device test to the build output test data.
 
@@ -2000,10 +2527,23 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         self._mock_has_package_server_connected_to_device(True)
         self._mock_has_tests_in_base([])
 
+        recorder = event.EventRecorder()
         ret = await main.async_main_wrapper(
-            args.parse_args(["--simple", "--no-e2e"])
+            args.parse_args(["--simple", "--no-e2e"]), recorder=recorder
         )
         self.assertEqual(ret, 0)
+
+        # The build event reports the Bazel targets even though they're
+        # built outside of the GN `fx build` invocation.
+        build_targets = [
+            payload.build_targets
+            async for e in recorder.iter()
+            if (payload := e.payload) is not None
+            and payload.build_targets is not None
+        ]
+        self.assertIn(host_label, build_targets[0])
+        self.assertIn(device_label, build_targets[0])
+        self.assertNotIn("--default", build_targets[0])
 
         # Host and device tests are built in mutually exclusive Bazel
         # configurations, so each gets its own invocation.
@@ -2427,6 +2967,99 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
             args.parse_args(["--simple", "--no-build", "bar_test"])
         )
         self.assertEqual(ret, 1)
+
+    @parameterized.expand(
+        [
+            (
+                "multiple tests",
+                ["--profiler"],
+                "--profiler requires selecting exactly one test",
+            ),
+            (
+                "multiple tests with --dry",
+                ["--profiler", "--dry"],
+                "--profiler requires selecting exactly one test",
+            ),
+            (
+                "host test",
+                # Selects host_x64/bar_test without the (mocked) fuzzy matcher.
+                ["--profiler", "--offset", "1", "--limit", "1"],
+                "--profiler cannot profile the host test host_x64/bar_test",
+            ),
+            (
+                "environmentless host test",
+                ["--profiler", "--offset", "4", "--limit", "1"],
+                "--profiler cannot profile the host test host_cc_tests.static_test",
+            ),
+            (
+                "e2e test without --e2e",
+                ["--profiler", "--offset", "3", "--limit", "1"],
+                "host_x64/example_e2e_test is an e2e test, but the --e2e flag was not provided",
+            ),
+        ]
+    )
+    async def test_profiler_selection_validation(
+        self, _unused_name: str, flag_list: list[str], expected_error: str
+    ) -> None:
+        """--profiler requires exactly one device or e2e test."""
+        self._mock_run_command(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+        recorder = event.EventRecorder()
+        ret = await main.async_main_wrapper(
+            args.parse_args(["--simple", "--no-build"] + flag_list),
+            recorder=recorder,
+        )
+        self.assertEqual(ret, 1)
+        errors = [e.error async for e in recorder.iter() if e.error is not None]
+        self.assertTrue(any(expected_error in e for e in errors), errors)
+
+    @parameterized.expand(
+        [
+            (
+                "single device test",
+                ["--profiler", "--offset", "0", "--limit", "1"],
+            ),
+            (
+                "single device test with --dry",
+                ["--profiler", "--dry", "--offset", "0", "--limit", "1"],
+            ),
+            (
+                "single e2e test with --e2e",
+                ["--profiler", "--e2e", "--offset", "3", "--limit", "1"],
+            ),
+        ]
+    )
+    async def test_profiler_selection_valid(
+        self, _unused_name: str, flag_list: list[str]
+    ) -> None:
+        """--profiler accepts a single device test or a single e2e test with --e2e."""
+        self._mock_run_command(0)
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+        ret = await main.async_main_wrapper(
+            args.parse_args(["--simple", "--no-build"] + flag_list),
+        )
+        self.assertEqual(ret, 0)
+
+    def test_main_previous_rejects_profiler(self) -> None:
+        """main() rejects --profiler with --previous before processing the previous run."""
+        stdout = io.StringIO()
+        with (
+            mock.patch("sys.argv", ["fxtest", "-pr", "log", "--profiler"]),
+            mock.patch(
+                "config.load_config",
+                return_value=config.ConfigFile(path=None),
+            ),
+            contextlib.redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            main.main()
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn(
+            "--profiler is incompatible with --previous",
+            stdout.getvalue(),
+        )
 
     async def test_count(self) -> None:
         """Test that we can re-run a test multiple times with --count"""
@@ -3763,6 +4396,7 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         app._flags.allow_empty_selection = True
         app._flags.selection = ["my_test", "missing_test"]
         app._flags.e2e = False
+        app._flags.profiler = False
         app._exec_env = mock.Mock()
 
         # Should not raise exception
@@ -3803,6 +4437,7 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         app._flags.allow_empty_selection = False
         app._flags.selection = ["my_test", "missing_test"]
         app._flags.e2e = False
+        app._flags.profiler = False
         app._exec_env = mock.Mock()
 
         with self.assertRaises(main.AsyncMain._SelectionValidationError) as ctx:
@@ -4449,7 +5084,7 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_device_environment_only_queried_for_e2e_or_test_pilot(
         self,
     ) -> None:
-        """Test that get_device_environment_from_exec_env is skipped for standard device tests."""
+        """Test that get_device_environment_from_exec_env is skipped for host tests and queried for device and E2E tests."""
         self._mock_run_command(0)
         self._mock_has_package_server_connected_to_device(True)
         self._mock_has_tests_in_base([])
@@ -4460,12 +5095,20 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        # Standard device test (no e2e, no test-pilot) should not query DeviceEnvironment.
+        # Host test (no device, no e2e) should not query DeviceEnvironment.
+        ret = await main.async_main_wrapper(
+            args.parse_args(["--simple", "--no-build", "--host"])
+        )
+        self.assertEqual(ret, 0)
+        mock_get_dev_env.assert_not_awaited()
+
+        # Standard device test (uses test-pilot) should query DeviceEnvironment.
+        mock_get_dev_env.reset_mock()
         ret = await main.async_main_wrapper(
             args.parse_args(["--simple", "--no-build", "--device"])
         )
         self.assertEqual(ret, 0)
-        mock_get_dev_env.assert_not_awaited()
+        mock_get_dev_env.assert_awaited_once()
 
         # E2E test run should query DeviceEnvironment.
         mock_get_dev_env.reset_mock()

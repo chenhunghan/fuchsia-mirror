@@ -49,7 +49,6 @@ fuchsia_cc_driver("log-test-driver-driver") {
 
 fuchsia_driver_component("log-test-driver") {
   testonly = true
-  info = "meta/log-test-driver-info.json"
   component_name = "log-test-driver"
   deps = [ ":log-test-driver-driver" ]
   cm_label = ":log-test-driver_dml_manifest"

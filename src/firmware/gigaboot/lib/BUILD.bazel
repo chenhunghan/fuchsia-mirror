@@ -1,0 +1,69 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Shared code used by both the device-side lib and the host unittests.
+# TODO(https://fxbug.dev/570694755): Preserve GN cflags = [ "-fshort-wchar" ]
+# until bazel2gn can map copts to cflags.
+# @bazel2gn:raw_attribute:cflags = [ "-fshort-wchar" ]
+fx_cc_library(
+    name = "shared",
+    srcs = ["xefi.c"],
+    # In GN, headers are exposed via `:shared_config` (`../include/shared`)
+    # without `public = [...]` because `//src/firmware/gigaboot/cpp:lib`
+    # includes `xefi.h` without depending on `:shared`.
+    # @bazel2gn:skip
+    hdrs = ["//src/firmware/gigaboot/include:shared/xefi.h"],
+    # TODO(https://fxbug.dev/570694755): bazel2gn maps copts to GN
+    # configs += [...]; cflags is emitted via raw_attribute above.
+    # @bazel2gn:skip
+    copts = ["-fshort-wchar"],
+    includes = ["../include/shared"],
+    public_configs = [":shared_config"],
+    visibility = [
+        "//src/firmware/gigaboot/cpp/tests:__pkg__",
+        "//src/firmware/gigaboot/src:__pkg__",
+    ],
+    deps = ["//zircon/kernel/lib/efi"],
+    alwayslink = True,
+)
+
+# TODO(https://fxbug.dev/570694755): Preserve GN include_dirs = [ "../include" ]
+# until bazel2gn supports include_dirs / cross-package header inclusion cleanly.
+# @bazel2gn:raw_attribute:include_dirs = [ "../include" ]
+fx_cc_library(
+    name = "inet",
+    srcs = [
+        "inet.c",
+        # @bazel2gn:skip
+        "//src/firmware/gigaboot/include:arpa/inet.h",
+    ],
+    # TODO(https://fxbug.dev/570694755): Use -I for ../include until
+    # cross-package headers live in a Bazel library target.
+    # @bazel2gn:skip
+    copts = ["-Isrc/firmware/gigaboot/include"],
+    implementation_deps = ["//zircon/kernel/lib/efi"],
+    public_configs = [":shared_config"],
+    visibility = ["//src/firmware/gigaboot/cpp:__pkg__"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "bootbyte",
+    srcs = ["bootbyte.c"],
+    # In GN, headers are exposed via `:shared_config` (`../include/shared`).
+    # @bazel2gn:skip
+    hdrs = ["//src/firmware/gigaboot/include:shared/bootbyte.h"],
+    includes = ["../include/shared"],
+    public_configs = [":shared_config"],
+    visibility = ["//src/firmware/gigaboot/cpp:__pkg__"],
+    deps = [
+        "//sdk/lib/zbi-format",
+        "//zircon/kernel/lib/efi",
+    ],
+    alwayslink = True,
+)

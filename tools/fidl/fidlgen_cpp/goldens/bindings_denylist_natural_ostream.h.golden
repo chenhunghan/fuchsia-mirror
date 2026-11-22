@@ -14,8 +14,8 @@
 #pragma clang diagnostic ignored "-Wshadow"
 
 template <>
-struct fidl::ostream::Formatter<::test_bindingsdenylist::OnlyLlcpp> {
-  static std::ostream& Format(std::ostream& os, const ::test_bindingsdenylist::OnlyLlcpp& value);
+struct fidl::ostream::Formatter<::test_bindingsdenylist::OnlyCpp> {
+  static std::ostream& Format(std::ostream& os, const ::test_bindingsdenylist::OnlyCpp& value);
 };
 template <>
 struct fidl::ostream::Formatter<::test_bindingsdenylist::DenyEachBindingOnlyDenyDartRequest> {
@@ -76,7 +76,7 @@ struct fidl::ostream::Formatter<::test_bindingsdenylist::OnlyAppearsInImportingL
 
 namespace test_bindingsdenylist {
 
-std::ostream& operator<<(std::ostream& os, const ::test_bindingsdenylist::OnlyLlcpp& value);
+std::ostream& operator<<(std::ostream& os, const ::test_bindingsdenylist::OnlyCpp& value);
 
 std::ostream& operator<<(std::ostream& os, const ::test_bindingsdenylist::DenyEachBindingOnlyDenyDartRequest& value);
 

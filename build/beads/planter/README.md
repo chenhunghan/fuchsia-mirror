@@ -31,7 +31,9 @@ Keep reviews of `planter-evolution` CLs lightweight: because these files are
 consumed by the agent rather than the build, a quick sanity check that new
 rules or checks describe general GN/Bazel patterns (rather than workarounds
 tied to specific directories) and contain nothing glaringly wrong is
-sufficient. CLs that only touch `.md`, `lessons/`, or `machinery/` files can
-include `No-Try: true` in the commit message to skip unnecessary CQ tryjobs.
+sufficient. Don't add `No-Try: true` to these CLs: it also skips static checks,
+which are the only presubmit checks that can catch problems in these files.
+Presubmit already skips the build and test tryjobs on CLs that only touch
+`.md`, `lessons/`, or `machinery/` files.
 
 Hand edits are welcome too; planter picks them up after they land.

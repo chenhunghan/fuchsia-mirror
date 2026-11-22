@@ -28,10 +28,7 @@ fx_cc_binary(
         "radarutil.cc",
         "radarutil.h",
     ],
-    # GN sets -D_ALL_SOURCE via the //build/config:all_source config.
-    copts = [
-        "-D_ALL_SOURCE",
-    ],  # @bazel2gn:raw_overwrite:[ "//build/config:all_source" ]
+    build_flags = ["//build/config:all_source"],
     gn_output_name = "radarutil",
     tags = ["manual"],
     deps = [
@@ -50,7 +47,6 @@ fx_packaged_binary(
 
 fx_package(
     name = "radarutil",
-    package_name = "radarutil",
     resources = [":radarutil_packaged_bin"],
 )
 
@@ -74,10 +70,7 @@ fx_cc_test_binary(
         "radarutil.h",
         "radarutil-test.cc",
     ],
-    # GN sets -D_ALL_SOURCE via the //build/config:all_source config.
-    copts = [
-        "-D_ALL_SOURCE",
-    ],  # @bazel2gn:raw_overwrite:[ "//build/config:all_source" ]
+    build_flags = ["//build/config:all_source"],
     tags = ["manual"],
     deps = [
         "//sdk/fidl/fuchsia.hardware.radar:fuchsia.hardware.radar_cpp",

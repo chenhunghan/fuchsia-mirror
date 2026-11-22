@@ -1,0 +1,49 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "stressor-bin",
+    srcs = [
+        "deletion_actor.rs",
+        "environment.rs",
+        "file_actor.rs",
+        "instance_actor.rs",
+        "main.rs",
+    ],
+    crate_name = "fs_stressor",
+    crate_root = "main.rs",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/storage/stress-tests:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/diagnostics/log/rust",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component-test",
+        "//src/lib/fuchsia-sync",
+        "//src/storage/fidl/fuchsia.fs.startup:fuchsia.fs.startup_rust",
+        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
+        "//src/storage/lib/fs_management/rust:fs_management",
+        "//src/storage/lib/key-bag",
+        "//src/storage/stress-tests/utils",
+        "//src/sys/lib/stress-test",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:either",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)

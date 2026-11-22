@@ -86,9 +86,9 @@ fuchsia_cc_test(
     srcs = [
         "aml-i2c-test.cc",
     ],
-    # TODO(b/322398374) Remove this copts
     copts = [
-        "-Wno-vla-cxx-extension",
+        # TODO(https://fxbug.dev/477786942): Fix -Wconversion warnings and remove.
+        "-Wno-conversion",
     ],
     deps = [
         ":common",
@@ -97,11 +97,11 @@ fuchsia_cc_test(
         "@fuchsia_sdk//fidl/fuchsia.hardware.i2c.businfo:fuchsia.hardware.i2c.businfo_cpp",
         "@fuchsia_sdk//fidl/fuchsia.hardware.i2cimpl:fuchsia.hardware.i2cimpl_cpp",
         "@fuchsia_sdk//pkg/async_patterns_testing_cpp",
+        "@fuchsia_sdk//pkg/driver_fake_mmio_reg_cpp",
         "@fuchsia_sdk//pkg/driver_fake_platform_device_cpp",
         "@fuchsia_sdk//pkg/driver_mmio_cpp",
         "@fuchsia_sdk//pkg/driver_testing_cpp",
         "@fuchsia_sdk//pkg/zx",
-        "@internal_sdk//pkg/fake-mmio-reg",
     ],
 )
 

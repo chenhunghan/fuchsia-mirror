@@ -17,22 +17,7 @@ import("//build/toolchain/ccache.gni")
 import("//build/toolchain/rbe.gni")
 import("//src/lib/icu/third_party_icu_headers.gni")
 
-# This is what is built into the Clang driver for --target=*-fuchsia.
-default_elf_page_size = 4096
-
-declare_args() {
-  # **TODO(https://fxbug.dev/42107211):** This is _extremely experimental_ and
-  # **must not** be set for production (including SDK) builds.
-  #
-  # This is the ELF ABI maximum page size.  It can always be increased (by
-  # powers of two) while staying ABI-compatible, but never decreased; any
-  # increases likely affect storage and memory sizes.  Binaries linked by
-  # this GN build will be compatible with ELF loading on a system that at
-  # runtime actually uses page sizes as big as this, as well as anything
-  # smaller down to 4k.  No system that uses page sizes larger than this
-  # will be able to load any ELF binaries produced by this build.
-  experimental_elf_page_size = default_elf_page_size
-}
+import("//build/config/fuchsia/elf_page_size.gni")
 
 # ccache, at least in some configurations, caches preprocessed content. This
 # means that by the time the compiler sees it, macros are unrolled. A number
@@ -42,6 +27,7 @@ declare_args() {
 # and tautological comparisons, since macros are not typed. Macros also tend
 # to over-parenthesize, and so on. This particular list of options was found
 # via trial and error, and might be the best way of keeping the build quiet.
+# LINT.IfChange(ccache)
 config("ccache") {
   cflags = [
     "-Wno-error",
@@ -54,6 +40,9 @@ config("ccache") {
   asmflags = cflags
 }
 
+# LINT.ThenChange(BUILD.bazel:ccache)
+
+# LINT.IfChange(compiler)
 compiler_config("compiler") {
   configs = [
     ":compiler_sysroot",
@@ -125,6 +114,9 @@ compiler_config("compiler") {
   rust_linker_flags += [ "-zrel" ]
 }
 
+# LINT.ThenChange(BUILD.bazel:compiler)
+
+# LINT.IfChange(compiler_sysroot)
 config("compiler_sysroot") {
   if (defined(sysroot) && sysroot != "") {
     cflags = [ "--sysroot=" + rebase_path(sysroot, root_build_dir) ]
@@ -139,12 +131,18 @@ config("compiler_sysroot") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:compiler_sysroot)
+
+# LINT.IfChange(compiler_target)
 config("compiler_target") {
   cflags = [ "--target=$current_target_tuple" ]
   asmflags = cflags
   ldflags = cflags
 }
 
+# LINT.ThenChange(BUILD.bazel:compiler_target)
+
+# LINT.IfChange(compiler_fuchsia_api_level)
 config("compiler_fuchsia_api_level") {
   if (is_gcc || !is_fuchsia) {
     defines =
@@ -157,12 +155,17 @@ config("compiler_fuchsia_api_level") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:compiler_fuchsia_api_level)
+
+# LINT.IfChange(max-page-size)
 compiler_config("max-page-size") {
   default_size = experimental_elf_page_size == default_elf_page_size
   if (!default_size || is_gcc) {
     linker_flags = [ "-zmax-page-size=$experimental_elf_page_size" ]
   }
 }
+
+# LINT.ThenChange(BUILD.bazel:max-page-size)
 
 # LINT.IfChange(shared_library_config)
 config("shared_library_config") {
@@ -331,6 +334,7 @@ sanitizer_default_options("scudo_default_options") {
 
 # LINT.ThenChange(BUILD.bazel:scudo_default_options)
 
+# LINT.IfChange(uses-outline-atomics-fxbug98632)
 # TODO(https://fxbug.dev/42180987): This works around a toolchain issue in LTO builds
 # where code generation results in a dependency on a Zircon vDSO call but
 # doesn't link -lzircon to supply it at link time.  This is added to deps of
@@ -353,6 +357,8 @@ group("uses-outline-atomics-fxbug98632") {
     deps = [ "//src/zircon/lib/zircon" ]
   }
 }
+
+# LINT.ThenChange(BUILD.bazel:uses-outline-atomics-fxbug98632)
 
 # toolchain_variant.{executable_,source,}deps point to these usually, so
 # BUILDCONFIG.gn (for $default_toolchain) and the toolchain definitions don't

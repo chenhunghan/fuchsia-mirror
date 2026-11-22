@@ -7,13 +7,12 @@
 
 #include <fidl/fuchsia.hardware.network.driver/cpp/driver/fidl.h>
 #include <fidl/fuchsia.hardware.network/cpp/wire.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <zircon/types.h>
 
 #include <array>
 
 #include <fbl/intrusive_double_list.h>
-
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace network {
 namespace netdev = fuchsia_hardware_network;

@@ -8,6 +8,10 @@
 #include <lib/fit/result.h>
 #include <unistd.h>
 
+#include <deque>
+#include <string>
+#include <vector>
+
 #include <fbl/unique_fd.h>
 
 namespace audit_utils {
@@ -41,7 +45,15 @@ fit::result<int, ssize_t> SendNetlinkMessage(int fd, const void* buf, size_t len
 
 fit::result<int, ssize_t> ReceiveNetlinkMessage(int fd, void* buf, size_t len, bool wait = true);
 
-fit::result<int> RegisterAsAuditDaemon(int fd, pid_t pid = getpid());
+/// Receives the next netlink message from `buffered_messages` if non-empty, or from `fd`.
+fit::result<int, ssize_t> ReceiveNetlinkMessage(int fd,
+                                                std::deque<std::vector<char>>& buffered_messages,
+                                                void* buf, size_t len, bool wait = true);
+
+/// Registers `fd` as the audit daemon for `pid`, appending any non-ACK netlink messages
+/// received before the ACK to `buffered_messages` when non-null.
+fit::result<int> RegisterAsAuditDaemon(int fd, pid_t pid = getpid(),
+                                       std::deque<std::vector<char>>* buffered_messages = nullptr);
 
 fit::result<int> UnregisterAuditDaemon(int fd);
 

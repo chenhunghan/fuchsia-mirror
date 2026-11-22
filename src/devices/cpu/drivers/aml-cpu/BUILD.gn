@@ -63,7 +63,6 @@ fuchsia_driver_component("aml-cpu") {
     ":aml-cpu-driver",
   ]
   manifest = "meta/aml-cpu.cml"
-  info = "meta/aml-cpu-info.json"
 }
 
 fuchsia_driver_package("package") {

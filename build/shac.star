@@ -34,6 +34,7 @@ _BAZEL_TYPE_CHECKED_RULES = [
     "py_binary",
     "py_library",
     "py_test",
+    "python_mobly_test",
 ]
 
 # Attributes of _BAZEL_TYPE_CHECKED_RULES that reference Python source files.

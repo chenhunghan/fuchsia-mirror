@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/456186319): The kernel build is not yet supported in
+# Bazel, so the non-kernel Fuchsia dependencies are emitted conditionally in GN
+# via raw_attribute.
+# @bazel2gn:raw_attribute:if (!is_kernel && !is_host) { public_deps += [ "//zircon/system/ulib/zx:headers" ] deps = [ "//src/zircon/lib/zircon", "//zircon/system/ulib/fbl", "//zircon/system/ulib/zx" ] }
+fx_cc_source_library_zx(
+    name = "bitmap",
+    srcs = ["raw-bitmap.cc"],
+    hdrs = [
+        "include/bitmap/bitmap.h",
+        "include/bitmap/raw-bitmap.h",
+        "include/bitmap/rle-bitmap.h",
+        "include/bitmap/storage.h",
+    ],
+    # Emitted conditionally in GN via `@bazel2gn:raw_attribute` above.
+    # @bazel2gn:skip
+    implementation_deps = ["//src/zircon/lib/zircon"],
+    # `zx_library()` in GN always adds `"include"` to `include_dirs`, and its
+    # `zircon_toolchain != false` branch rejects `includes` as unused.
+    # TODO(https://fxbug.dev/456186319): Remove once `zx_library.gni` handles
+    # `includes` in `zircon_toolchain != false`.
+    # @bazel2gn:skip
+    includes = ["include"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        # GN kernel toolchains use the `:headers` sub-target; Bazel defines only
+        # the main `//zircon/system/ulib/fbl` library target.
+        "//zircon/system/ulib/fbl",  # @bazel2gn:path_overwrite://zircon/system/ulib/fbl:headers
+        # <bitmap/storage.h> has #include <lib/zx/vmo.h>.
+        # Emitted conditionally in GN via `@bazel2gn:raw_attribute` above.
+        # @bazel2gn:skip
+        "//zircon/system/ulib/zx",
+    ],
+)

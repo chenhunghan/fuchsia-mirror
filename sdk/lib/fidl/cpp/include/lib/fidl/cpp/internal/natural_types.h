@@ -537,8 +537,8 @@ struct NaturalUnionCodingTraits {
     const size_t envelope_offset = offset + offsetof(fidl_union_t, envelope);
     EncodeMember(encoder, value, envelope_offset, index, recursion_depth + 1);
     // Call GetPtr after Encode because the buffer may move.
-    fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-    xunion->tag = static_cast<fidl_union_tag_t>(T::IndexToTag(index).value());
+    fidl_union_t* encoded = encoder->GetPtr<fidl_union_t>(offset);
+    encoded->tag = static_cast<fidl_union_tag_t>(T::IndexToTag(index).value());
   }
 
   template <size_t I = 1>
@@ -558,8 +558,8 @@ struct NaturalUnionCodingTraits {
   }
 
   static void Decode(NaturalDecoder* decoder, T* value, size_t offset, size_t recursion_depth) {
-    fidl_union_t* xunion = decoder->GetPtr<fidl_union_t>(offset);
-    const size_t index = T::TagToIndex(decoder, static_cast<typename T::Tag>(xunion->tag));
+    fidl_union_t* encoded = decoder->GetPtr<fidl_union_t>(offset);
+    const size_t index = T::TagToIndex(decoder, static_cast<typename T::Tag>(encoded->tag));
     if (unlikely(decoder->status() != ZX_OK)) {
       return;
     }
@@ -571,7 +571,7 @@ struct NaturalUnionCodingTraits {
     if (unlikely(index == 0)) {
       // Flexible unknown envelope.
       decoder->DecodeUnknownEnvelopeRequired(envelope_offset);
-      if (unlikely(xunion->tag == 0)) {
+      if (unlikely(encoded->tag == 0)) {
         decoder->SetError(kCodingErrorZeroTagButNonZeroEnvelope);
       }
       return;

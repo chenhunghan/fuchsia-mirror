@@ -23,13 +23,6 @@ fidl_library(
 )
 
 measure_tape(
-    name = "hlcpp_measure_tape_for_case",
-    fidls = [":fuchsia.test"],
-    target_binding = "hlcpp",
-    target_types = ["fuchsia.test/Case"],
-)
-
-measure_tape(
     name = "rust_measure_tape_for_case",
     fidls = [":fuchsia.test"],
     target_binding = "rust",

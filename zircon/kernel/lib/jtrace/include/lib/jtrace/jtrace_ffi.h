@@ -24,8 +24,6 @@ using ProdEntry = SmallEntry;
 
 extern "C" {
 
-void rust_jtrace_init();
-void rust_jtrace_set_after_thread_init_early();
 void rust_jtrace_set_location(void* ptr, size_t len);
 void rust_jtrace_invalidate();
 void rust_jtrace_log(jtrace::ProdEntry& e);

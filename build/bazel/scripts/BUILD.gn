@@ -33,7 +33,7 @@ if (is_host) {
     tests = [ "build_utils_test.py" ]
     inputs = [ "//build/bazel/wrapper.bazel.sh" ]
     deps = [
-      ":bazel_invocation",
+      ":bazel_besproxy_wrap",
       ":build_utils",
     ]
   }
@@ -86,6 +86,7 @@ if (is_host) {
     sources = [ "generate_invocation_bazelrc.py" ]
     library_deps = [
       ":bazel_invocation",
+      "//build/auth:auth_env",
       "//build/rbe:casfs",
       "//build/resultstore:related_invocations",
       "//build/resultstore:rs_profile",
@@ -145,7 +146,6 @@ if (is_host) {
     library_deps = [
       ":build_utils",
       ":remote_services_utils",
-      "//build/rbe:rbe_profile",
       "//build/rbe:rbe_settings",
     ]
   }
@@ -172,6 +172,7 @@ if (is_host) {
     library_deps = [
       ":bazel_test_packages",
       ":build_utils",
+      "//build/python/modules/bazel_labels",
     ]
   }
 
@@ -193,6 +194,7 @@ if (is_host) {
     library_deps = [
       ":bazel_action_file_copy_utils",
       ":bazel_action_utils",
+      ":bazel_build_events",
       ":bazel_label_mapper",
       ":bazel_rust_analyzer_utils",
       ":bazel_source_path_mapper",
@@ -246,6 +248,21 @@ if (is_host) {
     deps = [ ":bazel_build_flags" ]
   }
 
+  python_library("bazel_besproxy_wrap") {
+    sources = [ "bazel_besproxy_wrap.py" ]
+    library_deps = [
+      ":bazel_invocation",
+      ":build_utils",
+      "//build/auth:auth_env",
+      "//build/resultstore:rsclient",
+    ]
+  }
+
+  python_build_time_tests("bazel_besproxy_wrap_test") {
+    tests = [ "bazel_besproxy_wrap_test.py" ]
+    deps = [ ":bazel_besproxy_wrap" ]
+  }
+
   python_build_time_tests("bazel_label_mapper_test") {
     tests = [ "bazel_label_mapper_test.py" ]
     deps = [ ":bazel_label_mapper" ]
@@ -259,6 +276,15 @@ if (is_host) {
   python_build_time_tests("fetch_cipd_prebuilt_test") {
     tests = [ "fetch_cipd_prebuilt_test.py" ]
     deps = [ ":fetch_cipd_prebuilt" ]
+  }
+
+  python_library("export_rules_fuchsia") {
+    sources = [ "export_rules_fuchsia.py" ]
+  }
+
+  python_build_time_tests("export_rules_fuchsia_test") {
+    tests = [ "export_rules_fuchsia_test.py" ]
+    deps = [ ":export_rules_fuchsia" ]
   }
 
   # trim_visibility.py is a developer tool, not a build-time script, so its
@@ -296,6 +322,7 @@ bazel_test_suite("bazel_tests") {
     "//build/bazel/scripts:generate_host_test_wrapper_test",
     "//build/bazel/scripts:runfiles_utils_test",
     "//build/bazel/scripts:stdio_redirection_test",
+    "//build/bazel/scripts:update_no_workspace_bazel_vendor_dir_test",
     "//build/bazel/scripts:workspace_utils_test",
   ]
 }
@@ -305,6 +332,7 @@ group("tests") {
   deps = [
     ":bazel_action_file_copy_utils_test($host_toolchain)",
     ":bazel_action_utils_test($host_toolchain)",
+    ":bazel_besproxy_wrap_test($host_toolchain)",
     ":bazel_build_args_test($host_toolchain)",
     ":bazel_build_events_test($host_toolchain)",
     ":bazel_build_flags_test($host_toolchain)",
@@ -320,6 +348,7 @@ group("tests") {
     ":bazel_tests_utils_test($host_toolchain)",
     ":build_utils_test($host_toolchain)",
     ":compute_content_hash_test($host_toolchain)",
+    ":export_rules_fuchsia_test($host_toolchain)",
     ":fetch_cipd_prebuilt_test($host_toolchain)",
     ":generate_fx_host_tool_test($host_toolchain)",
     ":generate_host_test_wrapper_test($host_toolchain)",
@@ -332,6 +361,7 @@ group("tests") {
     ":trim_visibility_test($host_toolchain)",
     ":update_bazel_vendor_dir_test($host_toolchain)",
     ":workspace_utils_test($host_toolchain)",
+    "//build/python/modules/bazel_labels:bazel_labels_test($host_toolchain)",
   ]
 }
 
@@ -355,7 +385,6 @@ if (is_host) {
       "copy_bazel_build_group_outputs.py",
       "copy_bazel_debug_symbols.py",
       "create_gn_targets_dir.py",
-      "export_rules_fuchsia.py",
       "generate-bazel-install.py",
       "git-clone-then-apply-bundle.py",
       "hardlink-directory.py",
@@ -400,17 +429,20 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 if (is_host) {
   python_library("bazel_compdb_utils") {
     sources = [ "bazel_compdb_utils.py" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("git_test_utils") {
     sources = [ "git_test_utils.py" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("get_git_head_commit") {
     sources = [ "get_git_head_commit.py" ]
     deps = [ "//build/git:git_utils" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -421,23 +453,28 @@ if (is_host) {
       "//build/api:*",
       "//build/beads/scripts:*",
       "//build/ninja_implicit_inputs:*",
+      "//build/tui:*",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("compute_content_hash") {
     sources = [ "compute_content_hash.py" ]
     deps = [ ":get_git_head_commit" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("stdio_redirection") {
     sources = [ "stdio_redirection.py" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("thread_pool_helpers") {
     sources = [ "thread_pool_helpers.py" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -447,17 +484,20 @@ if (is_host) {
       ":build_utils",
       ":thread_pool_helpers",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("bazel_build_events") {
     sources = [ "bazel_build_events.py" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("generate_fx_host_tool") {
     sources = [ "generate_fx_host_tool.py" ]
     deps = [ ":runfiles_utils" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -467,6 +507,7 @@ if (is_host) {
       ":build_utils",
       ":runfiles_utils",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -476,6 +517,7 @@ if (is_host) {
       ":*",
       "//build/scripts:*",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -486,23 +528,27 @@ if (is_host) {
       ":bazel_invocation",
       ":build_utils",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("runfiles_utils") {
     sources = [ "runfiles_utils.py" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("bazel_rust_analyzer_utils") {
     sources = [ "bazel_rust_analyzer_utils.py" ]
     deps = [ ":build_utils" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("bazel_source_path_mapper") {
     sources = [ "bazel_source_path_mapper.py" ]
     deps = [ ":build_utils" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -513,11 +559,13 @@ if (is_host) {
       "//build/beads/scripts:*",
     ]
     deps = [ ":build_utils" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("bazel_build_flags") {
     sources = [ "bazel_build_flags.py" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -528,16 +576,25 @@ if (is_host) {
       ":build_utils",
       ":workspace_utils",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("bazel_repository_utils") {
     sources = [ "bazel_repository_utils.py" ]
     deps = [ ":build_utils" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("fetch_cipd_prebuilt") {
     sources = [ "fetch_cipd_prebuilt.py" ]
+    enable_mypy = false
+  }
+}
+if (is_host) {
+  python_library("update_no_workspace_bazel_vendor_dir") {
+    sources = [ "update_no_workspace_bazel_vendor_dir.py" ]
+    enable_mypy = false
   }
 }

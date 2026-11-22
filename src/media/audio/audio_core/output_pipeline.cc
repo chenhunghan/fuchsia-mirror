@@ -62,6 +62,11 @@ std::shared_ptr<Mixer> OutputPipelineImpl::AddInput(std::shared_ptr<ReadableStre
                                                     std::optional<float> initial_dest_gain_db,
                                                     Mixer::Resampler sampler_hint) {
   TRACE_DURATION("audio", "OutputPipelineImpl::AddInput", "stream", stream.get());
+  // Default to high-pass filtering for ultrasound output to eliminate audible frequencies.
+  if (sampler_hint == Mixer::Resampler::Default &&
+      usage == StreamUsage::WithRenderUsage(RenderUsage::ULTRASOUND)) {
+    sampler_hint = Mixer::Resampler::HighPassWindowedSinc;
+  }
   state_.streams.emplace_back(stream, usage);
   return LookupStageForUsage(usage).AddInput(std::move(stream), initial_dest_gain_db, sampler_hint);
 }

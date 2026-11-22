@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use log::{info, warn};
 use packet_encoding::{Decodable, Encodable};
 
 use crate::packets::{
@@ -200,13 +199,7 @@ impl AdvancedDecodable for SetBrowsedPlayerResponseParams {
 
         let uid_counter = u16::from_be_bytes(buf[0..2].try_into().unwrap());
         let num_items = u32::from_be_bytes(buf[2..6].try_into().unwrap());
-        let is_utf8 = match CharsetId::try_from(u16::from_be_bytes(buf[6..8].try_into().unwrap())) {
-            Ok(CharsetId::Utf8) => true,
-            res => {
-                warn!("Unsupported charset ID {:?}", res);
-                false
-            }
-        };
+        let charset_id = CharsetId::from_be_bytes(buf[6..8].try_into().unwrap());
         let folder_depth = buf[8];
 
         let mut next_idx = Self::MIN_PACKET_SIZE;
@@ -225,19 +218,8 @@ impl AdvancedDecodable for SetBrowsedPlayerResponseParams {
             if buf.len() < next_idx + name_len {
                 return Err(Error::InvalidMessage);
             }
-            // TODO(fxdev.bug/100467): add support to appropriately convert non-utf8
-            // charset ID folder names to utf8 names.
             let default_name = format!("Folder {:?}", processed + 1);
-            let name = if is_utf8 {
-                let mut name_arr = vec![0; name_len];
-                name_arr.copy_from_slice(&buf[next_idx..next_idx + name_len]);
-                String::from_utf8(name_arr).or_else(|e| {
-                    info!(e:%; "Browsable player folder name conversion caused error, falling back to placeholder name {default_name}");
-                    Ok(default_name)
-                })?
-            } else {
-                default_name
-            };
+            let name = charset_id.decode_str(&buf[next_idx..next_idx + name_len], &default_name);
             folder_names.push(name);
             next_idx += name_len;
         }
@@ -263,7 +245,7 @@ impl Encodable for SetBrowsedPlayerResponseParams {
 
         buf[0..2].copy_from_slice(&self.uid_counter.to_be_bytes());
         buf[2..6].copy_from_slice(&self.num_items.to_be_bytes());
-        buf[6..8].copy_from_slice(&u16::from(&CharsetId::Utf8).to_be_bytes());
+        buf[6..8].copy_from_slice(&CharsetId::Utf8.to_be_bytes());
         buf[8] = u8::try_from(self.folder_names.len()).map_err(|_| Error::OutOfRange)?;
         let mut next_idx = Self::MIN_PACKET_SIZE;
         for name in &self.folder_names {
@@ -384,29 +366,34 @@ mod tests {
 
     #[fuchsia::test]
     fn test_set_browsed_player_response_decode_with_folders_success() {
-        // With Utf8 folder names.
-        let buf = [4, 0, 1, 0, 0, 0, 10, 0, 106, 2, 0, 2, 0x41, 0x42, 0, 2, 0x43, 0x44];
-        let resp = SetBrowsedPlayerResponse::decode(&buf[..]).expect("should have decoded");
-        assert_matches!(
-            resp,
-            SetBrowsedPlayerResponse::Success(r) => {
+        fn decode_folder_names(buf: &[u8]) -> Vec<String> {
+            let resp = SetBrowsedPlayerResponse::decode(buf).expect("should have decoded");
+            assert_matches!(resp, SetBrowsedPlayerResponse::Success(r) => {
                 assert_eq!(r.uid_counter, 1);
                 assert_eq!(r.num_items, 10);
-                assert_eq!(r.folder_names, vec!["AB".to_string(), "CD".to_string()]);
-            }
-        );
+                r.folder_names
+            })
+        }
 
-        // With non-Utf8 folder names.
+        // With UTF-8 folder names.
+        let buf = [4, 0, 1, 0, 0, 0, 10, 0, 106, 2, 0, 2, 0x41, 0x42, 0, 2, 0x43, 0x44];
+        assert_eq!(decode_folder_names(&buf), vec!["AB", "CD"]);
+
+        // Invalid UTF-8 bytes with UTF-8 charset ID are replaced lossily.
+        let buf = [4, 0, 1, 0, 0, 0, 10, 0, 106, 1, 0, 2, 0xFF, 0xFE];
+        assert_eq!(decode_folder_names(&buf), vec!["\u{FFFD}\u{FFFD}"]);
+
+        // With ASCII folder names.
+        let buf = [4, 0, 1, 0, 0, 0, 10, 0, 3, 1, 0, 2, 0x41, 0x42];
+        assert_eq!(decode_folder_names(&buf), vec!["AB"]);
+
+        // With unknown non-UTF-8 charset ID.
         let buf = [4, 0, 1, 0, 0, 0, 10, 0, 55, 1, 0, 2, 0x41, 0x42];
-        let resp = SetBrowsedPlayerResponse::decode(&buf[..]).expect("should have decoded");
-        assert_matches!(
-            resp,
-            SetBrowsedPlayerResponse::Success(r) => {
-                assert_eq!(r.uid_counter, 1);
-                assert_eq!(r.num_items, 10);
-                assert_eq!(r.folder_names, vec!["Folder 1".to_string()]);
-            }
-        );
+        assert_eq!(decode_folder_names(&buf), vec!["Folder 1"]);
+
+        // With known non-UTF-8 charset ID (Iso8859_1).
+        let buf = [4, 0, 1, 0, 0, 0, 10, 0, 4, 1, 0, 2, 0x41, 0x42];
+        assert_eq!(decode_folder_names(&buf), vec!["Folder 1"]);
     }
 
     #[fuchsia::test]

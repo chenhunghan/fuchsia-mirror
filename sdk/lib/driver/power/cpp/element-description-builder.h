@@ -30,6 +30,14 @@ struct ElementDesc {
   // The below are created if the caller did not supply their corresponding server end
   std::optional<fidl::ClientEnd<fuchsia_power_broker::Lessor>> lessor_client;
   std::optional<fidl::ClientEnd<fuchsia_power_broker::ElementControl>> element_control_client;
+
+  // If `element_config.initial_level` is non-zero (or `SetInitialLeaseToken` is called), an
+  // initial lease on the element will be taken via `AddElement` and this token will be passed to
+  // Power Broker.
+  std::optional<fuchsia_power_broker::LeaseToken> initial_lease_token_broker;
+  // Created when `element_config.initial_level` is non-zero unless `initial_lease_token_broker`
+  // was supplied manually via `SetInitialLeaseToken`.
+  std::optional<fuchsia_power_broker::LeaseToken> initial_lease_token_client;
 };
 
 class ElementDescBuilder {
@@ -62,6 +70,12 @@ class ElementDescBuilder {
   ElementDescBuilder& SetElementRunner(
       fidl::ClientEnd<fuchsia_power_broker::ElementRunner> element_runner);
 
+  /// Sets the initial lease token for the element to be passed to Power Broker via AddElement.
+  /// The other half should be retained by the client as the LeaseToken, and
+  /// `element_config.initial_level` must be set to a non-zero valid level for `AddElement` to
+  /// succeed. See fuchsia_power_broker::ElementSchema for more details.
+  ElementDescBuilder& SetInitialLeaseToken(fuchsia_power_broker::LeaseToken broker_token);
+
  private:
   PowerElementConfiguration element_config;
   TokenMap tokens_;
@@ -69,6 +83,7 @@ class ElementDescBuilder {
   std::optional<fidl::ServerEnd<fuchsia_power_broker::Lessor>> lessor_;
   std::optional<fidl::ServerEnd<fuchsia_power_broker::ElementControl>> element_control_;
   std::optional<fidl::ClientEnd<fuchsia_power_broker::ElementRunner>> element_runner_;
+  std::optional<fuchsia_power_broker::LeaseToken> initial_lease_token_;
 };
 
 }  // namespace fdf_power

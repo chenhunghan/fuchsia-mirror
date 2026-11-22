@@ -20,6 +20,7 @@ async fn initialize_dictionary(
         fboot::BoolPair { key: "astro.sysconfig.abr-wear-leveling".to_string(), defaultval: false },
         fboot::BoolPair { key: "console.shell".to_string(), defaultval: false },
         fboot::BoolPair { key: "console.use_virtio_console".to_string(), defaultval: false },
+        fboot::BoolPair { key: "dev.fdomain.uart".to_string(), defaultval: false },
         fboot::BoolPair { key: "netsvc.advertise".to_string(), defaultval: true },
         fboot::BoolPair { key: "netsvc.all-features".to_string(), defaultval: true },
         fboot::BoolPair { key: "netsvc.disable".to_string(), defaultval: true },
@@ -27,6 +28,7 @@ async fn initialize_dictionary(
     ];
     let string_keys = vec![
         "androidboot.slot_suffix".to_string(),
+        "dev.fdomain.uart.baud".to_string(),
         "driver.usb.peripheral".to_string(),
         "omaha_app_id".to_string(),
         "omaha_url".to_string(),
@@ -214,7 +216,17 @@ mod tests {
     #[fuchsia::test]
     async fn initialize_dictionary_test() {
         let configs = test_with_kernel_serial(None).await;
-        assert_eq!(configs.len(), 24);
+        assert_eq!(configs.len(), 26);
+        assert_eq!(
+            configs.get("fuchsia.dev.fdomain.uart"),
+            Some(&fdecl::ConfigValue::Single(fdecl::ConfigSingleValue::Bool(true)))
+        );
+        assert_eq!(
+            configs.get("fuchsia.dev.fdomain.uart.baud"),
+            Some(&fdecl::ConfigValue::Single(fdecl::ConfigSingleValue::String(
+                "dev.fdomain.uart.baud".to_string()
+            )))
+        );
         assert_eq!(
             configs.get("fuchsia.kernel.serial"),
             Some(&fdecl::ConfigValue::Single(fdecl::ConfigSingleValue::Bool(true)))
@@ -224,7 +236,7 @@ mod tests {
     #[fuchsia::test]
     async fn kernel_serial_none_produces_false() {
         let configs = test_with_kernel_serial(Some("none")).await;
-        assert_eq!(configs.len(), 24);
+        assert_eq!(configs.len(), 26);
         assert_eq!(
             configs.get("fuchsia.kernel.serial"),
             Some(&fdecl::ConfigValue::Single(fdecl::ConfigSingleValue::Bool(false)))
@@ -234,7 +246,7 @@ mod tests {
     #[fuchsia::test]
     async fn kernel_serial_set_produces_true() {
         let configs = test_with_kernel_serial(Some("legacy")).await;
-        assert_eq!(configs.len(), 24);
+        assert_eq!(configs.len(), 26);
         assert_eq!(
             configs.get("fuchsia.kernel.serial"),
             Some(&fdecl::ConfigValue::Single(fdecl::ConfigSingleValue::Bool(true)))

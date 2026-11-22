@@ -25,11 +25,6 @@
             ],
         },
         {
-            // For the storage stall watchdog's test-only boot argument.
-            protocol: "fuchsia.boot.Arguments",
-            availability: "optional",
-        },
-        {
             // The storage stall watchdog's dump includes the log tail and storage Inspect data.
             protocol: "fuchsia.diagnostics.ArchiveAccessor",
             availability: "optional",
@@ -45,6 +40,14 @@
             type: "bool",
             availability: "optional",
             default: false,
+        },
+        {
+            // Test-only delay (in seconds) after which storage-watchdog simulates a stall; 0 disables it.
+            config: "fuchsia.diagnostics.StorageStallWatchdogSimulateStallSecs",
+            key: "storage_stall_watchdog_simulate_stall_secs",
+            type: "uint64",
+            availability: "optional",
+            default: 0,
         },
     ],
     expose: [

@@ -77,6 +77,7 @@ void DisplayEngineEventsFidl::OnDisplayAdded(display::DisplayId display_id,
       .display_id = display_id.ToFidl(),
       .preferred_modes = fidl::VectorView<fuchsia_hardware_display_types::wire::Mode>::FromExternal(
           fidl_preferred_modes_buffer.data(), preferred_modes.size()),
+      .preferred_mode_vrr_configs = {},
       .edid_bytes = {},
       .pixel_formats = fidl::VectorView<fuchsia_images2::wire::PixelFormat>::FromExternal(
           fidl_pixel_formats_buffer.data(), pixel_formats.size()),

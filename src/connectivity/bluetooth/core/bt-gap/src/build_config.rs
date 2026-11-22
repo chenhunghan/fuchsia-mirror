@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{format_err, Error};
+use anyhow::{Error, format_err};
 use fidl_fuchsia_bluetooth_sys::{self as sys, BrEdrSecurityMode, LeSecurityMode};
 use std::cmp::PartialEq;
 
@@ -133,7 +133,7 @@ mod tests {
         let host_device = HostDevice::mock(
             HostId(42),
             Address::Public([1, 2, 3, 4, 5, 6]),
-            "/dev/host".to_string(),
+            "test-host".to_string(),
             host_proxy,
         );
         let test_config = Config {

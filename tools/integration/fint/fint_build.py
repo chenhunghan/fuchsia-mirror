@@ -33,14 +33,6 @@ protobuf_wheel = fuchsia_root / PREBUILT_PROTOBUF_DIR
 if protobuf_wheel.exists() and str(protobuf_wheel) not in sys.path:
     sys.path.insert(0, str(protobuf_wheel))
 
-# Bypass strict protobuf gencode/runtime version check to align prebuilts at build-time (see b/537501139)
-try:
-    import google.protobuf.runtime_version as rv
-
-    rv.ValidateProtobufRuntimeVersion = lambda *args, **kwargs: None
-except ImportError:
-    pass
-
 import argparse
 import functools
 import json
@@ -1227,7 +1219,7 @@ class BuildContext:
 
         # Pre-build: Touch rebuild sentinel if incremental
         if self.static_spec.incremental:
-            rebuild_sentinel_path.write_text("")
+            rebuild_sentinel_path.touch()
 
         # Clear previous success stamp
         if success_stamp_path.exists():

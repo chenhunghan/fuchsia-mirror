@@ -5,7 +5,7 @@
 // DO NOT EDIT.
 // Generated from FIDL library `zither.aliases` by zither, a Fuchsia platform tool.
 
-use zerocopy::{Immutable, IntoBytes, TryFromBytes};
+use zerocopy::{FromBytes, Immutable, IntoBytes, TryFromBytes};
 
 pub type BoolAlias = bool;
 
@@ -29,49 +29,85 @@ pub type Uint64Alias = u64;
 /// information for bindings to express this type as an alias.
 pub const CONST_FROM_ALIAS: u8 = 0xff;
 
-#[repr(i16)]
-#[derive(Clone, Copy, Debug, Eq, Hash, Immutable, IntoBytes, PartialEq, TryFromBytes)]
-pub enum Enum {
-    Member = 0,
-}
+#[repr(transparent)]
+#[derive(Clone, Copy, Eq, FromBytes, Hash, Immutable, IntoBytes, PartialEq)]
+pub struct Enum(i16);
 
 impl Enum {
-    pub fn from_raw(raw: i16) -> Option<Self> {
-        match raw {
-            0 => Some(Self::Member),
+    pub const MEMBER: Self = Self(0);
 
-            _ => None,
-        }
+    /// Constructs a value from its underlying integer.
+    pub const fn from_raw(raw: i16) -> Self {
+        Self(raw)
+    }
+
+    /// Returns the underlying integer.
+    pub const fn as_raw(self) -> i16 {
+        self.0
+    }
+}
+
+impl From<i16> for Enum {
+    fn from(raw: i16) -> Self {
+        Self(raw)
     }
 }
 
 impl From<Enum> for i16 {
     fn from(val: Enum) -> Self {
-        val as Self
+        val.0
+    }
+}
+
+impl core::fmt::Debug for Enum {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::MEMBER => f.write_str("Enum::MEMBER"),
+
+            Self(raw) => f.debug_tuple("Enum").field(&raw).finish(),
+        }
     }
 }
 
 pub type EnumAlias = Enum;
 
-#[repr(u16)]
-#[derive(Clone, Copy, Debug, Eq, Hash, Immutable, IntoBytes, PartialEq, TryFromBytes)]
-pub enum Bits {
-    One = 1,
-}
+#[repr(transparent)]
+#[derive(Clone, Copy, Eq, FromBytes, Hash, Immutable, IntoBytes, PartialEq)]
+pub struct Bits(u16);
 
 impl Bits {
-    pub fn from_raw(raw: u16) -> Option<Self> {
-        match raw {
-            1 => Some(Self::One),
+    pub const ONE: Self = Self(1);
 
-            _ => None,
-        }
+    /// Constructs a value from its underlying integer.
+    pub const fn from_raw(raw: u16) -> Self {
+        Self(raw)
+    }
+
+    /// Returns the underlying integer.
+    pub const fn as_raw(self) -> u16 {
+        self.0
+    }
+}
+
+impl From<u16> for Bits {
+    fn from(raw: u16) -> Self {
+        Self(raw)
     }
 }
 
 impl From<Bits> for u16 {
     fn from(val: Bits) -> Self {
-        val as Self
+        val.0
+    }
+}
+
+impl core::fmt::Debug for Bits {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::ONE => f.write_str("Bits::ONE"),
+
+            Self(raw) => f.debug_tuple("Bits").field(&raw).finish(),
+        }
     }
 }
 

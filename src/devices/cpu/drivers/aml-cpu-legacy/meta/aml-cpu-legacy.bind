@@ -9,7 +9,7 @@ composite aml_cpu_legacy;
 using fuchsia;
 
 primary parent "thermal" {
-  fuchsia.BIND_PROTOCOL == fuchsia.thermal.BIND_PROTOCOL.DEVICE;
+  fuchsia.Service == "fuchsia.hardware.thermal.Service";
   fuchsia.BIND_PLATFORM_DEV_DID == fuchsia.amlogic.platform.BIND_PLATFORM_DEV_DID.THERMAL_PLL;
 }
 

@@ -12,7 +12,7 @@ by the imported product (and later, optional GN inclusions). Those list are
 [Base](#base), [Cache](#cache) and [Universe](#universe) respectively, and
 are defined below.
 
-## Boards
+## Boards {#boards}
 
 A [board](/docs/glossary/README.md#board) defines the architecture that the
 build produces for, as well as key features of the device upon which the
@@ -25,7 +25,7 @@ Note: The generic `arm64` board configuration is intended for physical target
 hardware and does not support running in the emulator. To run Fuchsia in the
 emulator for ARM64, you must use the `qemu-arm64` board configuration instead.
 
-## Products
+## Products {#products}
 
 A product defines the software configuration that a build will produce. Most
 critically, a product typically defines the kinds of user experiences that
@@ -34,7 +34,7 @@ observe, whether or not multimedia support is included, and so on.
 
 The available products can be listed using `fx list-products`.
 
-## Dependency Sets
+## Dependency sets {#dependency-sets}
 
 Boards define, and products augment three lists of dependencies, Base, Cache
 and Universe. These dependencies are GN labels that ultimately contribute
@@ -42,7 +42,7 @@ packages to various system artifacts, such as disk images and signed package
 metadata, as well as various development artifacts such as host tools and
 tests.
 
-### Base
+### Base {#base}
 
 The `base` dependency list contributes packages to disk images and system
 updates as well as the package repository. A package included by the `base`
@@ -51,7 +51,7 @@ dependency set. Base packages in a system configuration are considered system
 and security critical. They are updated as an atomic unit and are never
 evicted at runtime regardless of resource pressure.
 
-### Cache
+### Cache {#cache}
 
 The `cache` dependency list contributes packages that are pre-cached in the
 disk image artifacts of the build, and will also be made available in the
@@ -60,7 +60,7 @@ would instead be updated ephemerally. Cached packages can also be evicted
 from running systems in order to free resources based on runtime resource
 demands.
 
-### Universe
+### Universe {#universe}
 
 The `universe` dependency list contributes packages to the package repository
 only. These packages will be available for runtime caching and updating, but
@@ -68,7 +68,7 @@ are not found in system update images nor are they pre-cached in any disk
 images. All members of `base` and `cache` are inherently also members of
 `universe`.
 
-## Key Product Configurations
+## Key product configurations {#key-product-configurations}
 
 There are many more product definitions than those listed below, but the
 following four products are particularly important configurations to be familiar

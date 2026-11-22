@@ -67,6 +67,15 @@ template <typename T, typename F>
 concept InvocableAs =
     internal::SignatureOf<F>::template Arguments<internal::InvocableOn<T>::template type>::value;
 
+// Another helper concept: `InvocableAsR<T, F>` is like `InvocableAs<T, F>`,
+// but also requires that the return value be convertible to the return type
+// of F, as for `std::is_invocable_r`.  Unlike `std::is_invocable_r`, if F
+// returns void then T must return void too, rather than having its return
+// value silently ignored.
+template <typename T, typename F>
+concept InvocableAsR =
+    internal::SignatureOf<F>::template Invoke<internal::InvocableROn<T>::template type>::value;
+
 // A "callable" view of an init or fini range for a given function type F is
 // both a view of the range as F* and also itself callable with the same
 // arguments as a function of type F to iterate over the range calling each

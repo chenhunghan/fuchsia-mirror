@@ -6,6 +6,11 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    ["fd_waiter_unittest.cc"],
+    visibility = ["//src/lib/fsl:__pkg__"],
+)
+
 cc_library(
     name = "tasks",
     srcs = [

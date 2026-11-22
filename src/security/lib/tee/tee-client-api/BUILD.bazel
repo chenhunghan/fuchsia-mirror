@@ -2,8 +2,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -31,10 +33,47 @@ fx_cc_library(
         "//sdk/lib/fidl",
         "//zircon/system/ulib/zx",
     ],
-    visibility = [
-        "//src/security/lib/tee/rust:__pkg__",
-        "//src/sys/pkg/bin/system-update-configurator:__pkg__",
-    ],
+    visibility = ["//visibility:private"],
     deps = [":tee-client-api-headers"],
     alwayslink = True,
+)
+
+fx_cc_shared_library(
+    name = "tee-client-api",
+    # GN dependents include the headers through their dependency on the
+    # shared library; Bazel dependents get them from :tee-client-api-import.
+    gn_public_deps = [":tee-client-api-headers"],
+    visibility = [
+        "//src/devices/bin/driver_manager:__pkg__",
+        "//src/devices/tee/bin:__pkg__",
+        "//src/media/codec/examples/use_media_decoder:__pkg__",
+        "//src/media/drivers/amlogic_decoder:__pkg__",
+        "//src/security/bin/kms:__pkg__",
+        "//src/security/bin/tee_manager:__pkg__",
+        "//src/security/lib/kms-stateless:__pkg__",
+        "//src/security/lib/tee/rust:__pkg__",
+        "//src/sys/pkg/bin/system-update-configurator:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [":tee-client-api-static"],
+)
+
+# rules_cc and rules_rust `deps` / `link_deps` require `CcInfo`, which
+# `cc_shared_library()` doesn't provide, so Bazel dependents of the shared
+# library depend on this wrapper instead (using a bazel2gn `path_overwrite` to
+# `//src/security/lib/tee/tee-client-api` so GN depends on the shared library
+# directly).
+# @bazel2gn:skip
+cc_import(
+    name = "tee-client-api-import",
+    shared_library = ":tee-client-api",
+    visibility = [
+        "//src/devices/tee/bin:__pkg__",
+        "//src/security/bin/kms:__pkg__",
+        "//src/security/lib/kms-stateless:__pkg__",
+        "//src/security/lib/tee/rust:__pkg__",
+        "//src/sys/pkg/bin/system-update-configurator:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [":tee-client-api-headers"],
 )

@@ -30,6 +30,7 @@ test_suite(
         ":skills_test",
         ":underscore_vs_dash_test",
     ],
+    visibility = ["//scripts:__pkg__"],
 )
 
 host_shac_test(

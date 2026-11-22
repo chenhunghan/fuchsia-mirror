@@ -12,72 +12,46 @@
 #include <debug.h>
 #include <lib/backtrace.h>
 #include <lib/concurrent/capability_token.h>
-#include <lib/fit/function.h>
-#include <lib/flow_id.h>
 #include <lib/fxt/thread_ref.h>
 #include <lib/kconcurrent/chainlock.h>
 #include <lib/page-map/accessor.h>
 #include <lib/relaxed_atomic.h>
 #include <lib/zircon-internal/thread_annotations.h>
-#include <lib/zx/result.h>
-#include <platform.h>
 #include <sys/types.h>
 #include <zircon/compiler.h>
-#include <zircon/syscalls/object.h>
 #include <zircon/syscalls/rseq.h>
-#include <zircon/syscalls/scheduler.h>
 #include <zircon/types.h>
 
 #include <arch/arch_thread.h>
-#include <arch/exception.h>
 #include <arch/ops.h>
 #include <fbl/canary.h>
 #include <fbl/intrusive_double_list.h>
 #include <fbl/intrusive_single_list.h>
 #include <fbl/macros.h>
 #include <fbl/null_lock.h>
+#include <fbl/ref_ptr.h>
 #include <kernel/cpu.h>
-#include <kernel/deadline.h>
+#include <kernel/ffi.h>
 #include <kernel/koid.h>
 #include <kernel/preempt_disabled_token.h>
 #include <kernel/restricted_state.h>
 #include <kernel/scheduler_state.h>
 #include <kernel/spinlock.h>
-#include <kernel/task_runtime_stats.h>
-#include <kernel/timer.h>
 #include <kernel/wait.h>
 #include <ktl/array.h>
 #include <ktl/atomic.h>
-#include <ktl/optional.h>
 #include <ktl/string_view.h>
-#include <ktl/unique_ptr.h>
 #include <lockdep/thread_lock_state.h>
 #include <vm/kstack.h>
 
-class Dpc;
-struct BrwLockOps;
-class OwnedWaitQueue;
 class ThreadDispatcher;
 class VmAspace;
-struct WaitQueueLockOps;
 struct Thread;
-class ThreadDumper;  // A class which is a friend of the various internal thread
-                     // state classes and structures, allowing it to access
-                     // private variables for debugging purposes during debug
-                     // dumps of thread state.
 
 // These forward declarations are needed so that Thread can friend
 // them before they are defined.
 static inline Thread* arch_get_current_thread();
 static inline void arch_set_current_thread(Thread*);
-
-// The types of affinity the scheduler understands.
-enum class AffinityType : bool { Hard, Soft };
-
-static inline fbl::NullLock is_current_thread_token;
-
-// Returns a string constant for the given thread state.
-const char* ToString(enum thread_state state);
 
 // TODO(https://fxbug.dev/528405969): Remove cfi_unchecked_callee once cross-language
 // CFI between Clang C++ and rustc is supported in the kernel.
@@ -120,11 +94,8 @@ typedef void (*thread_trampoline_routine)() __NO_RETURN;
 #define NUM_PRIORITIES (32)
 #define LOWEST_PRIORITY (0)
 #define HIGHEST_PRIORITY (NUM_PRIORITIES - 1)
-#define DPC_PRIORITY (NUM_PRIORITIES - 2)
-#define IDLE_PRIORITY LOWEST_PRIORITY
 #define LOW_PRIORITY (NUM_PRIORITIES / 4)
 #define DEFAULT_PRIORITY (NUM_PRIORITIES / 2)
-#define HIGH_PRIORITY ((NUM_PRIORITIES / 4) * 3)
 
 class PreemptionState;
 
@@ -142,8 +113,6 @@ bool rust_preemption_state_set_timeslice_extension(const PreemptionState& preemp
 void rust_preemption_state_clear_timeslice_extension(const PreemptionState& preemption_state);
 void rust_preemption_state_preempt_set_pending(const PreemptionState& preemption_state,
                                                cpu_mask_t reschedule_mask);
-bool rust_preemption_state_evaluate_timeslice_extension(const PreemptionState& preemption_state);
-void rust_preemption_state_reset(const PreemptionState& preemption_state);
 }  // extern "C"
 
 class PreemptionState {
@@ -166,18 +135,11 @@ class PreemptionState {
     Active = 0b10u << kTimesliceExtensionFlagsShift,
   };
 
-  cpu_mask_t preempts_pending() const { return preempts_pending_.load(); }
-  void preempts_pending_clear() { preempts_pending_.store(0); }
-  void preempts_pending_add(cpu_mask_t mask) { preempts_pending_.fetch_or(mask); }
-
   bool PreemptIsEnabled() const {
     // Preemption is enabled iff both counts are zero and there's no runtime
     // extension.
     return state_.load() == 0;
   }
-
-  uint32_t PreemptDisableCount() const { return PreemptDisableCount(state_.load()); }
-  uint32_t EagerReschedDisableCount() const { return EagerReschedDisableCount(state_.load()); }
 
   // TODO(https://fxbug.dev/537458631): PreemptDisable, PreemptReenable,
   // PreemptReenableDelayFlush, EagerReschedDisable, and EagerReschedReenable
@@ -237,10 +199,6 @@ class PreemptionState {
   void PreemptReenableAnnotated() TA_REL(preempt_disabled_token) {
     preempt_disabled_token.Release();
     PreemptReenable();
-  }
-
-  static void AssertPreemptionDisabled() TA_ASSERT(preempt_disabled_token) {
-    preempt_disabled_token.AssertHeld();
   }
 
   // PreemptReenableDelayFlush() decrements the preempt disable counter, but
@@ -368,20 +326,7 @@ class PreemptionState {
     rust_preemption_state_preempt_set_pending(*this, reschedule_mask);
   }
 
-  // Evaluate the thread's timeslice extension (if present), activating or
-  // expiring it as necessary.
-  //
-  // Returns whether preemption is enabled.
-  bool EvaluateTimesliceExtension() {
-    return rust_preemption_state_evaluate_timeslice_extension(*this);
-  }
-
-  // Resets the preemption state. This should only be called when reviving an
-  // idle/power thread that halted while taking a CPU offline.
-  void Reset() { rust_preemption_state_reset(*this); }
-
  private:
-  friend class PreemptDisableTestAccess;
   friend concurrent::CapabilityToken<PreemptionState>;
 
   // <kernel/thread_layout.h> exposes member offsets to the Rust mirror of this class.
@@ -450,22 +395,6 @@ class PreemptionState {
   RelaxedAtomic<zx_instant_mono_t> timeslice_extension_deadline_{};
 };
 
-class TaskState;
-
-extern "C" {
-
-// Rust implementations of TaskState::Init, Join and TryWakeJoiners; the C++ methods of the same
-// name in TaskState are thin forwarders to these. Unlike the rust_thread_* accessor entries, the
-// last two deal with chain locks: Join is entered with the queue's lock and the current thread's
-// lock held and releases the queue's lock; TryWakeJoiners acquires (or backs off from) the queue's
-// lock itself.
-void rust_task_state_init(TaskState* task_state, thread_start_routine entry, void* arg);
-zx_status_t rust_task_state_join(TaskState* task_state, Thread* current_thread,
-                                 zx_instant_mono_t deadline);
-bool rust_task_state_try_wake_joiners(const TaskState* task_state, zx_status_t status);
-
-}  // extern "C"
-
 // TaskState is responsible for running the task defined by
 // |entry(arg)|, and reporting its value to any joining threads.
 //
@@ -474,50 +403,19 @@ class TaskState {
  public:
   TaskState() = default;
 
-  void Init(thread_start_routine entry, void* arg) { rust_task_state_init(this, entry, arg); }
-
-  zx_status_t Join(Thread* current_thread, zx_instant_mono_t deadline) TA_REL(get_lock())
-      TA_REQ(chainlock_transaction_token, ChainLockable::GetLock(*current_thread)) {
-    const zx_status_t status = rust_task_state_join(this, current_thread, deadline);
-    get_lock().MarkReleased();
-    return status;
-  }
-
-  // Attempt to wake all of our joiners.  This operation might fail because of a
-  // conflict while attempting to obtain the required locks, in which case the
-  // caller needs to back off (drop all currently held chain locks) and try
-  // again.
-  bool TryWakeJoiners(zx_status_t status)
-      TA_REQ(chainlock_transaction_token, preempt_disabled_token) {
-    return rust_task_state_try_wake_joiners(this, status);
-  }
-
-  thread_start_routine entry() const { return entry_; }
-  void* arg() const { return arg_; }
-
-  int retcode() const { return retcode_; }
-  void set_retcode(int retcode) { retcode_ = retcode; }
-
-  ChainLock& get_lock() TA_RET_CAP(retcode_wait_queue_.get_lock()) {
-    return retcode_wait_queue_.get_lock();
-  }
-
  private:
-  // Dumping routines are allowed to see inside us.
-  friend class ThreadDumper;
-
   // <kernel/thread_layout.h> exposes member offsets to the Rust mirror of this class.
   friend struct TaskStateLayout;
 
   // The Thread's entry point, and its argument.
-  thread_start_routine entry_ = nullptr;
-  void* arg_ = nullptr;
+  [[maybe_unused]] thread_start_routine entry_ = nullptr;
+  [[maybe_unused]] void* arg_ = nullptr;
 
   // Storage for the return code.
   //
   // TODO(johngro): This is logically protected by our thread's lock.  What is a
   // good way to represent this with a static annotation?
-  int retcode_ = 0;
+  [[maybe_unused]] int retcode_ = 0;
 
   // Other threads waiting to join this Thread.
   WaitQueue retcode_wait_queue_;
@@ -529,19 +427,6 @@ class TaskState {
 // handlers running in the thread's context.
 class MemoryAllocationState {
  public:
-  void Disable() {
-    ktl::atomic_signal_fence(ktl::memory_order_seq_cst);
-    disable_count_ = disable_count_ + 1;
-    ktl::atomic_signal_fence(ktl::memory_order_seq_cst);
-  }
-
-  void Enable() {
-    ktl::atomic_signal_fence(ktl::memory_order_seq_cst);
-    DEBUG_ASSERT(disable_count_ > 0);
-    disable_count_ = disable_count_ - 1;
-    ktl::atomic_signal_fence(ktl::memory_order_seq_cst);
-  }
-
   // Returns true if memory allocation is allowed.
   bool IsEnabled() {
     ktl::atomic_signal_fence(ktl::memory_order_seq_cst);
@@ -583,59 +468,70 @@ enum class ThreadStallState {
   Inactive,
   Progressing,
   // Safety invariant: a thread only enters `Stalling` while it is the running
-  // thread on its CPU (`ScopedMemoryStall` on `Thread::Current`), so a
+  // thread on its CPU (Rust `ScopedMemoryStall` on the current thread), so a
   // `Stalling` thread's `last_cpu` is a valid CPU number (`<
   // PerCpu::processor_count()`); `last_cpu` is only written at context switch
   // and idle init and never reset.
   Stalling,
 };
 
+enum class ThreadMigrateStage : uint8_t {
+  // The stage before the thread has migrated. Called from the old CPU to save state.
+  Save,
+  // The stage after the thread has migrated. Called from the new CPU to restore state.
+  Restore,
+  // The Thread is exiting. Can be called from any CPU.
+  Exiting,
+};
+
 extern "C" {
 
-// Rust implementations of the Thread flags, signals and name accessors and of
+// Rust implementations of the Thread flags and name accessors and of
 // CheckKillOrSuspendSignal. The C++ methods of the same name below are thin
 // forwarders to these; none of them takes a lock.
-void rust_thread_set_signals(const Thread* thread, uint32_t bits);
-void rust_thread_clear_signals(const Thread* thread, uint32_t bits);
-uint32_t rust_thread_flags(const Thread* thread);
-bool rust_thread_detached(const Thread* thread);
-void rust_thread_set_detached(const Thread* thread, bool value);
-bool rust_thread_free_struct(const Thread* thread);
-void rust_thread_set_free_struct(const Thread* thread, bool value);
-bool rust_thread_idle(const Thread* thread);
-void rust_thread_set_idle(const Thread* thread, bool value);
 bool rust_thread_vcpu(const Thread* thread);
 void rust_thread_set_vcpu(const Thread* thread, bool value);
 const char* rust_thread_name(const Thread* thread);
-void rust_thread_set_name(Thread* thread, const char* name, size_t len);
 zx_status_t rust_thread_check_kill_or_suspend_signal(const Thread* thread);
 
-// The default trampoline used when running the Thread. This can be replaced by the
-// |alt_trampoline| parameter to Thread::CreateEtc(). It is entered with the previous and current
-// thread locks held and interrupts disabled (it releases both locks) and never returns.
-void rust_thread_trampoline() __NO_RETURN;
+// Rust implementations of Thread and Thread::Current methods. The C++ methods of the same name
+// below are thin forwarders to these. rust_thread_create_etc returns null on failure, and
+// rust_thread_join stores the return code through |out_retcode| (if non-null) on success.
+Thread* rust_thread_create_etc(Thread* t, const char* name, size_t name_len,
+                               thread_start_routine entry, void* arg,
+                               const SchedulerState::BaseProfile& profile,
+                               thread_trampoline_routine alt_trampoline);
+void rust_thread_resume(Thread* thread);
+zx_status_t rust_thread_detach_and_resume(Thread* thread);
+zx_status_t rust_thread_join(Thread* thread, int* out_retcode, zx_instant_mono_t deadline);
+void rust_thread_forget(Thread* thread);
+void rust_thread_secondary_cpu_init_early(Thread* thread);
+ThreadDispatcher* rust_thread_current_user_thread();
+cpu_mask_t rust_thread_set_cpu_affinity(Thread* thread, cpu_mask_t affinity);
+cpu_mask_t rust_thread_get_cpu_affinity(const Thread* thread);
+cpu_num_t rust_thread_last_cpu(const Thread* thread);
+cpu_num_t rust_thread_last_cpu_locked(const Thread* thread);
+zx_status_t rust_thread_current_soft_fault_in_range(vaddr_t va, uint flags, size_t len);
+void rust_thread_current_yield();
+zx_status_t rust_thread_current_sleep(zx_instant_mono_t deadline);
+zx_status_t rust_thread_current_sleep_relative(zx_duration_mono_t delay);
+void rust_thread_current_get_backtrace_with_fp(vaddr_t fp, Backtrace& out_bt);
+lockdep::Lock<SpinLock>* rust_thread_get_list_lock();
+Thread* rust_thread_create_empty_named(const char* name, size_t name_len);
+void rust_thread_delete(Thread* thread);
+void rust_thread_set_migrate_fn(Thread* thread,
+                                void (*func)(void* ctx, Thread* thread, ThreadMigrateStage stage),
+                                void* ctx);
+void rust_thread_set_migrate_fn_locked(
+    Thread* thread, void (*func)(void* ctx, Thread* thread, ThreadMigrateStage stage), void* ctx);
+void rust_thread_set_context_switch_fn_locked(Thread* thread, void (*func)(void* ctx), void* ctx);
 
 }  // extern "C"
 
 struct Thread : public ChainLockable {
-  // TODO(kulakowski) Are these needed?
-  // Default constructor/destructor declared to be not-inline in order to
-  // avoid circular include dependencies involving Thread, WaitQueue, and
-  // OwnedWaitQueue.
-  Thread();
-  ~Thread();
-
-  // The default constructor leaves the object in a state equivalent to before
-  // construction, and is only used for special cases that get re-constructed
-  // via placement new using this signature.
-  explicit Thread(ktl::string_view name);
-
-  static Thread* CreateIdleThread(cpu_num_t cpu_num);
-
-  // Revive the idle/power thread for the given CPU so that it starts fresh after
-  // halting while taking the CPU offline. Most state is preserved, including
-  // stack memory locations (useful for debugging) and accumulated runtime stats.
-  static void ReviveIdlePowerThread(cpu_num_t cpu_num) TA_EXCL(chainlock_transaction_token);
+  // `Thread` is constructed and destroyed exclusively in Rust (`Thread::init` / `PinnedDrop`).
+  Thread() = delete;
+  ~Thread() = delete;
 
   // Creates a thread with |name| that will execute |entry| at |priority|. |arg|
   // will be passed to |entry| when executed, the return value of |entry| will be
@@ -644,50 +540,21 @@ struct Thread : public ChainLockable {
   // memory will be freed by either Join() or Detach(), one of these
   // MUST be called.
   // The thread will not be scheduled until Resume() is called.
-  static Thread* Create(ktl::string_view name, thread_start_routine entry, void* arg, int priority);
-  static Thread* Create(ktl::string_view name, thread_start_routine entry, void* arg,
-                        const SchedulerState::BaseProfile& profile);
+  static Thread* Create(ktl::string_view name, thread_start_routine entry, void* arg, int priority)
+      TA_EXCL(chainlock_transaction_token) {
+    return CreateEtc(nullptr, name, entry, arg, SchedulerState::BaseProfile{priority}, nullptr);
+  }
   static Thread* CreateEtc(Thread* t, ktl::string_view name, thread_start_routine entry, void* arg,
                            const SchedulerState::BaseProfile& profile,
-                           thread_trampoline_routine alt_trampoline);
-
-  // Public routines used by debugging code to dump thread state.
-
-  // Dump the information of a single thread. If |full| is true then a multi-line verbose dump of
-  // much information is performed, otherwise a single short summary line is dumped.
-  void Dump(bool full) const TA_EXCL(get_lock());
-  // Finds all threads whose |OwnerName| is the same as |match_owner|, or just all thread if
-  // |match_owner| is nullptr, and call |Dump| on them.
-  static void DumpAll(const char* match_owner, bool full) TA_EXCL(list_lock_);
-  // Finds a thread whose |tid()| matches the provided |tid| and calls |Dump| on it.
-  static void DumpTid(zx_koid_t tid, bool full) TA_EXCL(list_lock_);
-
-  // Same stuff, but skip the locks when we are panic'ing
-  inline void DumpDuringPanic(bool full) const TA_NO_THREAD_SAFETY_ANALYSIS;
-  static inline void DumpAllDuringPanic(const char* match_owner,
-                                        bool full) TA_NO_THREAD_SAFETY_ANALYSIS;
-  static inline void DumpTidDuringPanic(zx_koid_t tid, bool full) TA_NO_THREAD_SAFETY_ANALYSIS;
+                           thread_trampoline_routine alt_trampoline)
+      TA_EXCL(chainlock_transaction_token) {
+    return rust_thread_create_etc(t, name.data(), name.size(), entry, arg, profile, alt_trampoline);
+  }
 
   // Internal initialization routines. Eventually, these should be private.
-  void SecondaryCpuInitEarly();
+  void SecondaryCpuInitEarly() { rust_thread_secondary_cpu_init_early(this); }
 
-  // Associate this Thread to the given ThreadDispatcher.
-  void SetUsermodeThread(fbl::RefPtr<ThreadDispatcher> user_thread) TA_EXCL(get_lock());
-
-  void AssertIsCurrentThread() const TA_ASSERT(is_current_thread_token) {
-    DEBUG_ASSERT(this == Thread::Current::Get());
-  }
-
-  // Returns the lock that protects the thread's internal state, particularly with respect to
-  // scheduling.
-  fbl::NullLock& get_scheduler_variable_lock() const TA_RET_CAP(scheduler_variable_lock_) {
-    return scheduler_variable_lock_;
-  }
-  static auto& get_list_lock() TA_RET_CAP(list_lock_) { return list_lock_; }
-
-  // Get the associated ThreadDispatcher.
-  ThreadDispatcher* user_thread() { return user_thread_.get(); }
-  const ThreadDispatcher* user_thread() const { return user_thread_.get(); }
+  static lockdep::Lock<SpinLock>& get_list_lock() { return *rust_thread_get_list_lock(); }
 
   // Returns the koid of the associated ProcessDispatcher for user threads or
   // ZX_KOID_INVLID for kernel threads.
@@ -700,22 +567,16 @@ struct Thread : public ChainLockable {
   // Return the pid/tid of the thread as a tracing thread reference.
   fxt::ThreadRef<fxt::RefType::kInline> fxt_ref() const { return {pid(), tid()}; }
 
-  // Implicit conversion to a tracing thread reference.
-  operator fxt::ThreadRef<fxt::RefType::kInline>() const { return fxt_ref(); }
-
   // Called to mark a thread as schedulable.
-  void Resume() TA_EXCL(chainlock_transaction_token);
-  zx_status_t Suspend() { return SuspendOrKillInternal(SuspendOrKillOp::Suspend); }
-  void Forget();
-  zx_status_t RestrictedKick();
-  // Marks a thread as detached, in this state its memory will be released once
-  // execution is done.
-  zx_status_t Detach();
-  zx_status_t DetachAndResume();
+  void Resume() TA_EXCL(chainlock_transaction_token) { rust_thread_resume(this); }
+  void Forget() TA_EXCL(chainlock_transaction_token) { rust_thread_forget(this); }
+  zx_status_t DetachAndResume() TA_EXCL(chainlock_transaction_token) {
+    return rust_thread_detach_and_resume(this);
+  }
   // Waits |deadline| time for a thread to complete execution then releases its memory.
-  zx_status_t Join(int* retcode, zx_instant_mono_t deadline);
-  // Deliver a kill signal to a thread.
-  void Kill() { SuspendOrKillInternal(SuspendOrKillOp::Kill); }
+  zx_status_t Join(int* retcode, zx_instant_mono_t deadline) TA_EXCL(chainlock_transaction_token) {
+    return rust_thread_join(this, retcode, deadline);
+  }
 
   // Checks whether the kill or suspend signal has been raised. If kill has been
   // raised, then `ZX_ERR_INTERNAL_INTR_KILLED` will be returned. If suspend has
@@ -725,138 +586,59 @@ struct Thread : public ChainLockable {
     return rust_thread_check_kill_or_suspend_signal(this);
   }
 
-  // Erase this thread from all global lists, where applicable.
-  void EraseFromListsLocked() TA_REQ(list_lock_);
-
-  /**
-   * @brief Set the base profile for this thread.
-   *
-   * The chosen scheduling discipline and its associate parameters are defined by the BaseProfile
-   * object.
-   *
-   * @param params The weight to apply to the thread.
-   */
-  void SetBaseProfile(const SchedulerState::BaseProfile& profile) TA_EXCL(get_lock());
-
   void* recursive_object_deletion_list() { return recursive_object_deletion_list_; }
   void set_recursive_object_deletion_list(void* ptr) { recursive_object_deletion_list_ = ptr; }
 
-  // Get/set the mask of valid CPUs that thread may run on. If a new mask
-  // is set, the thread will be migrated to satisfy the new constraint.
+  // Get/set the hard CPU affinity mask of valid CPUs that the thread may run on. If a new mask is
+  // set, the thread will be migrated to satisfy the new constraint, and the scheduler will panic if
+  // it can't satisfy this affinity.
   //
-  // Affinity comes in two flavours:
-  //
-  //   * "hard affinity", which will always be respected by the scheduler.
-  //     The scheduler will panic if it can't satisfy this affinity.
-  //
-  //   * "soft affinity" indicating where the thread should ideally be scheduled.
-  //     The scheduler will respect the mask unless there are no other
-  //     options (e.g., the soft affinity and hard affinity don't contain
-  //     any common CPUs).
-  //
-  // If the two masks conflict, the hard affinity wins.
-  //
-  // Setting the affinity mask returns the previous value to make pinning and
-  // restoring operations simpler and more efficient.
-  //
-  // See scheduler.h for the declaration of the affinity setters.
+  // Setting the affinity mask returns the previous value to make pinning and restoring operations
+  // simpler and more efficient.
+  cpu_mask_t SetCpuAffinity(cpu_mask_t affinity) TA_EXCL(get_lock()) {
+    return rust_thread_set_cpu_affinity(this, affinity);
+  }
+  cpu_mask_t GetCpuAffinity() const TA_EXCL(get_lock()) {
+    return rust_thread_get_cpu_affinity(this);
+  }
 
-  cpu_mask_t SetCpuAffinity(cpu_mask_t affinity) TA_EXCL(get_lock());
-  cpu_mask_t GetCpuAffinity() const TA_EXCL(get_lock());
-  cpu_mask_t SetSoftCpuAffinity(cpu_mask_t affinity) TA_EXCL(get_lock());
-  cpu_mask_t GetSoftCpuAffinity() const TA_EXCL(get_lock());
+  using MigrateStage = ThreadMigrateStage;
 
-  enum class MigrateStage {
-    // The stage before the thread has migrated. Called from the old CPU to save state.
-    Save,
-    // The stage after the thread has migrated. Called from the new CPU to restore state.
-    Restore,
-    // The Thread is exiting. Can be called from any CPU.
-    Exiting,
-  };
-  // The migrate function will be invoked twice when a thread is migrate between
-  // CPUs. Firstly when the thread is removed from the old CPUs scheduler,
-  // secondly when the thread is rescheduled on the new CPU. When the migrate
-  // function is called, |thread_lock| is held.
-  //
-  // TODO(johngro): what to do about this?  It is all fine and good to say that
-  // a MigrateFn needs to have the thread's lock held when it is called, but
-  // there does not seem to be any good way to annotate this as a property of
-  // the fit::inline function's callable type. Perhaps the best thing to do is
-  // annotate the migrate function member itself with being guarded by the
-  // thread's lock, so that invocation (at least) would require holding the
-  // lock?
-  //
-  // Implementers of migrate functions should be able to annotate their
-  // callbacks as requiring the thread's lock in order to be invoked, but
-  // unfortunately this does not work along side of the fit::inline_function's
-  // type.  If a user attempts to annotate their lambda as such, the
-  // fit::inline_function fails expansion when its `operator()` attempt to call
-  // the lambda which requires that the lock be held.  If there was some way
-  // using the static lock annotation system to have the operator() inherit
-  // these annotations from its templated target type, we could avoid the issue,
-  // but that does not seem to be an option.
+  // Inline storage size and alignment for Rust-owned `Option<MigrateFn>` /
+  // `Option<ContextSwitchFn>` (`zr::SendInlineFnMut` with 2-word inline capacity + 1-word static
+  // vtable pointer).
+  static constexpr size_t kCallbackSize = 3 * sizeof(void*);
+  static constexpr size_t kCallbackAlign = alignof(void*);
 
-  using MigrateFn = fit::inline_function<void(Thread* thread, MigrateStage stage), sizeof(void*)>;
-  void SetMigrateFn(MigrateFn migrate_fn) TA_EXCL(list_lock_, get_lock());
-  void SetMigrateFnLocked(MigrateFn migrate_fn) TA_REQ(list_lock_, get_lock());
-  void CallMigrateFnLocked(MigrateStage stage) TA_REQ(get_lock());
-
-  // Call |migrate_fn| for each thread that was last run on the current CPU.
-  // Note: no locks should be held during this operation, and interrupts need to
-  // be disabled.
-  static void CallMigrateFnForCpu(cpu_num_t cpu);
+  // The migrate function will be invoked twice when a thread is migrated
+  // between CPUs. Firstly when the thread is removed from the old CPU's
+  // scheduler, secondly when the thread is rescheduled on the new CPU. When the
+  // migrate function is called, `get_lock()` is held.
+  template <typename F>
+  void SetMigrateFn(F&& migrate_fn) TA_EXCL(get_list_lock(), get_lock()) {
+    CppCallback<Thread*, MigrateStage> fn(ktl::forward<F>(migrate_fn));
+    rust_thread_set_migrate_fn(this, fn.func, fn.ctx);
+  }
+  template <typename F>
+  void SetMigrateFnLocked(F&& migrate_fn) TA_REQ(get_list_lock(), get_lock()) {
+    CppCallback<Thread*, MigrateStage> fn(ktl::forward<F>(migrate_fn));
+    rust_thread_set_migrate_fn_locked(this, fn.func, fn.ctx);
+  }
 
   // The context switch function will be invoked when a thread is context
   // switched to or away from. This will be called when a thread is about to be
   // run on a CPU, after it's stopped from running on a CPU, or about to exit.
-  using ContextSwitchFn = fit::inline_function<void(), sizeof(void*)>;
-  void SetContextSwitchFn(ContextSwitchFn context_switch_fn) TA_EXCL(get_lock());
-  void SetContextSwitchFnLocked(ContextSwitchFn context_switch_fn) TA_REQ(get_lock());
-  // Call |context_switch_fn| for this thread.
-  void CallContextSwitchFnLocked() TA_REQ(get_lock()) {
-    if (unlikely(context_switch_fn_)) {
-      context_switch_fn_();
-    }
+  template <typename F>
+  void SetContextSwitchFnLocked(F&& context_switch_fn) TA_REQ(get_lock()) {
+    CppCallback<> fn(ktl::forward<F>(context_switch_fn));
+    rust_thread_set_context_switch_fn_locked(this, fn.func, fn.ctx);
   }
-
-  void SignalCheckRestartableSequenceIfNeeded() {
-    if (likely(!rseq_accessor_.IsValid())) {
-      return;
-    }
-    set_signals(THREAD_SIGNAL_CHECK_RSEQ);
-  }
-
-  void set_rseq_accessor(page_map::Accessor<zx_rseq_t> accessor) {
-    rseq_accessor_ = ktl::move(accessor);
-  }
-
-  void CheckRestartableSequence(GeneralRegsSource source, void* gregs);
-
-  void OwnerName(char (&out_name)[ZX_MAX_NAME_LEN]) const;
-  // Return the number of nanoseconds a thread has been running for.
-  zx_duration_mono_t Runtime() const TA_EXCL(get_lock());
 
   // Last cpu this thread was running on, or INVALID_CPU if it has never run.
-  cpu_num_t LastCpu() const TA_EXCL(get_lock());
-  cpu_num_t LastCpuLocked() const TA_REQ_SHARED(get_lock());
-
-  // Return true if thread has been signaled.
-  bool IsSignaled() { return signals() != 0; }
-  bool IsIdle() const { return idle(); }
-
-  // Returns true if this Thread's user state has been saved.
-  //
-  // Caller must hold the thread's lock.
-  bool IsUserStateSavedLocked() const TA_REQ(get_lock()) { return user_state_saved_; }
-
-  // Callback for the Timer used for SleepEtc.
-  static void SleepHandler(Timer* timer, zx_instant_mono_t now, void* arg);
-  void HandleSleep(Timer* timer, zx_instant_mono_t now);
-
-  // Request a thread to check if it should sample its backtrace. When the thread returns to
-  // usermode, it will take a sample of its userstack if sampling is enabled.
-  static void SignalSampleStack(Timer* t, zx_instant_mono_t, void* session_id);
+  cpu_num_t LastCpu() const TA_EXCL(get_lock()) { return rust_thread_last_cpu(this); }
+  cpu_num_t LastCpuLocked() const TA_REQ_SHARED(get_lock()) {
+    return rust_thread_last_cpu_locked(this);
+  }
 
   // All of these operations implicitly operate on the current thread.
   struct Current {
@@ -864,54 +646,16 @@ struct Thread : public ChainLockable {
     static inline Thread* Get();
 
     // Scheduler routines to be used by regular kernel code.
-    static void Yield();
-    static void Preempt();
-    static void Reschedule() TA_EXCL(chainlock_transaction_token);
-    static void Exit(int retcode) __NO_RETURN;
-    static void Kill();
-    static void BecomeIdle() __NO_RETURN;
+    static void Yield() { rust_thread_current_yield(); }
 
-    // Wait until the deadline has occurred.
-    //
-    // If interruptible, may return early with ZX_ERR_INTERNAL_INTR_KILLED if
-    // thread is signaled for kill.
-    static zx_status_t SleepEtc(const Deadline& deadline, Interruptible interruptible,
-                                zx_instant_mono_t now) TA_EXCL(chainlock_transaction_token);
-    // Non-interruptible version of SleepEtc.
-    static zx_status_t Sleep(zx_instant_mono_t deadline);
+    // Wait until the deadline has occurred (non-interruptible).
+    static zx_status_t Sleep(zx_instant_mono_t deadline) {
+      return rust_thread_current_sleep(deadline);
+    }
     // Non-interruptible relative delay version of Sleep.
-    static zx_status_t SleepRelative(zx_duration_mono_t delay);
-    // Interruptible version of Sleep.
-    static zx_status_t SleepInterruptible(zx_instant_mono_t deadline);
-
-    // Transition the current thread to the THREAD_SUSPENDED state.
-    static void DoSuspend();
-
-    // Write the current thread's stack to the assigned sampler buffers
-    static void DoSampleStack(GeneralRegsSource source, void* gregs);
-
-    // |policy_exception_code| should be a ZX_EXCP_POLICY_CODE_* value.
-    static void SignalPolicyException(uint32_t policy_exception_code,
-                                      uint32_t policy_exception_data);
-
-    // Raise a thread signal that when processed, will kill the calling thread.
-    static void SignalPolicyKill();
-
-    // Process any pending thread signals.
-    //
-    // This method may never return if the thread has a pending kill signal.
-    //
-    // Interrupt state - This method modifies interrupt state.  It is critical that this method be
-    // called with interrupts disabled to eliminate a "lost wakeup" race condition.  While
-    // interrupts must be disabled prior to call this method, the method may re-enable them during
-    // the processing of certain signals.  This method guarantees that if it does return, it will do
-    // so with interrupts disabled.
-    static void ProcessPendingSignals(GeneralRegsSource source, void* gregs);
-
-    // Migrates the current thread to the CPU identified by target_cpu.
-    static void MigrateToCpu(cpu_num_t target_cpuid);
-
-    static void SetName(const char* name);
+    static zx_status_t SleepRelative(zx_duration_mono_t delay) {
+      return rust_thread_current_sleep_relative(delay);
+    }
 
     static PreemptionState& preemption_state() {
       return Thread::Current::Get()->preemption_state();
@@ -921,67 +665,30 @@ struct Thread : public ChainLockable {
       return Thread::Current::Get()->memory_allocation_state_;
     }
 
-    static cpu_mask_t SetCpuAffinity(cpu_mask_t affinity) {
-      return Thread::Current::Get()->SetCpuAffinity(affinity);
-    }
-
-    // If a restricted kick is pending on this thread, clear it and return true.
-    // Otherwise return false.
-    // Must be called with interrupts disabled.
-    [[nodiscard]] static bool CheckForRestrictedKick();
-
     static RestrictedState* restricted_state() {
       return Thread::Current::Get()->restricted_state();
     }
 
     static VmAspace* active_aspace() { return Thread::Current::Get()->aspace_; }
 
-    static VmAspace* switch_aspace(VmAspace* aspace) TA_NO_THREAD_SAFETY_ANALYSIS {
-      return Thread::Current::Get()->switch_aspace(aspace);
-    }
-
-    // These three functions handle faults on the address space containing va. If there is no
+    // This function handles faults on the address space containing va. If there is no
     // aspace that contains va, or we don't have access to it, a ZX_ERR_NOT_FOUND is returned.
     //
-    // Calling any of these methods on a pure kernel thread (i.e. one without an associated
+    // Calling this method on a pure kernel thread (i.e. one without an associated
     // `ThreadDispatcher`) is a programming error.
     // May block on page requests and must be called without locks held.
-    static zx_status_t PageFault(vaddr_t va, uint flags);
-    static zx_status_t SoftFault(vaddr_t va, uint flags);
-    static zx_status_t SoftFaultInRange(vaddr_t va, uint flags, size_t len);
-    static zx_status_t AccessedFault(vaddr_t va);
-
-    // Generate a backtrace for the calling thread.
-    //
-    // |out_bt| will be reset() prior to be filled in and if a backtrace cannot
-    // be obtained, it will be left empty.
-    static void GetBacktrace(Backtrace& out_bt);
+    static zx_status_t SoftFaultInRange(vaddr_t va, uint flags, size_t len) {
+      return rust_thread_current_soft_fault_in_range(va, flags, len);
+    }
 
     // Generate a backtrace for the calling thread starting at frame pointer |fp|.
     //
     // |out_bt| will be reset() prior to be filled in and if a backtrace cannot
     // be obtained, it will be left empty.
-    static void GetBacktrace(vaddr_t fp, Backtrace& out_bt);
-
-    static void Dump(bool full) { Thread::Current::Get()->Dump(full); }
-    static void DumpDuringPanic(bool full) TA_NO_THREAD_SAFETY_ANALYSIS {
-      Thread::Current::Get()->DumpDuringPanic(full);
+    static void GetBacktrace(vaddr_t fp, Backtrace& out_bt) {
+      rust_thread_current_get_backtrace_with_fp(fp, out_bt);
     }
-
-   private:
-    // Handles a virtual memory fault in the address space that contains va. If there is no aspace
-    // that contains va, or we don't have access to it, a ZX_ERR_NOT_FOUND is returned.
-    template <typename F>
-    static zx_status_t Fault(vaddr_t va, F resolve_fault);
   };  // struct Current;
-
-  // Trait for the global Thread list.
-  struct ThreadListTrait {
-    static fbl::DoublyLinkedListNodeState<Thread*>& node_state(Thread& thread) {
-      return thread.thread_list_node_;
-    }
-  };
-  using List = fbl::DoublyLinkedListCustomTraits<Thread*, ThreadListTrait>;
 
   // Traits for the temporary unblock list, used to batch-unblock threads.
   struct UnblockListTrait {
@@ -1000,60 +707,21 @@ struct Thread : public ChainLockable {
   using SaveStateList = fbl::SinglyLinkedListCustomTraits<Thread*, SaveStateListTrait>;
 
   struct Linebuffer {
-    size_t pos = 0;
-    ktl::array<char, 128> buffer{};
-  };
+    static constexpr size_t kBufferSize = 128;
 
-  // Called by the scheduler to update runtime stats.
-  void UpdateRuntimeStats(thread_state new_state);
+    size_t pos = 0;
+    ktl::array<char, kBufferSize> buffer{};
+  };
 
   // Accessors into Thread state. When the conversion to all-private
   // members is complete (bug 54383), we can revisit the overall
   // Thread API.
 
   thread_state state() const TA_REQ_SHARED(get_lock()) { return scheduler_state_.state(); }
-  SchedulerQueueState::Disposition disposition() const TA_REQ(get_scheduler_variable_lock()) {
-    return scheduler_queue_state().disposition();
-  }
-
-  // The scheduler can set threads to be running, or to be ready to run.
-  void set_running() TA_REQ(get_lock()) { scheduler_state_.set_state(THREAD_RUNNING); }
-  void set_ready() TA_REQ(get_lock()) { scheduler_state_.set_state(THREAD_READY); }
-  // While wait queues can set threads to be blocked.
-  void set_blocked() TA_REQ(get_lock()) { scheduler_state_.set_state(THREAD_BLOCKED); }
-  void set_blocked_read_lock() TA_REQ(get_lock()) {
-    scheduler_state_.set_state(THREAD_BLOCKED_READ_LOCK);
-  }
-  // The thread can set itself to be sleeping.
-  void set_sleeping() TA_REQ(get_lock()) { scheduler_state_.set_state(THREAD_SLEEPING); }
-  void set_death() TA_REQ(get_lock()) { scheduler_state_.set_state(THREAD_DEATH); }
-  void set_suspended() TA_REQ(get_lock()) { scheduler_state_.set_state(THREAD_SUSPENDED); }
 
   // Accessors for specific flags_ bits.
-  bool detached() const { return rust_thread_detached(this); }
-  void set_detached(bool value) { rust_thread_set_detached(this, value); }
-  bool free_struct() const { return rust_thread_free_struct(this); }
-  void set_free_struct(bool value) { rust_thread_set_free_struct(this, value); }
-  bool idle() const { return rust_thread_idle(this); }
-  void set_idle(bool value) { rust_thread_set_idle(this, value); }
   bool vcpu() const { return rust_thread_vcpu(this); }
   void set_vcpu(bool value) { rust_thread_set_vcpu(this, value); }
-
-  // Access to the entire flags_ value, for diagnostics.
-  unsigned int flags() const { return rust_thread_flags(this); }
-
-  // Accessors for pending signals. Reads are inline relaxed loads so IsSignaled() on syscall exit
-  // stays a single load; mutations forward to Rust.
-  // TODO(https://fxbug.dev/42077109): Write down memory order requirements for accessing signals.
-  uint32_t signals() const { return signals_.load(ktl::memory_order_relaxed); }
-  void set_signals(uint32_t bits) { rust_thread_set_signals(this, bits); }
-  void clear_signals(uint32_t bits) { rust_thread_clear_signals(this, bits); }
-
-  bool has_migrate_fn() const TA_REQ_SHARED(get_lock()) { return migrate_fn_ != nullptr; }
-  bool migrate_pending() const TA_REQ_SHARED(get_lock()) { return migrate_pending_; }
-
-  TaskState& task_state() { return task_state_; }
-  const TaskState& task_state() const { return task_state_; }
 
   PreemptionState& preemption_state() { return preemption_state_; }
   const PreemptionState& preemption_state() const { return preemption_state_; }
@@ -1062,16 +730,8 @@ struct Thread : public ChainLockable {
   const SchedulerState& scheduler_state() const TA_REQ_SHARED(get_lock()) {
     return scheduler_state_;
   }
-
-  SchedulerQueueState& scheduler_queue_state() TA_REQ(scheduler_variable_lock_) {
-    return scheduler_queue_state_;
-  }
-  const SchedulerQueueState& scheduler_queue_state() const TA_REQ(scheduler_variable_lock_) {
-    return scheduler_queue_state_;
-  }
 #ifdef UNITTESTS_ENABLED
   void* rust_ktrace_override() const { return rust_ktrace_override_; }
-  void set_rust_ktrace_override(void* ktrace) { rust_ktrace_override_ = ktrace; }
 #endif
 
   WaitQueueCollection::ThreadState& wait_queue_state() TA_REQ(get_lock()) {
@@ -1081,17 +741,7 @@ struct Thread : public ChainLockable {
     return wait_queue_state_;
   }
 
-#if WITH_LOCK_DEP
-  lockdep::ThreadLockState& lock_state() { return lock_state_; }
-  const lockdep::ThreadLockState& lock_state() const { return lock_state_; }
-#endif
-
   RestrictedState* restricted_state() { return restricted_state_.get(); }
-  const RestrictedState* restricted_state() const { return restricted_state_.get(); }
-  void set_restricted_state(RestrictedState* raw_rs) { restricted_state_.reset(raw_rs); }
-  bool in_restricted() const {
-    return restricted_state_ ? rust_restricted_state_in_restricted(restricted_state_.get()) : false;
-  }
 
   arch_thread& arch() { return arch_; }
   const arch_thread& arch() const { return arch_; }
@@ -1112,14 +762,14 @@ struct Thread : public ChainLockable {
   //     address space, or the kernel address space.
   // 2) Only the current thread is permitted to mutate its own aspace_ member.
   //    The only exception to this is during initialization, before the thread
-  //    is running, by VmAspace::AttachToThread.
+  //    is running, by VmAspace::attach_to_thread.
   // 3) The currently running thread is allowed to access its own currently
   //    assigned aspace without needing any locks.
   // 4) Any other thread who wishes to access a thread's aspace must do so via
-  //    either GetAspaceRef or GetAspaceRefLocked, which will return a RefPtr to
-  //    the thread's current aspace as long as the thread has not entered the
-  //    THREAD_DEATH state.
-  // 5) Other threads who access a thread's aspace via GetAspaceRef cannot
+  //    Rust `Thread::get_aspace_ref` or `ChainLockProof::get_aspace_ref_locked`,
+  //    which will return a RefPtr to the thread's current aspace as long as the
+  //    thread has not entered the THREAD_DEATH state.
+  // 5) Other threads who access a thread's aspace via those methods cannot
   //    assume that either the thread or the aspace is still alive after the
   //    thread's lock is dropped.  At best, they know that the RefPtr is keeping
   //    the VmAspace object alive from a C++ perspective, nothing more.
@@ -1132,15 +782,6 @@ struct Thread : public ChainLockable {
   //    switch is in the process of dying, but we know that its process cannot
   //    exit (destroying its aspace in the process) until after it has context
   //    switched for the last time.
-  fbl::RefPtr<VmAspace> GetAspaceRef() const TA_EXCL(get_lock());
-  fbl::RefPtr<VmAspace> GetAspaceRefLocked() const TA_REQ_SHARED(get_lock());
-  VmAspace* aspace() TA_REQ(is_current_thread_token) { return aspace_; }
-  const VmAspace* aspace() const TA_REQ(is_current_thread_token) { return aspace_; }
-  VmAspace* switch_aspace(VmAspace* aspace) TA_REQ(is_current_thread_token) {
-    VmAspace* old_aspace = aspace_;
-    aspace_ = aspace;
-    return old_aspace;
-  }
 
   // Returns the currently active address space, which is the address space currently hosting
   // page tables for the thread.
@@ -1149,7 +790,7 @@ struct Thread : public ChainLockable {
   // resolving faults, as it may be a unified aspace that does not keep track of its own mappings.
   //
   // Kernel-only thread -- This will return nullptr, unless a caller has explicitly set aspace_
-  // using `switch_aspace`, which is done by a few kernel unittests.
+  // using Rust `thread::current_switch_aspace`, which is done by a few kernel unittests.
   //
   // User thread -- If the thread is in Restricted Mode, this will return the restricted aspace.
   // Otherwise, it will return the process's normal aspace.
@@ -1161,56 +802,10 @@ struct Thread : public ChainLockable {
   const VmAspace* active_aspace() const { return aspace_; }
 
   const char* name() const { return rust_thread_name(this); }
-  // This may truncate |name|, so that it (including a trailing NUL
-  // byte) fit in ZX_MAX_NAME_LEN bytes.
-  void set_name(ktl::string_view name) { rust_thread_set_name(this, name.data(), name.size()); }
 
   Linebuffer& linebuffer() { return linebuffer_; }
 
   using Canary = fbl::Canary<fbl::magic("thrd")>;
-  const Canary& canary() const { return canary_; }
-
-  // Generate a backtrace for |this| thread.
-  //
-  // |this| must be blocked, sleeping or suspended (i.e. not running).
-  //
-  // |out_bt| will be reset() prior to be filled in and if a backtrace cannot be
-  // obtained, it will be left empty.
-  void GetBacktrace(Backtrace& out_bt) TA_EXCL(get_lock());
-
-  // Returns the last flow id allocated by TakeNextLockFlowId() for this thread.
-  uint64_t lock_flow_id() const { return lock_flow_id_; }
-
-  // Returns a unique flow id for lock contention tracing. The same value is
-  // returned by lock_flow_id() until another id is allocated for this thread
-  // by calling this method again.
-  uint64_t TakeNextLockFlowId() { return lock_flow_id_ = flow_id_generate(); }
-
-  void RecomputeEffectiveProfile() TA_REQ(get_lock()) {
-    scheduler_state_.RecomputeEffectiveProfile();
-  }
-
-  SchedulerState::EffectiveProfile SnapshotEffectiveProfileLocked() const
-      TA_REQ_SHARED(get_lock()) {
-    return scheduler_state_.effective_profile_;
-  }
-
-  SchedulerState::EffectiveProfile SnapshotEffectiveProfile() const
-      TA_EXCL(chainlock_transaction_token, get_lock());
-
-  SchedulerState::BaseProfile SnapshotBaseProfileLocked() const TA_REQ_SHARED(get_lock()) {
-    return scheduler_state_.base_profile_;
-  }
-
-  SchedulerState::BaseProfile SnapshotBaseProfile() const
-      TA_EXCL(chainlock_transaction_token, get_lock());
-
-  ThreadStallState memory_stall_state() const TA_REQ(preempt_disabled_token) {
-    return memory_stall_state_;
-  }
-  void set_memory_stall_state(ThreadStallState value) TA_REQ(preempt_disabled_token) {
-    memory_stall_state_ = value;
-  }
 
  private:
   // The architecture-specific methods for getting and setting the
@@ -1218,72 +813,35 @@ struct Thread : public ChainLockable {
   friend inline Thread* arch_get_current_thread();
   friend inline void arch_set_current_thread(Thread*);
 
-  // OwnedWaitQueues manipulate wait queue state.
-  friend class OwnedWaitQueue;
+  // Packs a C++ callable (or nullptr) into a `(func, ctx)` pair for the Rust
+  // `zr::SendInlineFnMut` FFI setter shims.
+  template <typename... Args>
+  struct CppCallback {
+    using RawFn = void (*)(void* ctx, Args...);
+    RawFn func = nullptr;
+    void* ctx = nullptr;
 
-  // ScopedThreadExceptionContext is the only public way to call
-  // SaveUserStateLocked and RestoreUserStateLocked.
-  friend class ScopedThreadExceptionContext;
+    constexpr CppCallback() = default;
+    constexpr explicit CppCallback(nullptr_t) {}
 
-  // Dumping routines are allowed to see inside us.
-  friend class ThreadDumper;
-
-  // Type used to select which operation (suspend or kill) we want during a call
-  // to SuspendOrKillInternal.
-  enum class SuspendOrKillOp { Suspend, Kill };
-
-  // Dpc callback used for cleaning up a detached Thread's resources.
-  static void FreeDpc(Dpc* dpc);
-
-  // Save the arch-specific user state.
-  //
-  // Returns true when the user state will later need to be restored.
-  [[nodiscard]] bool SaveUserStateLocked() TA_REQ(get_lock());
-
-  // Restore the arch-specific user state.
-  void RestoreUserStateLocked() TA_REQ(get_lock());
-
-  // Common implementation of Suspend and Kill.
-  zx_status_t SuspendOrKillInternal(SuspendOrKillOp op) TA_EXCL(chainlock_transaction_token);
-
-  // Returns true if it decides to kill the thread, which must be the
-  // current thread. The thread_lock must be held when calling this
-  // function.
-  //
-  // TODO: move this to CurrentThread, once that becomes a subclass of
-  // Thread.
-  bool CheckKillSignal() TA_REQ(get_lock());
-
-  // These should only be accessed from the current thread. The kick-pending flag stays
-  // C++-owned, so both accessors work on |flags_| directly.
-  bool restricted_kick_pending() const {
-    return (flags_.load(ktl::memory_order_relaxed) & THREAD_FLAG_RESTRICTED_KICK_PENDING) != 0;
-  }
-  void set_restricted_kick_pending(bool value) {
-    if (value) {
-      flags_.fetch_or(THREAD_FLAG_RESTRICTED_KICK_PENDING, ktl::memory_order_relaxed);
-    } else {
-      flags_.fetch_and(~THREAD_FLAG_RESTRICTED_KICK_PENDING, ktl::memory_order_relaxed);
-    }
-  }
-
-  __NO_RETURN void ExitLocked(int retcode) TA_REQ(get_lock());
-
-  static void DumpAllLocked(const char* match_owner, bool full) TA_REQ(list_lock_);
-  static void DumpTidLocked(zx_koid_t tid, bool full) TA_REQ(list_lock_);
-
- private:
-  struct MigrateListTrait {
-    static fbl::DoublyLinkedListNodeState<Thread*>& node_state(Thread& thread) {
-      return thread.migrate_list_node_;
+    template <typename F, typename Decayed = ktl::decay_t<F>,
+              typename = ktl::enable_if_t<!ktl::is_same_v<Decayed, CppCallback> &&
+                                          !ktl::is_same_v<Decayed, nullptr_t>>>
+    explicit CppCallback(F&& f) {
+      static_assert(sizeof(Decayed) <= sizeof(void*), "Callable too large for Thread callback");
+      static_assert(alignof(Decayed) <= alignof(void*),
+                    "Callable over-aligned for Thread callback");
+      static_assert(ktl::is_trivially_copyable_v<Decayed>, "Callable must be trivially copyable");
+      static_assert(ktl::is_trivially_destructible_v<Decayed>,
+                    "Callable must be trivially destructible");
+      __builtin_memcpy(&ctx, &f, sizeof(Decayed));
+      func = [](void* c, Args... args) {
+        alignas(Decayed) unsigned char buf[sizeof(Decayed)];
+        __builtin_memcpy(buf, &c, sizeof(Decayed));
+        (*reinterpret_cast<Decayed*>(buf))(args...);
+      };
     }
   };
-  using MigrateList = fbl::DoublyLinkedListCustomTraits<Thread*, MigrateListTrait>;
-
-  static inline DECLARE_SPINLOCK(Thread) list_lock_ TA_ACQ_BEFORE(lock_);
-
-  // The global list of threads with migrate functions.
-  static MigrateList migrate_list_ TA_GUARDED(list_lock_);
 
   // <kernel/thread_layout.h> exposes member offsets to the Rust mirror of this class.
   friend struct ThreadLayout;
@@ -1300,7 +858,10 @@ struct Thread : public ChainLockable {
   SchedulerState scheduler_state_ TA_GUARDED(get_lock());
   SchedulerQueueState scheduler_queue_state_ TA_GUARDED(scheduler_variable_lock_);
   WaitQueueCollection::ThreadState wait_queue_state_ TA_GUARDED(get_lock());
-  fbl::DoublyLinkedList<OwnedWaitQueue*> owned_wait_queues_ TA_GUARDED(get_lock());
+  // Rust-owned `OwnedWaitQueueList` (`fbl::DoublyLinkedList<NonNull<OwnedWaitQueue>>`),
+  // initialized and dropped in Rust.
+  [[maybe_unused]] OpaqueStorage<sizeof(void*), alignof(void*)> owned_wait_queues_
+      TA_GUARDED(get_lock());
   TaskState task_state_;
   PreemptionState preemption_state_;
   MemoryAllocationState memory_allocation_state_;
@@ -1319,21 +880,25 @@ struct Thread : public ChainLockable {
   RelaxedAtomic<VmAspace*> aspace_{nullptr};
 
 #ifdef UNITTESTS_ENABLED
-  void* rust_ktrace_override_{nullptr};
+  // Accessed with relaxed atomics from Rust (Thread::rust_ktrace_override).
+  RelaxedAtomic<void*> rust_ktrace_override_{nullptr};
 #endif
 
   // Saved by SignalPolicyException() to store the type of policy error, and
   // passed to exception disptach in ProcessPendingSignals().
-  uint32_t extra_policy_exception_code_ TA_GUARDED(get_lock()) = 0;
-  uint32_t extra_policy_exception_data_ TA_GUARDED(get_lock()) = 0;
+  [[maybe_unused]] uint32_t extra_policy_exception_code_ TA_GUARDED(get_lock()) = 0;
+  [[maybe_unused]] uint32_t extra_policy_exception_data_ TA_GUARDED(get_lock()) = 0;
 
   // Is this thread allowed to own wait queues?  Set to false by a thread as
   // it exits, but before it reaches the DEAD state.
-  bool can_own_wait_queues_ TA_GUARDED(get_lock()) = true;
+  [[maybe_unused]] bool can_own_wait_queues_ TA_GUARDED(get_lock()) = true;
 
   // Strong reference to user thread if one exists for this thread.
   // In the common case freeing Thread will also free ThreadDispatcher when this
   // reference is dropped.
+  //
+  // Stored once by Rust (Thread::set_usermode_thread) during user-thread
+  // setup and read lock-free via rust_thread_user_thread / Thread::user_thread.
   fbl::RefPtr<ThreadDispatcher> user_thread_;
 
   // When user_thread_ is set, these values are copied from ThreadDispatcher and
@@ -1346,11 +911,12 @@ struct Thread : public ChainLockable {
 
   KernelStack stack_;
 
-  // This is used by dispatcher.cc:SafeDeleter.
+  // Per-thread deferred object deletion state (deferred_deleter and legacy
+  // dispatcher.cc:SafeDeleter).
   void* recursive_object_deletion_list_ = nullptr;
 
   // This always includes the trailing NUL.
-  char name_[ZX_MAX_NAME_LEN]{};
+  [[maybe_unused]] char name_[ZX_MAX_NAME_LEN]{};
 
   // Buffering for Debuglog output.
   Linebuffer linebuffer_;
@@ -1365,7 +931,7 @@ struct Thread : public ChainLockable {
   // might be observed by another process, we save user register state to the thread's arch_thread_t
   // so that it may be accessed by a debugger.  Upon leaving a suspended or exception state, we
   // restore user register state.
-  bool user_state_saved_ TA_GUARDED(get_lock()){false};
+  [[maybe_unused]] bool user_state_saved_ TA_GUARDED(get_lock()){false};
 
   // For threads with migration functions, indicates whether a migration is in progress. When true,
   // the migrate function has been called with Before but not yet with After.
@@ -1373,13 +939,15 @@ struct Thread : public ChainLockable {
   // TODO(johngro): What to do about this?  Should it be protected by the
   // thread's lock?  Does the thread's lock need to be held exclusively when a
   // thread's migrate function is called?
-  bool migrate_pending_ TA_GUARDED(get_lock()){};
+  [[maybe_unused]] bool migrate_pending_ TA_GUARDED(get_lock()){};
 
   // Provides a way to execute custom logic when a thread must be migrated between CPUs.
-  MigrateFn migrate_fn_ TA_GUARDED(get_lock());
+  // Rust-owned `Option<MigrateFn>` (`zr::SendInlineFnMut`), initialized and dropped in Rust.
+  OpaqueStorage<kCallbackSize, kCallbackAlign> migrate_fn_ TA_GUARDED(get_lock());
 
   // Provides a way to execute custom logic when a thread is context switched to or away from.
-  ContextSwitchFn context_switch_fn_;
+  // Rust-owned `Option<ContextSwitchFn>` (`zr::SendInlineFnMut`), initialized and dropped in Rust.
+  OpaqueStorage<kCallbackSize, kCallbackAlign> context_switch_fn_ TA_GUARDED(get_lock());
 
   // An Accessor for the thread's restartable sequence structure, if any.
   //
@@ -1399,10 +967,10 @@ struct Thread : public ChainLockable {
 
   // Used to track threads that have set |migrate_fn_|. This is used to migrate
   // threads before a CPU is taken offline.
-  fbl::DoublyLinkedListNodeState<Thread*> migrate_list_node_ TA_GUARDED(list_lock_);
+  fbl::DoublyLinkedListNodeState<Thread*> migrate_list_node_ TA_GUARDED(get_list_lock());
 
   // Node storage for existing on the global thread list.
-  fbl::DoublyLinkedListNodeState<Thread*> thread_list_node_ TA_GUARDED(list_lock_);
+  fbl::DoublyLinkedListNodeState<Thread*> thread_list_node_ TA_GUARDED(get_list_lock());
 
   // Node storage for existing on the temporary batch unblock list.
   fbl::DoublyLinkedListNodeState<Thread*> unblock_list_node_ TA_GUARDED(get_lock());
@@ -1414,7 +982,7 @@ struct Thread : public ChainLockable {
   //
   // It can only be accessed by the thread's current CPU. Hence, preemption must
   // be disabled while accessing it.
-  ThreadStallState memory_stall_state_ TA_GUARDED(preempt_disabled_token) =
+  [[maybe_unused]] ThreadStallState memory_stall_state_ TA_GUARDED(preempt_disabled_token) =
       ThreadStallState::IgnoredKernelOnly;
   // LINT.ThenChange(
   //   //zircon/kernel/kernel/thread.rs:ThreadLayout,
@@ -1428,117 +996,8 @@ struct Thread : public ChainLockable {
 #include <arch/current_thread.h>
 Thread* Thread::Current::Get() { return arch_get_current_thread(); }
 
-extern "C" void arch_dump_thread(const Thread* t) TA_REQ_SHARED(t->get_lock());
-
-class ThreadDumper {
- public:
-  static void DumpLocked(const Thread* t, const char* match_owner, bool full)
-      TA_REQ_SHARED(t->get_lock());
-};
-
-inline void Thread::DumpDuringPanic(bool full) const TA_NO_THREAD_SAFETY_ANALYSIS {
-  ThreadDumper::DumpLocked(this, nullptr, full);
-}
-
-inline void Thread::DumpAllDuringPanic(const char* match_owner,
-                                       bool full) TA_NO_THREAD_SAFETY_ANALYSIS {
-  // Skip grabbing the lock if we are panic'ing
-  DumpAllLocked(match_owner, full);
-}
-
-inline void Thread::DumpTidDuringPanic(zx_koid_t tid, bool full) TA_NO_THREAD_SAFETY_ANALYSIS {
-  // Skip grabbing the lock if we are panic'ing
-  DumpTidLocked(tid, full);
-}
-
-// Other thread-system bringup functions.
-void thread_init_early();
-void thread_secondary_cpu_entry() __NO_RETURN;
-
 // Call the arch-specific signal handler.
 extern "C" void arch_iframe_process_pending_signals(iframe_t* iframe);
-
-// find a thread based on the thread id
-// NOTE: used only for debugging, its a slow linear search through the
-// global thread list
-//
-// Note: any thread pointer borrowed by this function is only guaranteed to be
-// alive as long as the Thread::list_lock is held.  Once this is dropped, the
-// thread could cease to exist at any time, and the pointer must be considered
-// to be invalid.
-Thread* thread_id_to_thread_slow(zx_koid_t tid) TA_REQ(Thread::get_list_lock());
-
-// RAII helper that installs/removes an exception context and saves/restores user register state.
-// The class operates on the current thread.
-//
-// When a thread takes an exception, this class is used to make user register state available to
-// debuggers and exception handlers.
-//
-// Example Usage:
-//
-// {
-//   ScopedThreadExceptionContext context(...);
-//   HandleException();
-// }
-//
-// Note, ScopedThreadExceptionContext keeps track of whether the state has already been saved so
-// it's safe to nest them:
-//
-// void Foo() {
-//   ScopedThreadExceptionContext context(...);
-//   Bar();
-// }
-//
-// void Bar() {
-//   ScopedThreadExceptionContext context(...);
-//   Baz();
-// }
-//
-class ScopedThreadExceptionContext {
- public:
-  explicit ScopedThreadExceptionContext(const arch_exception_context_t* context);
-  ~ScopedThreadExceptionContext();
-  DISALLOW_COPY_ASSIGN_AND_MOVE(ScopedThreadExceptionContext);
-
- private:
-  Thread* thread_;
-  const arch_exception_context_t* context_;
-  bool need_to_remove_;
-  bool need_to_restore_;
-};
-
-// RAII helper to enforce that a block of code does not allocate memory.
-//
-// See |Thread::Current::memory_allocation_state()|.
-class ScopedMemoryAllocationDisabled {
- public:
-  ScopedMemoryAllocationDisabled() { Thread::Current::memory_allocation_state().Disable(); }
-  ~ScopedMemoryAllocationDisabled() { Thread::Current::memory_allocation_state().Enable(); }
-  DISALLOW_COPY_ASSIGN_AND_MOVE(ScopedMemoryAllocationDisabled);
-};
-
-// AssertInWaitQueue asserts (as its name implies) that this thread is
-// currently blocked in |wq|, and that the wait queue is locked.  This should
-// be sufficient to establish (at runtime) that it is safe to allow
-// read-access to the thread's members which are used to track the thread's
-// state in the queue.
-//
-// TODO(johngro) : Link to something documenting the reasoning behind this.
-// 1) Consider making these asserts extra-debug-only asserts, so that most
-//    builds do not need to suffer the runtime overhead of using them.
-// 2) Consider ways to limit the scope of the read-only capability to just the
-//    wait queue state (and other things protected by the fact that we are
-//    blocked in the wait queue) and nothing else.  While the wait queue state
-//    cannot mutate while we exist in the wait queue (at least, not without
-//    holding both the wait queue and thread's lock), other things can.
-static inline void AssertInWaitQueue(const Thread& t, const WaitQueueBase& wq) TA_REQ(wq.get_lock())
-    TA_ASSERT_SHARED(t.get_lock()) {
-  [&]() TA_NO_THREAD_SAFETY_ANALYSIS {
-    DEBUG_ASSERT(t.wait_queue_state().InWaitQueue());
-    DEBUG_ASSERT(t.state() == THREAD_BLOCKED || t.state() == THREAD_BLOCKED_READ_LOCK);
-    DEBUG_ASSERT(t.wait_queue_state().blocking_wait_queue() == &wq);
-  }();
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -1570,75 +1029,6 @@ inline fbl::WAVLTreeNodeState<Thread*>& WaitQueueCollection::BlockedThreadTreeTr
 inline void PreemptionState::AssertCapabilityHeld(
     concurrent::CapabilityToken<PreemptionState>::TagType) {
   DEBUG_ASSERT(Thread::Current::preemption_state().PreemptIsEnabled() == false);
-}
-
-struct BrwLockOps {
-  // Attempt to lock the set of threads needed for a BrwLock wake operation.  If
-  // the first thread to wake is a writer, the set consists of just this thread.
-  // If the first thread to wake is a reader, then the set to wake is all of the
-  // readers we encounter until we hit another writer, or run out of threads to
-  // wake.
-  //
-  // On success, the list of threads to wake is returned with each thread
-  // locked, and with each thread prepared to unblock as if Dequeue had been
-  // called (blocked_status has been set to OK, and blocking_wait_queue has been
-  // cleared).
-  //
-  // On failure, no list is returned, and all threads will be unlocked and
-  // waiting in the collection.
-  struct LockForWakeResult {
-    Thread::UnblockList list;
-    uint32_t count{0};
-  };
-
-  static ktl::optional<LockForWakeResult> LockForWake(WaitQueue& queue, zx_instant_mono_t now)
-      TA_REQ(chainlock_transaction_token, queue.get_lock());
-};
-
-struct WaitQueueLockOps {
-  // Attempt to lock one or all threads for waking.
-  //
-  // When successful, removes the threads from the wait queue, moving them to a
-  // temporary unblock list and setting their wake result in the process.
-  // Callers may then perform any internal bookkeeping before dropping the queue
-  // lock, and finally waking the threads using Scheduler::Unblock.
-  //
-  // Returns std::nullopt in the case that a backoff condition is encountered.
-  static ktl::optional<Thread::UnblockList> LockForWakeAllInQueue(WaitQueue& queue,
-                                                                  zx_status_t wait_queue_error)
-      TA_REQ(chainlock_transaction_token, queue.get_lock());
-
-  // Same as LockForWakeAllInQueue(), but does not dequeue the threads from the wait queue.
-  static ktl::optional<Thread::UnblockList> LockForWakeAllInPlace(WaitQueue& queue)
-      TA_REQ(chainlock_transaction_token, queue.get_lock());
-
-  // Same as LockForWakeAllInPlace(), but only locks the first thread.
-  static ktl::optional<Thread::UnblockList> LockForWakeOneInPlace(WaitQueue& queue)
-      TA_REQ(chainlock_transaction_token, queue.get_lock());
-};
-
-// RAII class to mark sections of code as memory stalls.
-//
-// Nesting is not allowed. It is a programming error to instantiate this class
-// if there exists another instance on the call stack.
-class ScopedMemoryStall {
- public:
-  ScopedMemoryStall();
-  ~ScopedMemoryStall();
-
-  // Disallow copying, assigning and moving.
-  ScopedMemoryStall(const ScopedMemoryStall&) = delete;
-  ScopedMemoryStall(ScopedMemoryStall&&) = delete;
-  ScopedMemoryStall& operator=(const ScopedMemoryStall&) = delete;
-  ScopedMemoryStall& operator=(ScopedMemoryStall&&) = delete;
-};
-
-extern "C" {
-cpu_mask_t cpp_thread_get_cpu_affinity(const Thread* thread);
-cpu_mask_t cpp_thread_set_cpu_affinity(Thread* thread, cpu_mask_t affinity);
-ThreadDispatcher* cpp_thread_user_thread(Thread* thread);
-uint64_t cpp_thread_lock_flow_id(const Thread* thread);
-uint64_t cpp_thread_take_next_lock_flow_id(Thread* thread);
 }
 
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_THREAD_H_

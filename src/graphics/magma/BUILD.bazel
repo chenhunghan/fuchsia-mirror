@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "msd",
+    srcs = ["include/lib/magma_service/msd.cc"],
+    hdrs = [
+        "include/lib/magma_service/msd.h",
+        "include/lib/magma_service/msd_c.h",
+        "include/lib/magma_service/msd_defs.h",
+    ],
+    includes = ["include"],
+    public_configs = [":msd_config"],
+    visibility = [
+        "//src/graphics/drivers:__subpackages__",
+        "//src/graphics/magma:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/lib/async",
+        "//sdk/lib/magma_common",
+        "//sdk/lib/stdcompat",
+        "//zircon/system/ulib/inspect",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)

@@ -58,8 +58,8 @@ use netstack3_ip::socket::{
 };
 use netstack3_ip::{
     HopLimits, IpHeaderInfo, IpTransportContext, LocalDeliveryPacketInfo, MarksBindingsContext,
-    MulticastMembershipHandler, ReceiveIpPacketMeta, SocketMetadata, TransparentLocalDelivery,
-    TransportIpContext,
+    MulticastMembershipHandler, PmtuHandler, PmtuSrcAddr, ReceiveIpPacketMeta, SocketMetadata,
+    TransparentLocalDelivery, TransportIpContext, path_mtu,
 };
 use netstack3_trace::trace_duration;
 use packet::{
@@ -1872,27 +1872,59 @@ fn receive_icmp_error<I, BC, CC>(
         }
     };
 
-    let socket_id = StateContext::<I, _>::with_bound_state_context(core_ctx, |core_ctx| {
+    enum MatchedSocket<S> {
+        Connected(S),
+        Listener,
+    }
+
+    let matched = StateContext::<I, _>::with_bound_state_context(core_ctx, |core_ctx| {
         let device_weak = device.downgrade();
-        DatagramBoundStateContext::<_, _, Udp<_>>::with_bound_sockets(
+        let matched = DatagramBoundStateContext::<_, _, Udp<_>>::with_bound_sockets(
             core_ctx,
             |_core_ctx, bound_sockets| {
-                bound_sockets
-                    .lookup_connected(
-                        (orig_dst_ip, UdpRemotePort::from(orig_dst_port)),
-                        (orig_src_ip, orig_src_port),
-                        device_weak,
-                    )
-                    .map(|entry| entry.first().clone())
+                // Identify the socket that likely sent the original packet,
+                // preferring connected sockets over listening sockets.
+                let matched = match lookup(
+                    bound_sockets,
+                    (Some(orig_dst_ip), Some(orig_dst_port)),
+                    (orig_src_ip, orig_src_port),
+                    device_weak,
+                    None,
+                )
+                .next()?
+                {
+                    LookupResult::Conn(socket_id, _) => MatchedSocket::Connected(socket_id.clone()),
+                    LookupResult::Listener(_, _) => MatchedSocket::Listener,
+                };
+                Some(matched)
             },
-        )
+        )?;
+        // Only update the PMTU cache if the error reports a valid PMTU. The
+        // error is delivered to the socket regardless.
+        if let Some(pmtu) = path_mtu::pmtu_from_icmp_error::<I>(err) {
+            if let Some(src_ip) = PmtuSrcAddr::new_from_socket_ip_addr(orig_src_ip) {
+                BoundStateContext::<I, _>::with_transport_context(core_ctx, |core_ctx| {
+                    let _: I::Mtu = PmtuHandler::<I, _>::update_pmtu_if_less(
+                        core_ctx,
+                        bindings_ctx,
+                        src_ip,
+                        orig_dst_ip,
+                        pmtu,
+                    );
+                });
+            }
+        }
+        Some(matched)
     });
 
-    let Some(socket_id) = socket_id else {
-        CounterContext::<UdpCountersWithoutSocket<I>>::counters(core_ctx)
-            .rx_icmp_error_hard_no_socket
-            .increment();
-        return;
+    let socket_id = match matched {
+        Some(MatchedSocket::Connected(socket_id)) => socket_id,
+        None | Some(MatchedSocket::Listener) => {
+            CounterContext::<UdpCountersWithoutSocket<I>>::counters(core_ctx)
+                .rx_icmp_error_hard_no_socket
+                .increment();
+            return;
+        }
     };
 
     #[derive(GenericOverIp)]
@@ -3775,13 +3807,15 @@ mod tests {
     use alloc::vec;
     use core::convert::TryInto as _;
     use core::num::NonZeroU16;
-    use packet_formats::icmp::{Icmpv4DestUnreachableCode, Icmpv6DestUnreachableCode};
+    use packet_formats::icmp::{
+        IcmpDestUnreachable, Icmpv4DestUnreachableCode, Icmpv6DestUnreachableCode,
+    };
 
     use assert_matches::assert_matches;
     use ip_test_macro::ip_test;
     use itertools::Itertools as _;
     use net_declare::{net_ip_v4 as ip_v4, net_ip_v6};
-    use net_types::ip::{IpAddr, IpAddress, Ipv4, Ipv4Addr, Ipv6, Ipv6Addr};
+    use net_types::ip::{IpAddr, IpAddress, IpMtu as _, Ipv4, Ipv4Addr, Ipv6, Ipv6Addr, Mtu};
     use net_types::{
         AddrAndZone, LinkLocalAddr, MulticastAddr, Scope as _, ScopeableAddress as _, ZonedAddr,
     };
@@ -3799,7 +3833,9 @@ mod tests {
     use netstack3_hashmap::{HashMap, HashSet};
     use netstack3_ip::socket::testutil::{FakeDeviceConfig, FakeDualStackIpSocketCtx};
     use netstack3_ip::testutil::{DualStackSendIpPacketMeta, FakeIpHeaderInfo};
-    use netstack3_ip::{IpLayerIpExt, IpPacketDestination, ResolveRouteError, SendIpPacketMeta};
+    use netstack3_ip::{
+        IpLayerIpExt, IpPacketDestination, PmtuDstAddr, ResolveRouteError, SendIpPacketMeta,
+    };
     use packet::{Buf, Serializer};
     use test_case::test_case;
 
@@ -8189,9 +8225,17 @@ mod tests {
             icmp_err,
         );
 
-        let (_, bindings_ctx) = api.contexts();
+        let (core_ctx, bindings_ctx) = api.contexts();
         assert_eq!(bindings_ctx.state.take_pending_error::<I>(&socket.downgrade()), expected_err);
         assert_eq!(bindings_ctx.state.take_pending_error::<I>(&socket.downgrade()), None);
+
+        // Verify that a packet too big error updates the PMTU cache.
+        let pmtu_src = PmtuSrcAddr::new(local_ip.get()).unwrap();
+        let pmtu_dst = PmtuDstAddr::try_from(remote_ip).unwrap();
+        assert_eq!(
+            core_ctx.bound_sockets.ip_socket_ctx.state.get_pmtu::<I>(pmtu_src, pmtu_dst),
+            path_mtu::pmtu_from_icmp_error::<I>(icmp_err),
+        );
 
         let (core_ctx, _) = api.contexts();
         let (with_socket_expects, without_socket_expects) = match expected_err {
@@ -8231,36 +8275,49 @@ mod tests {
     }
 
     #[test_case(
-        Icmpv4ErrorCode::DestUnreachable(
-            Icmpv4DestUnreachableCode::DestNetworkUnreachable,
-            Default::default()
-        ),
+        Icmpv4ErrorCode::DestUnreachable {
+            code: Icmpv4DestUnreachableCode::DestNetworkUnreachable,
+            message: Default::default(),
+            original_packet_length: 0,
+        },
         None;
         "v4 network unreachable"
     )]
     #[test_case(
-        Icmpv4ErrorCode::DestUnreachable(
-            Icmpv4DestUnreachableCode::DestHostUnreachable,
-            Default::default()
-        ),
+        Icmpv4ErrorCode::DestUnreachable {
+            code: Icmpv4DestUnreachableCode::DestHostUnreachable,
+            message: Default::default(),
+            original_packet_length: 0,
+        },
         None;
         "v4 host unreachable"
     )]
     #[test_case(
-        Icmpv4ErrorCode::DestUnreachable(
-            Icmpv4DestUnreachableCode::DestProtocolUnreachable,
-            Default::default()
-        ),
+        Icmpv4ErrorCode::DestUnreachable {
+            code: Icmpv4DestUnreachableCode::DestProtocolUnreachable,
+            message: Default::default(),
+            original_packet_length: 0,
+        },
         Some(PendingDatagramSocketError::ProtocolUnreachable);
         "v4 protocol unreachable"
     )]
     #[test_case(
-        Icmpv4ErrorCode::DestUnreachable(
-            Icmpv4DestUnreachableCode::DestPortUnreachable,
-            Default::default()
-        ),
+        Icmpv4ErrorCode::DestUnreachable {
+            code: Icmpv4DestUnreachableCode::DestPortUnreachable,
+            message: Default::default(),
+            original_packet_length: 0,
+        },
         Some(PendingDatagramSocketError::PortUnreachable);
         "v4 connection refused"
+    )]
+    #[test_case(
+        Icmpv4ErrorCode::DestUnreachable {
+            code: Icmpv4DestUnreachableCode::FragmentationRequired,
+            message: IcmpDestUnreachable::new_for_frag_req(NonZeroU16::new(1300).unwrap()),
+            original_packet_length: 1500,
+        },
+        Some(PendingDatagramSocketError::PacketTooBig);
+        "v4 fragmentation required"
     )]
     fn so_error_v4(icmp_err: Icmpv4ErrorCode, expected_err: Option<PendingDatagramSocketError>) {
         so_error_inner::<Ipv4>(icmp_err, expected_err)
@@ -8286,8 +8343,120 @@ mod tests {
         Some(PendingDatagramSocketError::PermissionDenied);
         "v6 permission denied"
     )]
+    #[test_case(
+        Icmpv6ErrorCode::PacketTooBig(Mtu::new(1300)),
+        Some(PendingDatagramSocketError::PacketTooBig);
+        "v6 packet too big"
+    )]
     fn so_error_v6(icmp_err: Icmpv6ErrorCode, expected_err: Option<PendingDatagramSocketError>) {
         so_error_inner::<Ipv6>(icmp_err, expected_err)
+    }
+
+    #[ip_test(I)]
+    #[test_case(OriginalSocketState::Unbound; "no socket")]
+    #[test_case(OriginalSocketState::Listener; "listener")]
+    #[test_case(OriginalSocketState::Connected; "connected")]
+    fn receive_icmp_pmtu_error<I: TestIpExt>(socket_state: OriginalSocketState) {
+        set_logger_for_test();
+
+        let mut ctx = FakeUdpCtx::with_core_ctx(FakeUdpCoreCtx::new_fake_device::<I>());
+        let mut api = UdpApi::<I, _>::new(ctx.as_mut());
+
+        let local_ip = local_ip::<I>();
+        let remote_ip = remote_ip::<I>();
+        let pmtu_src = PmtuSrcAddr::new(local_ip.get()).unwrap();
+        let pmtu_dst = PmtuDstAddr::try_from(remote_ip).unwrap();
+        let pmtu = I::Mtu::new(Mtu::new(1300)).unwrap();
+
+        let socket = api.create();
+        match socket_state {
+            OriginalSocketState::Unbound => {}
+            OriginalSocketState::Listener => {
+                api.listen(&socket, Some(ZonedAddr::Unzoned(local_ip)), Some(LOCAL_PORT))
+                    .expect("listen should succeed");
+            }
+            OriginalSocketState::Connected => {
+                api.listen(&socket, Some(ZonedAddr::Unzoned(local_ip)), Some(LOCAL_PORT))
+                    .expect("listen should succeed");
+                api.connect(&socket, Some(ZonedAddr::Unzoned(remote_ip)), REMOTE_PORT.into())
+                    .expect("connect should succeed");
+            }
+        }
+
+        let original_body =
+            UdpPacketBuilder::new(local_ip.get(), remote_ip.get(), Some(LOCAL_PORT), REMOTE_PORT)
+                .wrap_body(Buf::new(vec![1, 2, 3, 4], ..))
+                .serialize_vec_outer(&mut NetworkSerializationContext::default())
+                .unwrap()
+                .unwrap_b();
+
+        let deliver_error = |api: &mut UdpApi<I, _>, mtu: Mtu| {
+            let (core_ctx, bindings_ctx) = api.contexts();
+            <UdpIpTransportContext as IpTransportContext<I, _, _>>::receive_icmp_error(
+                core_ctx,
+                bindings_ctx,
+                &FakeDeviceId,
+                Some(local_ip),
+                remote_ip,
+                original_body.as_ref(),
+                netstack3_ip::path_mtu::testutil::new_pmtu_error::<I>(mtu),
+            );
+        };
+
+        let (expected_pmtu, expected_err, delivered) = match socket_state {
+            OriginalSocketState::Unbound => (None, None, 0),
+            OriginalSocketState::Listener => (Some(pmtu), None, 0),
+            OriginalSocketState::Connected => {
+                (Some(pmtu), Some(PendingDatagramSocketError::PacketTooBig), 1)
+            }
+        };
+        let delivered_expects = |errors: u64| CounterExpectationsWithSocket {
+            rx_icmp_error_hard_delivered: errors * delivered,
+            ..Default::default()
+        };
+
+        // An error reporting an MTU below the minimum link MTU must be
+        // delivered to a connected socket without updating the PMTU cache.
+        let invalid_mtu = Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) - 1);
+        deliver_error(&mut api, invalid_mtu);
+        let (core_ctx, bindings_ctx) = api.contexts();
+        assert_eq!(bindings_ctx.state.take_pending_error::<I>(&socket.downgrade()), expected_err);
+        assert_eq!(
+            core_ctx.bound_sockets.ip_socket_ctx.state.get_pmtu::<I>(pmtu_src, pmtu_dst),
+            None,
+        );
+        assert_counters(
+            core_ctx,
+            delivered_expects(1),
+            CounterExpectationsWithoutSocket {
+                rx_icmp_error: 1,
+                rx_icmp_error_hard: 1,
+                rx_icmp_error_hard_no_socket: 1 - delivered,
+                ..Default::default()
+            },
+            [(&socket, delivered_expects(1))],
+        );
+
+        // An error reporting a valid MTU must be delivered to a connected
+        // socket, and update the PMTU cache for listening or connected sockets.
+        deliver_error(&mut api, pmtu.get());
+        let (core_ctx, bindings_ctx) = api.contexts();
+        assert_eq!(bindings_ctx.state.take_pending_error::<I>(&socket.downgrade()), expected_err);
+        assert_eq!(
+            core_ctx.bound_sockets.ip_socket_ctx.state.get_pmtu::<I>(pmtu_src, pmtu_dst),
+            expected_pmtu,
+        );
+        assert_counters(
+            core_ctx,
+            delivered_expects(2),
+            CounterExpectationsWithoutSocket {
+                rx_icmp_error: 2,
+                rx_icmp_error_hard: 2,
+                rx_icmp_error_hard_no_socket: 2 * (1 - delivered),
+                ..Default::default()
+            },
+            [(&socket, delivered_expects(2))],
+        );
     }
 
     #[test]
@@ -8328,10 +8497,14 @@ mod tests {
 
         let (core_ctx, bindings_ctx) = api.contexts();
 
-        let err = Icmpv4ErrorCode::DestUnreachable(
-            Icmpv4DestUnreachableCode::DestPortUnreachable,
-            Default::default(),
-        );
+        let err = Icmpv4ErrorCode::DestUnreachable {
+            code: Icmpv4DestUnreachableCode::DestPortUnreachable,
+            message: Default::default(),
+            original_packet_length: u16::try_from(
+                packet_formats::ipv4::HDR_PREFIX_LEN + original_body.len(),
+            )
+            .unwrap(),
+        };
 
         <UdpIpTransportContext as IpTransportContext<Ipv4, _, _>>::receive_icmp_error(
             core_ctx,
@@ -8439,10 +8612,11 @@ mod tests {
     }
 
     #[test_case(
-        Icmpv4ErrorCode::DestUnreachable(
-            Icmpv4DestUnreachableCode::DestPortUnreachable,
-            Default::default()
-        );
+        Icmpv4ErrorCode::DestUnreachable {
+            code: Icmpv4DestUnreachableCode::DestPortUnreachable,
+            message: Default::default(),
+            original_packet_length: 0,
+        };
         "v4 failed icmp counters"
     )]
     fn icmp_error_failed_counters_v4(icmp_err: Icmpv4ErrorCode) {

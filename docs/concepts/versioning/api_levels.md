@@ -85,7 +85,7 @@ level goes through:
 * [_Sunset_](#sunset)
 * [_Retired_](#retired)
 
-### Supported
+### Supported {#supported}
 
 Components built targeting API levels in this phase (with any release) run
 on the platform release. In addition, you can use the SDK to build
@@ -95,7 +95,7 @@ For example, if API level 17 is Supported in a given release, that means that
 the OS binaries from that release can run components that target API level 17,
 and the SDK from that release can build components that target API level 17.
 
-### Sunset
+### Sunset {#sunset}
 
 Components built targeting API levels in this phase run on the platform
 release. However, you cannot use the SDK to build components targeting
@@ -105,7 +105,7 @@ For example, if API level 17 is Sunset in a given release, that means the OS
 binaries from that release can run components that target API level 17, but the
 SDK from that release cannot build components that target API level 17.
 
-### Retired
+### Retired {#retired}
 
 Components built targeting API levels in this phase do not run on the platform
 release, and the SDK does not support them.

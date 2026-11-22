@@ -62,7 +62,6 @@ fuchsia_driver_component("usb-adb-function") {
     ":usb-adb-function-driver",
     ":usb_adb_bind",
   ]
-  info = "meta/usb-adb-function-info.json"
 }
 
 fuchsia_driver_package("package") {

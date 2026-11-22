@@ -888,10 +888,8 @@ require subsequent RFCs prior to implementation.
 <!-- Links -->
 
 [blobfs-desc]: /docs/concepts/filesystems/blobfs.md
-[diagram-1-size-check]:
-resources/0279_support_for_product-specific_blob_formats/diagram_1_size_check_illustration.png
-[diagram-2-delivery-blob-type-mime]:
-resources/0279_support_for_product-specific_blob_formats/diagram_2_delivery_blob_type_mime.png
+[diagram-1-size-check]: resources/0279_support_for_product-specific_blob_formats/diagram_1_size_check_illustration.png
+[diagram-2-delivery-blob-type-mime]: resources/0279_support_for_product-specific_blob_formats/diagram_2_delivery_blob_type_mime.png
 [ota-updates]: /docs/concepts/packages/ota.md
 [RFC-271]: /docs/contribute/governance/rfcs/0271_anchored_packages.md
 [RFC-207]: /docs/contribute/governance/rfcs/0207_offline_blob_compression.md

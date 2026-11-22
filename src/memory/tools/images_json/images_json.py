@@ -65,4 +65,8 @@ def all_blobs(images: Iterable[Image]) -> Iterator[Blob]:
 def parse(path: Path) -> List[Image]:
     """Parses `images.json`."""
     with open(path, "rt") as f:
-        return [Image.from_dict(image_data) for image_data in json.load(f)]
+        return [
+            # `from_dict` is added by `@dataclass_json` at runtime.
+            Image.from_dict(image_data)  # pyrefly: ignore[missing-attribute]
+            for image_data in json.load(f)
+        ]

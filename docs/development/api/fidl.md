@@ -311,7 +311,7 @@ representing the same concept.
     matters, the FIDL type system has named types semantics when it comes to
     API.
 
-### Consider using Virtual Memory Objects (VMOs)
+### Consider using virtual memory objects (VMOs) {#consider-using-virtual-memory-objects-vmos}
 
 A Virtual Memory Object (VMO) is a kernel object that represents a contiguous
 region of virtual memory along with a logical size. Use this type to transfer
@@ -322,7 +322,7 @@ Note: This rubric previously recommended using the `fuchsia.mem.Buffer` type for
 this purpose. This recommendation is no longer applicable. New and updated APIs
 should use VMOs directly instead of using `fuchsia.mem.Buffer`.
 
-### Specify bounds for vector and string
+### Specify bounds for vector and string {#specify-bounds-for-vector-and-string}
 
 All `vector` and `string` declarations should specify a length bound.
 Declarations generally fall into one of two categories:
@@ -350,7 +350,7 @@ example into a VMO.
 
 <<../languages/fidl/widgets/_size_constraint.md>>
 
-### String encoding, string contents, and length bounds
+### String encoding, string contents, and length bounds {#string-encoding-string-contents-and-length-bounds}
 
 FIDL `string`s are encoded in [UTF-8](https://en.wikipedia.org/wiki/UTF-8), a
 variable-width encoding that uses 1, 2, 3, or 4 bytes per
@@ -446,7 +446,7 @@ If a negative value has no meaning, use an unsigned type.  As a rule of thumb if
 you're unsure, use 32-bit values for small quantities and 64-bit values for
 large ones.
 
-### Avoid booleans if more states are possible
+### Avoid booleans if more states are possible {#avoid-booleans-if-more-states-are-possible}
 
 When adding a boolean field, consider using an enum instead if the field could
 be extended to represent additional states in the future. For example a boolean
@@ -534,7 +534,7 @@ syntax](#error-syntax): the performance benefits which existed have been
 obsoleted by [inlining small values in envelopes][rfc-0114], and low-level
 support for unions is now prevalent.
 
-#### Avoid messages and descriptions in errors
+#### Avoid messages and descriptions in errors {#avoid-messages-and-descriptions-in-errors}
 
 In some unusual situations, protocols may include a string description of the
 error in addition to a `status` or enum value if the range of possible error
@@ -556,7 +556,7 @@ typed messages, and leave the rendering to the UI layer.
 
 If all your messages are simple and unparameterized, use `enum`s for error
 reporting and general UI strings. For more detailed messages, with parameters
-such as names, numbers, and locations, use `table`s or `xunion`s, and pass
+such as names, numbers, and locations, use `table`s or `union`s, and pass
 the parameters as string or numeric fields.
 
 It may be tempting to generate messages (in English) in the service and provide
@@ -879,7 +879,7 @@ rights set for a type, e.g. `zx.DEFAULT_CHANNEL_RIGHTS`. While the former skips
 rights checks, the latter requires all normal rights for a given object type to
 be present.
 
-## Good Design Patterns
+## Good design patterns {#good-design-patterns}
 
 This section describes several good design patterns that recur in many FIDL
 protocols.
@@ -1033,7 +1033,7 @@ establishing a connection in the same way as a service that cannot be reached in
 the first place.  In both situations, the service is unavailable and the client
 should either generate an error or find another way to accomplish its task.
 
-### Flow control
+### Flow control {#flow-control}
 
 FIDL messages are buffered by the kernel.  If one endpoint produces more
 messages than the other endpoint consumes, the messages will accumulate in the
@@ -1288,7 +1288,7 @@ are never controlled by the user such as the manufacturer string. Another
 alternative is to sanitize the model string by comparing it to an allowlist of
 popular phone models and replacing rare model strings with a generic string.
 
-### Client-assigned identifiers
+### Client-assigned identifiers {#client-assigned-identifiers}
 
 Often a protocol will let a client manipulate multiple pieces of state held by
 the server.  When designing an object system, the typical approach to this
@@ -1360,7 +1360,7 @@ control plane.  Such protocols place a higher implementation burden on the clien
 and the server but are appropriate when you need maximal performance.  For example,
 the block device protocol uses this approach to optimize performance.
 
-### Pagination
+### Pagination {#pagination}
 
 FIDL messages are typically sent over channels, which have a maximum message
 size.  In many cases, the maximum message size is sufficient to transmit

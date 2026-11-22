@@ -1,0 +1,127 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":developer-console-integration-test_test"],
+    visibility = ["//src/developer:__pkg__"],
+)
+
+rustc_test(
+    name = "developer_console_integration_test",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
+        "//sdk/fidl/fuchsia.developer.console:fuchsia.developer.console_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+rustc_binary(
+    name = "developer_console_integration_test_support_bin",
+    srcs = ["src/support.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_root = "src/support.rs",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "developer_console_integration_test_support_bin_packaged",
+    binary = ":developer_console_integration_test_support_bin",
+    binary_name = "developer_console_integration_test_support_bin",
+)
+
+fx_component_manifest(
+    name = "developer-console-test-support-manifest",
+    component_name = "developer-console-test-support",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/developer-console-test-support.cml",
+)
+
+fx_component(
+    name = "developer-console-test-support",
+    compiled_manifest = ":developer-console-test-support-manifest",
+    deps = [
+        ":developer_console_integration_test_support_bin_packaged",
+        "//src/developer/zxsh:sh",
+    ],
+)
+
+fx_packaged_binary(
+    name = "developer_console_integration_test_packaged",
+    testonly = True,
+    binary = ":developer_console_integration_test",
+    binary_name = "developer_console_integration_test",
+)
+
+fx_component_manifest(
+    name = "developer-console-integration-test-manifest",
+    testonly = True,
+    component_name = "developer-console-integration-test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/developer-console-integration-test.cml",
+    restricted_features = ["use_dictionaries"],
+)
+
+fx_test_component(
+    name = "developer-console-integration-test-component",
+    compiled_manifest = ":developer-console-integration-test-manifest",
+    deps = [":developer_console_integration_test_packaged"],
+)
+
+fx_package(
+    name = "developer-console-integration-test",
+    components = [
+        ":developer-console-test-support",
+        "//src/bringup/bin/ptysvc:component",
+        "//src/developer/console:component",
+    ],
+    test_components = [":developer-console-integration-test-component"],
+)
+
+fx_test(
+    name = "developer-console-integration-test_test",
+    package = ":developer-console-integration-test",
+)

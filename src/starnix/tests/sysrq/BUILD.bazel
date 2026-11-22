@@ -17,9 +17,7 @@ rustc_test(
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-component",
-        # //src/lib/fuchsia-component-test names its library target
-        # fuchsia-component-test-lib in BUILD.bazel.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-fs",
         "//src/sys/lib/component-events",
         "//third_party/rust_crates/vendor:assert_matches",

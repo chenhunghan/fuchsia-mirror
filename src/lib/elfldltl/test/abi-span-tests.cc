@@ -5,6 +5,10 @@
 #include <lib/elfldltl/abi-span.h>
 #include <lib/elfldltl/testing/typed-test.h>
 
+#include <array>
+#include <concepts>
+#include <vector>
+
 #include <gtest/gtest.h>
 
 namespace {
@@ -192,6 +196,85 @@ TYPED_TEST(ElfldltlAbiSpanTests, StringView) {
   EXPECT_EQ(local.length(), 6u);
   EXPECT_EQ(local.data(), kFoobar.data());
   EXPECT_EQ(local.get(), kFoobar);
+
+  local = "bazqux";
+  EXPECT_EQ(local.get(), "bazqux");
+}
+
+TYPED_TEST(ElfldltlAbiSpanTests, Conversions) {
+  using Elf = typename TestFixture::Elf;
+  using LocalFixedMut = elfldltl::AbiSpan<int, 3, Elf, elfldltl::LocalAbiTraits>;
+  using LocalFixedConst = elfldltl::AbiSpan<const int, 3, Elf, elfldltl::LocalAbiTraits>;
+  using LocalDynMut = elfldltl::AbiSpan<int, std::dynamic_extent, Elf, elfldltl::LocalAbiTraits>;
+  using LocalDynConst =
+      elfldltl::AbiSpan<const int, std::dynamic_extent, Elf, elfldltl::LocalAbiTraits>;
+
+  using RemoteFixedMut = elfldltl::AbiSpan<int, 3, Elf, elfldltl::RemoteAbiTraits>;
+  using RemoteFixedConst = elfldltl::AbiSpan<const int, 3, Elf, elfldltl::RemoteAbiTraits>;
+  using RemoteDynMut = elfldltl::AbiSpan<int, std::dynamic_extent, Elf, elfldltl::RemoteAbiTraits>;
+  using RemoteDynConst =
+      elfldltl::AbiSpan<const int, std::dynamic_extent, Elf, elfldltl::RemoteAbiTraits>;
+
+  // Implicit and explicit conversion checks.
+  static_assert(std::convertible_to<LocalFixedMut, LocalFixedConst>);
+  static_assert(std::convertible_to<LocalFixedMut, LocalDynMut>);
+  static_assert(std::convertible_to<LocalFixedMut, LocalDynConst>);
+  static_assert(std::convertible_to<LocalDynMut, LocalDynConst>);
+  static_assert(!std::convertible_to<LocalDynConst, LocalFixedConst>);
+  static_assert(std::constructible_from<LocalFixedConst, LocalDynConst>);
+  static_assert(!std::constructible_from<LocalFixedMut, LocalFixedConst>);
+
+  static_assert(std::convertible_to<RemoteFixedMut, RemoteFixedConst>);
+  static_assert(std::convertible_to<RemoteFixedMut, RemoteDynMut>);
+  static_assert(std::convertible_to<RemoteDynMut, RemoteDynConst>);
+  static_assert(!std::convertible_to<RemoteDynConst, RemoteFixedConst>);
+  static_assert(std::constructible_from<RemoteFixedConst, RemoteDynConst>);
+  static_assert(!std::constructible_from<RemoteFixedMut, RemoteFixedConst>);
+
+  // Local conversions from containers and to std::span.
+  static_assert(std::convertible_to<std::array<int, 3>&, LocalFixedMut>);
+  static_assert(std::convertible_to<const std::array<int, 3>&, LocalFixedConst>);
+  static_assert(std::convertible_to<std::vector<int>&, LocalDynMut>);
+  static_assert(std::convertible_to<const std::vector<int>&, LocalDynConst>);
+  static_assert(std::convertible_to<LocalFixedConst, std::span<const int, 3>>);
+  static_assert(std::convertible_to<LocalDynConst, std::span<const int>>);
+
+  std::array<int, 3> arr = {10, 20, 30};
+  LocalFixedMut fixed_mut{arr};
+  LocalFixedConst fixed_const = fixed_mut;
+  LocalDynMut dyn_mut = fixed_mut;
+  LocalDynConst dyn_const = dyn_mut;
+  EXPECT_EQ(fixed_const.size(), 3u);
+  EXPECT_EQ(fixed_const.data(), arr.data());
+  EXPECT_EQ(dyn_const.size(), 3u);
+  EXPECT_EQ(dyn_const.data(), arr.data());
+
+  LocalFixedConst explicit_fixed{dyn_const};
+  EXPECT_EQ(explicit_fixed.data(), arr.data());
+
+  std::span<const int, 3> std_fixed = fixed_const;
+  std::span<const int> std_dyn = dyn_const;
+  EXPECT_EQ(std_fixed.data(), arr.data());
+  EXPECT_EQ(std_dyn.data(), arr.data());
+
+  std::vector<int> vec = {1, 2, 3, 4};
+  LocalDynMut vec_span{vec};
+  EXPECT_EQ(vec_span.size(), 4u);
+  EXPECT_EQ(vec_span.data(), vec.data());
+
+  // Remote conversions preserve pointer and size.
+  const auto ptr = RemoteFixedMut::Ptr::FromAddress(0x1000);
+  RemoteFixedMut r_fixed_mut{ptr, 3};
+  RemoteFixedConst r_fixed_const = r_fixed_mut;
+  RemoteDynMut r_dyn_mut = r_fixed_mut;
+  RemoteDynConst r_dyn_const = r_dyn_mut;
+  EXPECT_EQ(r_fixed_const.ptr().address(), 0x1000u);
+  EXPECT_EQ(r_fixed_const.size(), 3u);
+  EXPECT_EQ(r_dyn_const.ptr().address(), 0x1000u);
+  EXPECT_EQ(r_dyn_const.size(), 3u);
+
+  RemoteFixedConst r_explicit_fixed{r_dyn_const};
+  EXPECT_EQ(r_explicit_fixed.ptr().address(), 0x1000u);
 }
 
 }  // namespace

@@ -14,6 +14,7 @@ if (is_host) {
 
   python_library("path_normalizer") {
     sources = [ "path_normalizer.py" ]
+    library_deps = [ "//build/bazel/scripts:build_utils" ]
   }
 
   python_build_time_tests("path_normalizer_test") {
@@ -43,6 +44,25 @@ if (is_host) {
   python_library("discover_migration_candidates") {
     sources = [ "discover_migration_candidates.py" ]
     deps = [ ":gn_runner" ]
+  }
+
+  python_library("cutover_utils") {
+    sources = [ "cutover_utils.py" ]
+  }
+
+  python_build_time_tests("cutover_utils_test") {
+    tests = [ "cutover_utils_test.py" ]
+    deps = [ ":cutover_utils" ]
+    inputs = [ "//build/beads/verifications/cutover_categories.json" ]
+  }
+
+  python_library("guard_audit") {
+    sources = [ "guard_audit.py" ]
+  }
+
+  python_build_time_tests("guard_audit_test") {
+    tests = [ "guard_audit_test.py" ]
+    deps = [ ":guard_audit" ]
   }
 
   python_library("shell_utils") {
@@ -112,9 +132,11 @@ if (is_host) {
     testonly = true
     deps = [
       ":compare_utils_test",
+      ":cutover_utils_test",
       ":discover_migration_candidates_test",
       ":flags_differences_test",
       ":gn_runner_test",
+      ":guard_audit_test",
       ":normalize_clang_args_test",
       ":normalize_rustc_args_test",
       ":path_normalizer_test",

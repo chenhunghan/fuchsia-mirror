@@ -356,3 +356,69 @@ TEST_F(TestIsValidBatch, ContextStateBufferSizeOverflow) {
   };
   DoTest(buffer_desc, false, csb_resource);
 }
+
+TEST_F(TestIsValidBatch, ValidBatchWithResourceOffset) {
+  const uint32_t kPageSize = magma::page_size();
+  std::shared_ptr<MsdVsiBuffer> buffer;
+  ASSERT_NO_FATAL_FAILURE(CreateMsdBuffer(kPageSize * 2, &buffer));
+
+  ASSERT_TRUE(default_connection()
+                  ->MapBufferGpu(buffer, 0x10000, 1 /* page_offset */, 1 /* page_count */)
+                  .ok());
+
+  auto command_buffer = std::make_unique<msd::magma_command_buffer>(msd::magma_command_buffer{
+      .resource_count = 1,
+      .batch_buffer_resource_index = 0,
+      .batch_start_offset = 88,
+      .wait_semaphore_count = 0,
+      .signal_semaphore_count = 0,
+      .flags = 0,
+  });
+  std::vector<CommandBuffer::ExecResource> resources;
+  resources.emplace_back(
+      CommandBuffer::ExecResource{.buffer = buffer, .offset = kPageSize, .length = kPageSize - 96});
+
+  auto batch =
+      CommandBuffer::Create(default_context(), 0, std::move(command_buffer), std::move(resources),
+                            std::vector<std::shared_ptr<magma::PlatformSemaphore>>{});
+  ASSERT_NE(batch, nullptr);
+  ASSERT_TRUE(batch->PrepareForExecution());
+  EXPECT_TRUE(batch->IsValidBatch());
+  EXPECT_EQ(batch->GetBatchBufferWriteOffset(), (kPageSize * 2) - 8);
+}
+
+TEST_F(TestIsValidBatch, ResourceOffsetOverflow) {
+  const uint32_t kPageSize = magma::page_size();
+  const uint64_t kOverflowOffset = std::numeric_limits<uint64_t>::max() - (kPageSize - 1);
+
+  std::shared_ptr<MsdVsiBuffer> buffer;
+  ASSERT_NO_FATAL_FAILURE(CreateMsdBuffer(kPageSize * 2, &buffer));
+
+  auto bus_mapping =
+      address_space_owner_->GetBusMapper()->MapPageRangeBus(buffer->platform_buffer(), 0, 2, true);
+  ASSERT_NE(bus_mapping, nullptr);
+  ASSERT_TRUE(default_address_space()->Insert(0x10000, bus_mapping.get(), 0));
+  auto mapping = std::make_shared<GpuMapping>(default_address_space(), buffer, kOverflowOffset,
+                                              kPageSize * 2, 0x10000, std::move(bus_mapping));
+  ASSERT_TRUE(default_address_space()->AddMapping(mapping));
+
+  auto command_buffer = std::make_unique<msd::magma_command_buffer>(msd::magma_command_buffer{
+      .resource_count = 1,
+      .batch_buffer_resource_index = 0,
+      .batch_start_offset = kPageSize - 8,
+      .wait_semaphore_count = 0,
+      .signal_semaphore_count = 0,
+      .flags = 0,
+  });
+  std::vector<CommandBuffer::ExecResource> resources;
+  resources.emplace_back(
+      CommandBuffer::ExecResource{.buffer = buffer, .offset = kOverflowOffset, .length = 8});
+
+  auto batch =
+      CommandBuffer::Create(default_context(), 0, std::move(command_buffer), std::move(resources),
+                            std::vector<std::shared_ptr<magma::PlatformSemaphore>>{});
+  ASSERT_NE(batch, nullptr);
+  ASSERT_TRUE(batch->PrepareForExecution());
+  EXPECT_EQ(batch->GetBatchBufferWriteOffset(), std::nullopt);
+  EXPECT_FALSE(batch->IsValidBatch());
+}

@@ -5,30 +5,6 @@
 import("//build/components.gni")
 import("//build/test.gni")
 
-# Implementation of the logging compatibility layer for DFv1 drivers.
-# If a DFv1 driver has `:zxlogf` in its dependency, it must also add this target
-# to its `deps`.
-source_set("logging-dfv1") {
-  sources = [ "logging-dfv1.cc" ]
-  public_deps = [ ":logging" ]
-  deps = [
-    "//src/lib/ddk",
-    "//zircon/system/public",
-  ]
-}
-
-# Implementation of the logging compatibility layer for DFv2 drivers.
-# If a DFv2 driver has `:zxlogf` in its dependency, it must also add this target
-# to its `deps`.
-source_set("logging-dfv2") {
-  sources = [ "logging-dfv2.cc" ]
-  public_deps = [ ":logging" ]
-  deps = [
-    "//sdk/lib/driver/logging/cpp",
-    "//zircon/system/public",
-  ]
-}
-
 test("logging-dfv1-tests-bin") {
   output_name = "logging-dfv1-tests"
   sources = [
@@ -50,39 +26,6 @@ test("logging-dfv1-tests-bin") {
 
 fuchsia_unittest_package("logging-dfv1-tests") {
   deps = [ ":logging-dfv1-tests-bin" ]
-  test_specs = {
-    log_settings = {
-      max_severity = "ERROR"
-    }
-  }
-}
-
-test("logging-dfv2-tests-bin") {
-  output_name = "logging-dfv2-tests"
-  sources = [
-    "logging-dfv2-driver-test.cc",
-    "logging-dfv2-hardware-module-test.cc",
-  ]
-
-  deps = [
-    ":logging-dfv2",
-    "testing:dfv2-driver-with-logging",
-    "testing:logging-hardware-module",
-    "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
-    "//sdk/lib/driver/component/cpp",
-    "//sdk/lib/driver/testing/cpp",
-    "//sdk/lib/driver/testing/cpp:scoped_global_logger",
-    "//src/lib/diagnostics/fake-log-sink/cpp",
-    "//src/lib/fxl/test:gtest_main",
-    "//src/lib/testing/predicates",
-    "//third_party/googletest:gtest",
-    "//zircon/system/ulib/zx",
-  ]
-}
-
-fuchsia_unittest_package("logging-dfv2-tests") {
-  deps = [ ":logging-dfv2-tests-bin" ]
-  manifest = "meta/logging-dfv2-tests.cml"
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -137,4 +80,84 @@ source_set("zxlogf") {
     "//src/graphics/display/lib/driver-framework-migration-utils/logging/testing:*",
   ]
   public_deps = [ ":logging" ]
+}
+
+source_set("logging-dfv1") {
+  sources = [ "logging-dfv1.cc" ]
+  deps = [
+    "//src/lib/ddk",
+    "//zircon/system/public",
+  ]
+  visibility = [
+    ":*",
+    "//src/devices/bus/lib/virtio:*",
+    "//src/devices/lib/goldfish/pipe_io:*",
+  ]
+  public_deps = [ ":logging" ]
+}
+
+source_set("logging-dfv2") {
+  sources = [ "logging-dfv2.cc" ]
+  deps = [
+    "//sdk/lib/driver/logging/cpp",
+    "//zircon/system/public",
+  ]
+  visibility = [
+    ":*",
+    "//src/devices/bus/lib/virtio:*",
+    "//src/graphics/display/drivers/goldfish-display:*",
+  ]
+  public_deps = [ ":logging" ]
+}
+
+cc_test_executable("logging-dfv2-tests-bin") {
+  sources = [
+    "logging-dfv2-driver-test.cc",
+    "logging-dfv2-hardware-module-test.cc",
+  ]
+  output_name = "logging-dfv2-tests"
+  deps = [
+    ":logging-dfv2",
+    "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+    "//sdk/lib/driver/component/cpp",
+    "//sdk/lib/driver/testing/cpp",
+    "//sdk/lib/driver/testing/cpp:scoped_global_logger",
+    "//src/graphics/display/lib/driver-framework-migration-utils/logging/testing:dfv2-driver-with-logging",
+    "//src/graphics/display/lib/driver-framework-migration-utils/logging/testing:logging-hardware-module",
+    "//src/lib/diagnostics/fake-log-sink/cpp",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/predicates",
+    "//third_party/googletest:gtest",
+    "//zircon/system/ulib/zx",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+renamed_binary("logging-dfv2-tests-packaged-bin") {
+  testonly = true
+  source = "$root_out_dir/logging-dfv2-tests"
+  source_deps = [ ":logging-dfv2-tests-bin" ]
+  dest = "test/logging-dfv2-tests"
+}
+
+fuchsia_component_manifest("logging-dfv2-tests-manifest") {
+  testonly = true
+  component_name = "logging-dfv2-tests"
+  manifest = "meta/logging-dfv2-tests.cml"
+}
+
+fuchsia_test_component("logging-dfv2-tests-component") {
+  cm_label = ":logging-dfv2-tests-manifest"
+  deps = [ ":logging-dfv2-tests-packaged-bin" ]
+}
+
+fuchsia_test_package("logging-dfv2-tests") {
+  package_name = "logging-dfv2-tests-gn"
+  test_components = [ ":logging-dfv2-tests-component" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
 }

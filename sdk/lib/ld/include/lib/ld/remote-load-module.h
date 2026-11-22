@@ -11,6 +11,7 @@
 #include <lib/fit/result.h>
 
 #include <algorithm>
+#include <concepts>
 #include <type_traits>
 #include <vector>
 
@@ -34,11 +35,11 @@ namespace ld {
 enum class RemoteLoadZygote : bool { kNo = false, kYes = true };
 
 // This is an implementation detail of RemoteLoadModule, below.
-template <class Elf>
+template <elfldltl::ElfApi Elf>
 using RemoteLoadModuleBase = LoadModule<typename RemoteDecodedModule<Elf>::Ptr>;
 
 // Also known as RemoteDynamicLinker::Module.
-template <class Elf = elfldltl::Elf<>, RemoteLoadZygote Zygote = RemoteLoadZygote::kNo>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>, RemoteLoadZygote Zygote = RemoteLoadZygote::kNo>
 class RemoteLoadModule : public RemoteLoadModuleBase<Elf> {
  public:
   using Base = RemoteLoadModuleBase<Elf>;
@@ -137,7 +138,7 @@ class RemoteLoadModule : public RemoteLoadModuleBase<Elf> {
       Zygote == RemoteLoadZygote::kYes,          //
       elfldltl::SegmentWithVmo::CopySegmentVmo,  //
       elfldltl::SegmentWithVmo::NoCopySegmentVmo>;
-  static_assert(std::is_base_of_v<SegmentVmo, Loader::SegmentVmo<LoadInfo>>);
+  static_assert(std::derived_from<Loader::SegmentVmo<LoadInfo>, SegmentVmo>);
 
   RemoteLoadModule() = default;
 

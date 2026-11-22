@@ -77,7 +77,6 @@ rustc_test("power_residency_test") {
          [
            "//src/lib/fidl/rust/fidl",
            "//src/lib/fuchsia",
-           "//src/lib/fuchsia-async",
            "//third_party/rust_crates:futures",
          ]
   output_name = "starnix_modules_power_residency_lib_test"

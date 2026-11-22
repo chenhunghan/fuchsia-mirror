@@ -70,7 +70,7 @@ fit::result<Error, void*> RuntimeDynamicLinker::LookupSymbol(const RuntimeModule
   ld::ScopedModuleDiagnostics root_diag{diag, root.name().str()};
 
   elfldltl::SymbolName name{ref};
-  // TODO(https://fxbug.dev/370087572): properly handle weak symbols.
+  // TODO(https://fxbug.dev/428046261): properly handle weak symbols.
   for (const RuntimeModule& module : root.module_tree()) {
     if (const auto* sym = name.Lookup(module.symbol_info())) {
       bool is_tls = sym->type() == elfldltl::ElfSymType::kTls;

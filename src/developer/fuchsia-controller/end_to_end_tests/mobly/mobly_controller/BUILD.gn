@@ -34,8 +34,11 @@ python_library("mobly_controller") {
     "__init__.py",
     "fuchsia_device.py",
   ]
+  imports = [ ".." ]
   visibility = [
     ":*",
     "//src/developer/fuchsia-controller/end_to_end_tests/mobly:*",
   ]
+  deps = [ "//third_party/mobly" ]
+  enable_mypy = false
 }

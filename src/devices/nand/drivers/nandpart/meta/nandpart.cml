@@ -16,9 +16,16 @@
         default_dispatcher_opts: [ "allow_sync_calls" ],
         bind: "meta/bind/nandpart.bindbc",
     },
-    capabilities: [],
+    capabilities: [
+        { service: "fuchsia.hardware.badblock.Service" },
+    ],
     use: [
         { service: "fuchsia.boot.metadata.PartitionMap" },
     ],
-    expose: [],
+    expose: [
+        {
+            service: "fuchsia.hardware.badblock.Service",
+            from: "self",
+        },
+    ],
 }

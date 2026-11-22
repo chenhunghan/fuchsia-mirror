@@ -1117,7 +1117,7 @@ class UnionPayload {
   UnionPayload(UnionPayload&&) = default;
   UnionPayload& operator=(UnionPayload&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
   };
 
@@ -1134,7 +1134,7 @@ class UnionPayload {
   ::test_protocollayoutssamelibrary::wire::UnionPayload::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kB = 1,  // 0x1
   };
@@ -1154,7 +1154,7 @@ class ComposedProtocolTwoWayAnonComposedRequest {
   ComposedProtocolTwoWayAnonComposedRequest(ComposedProtocolTwoWayAnonComposedRequest&&) = default;
   ComposedProtocolTwoWayAnonComposedRequest& operator=(ComposedProtocolTwoWayAnonComposedRequest&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
   };
 
@@ -1171,7 +1171,7 @@ class ComposedProtocolTwoWayAnonComposedRequest {
   ::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedRequest::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kB = 1,  // 0x1
   };
@@ -1191,7 +1191,7 @@ class ComposedProtocolTwoWayAnonComposedWithErrorResponse {
   ComposedProtocolTwoWayAnonComposedWithErrorResponse(ComposedProtocolTwoWayAnonComposedWithErrorResponse&&) = default;
   ComposedProtocolTwoWayAnonComposedWithErrorResponse& operator=(ComposedProtocolTwoWayAnonComposedWithErrorResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
   };
 
@@ -1208,7 +1208,7 @@ class ComposedProtocolTwoWayAnonComposedWithErrorResponse {
   ::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedWithErrorResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kB = 1,  // 0x1
   };
@@ -1230,7 +1230,7 @@ class ComposedProtocolTwoWayAnonComposedWithErrorResult {
   ComposedProtocolTwoWayAnonComposedWithErrorResult(ComposedProtocolTwoWayAnonComposedWithErrorResult&&) = default;
   ComposedProtocolTwoWayAnonComposedWithErrorResult& operator=(ComposedProtocolTwoWayAnonComposedWithErrorResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -1262,7 +1262,7 @@ class ComposedProtocolTwoWayAnonComposedWithErrorResult {
   ::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedWithErrorResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -1283,7 +1283,7 @@ class ComposedProtocolOnAnonComposedRequest {
   ComposedProtocolOnAnonComposedRequest(ComposedProtocolOnAnonComposedRequest&&) = default;
   ComposedProtocolOnAnonComposedRequest& operator=(ComposedProtocolOnAnonComposedRequest&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
   };
 
@@ -1300,7 +1300,7 @@ class ComposedProtocolOnAnonComposedRequest {
   ::test_protocollayoutssamelibrary::wire::ComposedProtocolOnAnonComposedRequest::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kB = 1,  // 0x1
   };
@@ -1320,7 +1320,7 @@ class ComposedProtocolTwoWayNamedComposedWithErrorResult {
   ComposedProtocolTwoWayNamedComposedWithErrorResult(ComposedProtocolTwoWayNamedComposedWithErrorResult&&) = default;
   ComposedProtocolTwoWayNamedComposedWithErrorResult& operator=(ComposedProtocolTwoWayNamedComposedWithErrorResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -1352,7 +1352,7 @@ class ComposedProtocolTwoWayNamedComposedWithErrorResult {
   ::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayNamedComposedWithErrorResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -1373,7 +1373,7 @@ class MainProtocolTwoWayLocalWithErrorResult {
   MainProtocolTwoWayLocalWithErrorResult(MainProtocolTwoWayLocalWithErrorResult&&) = default;
   MainProtocolTwoWayLocalWithErrorResult& operator=(MainProtocolTwoWayLocalWithErrorResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -1405,7 +1405,7 @@ class MainProtocolTwoWayLocalWithErrorResult {
   ::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayLocalWithErrorResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -1426,9 +1426,9 @@ class MainProtocolTwoWayAnonRequest {
   MainProtocolTwoWayAnonRequest(MainProtocolTwoWayAnonRequest&&) = default;
   MainProtocolTwoWayAnonRequest& operator=(MainProtocolTwoWayAnonRequest&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnonRequest::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -1447,7 +1447,7 @@ class MainProtocolTwoWayAnonRequest {
   ::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnonRequest::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kB = 1,  // 0x1
   };
@@ -1467,9 +1467,9 @@ class MainProtocolTwoWayAnonWithErrorResponse {
   MainProtocolTwoWayAnonWithErrorResponse(MainProtocolTwoWayAnonWithErrorResponse&&) = default;
   MainProtocolTwoWayAnonWithErrorResponse& operator=(MainProtocolTwoWayAnonWithErrorResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnonWithErrorResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -1488,7 +1488,7 @@ class MainProtocolTwoWayAnonWithErrorResponse {
   ::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnonWithErrorResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kB = 1,  // 0x1
   };
@@ -1510,7 +1510,7 @@ class MainProtocolTwoWayAnonWithErrorResult {
   MainProtocolTwoWayAnonWithErrorResult(MainProtocolTwoWayAnonWithErrorResult&&) = default;
   MainProtocolTwoWayAnonWithErrorResult& operator=(MainProtocolTwoWayAnonWithErrorResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -1542,7 +1542,7 @@ class MainProtocolTwoWayAnonWithErrorResult {
   ::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnonWithErrorResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -1563,9 +1563,9 @@ class MainProtocolOnAnonRequest {
   MainProtocolOnAnonRequest(MainProtocolOnAnonRequest&&) = default;
   MainProtocolOnAnonRequest& operator=(MainProtocolOnAnonRequest&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_protocollayoutssamelibrary::wire::MainProtocolOnAnonRequest::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -1584,7 +1584,7 @@ class MainProtocolOnAnonRequest {
   ::test_protocollayoutssamelibrary::wire::MainProtocolOnAnonRequest::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kB = 1,  // 0x1
   };

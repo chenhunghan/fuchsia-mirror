@@ -38,5 +38,4 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "test_root_info.json"
 }

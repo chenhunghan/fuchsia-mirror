@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+# //tools/symbolizer is not yet migrated to Bazel; keep the GN runtime data_deps.
+# @bazel2gn:raw_attribute:data_deps = [ "//tools/symbolizer" ]
+ffx_plugin(
+    name = "ffx_debug_symbolize",
+    srcs = ["src/lib.rs"],
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx/plugins/debug:__pkg__"],
+    deps = [
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/symbol-index:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)

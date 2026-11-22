@@ -79,7 +79,7 @@ TEST_P(IoctlInvalidTest, InvalidRequest) {
     GTEST_SKIP() << "SIOCSIFFLAGS requires root, skipping...";
   }
 
-  ifreq ifr;
+  ifreq ifr = {};
   ifr.ifr_addr = {.sa_family = family};
   if (if_index.has_value()) {
     ifr.ifr_ifindex = if_index.value();
@@ -155,7 +155,7 @@ INSTANTIATE_TEST_SUITE_P(IoctlInvalidTest, IoctlInvalidTest,
                              }));
 
 void GetIfAddr(fbl::unique_fd& fd, in_addr_t expected_addr) {
-  ifreq ifr;
+  ifreq ifr = {};
   ifr.ifr_addr = {.sa_family = AF_INET};
   strncpy(ifr.ifr_name, kLoopbackIfName, IFNAMSIZ);
   ASSERT_EQ(ioctl(fd.get(), SIOCGIFADDR, &ifr), 0) << strerror(errno);
@@ -172,7 +172,7 @@ TEST_F(IoctlTest, SIOCGIFADDR_Success) {
 }
 
 void SetIfAddr(fbl::unique_fd& fd, in_addr_t addr) {
-  ifreq ifr;
+  ifreq ifr = {};
   *(reinterpret_cast<sockaddr_in*>(&ifr.ifr_addr)) = sockaddr_in{
       .sin_family = AF_INET,
       .sin_addr = {.s_addr = addr},
@@ -251,7 +251,7 @@ void InstallIpv4AddressOnInterface(const char* if_name, in_addr_t addr, uint8_t 
     ifaddrmsg ifa;
     rtattr rta;
     in_addr in_addr;
-  } req;
+  } req = {};
 
   req.hdr.nlmsg_len = NLMSG_LENGTH(sizeof(ifaddrmsg)) + RTA_LENGTH(sizeof(in_addr));
   req.hdr.nlmsg_type = RTM_NEWADDR;
@@ -351,7 +351,7 @@ TEST_F(IoctlTest, SIOCSIFADDR_WithMultipleAddressesOnInterface) {
 }
 
 void GetIfNetmask(fbl::unique_fd& fd, in_addr_t expected_addr) {
-  ifreq ifr;
+  ifreq ifr = {};
   ifr.ifr_netmask = {.sa_family = AF_INET};
   strncpy(ifr.ifr_name, kLoopbackIfName, IFNAMSIZ);
   ASSERT_EQ(ioctl(fd.get(), SIOCGIFNETMASK, &ifr), 0) << strerror(errno);
@@ -369,7 +369,7 @@ TEST_F(IoctlTest, SIOCGIFNETMASK_Success) {
 }
 
 void SetIfNetmask(fbl::unique_fd& fd, in_addr_t addr) {
-  ifreq ifr;
+  ifreq ifr = {};
   *(reinterpret_cast<sockaddr_in*>(&ifr.ifr_netmask)) = sockaddr_in{
       .sin_family = AF_INET,
       .sin_addr = {.s_addr = addr},
@@ -430,7 +430,7 @@ TEST_F(IoctlTest, SIOCSIFNETMASK_WithMultipleAddressesOnInterface) {
 }
 
 short GetLoopbackIfFlags(fbl::unique_fd& fd) {
-  ifreq ifr;
+  ifreq ifr = {};
   strncpy(ifr.ifr_name, kLoopbackIfName, IFNAMSIZ);
   EXPECT_EQ(ioctl(fd.get(), SIOCGIFFLAGS, &ifr), 0) << strerror(errno);
 
@@ -443,7 +443,7 @@ TEST_F(IoctlTest, SIOCGIFFLAGS_Success) {
 }
 
 void SetLoopbackIfFlags(fbl::unique_fd& fd, short flags) {
-  ifreq ifr;
+  ifreq ifr = {};
   strncpy(ifr.ifr_name, kLoopbackIfName, IFNAMSIZ);
   ifr.ifr_ifru.ifru_flags = flags;
   ASSERT_EQ(ioctl(fd.get(), SIOCSIFFLAGS, &ifr), 0) << strerror(errno);
@@ -576,24 +576,21 @@ TEST_F(IoctlTest, FIONREAD_StreamSocket_Success) {
 }
 
 TEST_F(IoctlTest, FIONREAD_StreamSocket_DataAvailable) {
-  int fds[2];
-  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0) << strerror(errno);
+  test_helper::ScopedSocketPair fds;
+  ASSERT_TRUE(fds);
 
   const char data[] = "hello";
-  ASSERT_EQ(write(fds[0], data, sizeof(data)), static_cast<ssize_t>(sizeof(data)))
+  ASSERT_EQ(write(fds[0].get(), data, sizeof(data)), static_cast<ssize_t>(sizeof(data)))
       << strerror(errno);
 
   struct pollfd pfd = {};
-  pfd.fd = fds[1];
+  pfd.fd = fds[1].get();
   pfd.events = POLLIN;
   ASSERT_EQ(poll(&pfd, 1, -1), 1) << strerror(errno);
 
   int available = -1;
-  ASSERT_EQ(ioctl(fds[1], FIONREAD, &available), 0) << strerror(errno);
+  ASSERT_EQ(ioctl(fds[1].get(), FIONREAD, &available), 0) << strerror(errno);
   EXPECT_EQ(available, static_cast<int>(sizeof(data)));
-
-  close(fds[0]);
-  close(fds[1]);
 }
 
 }  // namespace

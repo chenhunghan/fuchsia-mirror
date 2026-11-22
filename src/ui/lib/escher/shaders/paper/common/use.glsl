@@ -19,11 +19,6 @@ layout(location = 1) in vec3 inPositionOffset;
 layout(location = 2) in vec2 inUV;
 #endif
 
-// 'location' corresponds to PaperRenderFuncs::kMeshAttributeBindingLocations::perimeter_pos.
-#ifdef USE_ATTRIBUTE_PERIMETER
-layout(location = 3) in vec2 inPerimeter;
-#endif
-
 // 'location' corresponds to PaperRenderFuncs::kMeshAttributeBindingLocations::blend_weight1.
 #ifdef USE_ATTRIBUTE_BLEND_WEIGHT_1
 layout(location = 4) in vec2 inBlendWeight;

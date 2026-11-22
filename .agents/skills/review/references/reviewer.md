@@ -12,7 +12,7 @@ Your prompt gives you:
   `git`).
 - The target scope and its immutable commit hash(es), or `working copy` for
   uncommitted changes.
-- The effort level: `quick`, `standard` (default), or `deep`.
+- The effort level: `quick`, `standard` (default), `deep`, or `simplify`.
 - An intent summary of the change.
 - Your task: a `skill_path` and its `files`, `general` with all retained
   changed files, or (in `quick` mode) all retained changed files plus any
@@ -36,6 +36,10 @@ Match your context-reading depth to the effort level:
 - `deep`: Beyond the diff, actively trace callers, callees, trait/interface
   implementations, FIDL/IPC/syscall wire contracts, lock-ordering and async
   cancellation invariants, and edge-case test coverage across neighboring files.
+- `simplify`: Read the diff and full touched functions, types, and tests, and
+  search callers and sibling/shared libraries (`git grep` or `rg`, excluding
+  `//out`) to verify unused machinery, existing in-tree helpers, and
+  data-structure or layer boundaries.
 
 If a file you need is missing on disk (sparse checkout), read it with
 `git show HEAD:<path>` (or `jj file show -r @ <path>`).
@@ -50,9 +54,9 @@ If a file you need is missing on disk (sparse checkout), read it with
   combine their critical correctness/safety rules with `general` review in one
   pass. Because `general` is included, never set `decision: not_applicable` in
   `quick` mode, and list every skill you read plus `general` in `agent_skills`.
-- For a single-skill task (`standard` or `deep`), if the skill's rules don't
-  apply to the assigned changes, write a result with `decision: not_applicable`
-  and no findings; don't stretch the rules to fit.
+- For a single-skill task (`standard`, `deep`, or `simplify`), if the skill's
+  rules don't apply to the assigned changes, write a result with
+  `decision: not_applicable` and no findings; don't stretch the rules to fit.
 - For `general`, review for correctness, error handling, edge cases,
   concurrency and resource lifetimes, missing or inadequate tests, and
   consistency with the style of the surrounding code and the guidance in
@@ -65,9 +69,13 @@ If a file you need is missing on disk (sparse checkout), read it with
   diff. Assign an integer `confidence` (`0`-`100`) to each finding and emit only
   `blocking` findings with `confidence >= 90`; skip style, docs, minor
   suggestions, and pre-existing issues.
-- In `standard` and `deep` modes: Check every changed hunk of every file in
-  your task against every applicable rule. Do not stop after the first few
-  findings; report minor suggestions too.
+- In `standard`, `deep`, and `simplify` modes: Check every changed hunk of
+  every file in your task against every applicable rule. Do not stop after the
+  first few findings; report minor suggestions too. When running the
+  `code-simplification` skill (in `deep` or `simplify` mode), emit all findings
+  with `"severity": "suggestion"` (never `"blocking"`) and evaluate only newly
+  added or modified code (never report `pre_existing` simplifications on
+  untouched or verbatim-moved code).
 - **Pre-existing issues (`pre_existing`)**: Focus on changes introduced by the
   diff; do not audit untouched code outside changed hunks. However, in
   `standard` or `deep` mode, if the change moves code verbatim or newly
@@ -80,8 +88,8 @@ If a file you need is missing on disk (sparse checkout), read it with
 - If a finding depends on an external peer (firmware, hardware, a remote
   component) behaving a certain way, confirm that the peer can do so before
   reporting it. Use a domain skill's contract or source pointers when one is
-  provided, and cite the peer code in `comment`. Don't add handling for peer
-  behavior you can't show is possible.
+  provided, and cite the peer code in `why` or `trace`. Don't add handling for
+  peer behavior you can't show is possible.
 
 ## Step 4: Write the result
 
@@ -97,7 +105,12 @@ Write a single JSON object to your output file:
     {
       "severity": "blocking",
       "category": "logic",
-      "comment": "`items[0]` panics when `items` is empty, which happens when ...",
+      "headline": "Empty input slice panics when indexing the first item",
+      "why": "Indexing the first element directly panics when the caller passes an empty slice.",
+      "details": [
+        "Callers pass an empty slice when no items match the filter."
+      ],
+      "action": "Return early when the slice is empty before reading the first element.",
       "rule_reference": "rust_best_practices/panics",
       "rule_link": "file:///abs/path/.agents/skills/rust_best_practices/SKILL.md#L42-L46",
       "file_path": "src/foo/lib.rs",
@@ -105,7 +118,11 @@ Write a single JSON object to your output file:
       "line_end": 20,
       "code_snippet": "let first = items[0];",
       "revision": "14c81ce2ca58",
-      "suggested_diff": "-let first = items[0];\n+let Some(first) = items.first() else { return Ok(()) };"
+      "suggested_diff": "-let first = items[0];\n+let Some(first) = items.first() else { return Ok(()) };",
+      "trace": [
+        "Caller path: `load_items` passes unfiltered results directly into this helper."
+      ],
+      "trace_title": "Callers and reproduction"
     }
   ]
 }
@@ -124,7 +141,17 @@ Write a single JSON object to your output file:
   mode, where only `confidence >= 90` is emitted).
 - `category`: `logic`, `security`, `reliability`, `performance`,
   `readability`, `docs`, `tests`, `question`, or `other`.
-- `comment` *(required)*: the defect and why it matters.
+- `headline` *(required)*: short plain-English title of the defect or
+  improvement, without repeating the file path, line numbers, or
+  `[Pre-existing]`.
+- `why` *(required)*: 1 to 2 short plain-English sentences explaining what fails
+  and why it matters.
+- `details` *(optional)*: list of short supporting strings when extra context
+  helps explain `why`.
+- `action` *(optional)*: 1 plain-English sentence stating what to change.
+- `trace` and `trace_title` *(optional)*: list of short strings (`trace`) for
+  CLI commands, symbol ownership chains, or multi-step traces, collapsed under
+  `trace_title` (defaults to `"Supporting details"`).
 - `rule_reference` and `rule_link`: the skill rule behind the finding, linked
   as `file://<absolute skill_path>#L<start>-L<end>`. For `general` findings,
   set `rule_reference` to `general/<category>` (for example `general/logic`)
@@ -136,6 +163,29 @@ Write a single JSON object to your output file:
   `findings[]` and `reviewed_files[]` for uncommitted changes.
 - `suggested_diff`: optional; `-` and `+` lines only, no file headers or code
   fences.
+
+### Writing style
+
+Follow these rules in `headline`, `why`, `details`, `action`, and `trace`:
+
+1. Write short, direct sentences with no em dashes or en dashes as clause
+   connectors and no AI filler.
+2. Use at most 2 inline backticked `` `code` `` spans per sentence. Refer to
+   internal types, fields, and parameters by their plain-English role first,
+   and reserve backticks for the 1 to 2 symbols the author needs to locate or
+   edit.
+3. Do not repeat exact code expressions, parameter types, or `#include` lines
+   in `action` when `suggested_diff` follows. State the intent in plain words
+   and let the diff carry the syntax.
+4. Format supporting file and doc citations as proportional
+   `[basename:line](file:///...)` Markdown links at the end of a clause rather
+   than mid-sentence monospace paths, and do not echo line numbers already
+   anchored by the finding header or diff.
+5. Put CLI reproduction or sync commands (such as `fx build` or `fx test`) and
+   multi-step symbol ownership chains into `trace` items instead of prose
+   sentences. Apply all technical checks from loaded domain skills while keeping
+   this concise plain-English output format even if a domain skill suggests
+   long-form teaching prose.
 
 ## Step 5: Report back
 

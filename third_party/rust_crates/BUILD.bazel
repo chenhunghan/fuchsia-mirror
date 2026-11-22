@@ -38,12 +38,14 @@ package_group(
 package_group(
     name = "once_cell_visibility",
     packages = [
+        "//src/connectivity/network/netstack3",
         "//src/lib/async-utils",
         "//src/starnix/kernel/core",
         "//src/starnix/modules/ashmem",
         "//src/starnix/modules/ext4",
         "//src/starnix/modules/overlayfs",
         "//src/storage/ext4",
+        "//tools/shush",
 
         # Not enforced, matching visibility.gni.
         "//third_party/...",
@@ -82,7 +84,20 @@ package_group(
 package_group(
     name = "regex_visibility",
     packages = [
+        "//examples/fidl/new/key_value_store/add_iterator/rust/server",
+        "//examples/fidl/new/key_value_store/add_iterator/rust_next/server",
         "//examples/fidl/new/key_value_store/add_read_item/rust/server",
+        "//examples/fidl/new/key_value_store/add_read_item/rust_next/server",
+        "//examples/fidl/new/key_value_store/baseline/rust/server",
+        "//examples/fidl/new/key_value_store/baseline/rust_next/server",
+        "//examples/fidl/new/key_value_store/support_exports/rust/server",
+        "//examples/fidl/new/key_value_store/support_exports/rust_next/server",
+        "//examples/fidl/new/key_value_store/support_trees/rust/server",
+        "//examples/fidl/new/key_value_store/support_trees/rust_next/server",
+        "//examples/fidl/new/key_value_store/use_generic_values/rust/server",
+        "//examples/fidl/new/key_value_store/use_generic_values/rust_next/server",
+        "//src/connectivity/bluetooth/tools/bt-cli",
+        "//src/connectivity/lowpan/drivers/lowpan-ot-driver",
         "//src/connectivity/wlan/lib/ieee80211-testutils",
         "//src/connectivity/wlan/lib/sme",
         "//src/connectivity/wlan/wlancfg",
@@ -92,6 +107,8 @@ package_group(
         "//src/developer/ffx/lib/target_errors",
         "//src/developer/ffx/lib/trace",
         "//src/developer/ffx/playground",
+        "//src/developer/ffx/plugins/doctor",
+        "//src/developer/ffx/plugins/emulator/commands/start",
         "//src/developer/ffx/plugins/forward",
         "//src/developer/ffx/plugins/fuzz",
         "//src/developer/ffx/plugins/platform/preflight",
@@ -102,6 +119,7 @@ package_group(
         "//src/developer/ffx/plugins/profile/temperature/logger",
         "//src/developer/ffx/plugins/sdk",
         "//src/developer/ffx/plugins/setui/keyboard",
+        "//src/developer/ffx/plugins/trace",
         "//src/developer/ffx/tools/bluetooth/common",
         "//src/developer/ffx/tools/bluetooth/src/peer",
         "//src/devices/lib/fidl-ir",
@@ -119,11 +137,14 @@ package_group(
         "//src/sys/fuzzing/fuzzctl",
         "//src/sys/lib/cm_fidl_validator",
         "//src/sys/pkg/lib/fuchsia-pkg",
+        "//src/sys/test_runners/rust",
         "//tools/doc_checker",
+        "//tools/fidl/example-tester",
         "//tools/fidl/fidldoc",
         "//tools/gn_desc/bin",
         "//tools/gtest_test_parser",
         "//tools/pretty_serial",
+        "//tools/shush",
         "//tools/zedmon/client",
 
         # Matches visibility.gni, which allows all of vendor/ without exposing

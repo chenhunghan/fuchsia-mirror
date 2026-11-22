@@ -1,0 +1,175 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":netemul-tests"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "netemul_sandbox",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.test:fuchsia.component.test_rust",
+        "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
+        "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token_rust",
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        "//sdk/fidl/fuchsia.net.tun:fuchsia.net.tun_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//sdk/fidl/fuchsia.tracing.provider:fuchsia.tracing.provider_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/network/testing/netemul/fidl:fuchsia.netemul_rust",
+        "//src/connectivity/network/testing/netemul/network-context/fidl:network_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-sync",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "netemul_sandbox_bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    proc_macro_deps = ["//src/lib/testing/fixture"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/connectivity/network/testing/netemul/test-support:fidl_rust",
+        "//src/lib/diagnostics/data/rust",
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/diagnostics/selectors",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "netemul_sandbox",
+)
+
+fx_component_manifest(
+    name = "netemul-sandbox_manifest",
+    component_name = "netemul-sandbox",
+    includes = ["//src/connectivity/network/testing/netemul/service/meta:common.shard"],
+    manifest = "//src/connectivity/network/testing/netemul/service/meta:netemul-sandbox.cml",
+)
+
+fx_component(
+    name = "netemul-sandbox",
+    compiled_manifest = ":netemul-sandbox_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "netemul-sandbox",
+    components = [
+        ":netemul-sandbox",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    subpackages = [
+        "//src/connectivity/network/testing/netemul/network-context:package",
+        "//src/connectivity/network/tun/network-tun",
+    ],
+    visibility = ["//src/connectivity/network:__subpackages__"],
+)
+
+fx_packaged_binary(
+    name = "bin_test_packaged",
+    testonly = True,
+    binary = ":netemul_sandbox_bin_test",
+    binary_name = "netemul_sandbox_bin_test",
+)
+
+fx_component_manifest(
+    name = "netemul-sandbox-tests_manifest",
+    testonly = True,
+    component_name = "netemul-sandbox-tests",
+    includes = [
+        "//src/connectivity/network/testing/netemul/service/meta:collection.shard",
+        "//src/connectivity/network/testing/netemul/service/meta:common.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "//src/connectivity/network/testing/netemul/service/meta:netemul-sandbox-tests.cml",
+)
+
+fx_test_component(
+    name = "netemul-sandbox-tests",
+    compiled_manifest = ":netemul-sandbox-tests_manifest",
+    deps = [
+        ":bin_test_packaged",
+        "//src/connectivity/network/testing/netemul/test-support:counter",
+        "//src/connectivity/network/testing/netemul/test-support:counter-alternative",
+        "//src/connectivity/network/testing/netemul/test-support:counter-with-shutdown",
+        "//src/connectivity/network/testing/netemul/test-support:counter-without-program",
+    ],
+)
+
+fx_package(
+    name = "counter-subpackage",
+    testonly = True,
+    components = ["//src/connectivity/network/testing/netemul/test-support:counter"],
+)
+
+fx_package(
+    name = "netemul-tests_package",
+    package_name = "netemul-tests",
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    subpackages = [
+        ":counter-subpackage",
+        "//src/connectivity/network/testing/netemul/network-context:package",
+        "//src/connectivity/network/tun/network-tun",
+    ],
+    test_components = [":netemul-sandbox-tests"],
+)
+
+fx_test(
+    name = "netemul-tests",
+    package = ":netemul-tests_package",
+    # TODO(https://fxbug.dev/42162845): run tests in parallel when this doesn't
+    # cause embedded archivist to crash.
+    parallel = 1,
+)

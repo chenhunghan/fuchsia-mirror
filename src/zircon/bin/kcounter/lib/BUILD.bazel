@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    tests = [":kcounter_lib_host_test"],
+    visibility = ["//src/zircon:__pkg__"],
+)
+
+# Code shared between the kcounter tool and its test: command line parsing
+# and, on Fuchsia, read-only views of the kernel counter VMOs.
+rustc_library(
+    name = "kcounter-lib",
+    srcs = [
+        "src/cmdline.rs",
+        "src/lib.rs",
+        "src/vmo.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/zircon/bin/kcounter:__pkg__",
+        "//src/zircon/tests/kcounter:__pkg__",
+    ],
+    deps = select({
+        "@platforms//os:fuchsia": [
+            "//sdk/rust/zx",
+            "//src/lib/fuchsia-runtime",
+            "//third_party/rust_crates/vendor:zerocopy",
+            "//zircon/kernel/lib/counters/abi:counters-abi",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+rustc_test(
+    name = "kcounter_lib_test",
+    crate = ":kcounter-lib",
+)
+
+wrap_host_rust_test(
+    name = "kcounter_lib_host_test",
+    binary_name = "kcounter_lib_test",
+)

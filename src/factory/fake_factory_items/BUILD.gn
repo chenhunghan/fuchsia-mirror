@@ -2,46 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/bazel/bazel_test_suite.gni")
-import("//build/components.gni")
-import("//build/dist/resource.gni")
-
-fuchsia_test_component("fake_factory_items_test_comp") {
-  component_name = "fake_factory_items_test"
-  manifest = "meta/fake_factory_items_test.cml"
-  deps = [ ":fake_factory_items_test" ]
-}
-
-fuchsia_test_package("fake_factory_items_tests") {
-  package_name = "fake_factory_items_tests-gn"
-  test_components = [ ":fake_factory_items_test_comp" ]
-  deps = [
-    ":fake_factory_items_comp",
-    ":testdata",
-  ]
-}
-
-resource("testdata") {
-  testonly = true
-  sources = [
-    "testdata/empty",
-    "testdata/fake_factory_items.json",
-    "testdata/random1",
-    "testdata/random2",
-  ]
-  outputs = [ "data/{{source_file_part}}" ]
-}
-
-bazel_test_suite("bazel_tests") {
-  target_tests = [ "//src/factory/fake_factory_items:fake_factory_items_tests" ]
-}
-
 group("tests") {
   testonly = true
-  deps = [
-    ":bazel_tests",
-    ":fake_factory_items_tests",
-  ]
+  deps = [ ":fake_factory_items_tests" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -111,5 +74,36 @@ rustc_test("fake_factory_items_test") {
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-component",
     "//third_party/rust_crates:anyhow",
+  ]
+}
+
+resource("testdata") {
+  testonly = true
+  sources = [
+    "testdata/empty",
+    "testdata/fake_factory_items.json",
+    "testdata/random1",
+    "testdata/random2",
+  ]
+  outputs = [ "data/{{source_file_part}}" ]
+}
+
+fuchsia_component_manifest("fake_factory_items_test_manifest") {
+  testonly = true
+  component_name = "fake_factory_items_test"
+  manifest = "meta/fake_factory_items_test.cml"
+}
+
+fuchsia_test_component("fake_factory_items_test_comp") {
+  cm_label = ":fake_factory_items_test_manifest"
+  deps = [ ":fake_factory_items_test" ]
+}
+
+fuchsia_test_package("fake_factory_items_tests") {
+  package_name = "fake_factory_items_tests-gn"
+  test_components = [ ":fake_factory_items_test_comp" ]
+  deps = [
+    ":fake_factory_items_comp",
+    ":testdata",
   ]
 }

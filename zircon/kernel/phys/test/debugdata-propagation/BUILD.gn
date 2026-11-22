@@ -7,7 +7,7 @@
 import("//build/testing/boot_tests/kernel_zbi_test.gni")
 import("//build/testing/boot_tests/zbi_test_executable.gni")
 import("//zircon/kernel/phys/test/turducken_zbi_test.gni")
-import("//zircon/kernel/phys/zbi_executable.gni")
+import("//zircon/kernel/phys/zbi-runtime/zbi_executable.gni")
 
 if (current_toolchain != default_toolchain) {
   zbi_executable("debugdata-provider") {
@@ -17,8 +17,8 @@ if (current_toolchain != default_toolchain) {
       "..:turducken",
       "//sdk/lib/zbi-format:internal",
       "//src/lib/zbitl",
-      "//zircon/kernel/phys:symbolize",
       "//zircon/kernel/phys/lib/boot-shim",
+      "//zircon/kernel/phys/runtime",
     ]
   }
 

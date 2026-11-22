@@ -98,7 +98,7 @@ void Runner::CreateDriverComponent(const std::shared_ptr<ComponentOwner>& owner,
   child_args_builder.dynamic_offers(dynamic_offers);
 
   if (offers_dictionary) {
-    child_args_builder.dictionary(fidl::ToWire(arena, std::move(offers_dictionary.value())));
+    child_args_builder.additional_inputs(std::move(offers_dictionary.value()));
   }
 
   std::string child_moniker(moniker);

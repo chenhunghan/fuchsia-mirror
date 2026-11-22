@@ -56,13 +56,13 @@
             },
         },
         {
-            name: "gpio-eth-interrupt",
+            name: "gpio-int",
             service: "fuchsia.hardware.gpio.Service",
             from: "#gpio-controller-ff634400",
             to: "#ethernet-phy-ff634000",
             constraints: {
                 pin: 14,
-                name: "INTERRUPT",
+                name: "gpio-int",
             },
         },
         {

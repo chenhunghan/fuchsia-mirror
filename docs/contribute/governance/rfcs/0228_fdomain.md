@@ -172,7 +172,7 @@ FDomain to achieve its goals:
    conventions around error handling should make this change fairly easy for
    users to navigate.
 
-## Design
+## Design {:#design}
 
 Conceptually, an FDomain is a collection of handles which can be manipulated
 remotely via a set of operations. The FDomain protocol presents these operations

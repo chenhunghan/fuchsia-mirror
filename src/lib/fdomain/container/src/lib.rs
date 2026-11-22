@@ -82,7 +82,7 @@ impl<T> Queue<T> {
 // LINT.IfChange
 const ASYNC_READ_BUFSIZE: u64 = 256 * 1024;
 // LINT.ThenChange(
-//     //src/developer/ffx/lib/target/src/target_connector.rs,
+//     //src/developer/ffx/lib/target/src/transport_connector.rs,
 //     //src/developer/remote-control/fdomain-runner/src/main.rs,
 //     //src/developer/remote-control/runner/src/main.rs
 // )
@@ -688,7 +688,7 @@ impl HandleState {
                 }
             }
         } else {
-            max_bytes
+            std::cmp::min(max_bytes, ASYNC_READ_BUFSIZE)
         };
         self.handle.read_socket(max_bytes).transpose().map(|x| {
             FDomainEvent::SocketData(

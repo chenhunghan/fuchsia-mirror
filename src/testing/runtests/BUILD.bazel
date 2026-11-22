@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/570694755): Verify whether runtests should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+fx_cc_test_binary(
+    name = "runtests",
+    srcs = ["runtests.cc"],
+    # Uses Fuchsia-only Zircon, device-watcher, and runtests-utils APIs.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//:__pkg__",
+        "//products/bringup:__pkg__",
+        "//src/bringup/bin/console-launcher/qemu-tests:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/lib/async",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/device-watcher/cpp",
+        "//sdk/lib/fidl",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/runtests-utils",
+        "//zircon/system/ulib/zircon-internal",
+        "//zircon/system/ulib/zx",
+    ],
+)

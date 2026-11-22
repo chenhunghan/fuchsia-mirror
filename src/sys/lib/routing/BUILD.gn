@@ -93,11 +93,11 @@ rustc_library("routing") {
   ]
   deps = []
   deps += [
-    "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
-    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
-    "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
-    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/fidl/fuchsia.component:fuchsia.component_rust_common",
+    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
+    "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust_common",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust_common",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust_common",
     "//sdk/rust/zx-status",
     "//src/lib/directed_graph",
     "//src/lib/error/clonable_error",
@@ -118,6 +118,7 @@ rustc_library("routing") {
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:itertools",
     "//third_party/rust_crates:log",
+    "//third_party/rust_crates:smallbox",
     "//third_party/rust_crates:thiserror",
     "//third_party/rust_crates:url",
   ]
@@ -126,6 +127,8 @@ rustc_library("routing") {
   }
   if (is_fuchsia) {
     deps += [
+      "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
       "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
       "//src/lib/trace/rust:trace",
       "//src/storage/lib/vfs/rust:vfs",
@@ -170,11 +173,11 @@ rustc_test("routing_test") {
   ]
   deps = []
   deps += [
-    "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
-    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
-    "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
-    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/fidl/fuchsia.component:fuchsia.component_rust_common",
+    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
+    "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust_common",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust_common",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust_common",
     "//sdk/rust/zx-status",
     "//src/lib/directed_graph",
     "//src/lib/error/clonable_error",
@@ -195,6 +198,7 @@ rustc_test("routing_test") {
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:itertools",
     "//third_party/rust_crates:log",
+    "//third_party/rust_crates:smallbox",
     "//third_party/rust_crates:thiserror",
     "//third_party/rust_crates:url",
   ]
@@ -203,6 +207,8 @@ rustc_test("routing_test") {
   }
   if (is_fuchsia) {
     deps += [
+      "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
       "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
       "//src/lib/trace/rust:trace",
       "//src/storage/lib/vfs/rust:vfs",

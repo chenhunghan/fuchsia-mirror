@@ -60,7 +60,6 @@ fuchsia_driver_component("root") {
   component_name = "root"
   dml_label = ":root-dml"
   deps = [ ":root-driver" ]
-  info = "meta/root-info.json"
 }
 
 rustc_test("bin") {

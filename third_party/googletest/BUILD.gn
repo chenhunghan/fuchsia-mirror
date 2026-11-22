@@ -114,9 +114,16 @@ static_library("gtest_no_testonly") {
   }
 }
 
+# Provides both GoogleTest and GoogleMock, matching upstream Bazel's
+# @com_google_googletest//:gtest, which bundles GoogleMock. This lets
+# bazel2gn translate @com_google_googletest//:gtest to this target for code
+# that includes <gmock/gmock.h>.
 group("gtest") {
   testonly = true
-  public_deps = [ ":gtest_no_testonly" ]
+  public_deps = [
+    ":gmock_no_testonly",
+    ":gtest_no_testonly",
+  ]
 }
 
 # Library that defines the FRIEND_TEST macro.
@@ -289,9 +296,11 @@ static_library("gmock_no_testonly") {
   public_deps = [ ":gtest_no_testonly" ]
 }
 
+# Same as :gtest, which already provides GoogleMock. Kept so that existing
+# dependents keep building.
 group("gmock") {
   testonly = true
-  public_deps = [ ":gmock_no_testonly" ]
+  public_deps = [ ":gtest" ]
 }
 
 static_library("gmock_main") {

@@ -1,0 +1,258 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":vulkan_loader_tests_test"],
+    visibility = ["//src/graphics:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "test_bin",
+    srcs = ["test.cc"],
+    deps = [
+        "//sdk/fidl/fuchsia.gpu.magma:fuchsia.gpu.magma_cpp",
+        "//sdk/fidl/fuchsia.gpu.magma:fuchsia.gpu.magma_cpp_testing",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_cpp",
+        "//sdk/fidl/fuchsia.vulkan.loader:fuchsia.vulkan.loader_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/sys/component/cpp/testing:cpp",
+        "//src/lib/fxl:fxl_cli",
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "test_bin_packaged",
+    testonly = True,
+    binary = ":test_bin",
+    binary_name = "vulkan_loader_test",
+)
+
+fx_cc_test_binary(
+    name = "unittest_bin",
+    srcs = ["unittest.cc"],
+    deps = [
+        "//sdk/fidl/fuchsia.gpu.magma:fuchsia.gpu.magma_cpp_testing",
+        "//sdk/fidl/fuchsia.hardware.goldfish:fuchsia.hardware.goldfish_cpp_testing",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_cpp_testing",
+        "//sdk/fidl/fuchsia.vulkan.loader:fuchsia.vulkan.loader_cpp",
+        "//sdk/fidl/fuchsia.vulkan.loader:fuchsia.vulkan.loader_cpp_testing",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//sdk/lib/sys/cpp",
+        "//src/graphics/bin/vulkan_loader:app",
+        "//src/lib/fxl:fxl_cli",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/json_parser",
+        "//src/storage/lib/vfs/cpp",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "unittest_bin_packaged",
+    testonly = True,
+    binary = ":unittest_bin",
+    binary_name = "vulkan_loader_unittest",
+)
+
+fx_cc_binary(
+    name = "pkg-server-bin",
+    testonly = True,
+    srcs = ["pkg-server-main.cc"],
+    deps = [
+        "//sdk/fidl/fuchsia.gpu.magma:fuchsia.gpu.magma_cpp",
+        "//sdk/fidl/fuchsia.gpu.magma:fuchsia.gpu.magma_cpp_testing",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp",
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp_testing",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl:fxl_cli",
+        "//src/storage/lib/vfs/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "pkg-server-bin_packaged",
+    testonly = True,
+    binary = ":pkg-server-bin",
+    binary_name = "pkg-server",
+)
+
+fx_component_manifest(
+    name = "vulkan_loader_test_lib_provider_manifest",
+    testonly = True,
+    component_name = "vulkan_loader_test_lib_provider",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/vulkan_loader_test_lib_provider.cml",
+)
+
+fx_component(
+    name = "vulkan_loader_test_lib_provider_cmp",
+    testonly = True,
+    compiled_manifest = ":vulkan_loader_test_lib_provider_manifest",
+    deps = [":pkg-server-bin_packaged"],
+)
+
+fx_component_manifest(
+    name = "vulkan_loader_test_manifest",
+    testonly = True,
+    component_name = "vulkan_loader_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/vulkan_loader_test.cml",
+)
+
+fx_test_component(
+    name = "vulkan_loader_test",
+    compiled_manifest = ":vulkan_loader_test_manifest",
+    deps = [":test_bin_packaged"],
+)
+
+fx_component_manifest(
+    name = "vulkan_loader_unittest_driver_manifest",
+    testonly = True,
+    component_name = "vulkan_loader_unittest_driver",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/vulkan_loader_unittest_driver.cml",
+)
+
+fx_component(
+    name = "vulkan_loader_unittest_driver",
+    testonly = True,
+    compiled_manifest = ":vulkan_loader_unittest_driver_manifest",
+    deps = [":unittest_bin_packaged"],
+)
+
+fx_component_manifest(
+    name = "vulkan_loader_unittest_manifest",
+    testonly = True,
+    component_name = "vulkan_loader_unittest",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/vulkan_loader_unittest.cml",
+)
+
+fx_test_component(
+    name = "vulkan_loader_unittest",
+    compiled_manifest = ":vulkan_loader_unittest_manifest",
+)
+
+resource(
+    name = "metadata",
+    srcs = ["metadata.json"],
+    outputs = ["data/test_metadata/metadata.json"],
+)
+
+resource(
+    name = "manifest-json",
+    srcs = ["libvulkan_fake.json"],
+    outputs = ["data/libvulkan_fake.json"],
+)
+
+fx_component_manifest(
+    name = "test_vulkan_driver_manifest",
+    testonly = True,
+    component_name = "test_vulkan_driver",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/test_vulkan_driver.cml",
+)
+
+fx_component(
+    name = "test_vulkan_driver",
+    testonly = True,
+    compiled_manifest = ":test_vulkan_driver_manifest",
+    deps = [":metadata"],
+)
+
+fx_component_manifest(
+    name = "test_realm_manifest",
+    testonly = True,
+    component_name = "test_realm",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/test_realm.cml",
+)
+
+fx_component(
+    name = "test_realm",
+    testonly = True,
+    compiled_manifest = ":test_realm_manifest",
+)
+
+fx_package(
+    name = "vulkan_loader_tests",
+    testonly = True,
+    components = [
+        ":test_realm",
+        ":test_vulkan_driver",
+        ":vulkan_loader_test_lib_provider_cmp",
+        ":vulkan_loader_unittest_driver",
+        "//src/graphics/bin/vulkan_loader:vulkan_loader_cmp",
+        # TODO(https://fxbug.dev/570694755): Pulled in transitively via
+        # //sdk/lib/sys/component/cpp/testing:cpp in GN.
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    resources = [":manifest-json"],
+    test_components = [
+        ":vulkan_loader_test",
+        ":vulkan_loader_unittest",
+    ],
+)
+
+fx_test(
+    name = "vulkan_loader_tests_test",
+    max_log_severity = "ERROR",
+    package = ":vulkan_loader_tests",
+)
+
+# LINT.IfChange
+fx_package(
+    name = "vulkan_loader_test_lib_provider",
+    testonly = True,
+    components = [":vulkan_loader_test_lib_provider_cmp"],
+)
+# LINT.ThenChange(BUILD.gn)

@@ -10,6 +10,8 @@ import("//build/toolchain/toolchain_environment.gni")
 import("//build/toolchain/zircon/zircon_toolchain_suite.gni")
 import("//zircon/kernel/kernel_bindgen_crate.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
+import("//zircon/kernel/kernel_shell_script.gni")
+import("//zircon/kernel/params.gni")
 
 if (toolchain_environment == "kernel.phys" ||
     toolchain_environment == "kernel") {
@@ -21,11 +23,28 @@ if (toolchain_environment == "kernel.phys" ||
       ":integer-register-abi",
       ":percpu-abi",
       ":thread-pointer-abi",
-
-      # Don't use the outline atomics since we don't have the helper functions.
-      # TODO(mcgrathr): use code-patching to define the outcalls for the kernel
-      "//build/config/arm64:no-outline-atomics",
     ]
+
+    # Only the kernel proper links in the helper functions.
+    if (toolchain_environment == "kernel") {
+      compiler_configs += [ ":outline-atomics" ]
+    } else {
+      compiler_configs += [ "//build/config/arm64:no-outline-atomics" ]
+    }
+  }
+
+  # Call the helper functions defined in outline-atomics/ for atomic
+  # read-modify-write operations, rather than generating LL/SC loops inline.
+  # Without LSE, the compiler expands those before register allocation, so a
+  # spill or reload can land between the load-exclusive and the
+  # store-exclusive, and then the loop isn't guaranteed to make progress.
+  #
+  # This doesn't cover everything: LLVM still expands atomic min, max, and
+  # nand, and all 16-byte atomic operations except compare-and-swap, to LL/SC
+  # loops in IR.
+  compiler_config("outline-atomics") {
+    cflags = [ "-moutline-atomics" ]
+    rust_target_features = [ "+outline-atomics" ]
   }
 
   # Don't use any FP / vector registers in kernel code.  They usually still
@@ -79,7 +98,7 @@ if (toolchain_environment == "kernel.phys" ||
     include_dirs = [ "include" ]
 
     configs = [
-      # <arch/current_thread.h> has #include <lib/arch/intrin.h>.
+      # <arch/arm64.h> has #include <lib/arch/intrin.h>.
       "//zircon/kernel/lib/arch/arm64:headers.config",
     ]
   }
@@ -88,49 +107,25 @@ if (toolchain_environment == "kernel.phys" ||
     public_deps = [ ":headers" ]
 
     sources = [
-      "arm64_ffi.cc",
       "asm.S",
       "cache-ops.S",
-      "coresight.cc",
-      "dap.cc",
       "exceptions.S",
       "fpu_asm.S",
-      "registers.cc",
       "secondary.S",
-      "secondary.cc",
       "smccc.S",
-      "spinlock.cc",
       "uspace_entry.S",
     ]
     deps = [
       "user-copy",
-      "//sdk/lib/fit",
-      "//zircon/kernel/dev/coresight",
-      "//zircon/kernel/dev/iommu/arm_smmu",
-      "//zircon/kernel/dev/iommu/stub",
-      "//zircon/kernel/dev/psci",
       "//zircon/kernel/lib/arch",
-      "//zircon/kernel/lib/boot-options",
       "//zircon/kernel/lib/code-patching",
-      "//zircon/kernel/lib/console",
-      "//zircon/kernel/lib/counters",
-      "//zircon/kernel/lib/crashlog",
-      "//zircon/kernel/lib/heap",
-      "//zircon/kernel/lib/init",
-      "//zircon/kernel/lib/instrumentation",
-      "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/lib/page",
       "//zircon/kernel/lib/syscalls",
-      "//zircon/kernel/lib/thread-stack",
       "//zircon/kernel/lib/userabi:headers",
-      "//zircon/kernel/object",
-      "//zircon/kernel/phys/handoff",
-      "//zircon/kernel/platform:headers",
-      "//zircon/kernel/vm",
-      "//zircon/system/ulib/fbl",
-      "//zircon/system/ulib/pretty",
-      "//zircon/system/ulib/zx",
     ]
+    if (toolchain_environment == "kernel") {
+      # Provide the functions called by code compiled with :outline-atomics.
+      deps += [ "outline-atomics" ]
+    }
   }
 
   library_headers("headers") {
@@ -151,7 +146,6 @@ if (toolchain_environment == "kernel.phys" ||
     var_allowlist = [
       "kTbiBit",
       "kTbiMask",
-      "kHighVABit",
       "kUserBitMask",
     ]
     expect_lints = [ "non_upper_case_globals" ]
@@ -216,24 +210,10 @@ if (toolchain_environment == "kernel.phys" ||
     notice_year = 2026
   }
 
-  kernel_bindgen_crate("arm64-crashlog-bindings") {
-    headers = [ "include/arch/crashlog_regs.h" ]
-    cpp = true
-    non_rust_deps = [ ":headers" ]
-    notice_year = 2026
-    raw_lines = [ "#![no_std]" ]
-    type_allowlist = [ "crashlog_regs_t" ]
-    opaque_types = [ "iframe_t" ]
-    explicit_padding = false
-  }
-
   kernel_bindgen_crate("arm64-feature-bindings") {
     headers = [ "include/arch/arm64/feature.h" ]
     cpp = true
-    non_rust_deps = [
-      ":headers",
-      "//zircon/kernel/lib/ktl:headers",
-    ]
+    non_rust_deps = [ ":headers" ]
     notice_year = 2026
     raw_lines = [ "#![no_std]" ]
     type_allowlist = [
@@ -265,6 +245,7 @@ if (toolchain_environment == "kernel.phys" ||
     notice_year = 2026
     raw_lines = [ "#![no_std]" ]
     explicit_padding = false
+    std_derives = [ "default" ]
 
     # arch_exception_context and ARM64_EXCEPTION_FLAG_LOWER_EL come from
     # arch/arm64.h, which mp.h includes.
@@ -357,7 +338,9 @@ if (toolchain_environment == "kernel.phys" ||
       "src/arch.rs",
       "src/asid_allocator.rs",
       "src/cache.rs",
+      "src/coresight.rs",
       "src/crashlog.rs",
+      "src/dap.rs",
       "src/debugger.rs",
       "src/exceptions.rs",
       "src/feature.rs",
@@ -366,9 +349,11 @@ if (toolchain_environment == "kernel.phys" ||
       "src/mmu_ffi.rs",
       "src/mod.rs",
       "src/mp.rs",
+      "src/outline_atomics.rs",
       "src/periphmap.rs",
       "src/registers.rs",
       "src/restricted.rs",
+      "src/secondary.rs",
       "src/smccc.rs",
       "src/spinlock.rs",
       "src/sysreg.rs",
@@ -380,7 +365,6 @@ if (toolchain_environment == "kernel.phys" ||
     deps = [
       ":arch-arm64-aspace-bindings",
       ":arch-arm64-vm-bindings",
-      ":arm64-crashlog-bindings",
       ":arm64-feature-bindings",
       ":arm64-mp-bindings",
       ":arm64-restricted-bindings",
@@ -388,13 +372,16 @@ if (toolchain_environment == "kernel.phys" ||
       ":arm64-user-copy-bindings",
       "//sdk/rust/zx-status",
       "//sdk/rust/zx-types",
+      "//src/lib/kalloc",
       "//src/lib/kprint",
       "//src/lib/ksync",
       "//src/lib/lazy_init:lazy_init_rs",
       "//src/lib/lockdep/rust:lockdep",
       "//src/lib/regio",
       "//third_party/rust_crates:pin-init",
+      "//third_party/rust_crates:zerocopy",
       "//zircon/kernel/arch:arch-types-bindings",
+      "//zircon/kernel/dev/coresight:coresight-rs",
       "//zircon/kernel/lib/arch:arch-rs",
       "//zircon/kernel/lib/boot-options:boot-options-rs",
       "//zircon/kernel/lib/debug",
@@ -409,13 +396,123 @@ if (toolchain_environment == "kernel.phys" ||
       "//zircon/system/ulib/mmio-ptr:mmio-ptr-rs",
       "//zircon/system/ulib/pretty/rust:pretty",
     ]
-    test_deps = [
-      "//src/lib/kalloc",
-      "//zircon/kernel/lib/unittest:unittest-rs",
-    ]
+    test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
   }
 
   group("kernel-tests") {
     testonly = true
+  }
+} else if (!is_efi_toolchain) {
+  assert(current_cpu == "arm64")
+
+  # Known arm64 hardware with no FEAT_LSE (ARMv8.0 Cortex-A53 / Cortex-A73).
+  no_lse_envs = [
+    astro_env,
+    lilac_env,
+    sherlock_env,
+    sorrel_env,
+    vim3_env,
+  ]
+
+  # Known arm64 hardware with FEAT_LSE where auto chooses the Cortex-A55
+  # prefetch workaround (`lse-a55`).
+  lse_a55_envs = [ nelson_env ]
+
+  # Known arm64 hardware with FEAT_LSE that auto should use.  Under KVM, QEMU
+  # and crosvm pass `-cpu host` (while TCG uses `-cpu max`), so generic
+  # emulator environments depend on the host CPU; only emulator environments
+  # whose `host_device_type` pins a known ARMv8.2+ server CPU are listed.
+  wanted_lse_envs = [
+    ampere_altra_env,
+    ampere_one_env,
+    c4a_env,
+    crosvm_arm64_env,
+    iris_env,
+  ]
+
+  # All hardware and emulators, deduplicated.
+  all_envs = []
+  foreach(env, all_fuchsia_envs + kernel_test_environments) {
+    all_envs += [ env ]
+    all_envs -= [ env ]
+    all_envs += [ env ]
+  }
+
+  outline_atomics_boot_tests = [
+    # Default `kernel.arm64.atomics=auto` picks LL/SC on hardware with no
+    # FEAT_LSE.
+    {
+      name = "auto-llsc"
+      expected = "llsc"
+      environments = no_lse_envs
+    },
+
+    # Default `kernel.arm64.atomics=auto` picks `lse-a55` on Cortex-A55.
+    {
+      name = "auto-lse-a55"
+      expected = "lse-a55"
+      environments = lse_a55_envs
+    },
+
+    # Default `kernel.arm64.atomics=auto` picks LSE on hardware with
+    # FEAT_LSE we want to use.
+    {
+      name = "auto-lse"
+      expected = "lse"
+      environments = wanted_lse_envs
+    },
+
+    # Forced `llsc` works on all hardware and emulators.
+    {
+      name = "llsc"
+      args = [ "kernel.arm64.atomics=llsc" ]
+      expected = "llsc"
+      environments = all_envs
+    },
+
+    # Forced `lse` works on all known hardware with FEAT_LSE, including
+    # Cortex-A55.
+    {
+      name = "lse"
+      args = [ "kernel.arm64.atomics=lse" ]
+      expected = "lse"
+      environments = wanted_lse_envs + lse_a55_envs
+    },
+
+    # Forced `lse-a55` works on all known hardware with FEAT_LSE.
+    {
+      name = "lse-a55"
+      args = [ "kernel.arm64.atomics=lse-a55" ]
+      expected = "lse-a55"
+      environments = wanted_lse_envs + lse_a55_envs
+    },
+  ]
+
+  boot_test_deps = []
+  foreach(test, outline_atomics_boot_tests) {
+    test_target = "arm64-outline-atomics-${test.name}-boot-test"
+    boot_test_deps += [ ":$test_target" ]
+
+    kernel_shell_script_test(test_target) {
+      forward_variables_from(test,
+                             [
+                               "args",
+                               "environments",
+                             ])
+      script = [
+        "outline_atomics ${test.expected}",
+        "and ut arm64_outline_atomics",
+        "boot-test-success",
+        {
+          cuckoo = false
+          lines = [ "graceful-shutdown" ]
+        },
+      ]
+    }
+  }
+
+  group("boot_tests") {
+    testonly = true
+    deps = boot_test_deps
   }
 }

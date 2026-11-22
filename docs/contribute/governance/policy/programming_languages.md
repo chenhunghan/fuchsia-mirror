@@ -77,7 +77,8 @@ objects of that class.
 #### Decision
 
 *   C is supported for end-developers. (See
-    [the list of supported versions of C](/docs/development/api/c.md#Language-versions).)
+    [the list of supported versions of
+    C](/docs/development/api/c.md#language-versions).)
 *   Within the Fuchsia Platform Source Tree, new uses of C are discouraged. Ask
     the relevant OWNERS for guidance about whether to use C for new code.
 *   C is approved for use in the Fuchsia Platform Source Tree:
@@ -102,10 +103,11 @@ objects of that class.
 #### Decision
 
 *   C++ is supported for end-developers. (See
-    [the list of supported versions of C++](/docs/development/api/c.md#Language-versions).)
+    [the list of supported versions of
+    C++](/docs/development/api/c.md#language-versions).)
 *   C++ is approved for use throughout the Fuchsia Platform Source Tree.
 
-### Dart
+### Dart {:#dart}
 
 #### Analysis
 

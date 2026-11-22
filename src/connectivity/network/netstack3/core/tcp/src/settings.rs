@@ -13,6 +13,12 @@ pub struct TcpSettings {
     pub receive_buffer: BufferSizeSettings<NonZeroUsize>,
     /// Send buffer settings.
     pub send_buffer: BufferSizeSettings<NonZeroUsize>,
+    /// Whether TCP Generic Segmentation Offload (GSO) is enabled.
+    ///
+    /// When enabled, TCP may emit segments carrying more than one MSS worth
+    /// of payload, which are split into MSS-sized segments by the IP layer on
+    /// egress.
+    pub gso_enabled: bool,
 }
 
 #[cfg(any(test, feature = "testutils"))]
@@ -25,6 +31,7 @@ impl Default for TcpSettings {
         let max = NonZeroUsize::new(16 << 20).unwrap();
         let default = NonZeroUsize::new(netstack3_base::WindowSize::DEFAULT.into()).unwrap();
         let sizes = BufferSizeSettings::new(min, default, max).unwrap();
-        Self { receive_buffer: sizes, send_buffer: sizes }
+        // TODO(https://fxbug.dev/565891068): Default `gso_enabled` to true.
+        Self { receive_buffer: sizes, send_buffer: sizes, gso_enabled: false }
     }
 }

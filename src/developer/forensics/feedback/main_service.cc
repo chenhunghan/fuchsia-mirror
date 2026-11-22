@@ -6,9 +6,6 @@
 
 #include <fidl/fuchsia.hardware.power.statecontrol/cpp/fidl.h>
 #include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
-#include <fuchsia/feedback/cpp/fidl.h>
-#include <lib/async-loop/default.h>
-#include <lib/fidl/cpp/interface_request.h>
 #include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/syslog/cpp/macros.h>
@@ -19,7 +16,6 @@
 
 #include "src/developer/forensics/feedback/annotations/device_id_provider.h"
 #include "src/developer/forensics/feedback/annotations/provider.h"
-#include "src/developer/forensics/feedback/constants.h"
 #include "src/developer/forensics/feedback/reboot_log/graceful_shutdown_info.h"
 #include "src/developer/forensics/feedback/redactor_factory.h"
 #include "src/developer/forensics/feedback/stop_signals.h"
@@ -87,10 +83,6 @@ MainService::MainService(async_dispatcher_t* dispatcher,
                      options.crash_reports_options),
       last_reboot_(dispatcher_, cobalt_, redactor_.get(), crash_reports_.CrashReporter(),
                    std::move(options.last_reboot_options)),
-      system_time_tracker_loop_(&kAsyncLoopConfigNoAttachToCurrentThread),
-      system_time_tracker_(system_time_tracker_loop_.dispatcher(), clock_,
-                           kSystemTimeTrackerWritePeriod,
-                           std::move(options.current_system_time_write_path)),
       component_data_register_bindings_(dispatcher_, annotations_.ComponentDataRegister(),
                                         &inspect_node_manager_,
                                         "/fidl/fuchsia.feedback.ComponentDataRegister"),
@@ -128,8 +120,9 @@ MainService::MainService(async_dispatcher_t* dispatcher,
             FX_LOGS(INFO) << std::format("Received shutdown action '{}' with reasons '{}'",
                                          ToString(action), ToRawStrings(reasons));
 
-            WriteGracefulShutdownInfo(action, reasons, path);
-            system_time_tracker_.RecordSystemShutdownSignal();
+            const zx::duration runtime = zx::duration(clock_->MonotonicNow().to_timespec());
+            const zx::duration uptime = zx::duration(clock_->BootNow().to_timespec());
+            WriteGracefulShutdownInfo(action, reasons, uptime, runtime, path);
             signal.Respond();
           })
           .or_else([](const Error& error) {
@@ -154,20 +147,7 @@ MainService::MainService(async_dispatcher_t* dispatcher,
 
   network_watcher_.Register(
       fit::bind_member(&crash_reports_, &CrashReports::SetNetworkIsReachable));
-
-  // Perform periodic writes on a separate thread so that Feedback can still function if the
-  // filesystem gets stuck.
-  if (const zx_status_t status = system_time_tracker_loop_.StartThread("system-time-tracker");
-      status != ZX_OK) {
-    FX_PLOGS(FATAL, status) << "Failed to start writer thread for SystemTimeTracker";
-  }
-
-  if (options.enable_periodic_system_time_writes) {
-    system_time_tracker_.Start();
-  }
 }
-
-MainService::~MainService() { system_time_tracker_loop_.Shutdown(); }
 
 template <>
 ::fidl::ProtocolHandler<fuchsia_feedback::LastRebootInfoProvider>

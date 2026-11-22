@@ -7,6 +7,7 @@
 #include <lib/fit/function.h>
 
 #include <optional>
+#include <utility>
 
 #include "src/developer/forensics/utils/time.h"
 #include "src/lib/files/file.h"
@@ -19,25 +20,26 @@ UtcTimeProvider::UtcTimeProvider(UtcClockReadyWatcherBase* utc_clock_ready_watch
 
 UtcTimeProvider::UtcTimeProvider(UtcClockReadyWatcherBase* utc_clock_ready_watcher,
                                  timekeeper::Clock* clock,
-                                 PreviousBootFile utc_boot_difference_file)
-    : UtcTimeProvider(utc_clock_ready_watcher, clock, std::optional(utc_boot_difference_file)) {}
+                                 UtcBootDifferencePaths utc_boot_difference_paths)
+    : UtcTimeProvider(utc_clock_ready_watcher, clock,
+                      std::optional(std::move(utc_boot_difference_paths))) {}
 
 UtcTimeProvider::UtcTimeProvider(UtcClockReadyWatcherBase* utc_clock_ready_watcher,
                                  timekeeper::Clock* clock,
-                                 std::optional<PreviousBootFile> utc_boot_difference_file)
+                                 std::optional<UtcBootDifferencePaths> utc_boot_difference_paths)
     : clock_(clock),
-      utc_boot_difference_file_(std::move(utc_boot_difference_file)),
+      utc_boot_difference_paths_(std::move(utc_boot_difference_paths)),
       previous_boot_utc_boot_difference_(std::nullopt),
       utc_clock_ready_watcher_(utc_clock_ready_watcher) {
   utc_clock_ready_watcher->OnClockReady(
       fit::bind_member<&UtcTimeProvider::OnClockLoggingQuality>(this));
 
-  if (!utc_boot_difference_file_.has_value()) {
+  if (!utc_boot_difference_paths_.has_value()) {
     return;
   }
 
   std::string buf;
-  if (!files::ReadFileToString(utc_boot_difference_file_.value().PreviousBootPath(), &buf)) {
+  if (!files::ReadFileToString(utc_boot_difference_paths_->previous_boot, &buf)) {
     return;
   }
 
@@ -60,9 +62,9 @@ std::optional<zx::duration> UtcTimeProvider::CurrentUtcBootDifference() const {
   const timekeeper::time_utc current_utc_time = CurrentUtcTimeRaw(clock_);
 
   const zx::duration utc_boot_difference(current_utc_time.get() - clock_->BootNow().get());
-  if (utc_boot_difference_file_.has_value()) {
+  if (utc_boot_difference_paths_.has_value()) {
     // Write the most recent UTC-boot difference in case either clock has been adjusted.
-    files::WriteFile(utc_boot_difference_file_.value().CurrentBootPath(),
+    files::WriteFile(utc_boot_difference_paths_->current_boot,
                      std::to_string(utc_boot_difference.get()));
   }
   return utc_boot_difference;
@@ -74,10 +76,10 @@ std::optional<zx::duration> UtcTimeProvider::PreviousBootUtcBootDifference() con
 
 void UtcTimeProvider::OnClockLoggingQuality() {
   // Write the current difference between the UTC and boot clocks.
-  if (utc_boot_difference_file_.has_value()) {
+  if (utc_boot_difference_paths_.has_value()) {
     const timekeeper::time_utc current_utc_time = CurrentUtcTimeRaw(clock_);
     const zx::duration utc_boot_difference(current_utc_time.get() - clock_->BootNow().get());
-    files::WriteFile(utc_boot_difference_file_.value().CurrentBootPath(),
+    files::WriteFile(utc_boot_difference_paths_->current_boot,
                      std::to_string(utc_boot_difference.get()));
   }
 }

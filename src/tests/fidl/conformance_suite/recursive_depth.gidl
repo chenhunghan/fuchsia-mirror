@@ -1774,3 +1774,715 @@ decode_failure("RecursiveTableHolderExceedLimit") {
     },
     err = EXCEEDED_MAX_OUT_OF_LINE_DEPTH,
 }
+
+// 31 boxed structs (depth 1..31) plus an unknown out-of-line union envelope (depth 32).
+decode_success("RecursiveOptionalWithFlexibleUnionUnknownOutOfLineAtLimit") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    // gidl-format off
+    value = RecursiveOptionalWithFlexibleUnion { // 0
+    inner: RecursiveOptionalWithFlexibleUnion { // 1
+    inner: RecursiveOptionalWithFlexibleUnion { // 2
+    inner: RecursiveOptionalWithFlexibleUnion { // 3
+    inner: RecursiveOptionalWithFlexibleUnion { // 4
+    inner: RecursiveOptionalWithFlexibleUnion { // 5
+    inner: RecursiveOptionalWithFlexibleUnion { // 6
+    inner: RecursiveOptionalWithFlexibleUnion { // 7
+    inner: RecursiveOptionalWithFlexibleUnion { // 8
+    inner: RecursiveOptionalWithFlexibleUnion { // 9
+    inner: RecursiveOptionalWithFlexibleUnion { // 10
+    inner: RecursiveOptionalWithFlexibleUnion { // 11
+    inner: RecursiveOptionalWithFlexibleUnion { // 12
+    inner: RecursiveOptionalWithFlexibleUnion { // 13
+    inner: RecursiveOptionalWithFlexibleUnion { // 14
+    inner: RecursiveOptionalWithFlexibleUnion { // 15
+    inner: RecursiveOptionalWithFlexibleUnion { // 16
+    inner: RecursiveOptionalWithFlexibleUnion { // 17
+    inner: RecursiveOptionalWithFlexibleUnion { // 18
+    inner: RecursiveOptionalWithFlexibleUnion { // 19
+    inner: RecursiveOptionalWithFlexibleUnion { // 20
+    inner: RecursiveOptionalWithFlexibleUnion { // 21
+    inner: RecursiveOptionalWithFlexibleUnion { // 22
+    inner: RecursiveOptionalWithFlexibleUnion { // 23
+    inner: RecursiveOptionalWithFlexibleUnion { // 24
+    inner: RecursiveOptionalWithFlexibleUnion { // 25
+    inner: RecursiveOptionalWithFlexibleUnion { // 26
+    inner: RecursiveOptionalWithFlexibleUnion { // 27
+    inner: RecursiveOptionalWithFlexibleUnion { // 28
+    inner: RecursiveOptionalWithFlexibleUnion { // 29
+    inner: RecursiveOptionalWithFlexibleUnion { // 30
+    inner: RecursiveOptionalWithFlexibleUnion { // 31
+        inner: null,
+        u: SampleUnion { // 32
+            99: null,
+        },
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    },
+    // gidl-format on
+    bytes = {
+        v2 = [
+            // 0..30 (31 levels of present box + absent optional union)
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            // 31
+            repeat(0x00):8,
+            num(99):8, // unknown ordinal
+            num(8):4, num(0):2, num(0):2, // out-of-line envelope (depth 32)
+            repeat(0xab):8,
+        ],
+    },
+}
+
+// 32 boxed structs (depth 1..32) plus an unknown out-of-line union envelope (depth 33).
+decode_failure("RecursiveOptionalWithFlexibleUnionUnknownOutOfLineExceedLimit") {
+    // TODO(https://fxbug.dev/579582163): Check recursion depth on decode in rust_next.
+    bindings_denylist = [rust_next],
+    type = RecursiveOptionalWithFlexibleUnion,
+    bytes = {
+        v2 = [
+            // 0..31 (32 levels of present box + absent optional union)
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            // 32
+            repeat(0x00):8,
+            num(99):8, // unknown ordinal
+            num(8):4, num(0):2, num(0):2, // out-of-line envelope (depth 33)
+            repeat(0xab):8,
+        ],
+    },
+    err = EXCEEDED_MAX_OUT_OF_LINE_DEPTH,
+}
+
+// 31 boxed structs (depth 1..31) plus an unknown inlined union envelope (depth 32).
+decode_success("RecursiveOptionalWithFlexibleUnionUnknownInlineAtLimit") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    // gidl-format off
+    value = RecursiveOptionalWithFlexibleUnion { // 0
+    inner: RecursiveOptionalWithFlexibleUnion { // 1
+    inner: RecursiveOptionalWithFlexibleUnion { // 2
+    inner: RecursiveOptionalWithFlexibleUnion { // 3
+    inner: RecursiveOptionalWithFlexibleUnion { // 4
+    inner: RecursiveOptionalWithFlexibleUnion { // 5
+    inner: RecursiveOptionalWithFlexibleUnion { // 6
+    inner: RecursiveOptionalWithFlexibleUnion { // 7
+    inner: RecursiveOptionalWithFlexibleUnion { // 8
+    inner: RecursiveOptionalWithFlexibleUnion { // 9
+    inner: RecursiveOptionalWithFlexibleUnion { // 10
+    inner: RecursiveOptionalWithFlexibleUnion { // 11
+    inner: RecursiveOptionalWithFlexibleUnion { // 12
+    inner: RecursiveOptionalWithFlexibleUnion { // 13
+    inner: RecursiveOptionalWithFlexibleUnion { // 14
+    inner: RecursiveOptionalWithFlexibleUnion { // 15
+    inner: RecursiveOptionalWithFlexibleUnion { // 16
+    inner: RecursiveOptionalWithFlexibleUnion { // 17
+    inner: RecursiveOptionalWithFlexibleUnion { // 18
+    inner: RecursiveOptionalWithFlexibleUnion { // 19
+    inner: RecursiveOptionalWithFlexibleUnion { // 20
+    inner: RecursiveOptionalWithFlexibleUnion { // 21
+    inner: RecursiveOptionalWithFlexibleUnion { // 22
+    inner: RecursiveOptionalWithFlexibleUnion { // 23
+    inner: RecursiveOptionalWithFlexibleUnion { // 24
+    inner: RecursiveOptionalWithFlexibleUnion { // 25
+    inner: RecursiveOptionalWithFlexibleUnion { // 26
+    inner: RecursiveOptionalWithFlexibleUnion { // 27
+    inner: RecursiveOptionalWithFlexibleUnion { // 28
+    inner: RecursiveOptionalWithFlexibleUnion { // 29
+    inner: RecursiveOptionalWithFlexibleUnion { // 30
+    inner: RecursiveOptionalWithFlexibleUnion { // 31
+        inner: null,
+        u: SampleUnion { // 32
+            99: null,
+        },
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    },
+    // gidl-format on
+    bytes = {
+        v2 = [
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            // 31
+            repeat(0x00):8,
+            num(99):8, // unknown ordinal
+            num(42):4, num(0):2, num(1):2, // inlined envelope (depth 32)
+        ],
+    },
+}
+
+// 32 boxed structs (depth 1..32) plus an unknown inlined union envelope (depth 33).
+decode_failure("RecursiveOptionalWithFlexibleUnionUnknownInlineExceedLimit") {
+    // TODO(https://fxbug.dev/579582741): Increment recursion depth on inline envelopes in rust.
+    // TODO(https://fxbug.dev/579582163): Check recursion depth on decode in rust_next.
+    bindings_denylist = [rust, rust_next],
+    type = RecursiveOptionalWithFlexibleUnion,
+    bytes = {
+        v2 = [
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            repeat(0xff):8, repeat(0x00):16,
+            // 32
+            repeat(0x00):8,
+            num(99):8, // unknown ordinal
+            num(42):4, num(0):2, num(1):2, // inlined envelope (depth 33)
+        ],
+    },
+    err = EXCEEDED_MAX_OUT_OF_LINE_DEPTH,
+}
+
+// 30 boxed structs (depth 1..30) plus a table envelope vector (depth 31)
+// containing an unknown out-of-line envelope (depth 32).
+decode_success("RecursiveOptionalWithTableUnknownOutOfLineAtLimit") {
+    // gidl-format off
+    value = RecursiveOptionalWithEmptyTable { // 0
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 1
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 2
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 3
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 4
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 5
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 6
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 7
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 8
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 9
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 10
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 11
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 12
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 13
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 14
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 15
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 16
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 17
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 18
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 19
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 20
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 21
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 22
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 23
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 24
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 25
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 26
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 27
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 28
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 29
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 30
+        inner: null,
+        t: TableFieldUnknown{}, // vector depth 31, unknown OOL envelope depth 32
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    },
+    // gidl-format on
+    bytes = {
+        v2 = [
+            // 0..29 (30 levels of present box + empty table)
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            // 30
+            repeat(0x00):8, // inner: null
+            num(1):8, repeat(0xff):8, // table header (depth 31)
+            num(8):4, num(0):2, num(0):2, // unknown OOL envelope (depth 32)
+            repeat(0xab):8,
+        ],
+    },
+}
+
+// 31 boxed structs (depth 1..31) plus a table envelope vector (depth 32)
+// containing an unknown out-of-line envelope (depth 33).
+decode_failure("RecursiveOptionalWithTableUnknownOutOfLineExceedLimit") {
+    // TODO(https://fxbug.dev/579582163): Check recursion depth on decode in rust_next.
+    bindings_denylist = [rust_next],
+    type = RecursiveOptionalWithEmptyTable,
+    bytes = {
+        v2 = [
+            // 0..30 (31 levels of present box + empty table)
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            // 31
+            repeat(0x00):8, // inner: null
+            num(1):8, repeat(0xff):8, // table header (depth 32)
+            num(8):4, num(0):2, num(0):2, // unknown OOL envelope (depth 33)
+            repeat(0xab):8,
+        ],
+    },
+    err = EXCEEDED_MAX_OUT_OF_LINE_DEPTH,
+}
+
+// 30 boxed structs (depth 1..30) plus a table envelope vector (depth 31)
+// containing an unknown inlined envelope (depth 32).
+decode_success("RecursiveOptionalWithTableUnknownInlineAtLimit") {
+    // gidl-format off
+    value = RecursiveOptionalWithEmptyTable { // 0
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 1
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 2
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 3
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 4
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 5
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 6
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 7
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 8
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 9
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 10
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 11
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 12
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 13
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 14
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 15
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 16
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 17
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 18
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 19
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 20
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 21
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 22
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 23
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 24
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 25
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 26
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 27
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 28
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 29
+    t: TableFieldUnknown{},
+    inner: RecursiveOptionalWithEmptyTable { // 30
+        inner: null,
+        t: TableFieldUnknown{}, // vector depth 31, unknown inline envelope depth 32
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    },
+    // gidl-format on
+    bytes = {
+        v2 = [
+            // 0..29 (30 levels of present box + empty table)
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            // 30
+            repeat(0x00):8,
+            num(1):8, repeat(0xff):8, // table header (depth 31)
+            num(42):4, num(0):2, num(1):2, // unknown inline envelope (depth 32)
+        ],
+    },
+}
+
+// 31 boxed structs (depth 1..31) plus a table envelope vector (depth 32)
+// containing an unknown inlined envelope (depth 33).
+decode_failure("RecursiveOptionalWithTableUnknownInlineExceedLimit") {
+    // TODO(https://fxbug.dev/579582741): Increment recursion depth on inline envelopes in rust.
+    // TODO(https://fxbug.dev/579582163): Check recursion depth on decode in rust_next.
+    bindings_denylist = [rust, rust_next],
+    type = RecursiveOptionalWithEmptyTable,
+    bytes = {
+        v2 = [
+            // 0..30 (31 levels)
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            repeat(0xff):8, num(0):8, repeat(0xff):8,
+            // 31
+            repeat(0x00):8,
+            num(1):8, repeat(0xff):8, // table header (depth 32)
+            num(42):4, num(0):2, num(1):2, // unknown inline envelope (depth 33)
+        ],
+    },
+    err = EXCEEDED_MAX_OUT_OF_LINE_DEPTH,
+}

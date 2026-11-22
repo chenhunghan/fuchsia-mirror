@@ -47,3 +47,53 @@ fx_unittest_package(
     name = "io_conformance_util_tests",
     unit_tests = [":io_conformance_util_test"],
 )
+
+# TODO(https://fxbug.dev/570694755): Migrate conformance_test once
+# storage_conformance_test.gni and its conformance_harness packages move to
+# Bazel. Currently dual-built via bazel2gn as a test binary for those GN
+# harness packages.
+rustc_test(
+    name = "conformance_test",
+    srcs = [
+        "tests/attributes.rs",
+        "tests/clone.rs",
+        "tests/directory.rs",
+        "tests/directory/create.rs",
+        "tests/directory/get_token.rs",
+        "tests/directory/link.rs",
+        "tests/directory/open.rs",
+        "tests/directory/read_dirents.rs",
+        "tests/directory/rename.rs",
+        "tests/directory/unlink.rs",
+        "tests/directory/watch.rs",
+        "tests/file.rs",
+        "tests/file/get_backing_memory.rs",
+        "tests/file/link_into.rs",
+        "tests/file/read.rs",
+        "tests/file/resize.rs",
+        "tests/file/write.rs",
+        "tests/flags.rs",
+        "tests/node.rs",
+        "tests/query.rs",
+        "tests/remote.rs",
+        "tests/service.rs",
+        "tests/symlink.rs",
+        "tests/tests.rs",
+        "tests/unnamed_temporary_file.rs",
+        "tests/xattrs.rs",
+    ],
+    crate_root = "tests/tests.rs",
+    edition = "2024",
+    visibility = [":__subpackages__"],
+    deps = [
+        ":io_conformance_util",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-fs",
+        "//src/testing/fidl:placeholders_rust",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

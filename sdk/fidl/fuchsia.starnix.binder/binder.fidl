@@ -290,12 +290,35 @@ open protocol Binder {
     /// client. `mapped_address` is the address where the VMO is mapped in the
     /// client address space.
     ///
+    /// The driver can place buffers anywhere in the VMO, so the client must map
+    /// all of it. Clients should use `MapVmoWithSize` instead.
+    ///
     /// Responds once the VMO is mapped. The driver handles the other requests
     /// of the client concurrently, so the client must wait for the response
     /// before sending any ioctl that needs the VMO.
     flexible MapVmo(resource struct {
         vmo zx.Handle:VMO;
         mapped_address uint64;
+    }) -> () error fuchsia.posix.Errno;
+    /// Maps the VMO used as a shared resource between the driver and the
+    /// client, of which the client mapped `mapped_size` bytes from its start
+    /// at `mapped_address` in its address space. The driver only places
+    /// buffers in these `mapped_size` bytes.
+    ///
+    /// Responds once the VMO is mapped. The driver handles the other requests
+    /// of the client concurrently, so the client must wait for the response
+    /// before sending any ioctl that needs the VMO.
+    ///
+    /// Fails with `EINVAL` if a field is missing, or if `mapped_size` is 0,
+    /// not a multiple of the page size, or larger than the VMO.
+    flexible MapVmoWithSize(resource table {
+        /// The VMO. Required.
+        1: vmo zx.Handle:VMO;
+        /// The address where the client mapped the VMO. Required.
+        2: mapped_address uint64;
+        /// The number of bytes of the VMO, from its start, that the client
+        /// mapped. Required.
+        3: mapped_size uint64;
     }) -> () error fuchsia.posix.Errno;
     /// Processes a Binder ioctl. This message returns writes for the calling thread
     /// that must be processed to correctly handle the ioctl.

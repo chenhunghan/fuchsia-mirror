@@ -17,6 +17,7 @@ load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
 )
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load(
     "//build/bazel/rules/testing:fx_unittest_package.bzl",
     "fx_unittest_package",
@@ -85,7 +86,6 @@ fx_component(
 
 fx_package(
     name = "build-info-service",
-    package_name = "build-info-service",
     components = [
         ":build-info-component",
     ],
@@ -94,6 +94,22 @@ fx_package(
         # is added to the Bazel assembly.
         "//build/bazel/rules/tests:__subpackages__",
         "//bundles/assembly:__subpackages__",
+    ],
+)
+
+rustc_binary(
+    name = "shell_bin",
+    srcs = ["shell.rs"],
+    binary_name = "build-info",
+    crate_root = "shell.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
     ],
 )
 
@@ -110,6 +126,11 @@ fx_cc_binary(
     ],
 )
 
+# Needs reviewer attention (bazel2gn skip): build-info-unittest was already
+# migrated to Bazel and wrapped by bazel_test_suite("build-info-unittest") in
+# BUILD.gn; generating a duplicate GN fuchsia_unittest_package("build-info-unittest")
+# collides with the existing bazel_test_suite target name.
+# @bazel2gn:skip
 fx_unittest_package(
     name = "build-info-unittest",
     # Tests may produce ERROR logs when validating behavior in scenarios where

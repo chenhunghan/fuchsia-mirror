@@ -351,5 +351,5 @@ impl Driver for InterconnectDriver {
         .inspect_err(|e| error!("Failed to start graph service: {e}"))
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }

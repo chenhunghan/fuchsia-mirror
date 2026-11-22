@@ -110,10 +110,9 @@ class DmcVirtualUsbPowerHubTests(unittest.TestCase):
             "_get_device_config",
             return_value={"device_serial": "SER123"},
         ):
-            hub, port = test_obj._lookup_usb_power_hub(mock_device)
+            hub = test_obj._lookup_usb_power_hub(mock_device)
 
         self.assertIs(hub, mock_dmc_hub_cls.return_value)
-        self.assertIsNone(port)
         mock_dmc_hub_cls.assert_called_once_with(device_name="fuchsia-dut")
         mock_linux_hub_cls.assert_not_called()
 
@@ -144,10 +143,9 @@ class DmcVirtualUsbPowerHubTests(unittest.TestCase):
             "_get_device_config",
             return_value={"device_serial": "SER123"},
         ):
-            hub, port = test_obj._lookup_usb_power_hub(mock_device)
+            hub = test_obj._lookup_usb_power_hub(mock_device)
 
         self.assertIs(hub, mock_dmc_reset_hub_cls.return_value)
-        self.assertIsNone(port)
         mock_dmc_reset_hub_cls.assert_called_once_with(
             device_name="fuchsia-dut"
         )

@@ -14,22 +14,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-try:
-    from fx_cli.registry import (
-        Category,
-        RegistryEntry,
-        RegistryError,
-        load_registry_file,
-        resolve_fuchsia_dir,
-    )
-except ImportError:
-    from registry import (
-        Category,
-        RegistryEntry,
-        RegistryError,
-        load_registry_file,
-        resolve_fuchsia_dir,
-    )
+from registry import (
+    Category,
+    RegistryEntry,
+    RegistryError,
+    load_registry_file,
+    resolve_fuchsia_dir,
+)
 
 
 class CommandKind(StrEnum):

@@ -15,10 +15,7 @@ tests_with_err_logs = [
   {
     label = "management"
     long = true
-
-    # The `controller` component (depended on by `management`) launches
-    # `hermetic_network`, which resolves `netstack-conformance` as a subpackage.
-    subpackages = [ "//src/connectivity/network/netstack3:package-conformance" ]
+    subpackages = [ "//src/connectivity/network/testing/network-test-realm/service:network-test-realm" ]
   },
 ]
 
@@ -33,34 +30,11 @@ foreach(test, tests) {
 }
 
 package_deps_for_tests = [
-  # netemul-sandbox is used to create hermetic test realms.
-  "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
-
-  # reachability monitor is under test.
-  "//src/connectivity/policy/reachability:component_with_fake_time",
-
   # stash_secure is used by dhcpd and netstack.
   "//src/sys/stash:stash_secure_v2",
 
-  # DHCPv6 client is under test.
-  "//src/connectivity/network/dhcpv6/client:component",
-
-  # dns_resolver integration with netstack is tested.
-  "//src/connectivity/network/dns:component_with_fake_time",
-
   # the DNS resolver under test uses the fake clock.
   "//src/lib/fake-clock/svc",
-
-  # netcfg integration with netstack is tested.
-  ":netcfg-netemul-configs",
-  "//src/connectivity/policy/netcfg:component",
-  "//src/connectivity/policy/netcfg/integration/fake-netcfg:component",
-
-  # netcfg integration with socket-proxy is tested.
-  "//src/connectivity/policy/socket-proxy:component",
-
-  # fake socket proxy for netcfg testing.
-  "//src/connectivity/policy/socket-proxy/integration/fake-socket-proxy:svc",
 ]
 
 subpackages_for_tests = [
@@ -70,9 +44,31 @@ subpackages_for_tests = [
   # DHCPv4 Server is used to test DHCP address acquisition.
   "//src/connectivity/network/dhcpv4/server:package",
 
+  # DHCPv6 client is under test.
+  "//src/connectivity/network/dhcpv6/client:package",
+
+  # dns_resolver integration with netstack is tested.
+  "//src/connectivity/network/dns:package_with_fake_time",
+
   # Netstack3 is under test.
   "//src/connectivity/network/netstack3:package-debug",
   "//src/connectivity/network/netstack3:package-for-tests",
+
+  # netemul-sandbox is used to create hermetic test realms.
+  "//src/connectivity/network/testing/netemul/service:package",
+
+  # netcfg integration with netstack is tested.
+  "//src/connectivity/policy/netcfg:package-for-tests",
+  "//src/connectivity/policy/netcfg/integration/fake-netcfg:package",
+
+  # reachability monitor is under test.
+  "//src/connectivity/policy/reachability:package-for-tests",
+
+  # netcfg integration with socket-proxy is tested.
+  "//src/connectivity/policy/socket-proxy:package",
+
+  # fake socket proxy for netcfg testing.
+  "//src/connectivity/policy/socket-proxy/integration/fake-socket-proxy:pkg",
 ]
 
 fuchsia_test_package("policy-integration-tests") {
@@ -187,6 +183,7 @@ foreach(test, tests_with_err_logs) {
 # network/tests/integration/common/src/realms.rs with an enum type.
 resource("netcfg-netemul-configs") {
   testonly = true
+  visibility = [ "//src/connectivity/policy/netcfg:*" ]
 
   sources = [
     "management/config/all_delegated.json",

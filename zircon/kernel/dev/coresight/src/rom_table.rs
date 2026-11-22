@@ -4,10 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! ARM CoreSight ROM table registers and tree walker, mirroring
-//! `<dev/coresight/rom_table.h>`.
+//! ARM CoreSight ROM table registers and tree walker.
 
-use core::ffi::{c_char, c_void};
 use core::mem::{align_of, size_of};
 
 use bitrs::{bitfield_repr, layout};
@@ -83,7 +81,7 @@ impl Class0x9Rom64BitEntry {
     }
 }
 
-/// Entry format encoded in `DEVID.FORMAT` (`Class0x9RomDeviceIdRegister::Format`).
+/// Entry format encoded in `DEVID.FORMAT`.
 #[bitfield_repr(u8)]
 #[derive(Copy, Clone)]
 pub enum Class0x9RomEntryFormat {
@@ -148,6 +146,10 @@ impl RomTable {
     /// Maximum number of entries in a Class `0x9` 64-bit ROM table.
     const MAX_0X9_ROM_64BIT_ENTRIES: u32 = 256;
 
+    /// The most tables [`Self::walk`] goes through to reach a component. CoreSight hierarchies are
+    /// only a few tables deep.
+    const MAX_TABLE_DEPTH: u32 = 8;
+
     /// Walks the underlying tree of components with no dynamic allocation,
     /// calling `callback` on the offset from the table's base address (implicitly
     /// encoded in `base`) of each component found. The (`base`, `max_offset`)
@@ -159,6 +161,12 @@ impl RomTable {
     /// the maximum visited offset - or at least something deemed large enough -
     /// is left to the caller. The offset must at least be
     /// `MINIMUM_COMPONENT_SIZE`, which is the size of the base table proper.
+    ///
+    /// `callback` is only called with offsets that are multiples of `MINIMUM_COMPONENT_SIZE`
+    /// and satisfy `offset as usize + MINIMUM_COMPONENT_SIZE <= max_offset as usize`.
+    ///
+    /// A component reached through more than 8 tables (`MAX_TABLE_DEPTH`), as a cycle of entries
+    /// leads to, ends the walk with an error at the table that points at it.
     ///
     /// # Safety
     ///
@@ -179,7 +187,7 @@ impl RomTable {
         let base = base.restrict::<Ro>();
         // SAFETY: Caller guarantees `base` points to a mapped MMIO aperture of at least
         // `max_offset` bytes.
-        unsafe { Self::walk_from(base, max_offset, &mut callback, 0) }
+        unsafe { Self::walk_from(base, max_offset, &mut callback, 0, 0) }
     }
 
     #[inline]
@@ -196,6 +204,8 @@ impl RomTable {
         false
     }
 
+    /// Walks the component at `offset`, reached through `depth` tables.
+    ///
     /// # Safety
     ///
     /// `base` must point to a valid, mapped MMIO aperture of at least `max_offset` bytes.
@@ -204,6 +214,7 @@ impl RomTable {
         max_offset: u32,
         callback: &mut F,
         offset: u32,
+        depth: u32,
     ) -> Result<(), WalkError>
     where
         F: FnMut(u32),
@@ -265,12 +276,15 @@ impl RomTable {
                 if !contents.present {
                     continue;
                 }
+                if depth == Self::MAX_TABLE_DEPTH {
+                    return Err(WalkError { reason: "ROM tables nested too deeply", offset });
+                }
                 // [CS] D5.4
                 // the offset provided by the ROM table entry requires a shift of 12 bits.
                 let new_offset = offset.wrapping_add(contents.offset.wrapping_shl(12));
                 // SAFETY: `base` covers `max_offset` bytes, and `walk_from` validates bounds for
                 // `new_offset` on entry.
-                unsafe { Self::walk_from(base, max_offset, callback, new_offset) }?;
+                unsafe { Self::walk_from(base, max_offset, callback, new_offset, depth + 1) }?;
             }
             return Ok(());
         }
@@ -333,8 +347,9 @@ impl RomTable {
                     bank64.at(Class0x9Rom64BitEntry::offset_of(n))
                 }
                 .read();
-                let u32_offset = entry.offset() & 0xffff_ffff;
-                if entry.offset() != u32_offset {
+                // `walk_from` shifts the offset field left by 12 into a `u32`, which keeps only
+                // its low 20 bits.
+                if entry.offset() > u64::from(u32::MAX >> 12) {
                     return Err(
                         "a simplifying assumption is made that a ROM table entry's offset only \
                          contains 32 bits of information. If this is no longer true, please file \
@@ -343,56 +358,11 @@ impl RomTable {
                 }
                 Ok(EntryContents {
                     value: entry.bits(),
-                    offset: u32_offset as u32,
+                    offset: entry.offset() as u32,
                     present: (entry.present() & 0b11) != 0,
                 })
             }
             None => Err("bad format value"),
-        }
-    }
-}
-
-type WalkCallback = unsafe extern "C" fn(*mut c_void, u32);
-
-/// FFI trampoline for `coresight::RomTable::Walk`.
-///
-/// Returns `true` on success, or `false` on error after populating `out_error_reason_ptr`,
-/// `out_error_reason_len`, and `out_error_offset`.
-///
-/// # Safety
-///
-/// - `base` must point to a valid, mapped MMIO aperture of at least `max_offset` bytes that
-///   remains mapped and safe to read for the duration of the call (with 8-byte alignment if
-///   64-bit Class `0x9` ROM tables are present).
-/// - `callback` must be a valid function pointer safe to invoke with `cb_ctx` for the duration of
-///   the call.
-/// - `out_error_reason_ptr`, `out_error_reason_len`, and `out_error_offset` must be valid, aligned
-///   pointers writable for the duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_coresight_rom_table_walk(
-    base: *const u32,
-    max_offset: u32,
-    cb_ctx: *mut c_void,
-    callback: WalkCallback,
-    out_error_reason_ptr: *mut *const c_char,
-    out_error_reason_len: *mut usize,
-    out_error_offset: *mut u32,
-) -> bool {
-    // SAFETY: Caller guarantees `base` points to a mapped MMIO aperture of at least `max_offset`
-    // bytes, `callback` is safe to invoke with `cb_ctx`, and the output pointers are valid,
-    // aligned, and writable.
-    unsafe {
-        let ptr = MmioPtr::<u32, Ro>::new(base);
-        match RomTable::walk(ptr, max_offset, |offset| {
-            callback(cb_ctx, offset);
-        }) {
-            Ok(()) => true,
-            Err(err) => {
-                out_error_reason_ptr.write(err.reason.as_ptr().cast::<c_char>());
-                out_error_reason_len.write(err.reason.len());
-                out_error_offset.write(err.offset);
-                false
-            }
         }
     }
 }
@@ -410,6 +380,7 @@ mod tests {
     const CLASS_0X9_ROM_TABLE_DEV_ARCH_REG: u32 = 0x4760_0af7;
 
     const EMPTY_ROM_ENTRY_REG: u32 = 0x0000_0000;
+    const OFFSET_0X0000_CLASS_0X1_ROM_ENTRY_REG: u32 = 0x0000_0001;
     const OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG: u32 = 0x0000_1001;
     const OFFSET_0X2000_CLASS_0X9_ROM_ENTRY_REG: u32 = 0x0000_2011;
     const OFFSET_0X2000_NOT_PRESENT_CLASS_0X1_ROM_ENTRY_REG: u32 = 0x0000_2000;
@@ -460,10 +431,6 @@ mod tests {
                 let ptr = MmioPtr::<u32, Ro>::new(self.words.as_ptr());
                 RomTable::walk(ptr, max_offset, callback)
             }
-        }
-
-        fn as_ptr(&self) -> *const u32 {
-            self.words.as_ptr()
         }
     }
 
@@ -672,7 +639,85 @@ mod tests {
     }
 
     #[test]
-    fn ffi_trampolines_and_register_setters() {
+    fn class_0x9_64bit_offset_over_32_bits() {
+        // 64-bit Class 0x9 table whose one entry is at offset 0x1_0000_1000. Kept to 32 bits, that
+        // offset would alias the component at 0x1000.
+        let mut aperture = FakeAperture::new();
+        aperture
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0xff4)
+            .write32(CLASS_0X9_ROM_TABLE_DEV_ARCH_REG, 0xfbc)
+            .write32(0x0000_0001, 0xfc8) // Format::Bits64
+            .write64(0x0000_0001_0000_1003, 0)
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x1000 + 0xfbc)
+            .write64(0, 8);
+
+        let mut visited = VisitedList::new();
+        let result =
+            aperture.walk(0x1000 + (MINIMUM_COMPONENT_SIZE as u32), |offset| visited.push(offset));
+        let error = result.unwrap_err();
+        assert!(error.reason.starts_with("a simplifying assumption"));
+        assert_eq!(error.offset, 0);
+        assert!(visited.as_slice().is_empty());
+    }
+
+    #[test]
+    fn self_referencing_table() {
+        let mut aperture = FakeAperture::new();
+        aperture
+            // Visit: Table (class 0x1)
+            .write32(CLASS_0X1_ROM_COMPONENT_ID_REG, 0x0000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x0000 + 0xfbc)
+            // Read: Entry0 of Table -> Table
+            .write32(OFFSET_0X0000_CLASS_0X1_ROM_ENTRY_REG, 0x0000);
+
+        let result = aperture.walk(MINIMUM_COMPONENT_SIZE as u32, |offset| {
+            panic!("unexpected component found at offset {offset:#x}");
+        });
+        assert_eq!(result, Err(WalkError { reason: "ROM tables nested too deeply", offset: 0 }));
+    }
+
+    #[test]
+    fn nesting_depth_limit() {
+        /// Writes a chain of `tables` class 0x1 tables, one per page from offset 0, each pointing
+        /// at the next page, and a component on the page after the last.
+        fn write_chain(aperture: &mut FakeAperture, tables: u32) {
+            aperture.clear();
+            for i in 0..tables {
+                aperture
+                    .write32(CLASS_0X1_ROM_COMPONENT_ID_REG, i * 0x1000 + 0xff4)
+                    .write32(EMPTY_DEV_ARCH_REG, i * 0x1000 + 0xfbc)
+                    .write32(OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG, i * 0x1000);
+            }
+            aperture
+                .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, tables * 0x1000 + 0xff4)
+                .write32(EMPTY_DEV_ARCH_REG, tables * 0x1000 + 0xfbc);
+        }
+
+        let depth = RomTable::MAX_TABLE_DEPTH;
+        let mut aperture = FakeAperture::new();
+
+        // The deepest component the walk reaches.
+        write_chain(&mut aperture, depth);
+        let mut visited = VisitedList::new();
+        let end_offset = depth * 0x1000 + (MINIMUM_COMPONENT_SIZE as u32);
+        assert_eq!(aperture.walk(end_offset, |offset| visited.push(offset)), Ok(()));
+        assert_eq!(visited.as_slice(), &[depth * 0x1000]);
+
+        // One table more: the error names the table that points past the limit.
+        write_chain(&mut aperture, depth + 1);
+        let end_offset = (depth + 1) * 0x1000 + (MINIMUM_COMPONENT_SIZE as u32);
+        let result = aperture.walk(end_offset, |offset| {
+            panic!("unexpected component found at offset {offset:#x}");
+        });
+        assert_eq!(
+            result,
+            Err(WalkError { reason: "ROM tables nested too deeply", offset: depth * 0x1000 })
+        );
+    }
+
+    #[test]
+    fn is_table_and_register_setters() {
         assert!(RomTable::is_table(Some(ClassId::RomTable0x1), 0, 0));
         assert!(RomTable::is_table(
             Some(ClassId::CoreSight),
@@ -703,41 +748,5 @@ mod tests {
         assert!(devid.prr());
         assert!(devid.sysmem());
         assert_eq!(devid.try_format().ok(), Some(Class0x9RomEntryFormat::Bits64));
-
-        /// # Safety
-        ///
-        /// `ctx` must point to a valid `VisitedList`.
-        unsafe extern "C" fn visit_cb(ctx: *mut c_void, offset: u32) {
-            // SAFETY: `ctx` is a valid pointer to `VisitedList`.
-            unsafe { (*ctx.cast::<VisitedList>()).push(offset) };
-        }
-
-        let mut aperture = FakeAperture::new();
-        aperture
-            .write32(CLASS_0X1_ROM_COMPONENT_ID_REG, 0xff4)
-            .write32(EMPTY_DEV_ARCH_REG, 0xfbc)
-            .write32(OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG, 0)
-            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0xff4)
-            .write32(EMPTY_DEV_ARCH_REG, 0x1000 + 0xfbc)
-            .write32(EMPTY_ROM_ENTRY_REG, 4);
-
-        let mut visited = VisitedList::new();
-        let mut err_ptr: *const c_char = core::ptr::null();
-        let mut err_len: usize = 0;
-        let mut err_offset: u32 = 0;
-        // SAFETY: `aperture` and `visited` outlive the call and match the callback cast above.
-        let ok = unsafe {
-            rust_coresight_rom_table_walk(
-                aperture.as_ptr(),
-                0x1000 + (MINIMUM_COMPONENT_SIZE as u32),
-                (&raw mut visited).cast::<c_void>(),
-                visit_cb,
-                &mut err_ptr,
-                &mut err_len,
-                &mut err_offset,
-            )
-        };
-        assert!(ok);
-        assert_eq!(visited.as_slice(), &[0x1000]);
     }
 }

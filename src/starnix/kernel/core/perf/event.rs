@@ -207,7 +207,7 @@ impl<'a> TraceEventQueue {
         self.ring_buffer.read().disable()
     }
 
-    /// Reads a page worth of events. Currently only reads pages that are full.
+    /// Reads the oldest unread page of events into `buf`. If no data is ready, returns `EAGAIN`.
     ///
     /// From https://docs.kernel.org/trace/ring-buffer-design.html, when memory is mapped, a reader
     /// page can be swapped with the header page to avoid copying memory.
@@ -564,22 +564,33 @@ mod tests {
         assert_eq!(event_size, 42);
     }
 
-    // This can be removed when we support reading incomplete pages.
     #[fuchsia::test]
-    fn single_trace_event_fails_read() {
+    fn single_trace_event_reads_partial_page() {
         let queue = TraceEventQueue::new(0).expect("create queue");
         queue.enable().expect("enable queue");
-        // Create an event.
-        let data = b"B|1234|slice_name";
-        let event = TraceEvent::new(1234, data.len());
 
-        // Push the event into the queue.
-        let result = queue.push_event(event, data);
-        assert!(result.is_ok());
-        assert_eq!(result.ok().expect("delta").into_nanos(), 0);
+        let pid = 1234;
+        let data = b"B|1234|slice_name";
+        let event = TraceEvent::new(pid, data.len());
+        let expected_size = event.size();
+
+        let delta = queue.push_event(event, data).expect("push event");
+        assert_eq!(delta.into_nanos(), 0);
 
         let mut buffer = VecOutputBuffer::new(*PAGE_SIZE as usize);
-        assert_eq!(queue.read(&mut buffer), error!(EAGAIN));
+        assert_eq!(queue.read(&mut buffer), Ok(*PAGE_SIZE as usize));
+        let records = page_records(buffer.data());
+        assert_eq!(records.len(), 1);
+        let mut expected_body = PrintEvent::new(pid).as_bytes().to_vec();
+        expected_body.extend_from_slice(data);
+        expected_body.push(b'\n');
+        assert_eq!(records[0].length as usize, expected_size - 4);
+        assert_eq!(records[0].body, expected_body);
+        assert_eq!(records[0].time_delta, 0);
+        assert_eq!(records[0].time_stamp, None);
+
+        let mut empty_buffer = VecOutputBuffer::new(*PAGE_SIZE as usize);
+        assert_eq!(queue.read(&mut empty_buffer), error!(EAGAIN));
     }
 
     const TYPE_OR_LENGTH_MASK: u32 = (1 << LocklessRingBuffer::TYPE_OR_LENGTH_BITS) - 1;
@@ -725,9 +736,21 @@ mod tests {
         // The next event is the first on Page 1.
         assert_eq!(deltas[events_per_page], 0);
 
-        // Page 1 is not full, so it can't be read yet.
+        // Reading again closes Page 1 and delivers its single trailing event.
         let mut buffer = VecOutputBuffer::new(*PAGE_SIZE as usize);
-        assert_eq!(queue.read(&mut buffer), error!(EAGAIN));
+        assert_eq!(queue.read(&mut buffer), Ok(*PAGE_SIZE as usize));
+        let page = buffer.data();
+        let page_timestamp = u64::from_le_bytes(page[0..8].try_into().unwrap());
+        assert_eq!(page_timestamp, times[events_per_page] as u64);
+        let records = page_records(page);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].length as usize, expected_event.size() - 4);
+        assert_eq!(records[0].body, expected_body);
+        assert_eq!(records[0].time_delta, 0);
+        assert_eq!(records[0].time_stamp, None);
+
+        let mut empty_buffer = VecOutputBuffer::new(*PAGE_SIZE as usize);
+        assert_eq!(queue.read(&mut empty_buffer), error!(EAGAIN));
     }
 
     // Races list-level enable() against disable() and checks that the queues and

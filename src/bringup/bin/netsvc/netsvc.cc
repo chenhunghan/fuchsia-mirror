@@ -26,7 +26,6 @@
 #include "src/bringup/bin/netsvc/netboot.h"
 #include "src/bringup/bin/netsvc/netifc.h"
 #include "src/bringup/bin/netsvc/netsvc_config.h"
-#include "src/bringup/bin/netsvc/tftp.h"
 #include "src/sys/lib/stdout-to-debuglog/cpp/stdout-to-debuglog.h"
 
 #ifndef ENABLE_SLAAC
@@ -70,10 +69,6 @@ void udp6_recv(async_dispatcher_t* dispatcher, void* data, size_t len, const ip6
       break;
     case NETBOOT_DEBUGLOG_PORT_ACK:
       debuglog_recv(dispatcher, data, len, mcast);
-      break;
-    case NETBOOT_PORT_TFTP_INCOMING:
-    case NETBOOT_PORT_TFTP_OUTGOING:
-      tftp_recv(dispatcher, data, len, daddr, dport, saddr, sport);
       break;
   }
 }

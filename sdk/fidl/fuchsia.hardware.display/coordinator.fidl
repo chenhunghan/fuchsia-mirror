@@ -625,4 +625,17 @@ closed protocol Coordinator {
         /// Newly added displays has `ON` power mode.
         power_mode fuchsia.hardware.display.types.PowerMode;
     }) -> () error zx.Status;
+
+    /// Hints that upcoming presentations are expected on `display_id` with
+    /// target `frame_interval`, and the first frame with such timing is
+    /// expected at `expected_present_time`.
+    ///
+    /// Ignored if the caller does not currently own the displays or if
+    /// `display_id` does not refer to a known display. Does not modify draft or
+    /// committed display configurations.
+    strict NotifyExpectedPresent(struct {
+        display_id fuchsia.hardware.display.types.DisplayId;
+        expected_present_time zx.InstantMono;
+        frame_interval zx.DurationMono;
+    });
 };

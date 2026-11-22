@@ -47,6 +47,20 @@ void PlatformManagerImpl::SetComponentContextForProcess(
   context_ = std::move(context);
 }
 
+void PlatformManagerImpl::SetComponentContextForProcess(
+    fidl::ClientEnd<fuchsia_io::Directory> incoming_svc,
+    fidl::ServerEnd<fuchsia_io::Directory> outgoing_dir, async_dispatcher_t *dispatcher) {
+  async_dispatcher_t *target_dispatcher = dispatcher != nullptr ? dispatcher : dispatcher_;
+  auto svc = std::make_shared<sys::ServiceDirectory>(incoming_svc.TakeChannel());
+  if (outgoing_dir.is_valid()) {
+    context_ = std::make_unique<sys::ComponentContext>(
+        std::move(svc), fidl::InterfaceRequest<fuchsia::io::Directory>(outgoing_dir.TakeChannel()),
+        target_dispatcher);
+  } else {
+    context_ = std::make_unique<sys::ComponentContext>(std::move(svc), target_dispatcher);
+  }
+}
+
 void PlatformManagerImpl::SetDispatcher(async_dispatcher_t *dispatcher) {
   ZX_ASSERT(dispatcher != nullptr);
   dispatcher_ = dispatcher;

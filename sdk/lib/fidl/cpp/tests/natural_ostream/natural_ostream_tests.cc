@@ -196,9 +196,9 @@ TEST(NaturalOStream, Union) {
             "test_types::TestUnion::primitive(42)");
   EXPECT_EQ(to_string(test_types::TestUnion::WithCopyable({{.x = 23}})),
             "test_types::TestUnion::copyable(test_types::CopyableStruct{ x = 23, })");
-  EXPECT_EQ(
-      to_string(test_types::TestXUnion(fidl::internal::DefaultConstructPossiblyInvalidObjectTag{})),
-      "test_types::TestXUnion::Unknown");
+  EXPECT_EQ(to_string(test_types::TestFlexibleUnion(
+                fidl::internal::DefaultConstructPossiblyInvalidObjectTag{})),
+            "test_types::TestFlexibleUnion::Unknown");
 }
 
 TEST(NaturalOStream, Protocol) {

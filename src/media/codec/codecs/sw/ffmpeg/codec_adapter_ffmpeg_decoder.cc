@@ -16,9 +16,9 @@ extern "C" {
 
 namespace {
 
-AVPixelFormat Images2PixelFormatToAvPixelFormat(fuchsia::images2::PixelFormat pixel_format) {
+AVPixelFormat Images2PixelFormatToAvPixelFormat(fuchsia_images2::PixelFormat pixel_format) {
   switch (pixel_format) {
-    case fuchsia::images2::PixelFormat::YV12:
+    case fuchsia_images2::PixelFormat::kYv12:
       return AV_PIX_FMT_YUV420P;
     default:
       return AV_PIX_FMT_NONE;
@@ -64,11 +64,9 @@ void CodecAdapterFfmpegDecoder::ProcessInputLoop() {
         return;
       }
       auto maybe_avcodec_context = AvCodecContext::CreateDecoder(
-          input_item.format_details(),
-          [this](const AvCodecContext::FrameBufferRequest& frame_buffer_request,
-                 AVCodecContext* avcodec_context, AVFrame* frame, int flags) {
-            return GetBuffer(frame_buffer_request, avcodec_context, frame, flags);
-          });
+          input_item.format_details2(),
+          [this](const AvCodecContext::FrameBufferRequest& frame_buffer_request, AVFrame* frame,
+                 int flags) { return GetBuffer(frame_buffer_request, frame, flags); });
       if (!maybe_avcodec_context) {
         events_->onCoreCodecFailCodec("Failed to create ffmpeg decoder.");
         return;
@@ -83,14 +81,18 @@ void CodecAdapterFfmpegDecoder::ProcessInputLoop() {
       DecodeFrames();
     } else if (input_item.is_packet()) {
       ZX_DEBUG_ASSERT(avcodec_context_);
-      int result = avcodec_context_->SendPacket(input_item.packet());
+      auto return_packet = fit::defer(
+          [this, &input_item] { events_->onCoreCodecInputPacketDone(input_item.packet()); });
+      const int result = avcodec_context_->SendPacket(input_item.packet());
       if (result < 0) {
-        events_->onCoreCodecFailCodec("Failed to decode input packet with ffmpeg error: %s",
-                                      av_err2str(result));
+        if (IsStreamActive()) {
+          events_->onCoreCodecFailCodec("Failed to decode input packet with ffmpeg error: %s",
+                                        av_err2str(result));
+        }
         return;
       }
 
-      events_->onCoreCodecInputPacketDone(input_item.packet());
+      return_packet.call();
 
       DecodeFrames();
     }
@@ -99,16 +101,16 @@ void CodecAdapterFfmpegDecoder::ProcessInputLoop() {
 
 void CodecAdapterFfmpegDecoder::CleanUpAfterStream() { avcodec_context_ = nullptr; }
 
-std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterFfmpegDecoder::OutputFormatDetails() {
+std::pair<fuchsia_media::FormatDetails, size_t> CodecAdapterFfmpegDecoder::OutputFormatDetails() {
   std::lock_guard<std::mutex> lock(lock_);
   ZX_ASSERT(decoded_output_info_.has_value());
 
   const auto& [image_format, per_packet_buffer_bytes] = decoded_output_info_.value();
 
-  fuchsia::media::FormatDetails format_details;
+  fuchsia_media::FormatDetails format_details;
 
-  format_details.set_mime_type("video/raw");
-  format_details.set_image_format(fidl::Clone(image_format));
+  format_details.mime_type() = "video/raw";
+  format_details.image_format() = image_format;
 
   return {std::move(format_details), per_packet_buffer_bytes};
 }
@@ -119,41 +121,60 @@ void CodecAdapterFfmpegDecoder::FfmpegFreeBufferCallback(void* ctx, uint8_t* bas
 }
 
 int CodecAdapterFfmpegDecoder::GetBuffer(
-    const AvCodecContext::FrameBufferRequest& decoded_output_info, AVCodecContext* avcodec_context,
-    AVFrame* frame, int flags) {
+    const AvCodecContext::FrameBufferRequest& decoded_output_info, AVFrame* frame, int flags) {
   bool should_config_output = false;
   bool output_increased_in_size = false;
   bool need_new_buffers = false;
   {
     std::lock_guard<std::mutex> lock(lock_);
-    need_new_buffers = !decoded_output_info_;
-    if (!decoded_output_info_ ||
-        !fidl::Equals((*decoded_output_info_).format, decoded_output_info.format)) {
+    if (!IsStreamActiveLocked()) {
+      return AVERROR(ENOMEM);
+    }
+    need_new_buffers = !decoded_output_info_ || !output_buffer_pool_.has_buffers_configured();
+    if (need_new_buffers || (*decoded_output_info_).format != decoded_output_info.format) {
       output_increased_in_size =
-          decoded_output_info_.has_value() &&
+          !need_new_buffers &&
           decoded_output_info.buffer_bytes_needed > (*decoded_output_info_).buffer_bytes_needed;
-      decoded_output_info_ = {.format = fidl::Clone(decoded_output_info.format),
-                              .buffer_bytes_needed = decoded_output_info.buffer_bytes_needed};
-      should_config_output = true;
+      if (!output_increased_in_size) {
+        // When !need_new_buffers, keep the buffer_bytes_needed that the
+        // currently configured output buffers were allocated for, so a later
+        // switch back to dimensions that still fit in the configured buffers
+        // does not fail the output_increased_in_size check above.
+        decoded_output_info_ = {
+            .format = decoded_output_info.format,
+            .buffer_bytes_needed = need_new_buffers ? decoded_output_info.buffer_bytes_needed
+                                                    : (*decoded_output_info_).buffer_bytes_needed};
+        should_config_output = true;
+        if (need_new_buffers) {
+          SetOutputReconfigPendingLocked();
+        }
+      }
     }
   }
 
   if (output_increased_in_size) {
     events_->onCoreCodecFailCodec(
         "Midstream output config change to larger format is not supported.");
-    return avcodec_default_get_buffer2(avcodec_context, frame, flags);
+    return AVERROR(ENOMEM);
   }
 
   if (should_config_output) {
-    events_->onCoreCodecMidStreamOutputConstraintsChange(
-        /*output_re_config_required=*/need_new_buffers);
+    if (need_new_buffers) {
+      events_->onCoreCodecMidStreamOutputConstraintsChange(
+          /*output_re_config_required=*/true);
+
+      const bool is_active = WaitForOutputReconfigToComplete();
+      if (!is_active) {
+        return AVERROR(ENOMEM);
+      }
+    } else {
+      events_->onCoreCodecOutputFormatChange();
+    }
   }
 
   auto buffer = output_buffer_pool_.AllocateBuffer(decoded_output_info.buffer_bytes_needed);
   if (!buffer) {
-    // This stream is stopping. We let ffmpeg allocate just so it can exit
-    // cleanly.
-    return avcodec_default_get_buffer2(avcodec_context, frame, flags);
+    return AVERROR(ENOMEM);
   }
 
   ZX_ASSERT(decoded_output_info.buffer_bytes_needed <= buffer->size());
@@ -161,7 +182,7 @@ int CodecAdapterFfmpegDecoder::GetBuffer(
             buffer->raw_vmo_size() - buffer->vmo_offset());
 
   AVPixelFormat pix_fmt =
-      Images2PixelFormatToAvPixelFormat(decoded_output_info.format.pixel_format());
+      Images2PixelFormatToAvPixelFormat(*decoded_output_info.format.pixel_format());
   if (pix_fmt == AV_PIX_FMT_NONE) {
     events_->onCoreCodecFailCodec("Unsupported format: %d", pix_fmt);
     return -1;
@@ -172,8 +193,8 @@ int CodecAdapterFfmpegDecoder::GetBuffer(
                                              FfmpegFreeBufferCallback, this, flags);
 
   int fill_arrays_status = av_image_fill_arrays(frame->data, frame->linesize, buffer_ref->data,
-                                                pix_fmt, decoded_output_info.format.size().width,
-                                                decoded_output_info.format.size().height, 1);
+                                                pix_fmt, decoded_output_info.format.size()->width(),
+                                                decoded_output_info.format.size()->height(), 1);
   if (fill_arrays_status < 0) {
     events_->onCoreCodecFailCodec("Ffmpeg fill arrays failed: %d", fill_arrays_status);
     return -1;
@@ -203,8 +224,10 @@ void CodecAdapterFfmpegDecoder::DecodeFrames() {
       events_->onCoreCodecOutputEndOfStream(/*error_detected_before=*/false);
       return;
     } else if (error < 0) {
-      events_->onCoreCodecFailCodec("DecodeFrames(): Failed to decode frame: %s",
-                                    av_err2str(error));
+      if (IsStreamActive()) {
+        events_->onCoreCodecFailCodec("DecodeFrames(): Failed to decode frame: %s",
+                                      av_err2str(error));
+      }
       return;
     }
 
@@ -243,17 +266,11 @@ void CodecAdapterFfmpegDecoder::DecodeFrames() {
   }
 }
 
-fuchsia_sysmem2::BufferCollectionConstraints
-CodecAdapterFfmpegDecoder::CoreCodecGetBufferCollectionConstraints2(
-    CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-    const fuchsia::media::StreamBufferPartialSettings& partial_settings) {
+std::optional<CodecAdapter::CoreCodecGetBufferCollectionConstraints3Result>
+CodecAdapterFfmpegDecoder::CoreCodecGetBufferCollectionConstraints3(CodecPort port) {
   std::lock_guard<std::mutex> lock(lock_);
 
   fuchsia_sysmem2::BufferCollectionConstraints result;
-
-  // The CodecImpl won't hand us the sysmem token, so we shouldn't expect to
-  // have the token here.
-  ZX_DEBUG_ASSERT(!partial_settings.has_sysmem_token());
 
   // TODO(https://fxbug.dev/42084949): plumb/permit range of buffer count from further down,
   // instead of single number frame_count, and set this to the actual
@@ -293,7 +310,8 @@ CodecAdapterFfmpegDecoder::CoreCodecGetBufferCollectionConstraints2(
 
     ZX_DEBUG_ASSERT(port == kOutputPort);
     // YV12, based on min stride.
-    per_packet_buffer_bytes_min = image_format.bytes_per_row() * image_format.size().height * 3 / 2;
+    per_packet_buffer_bytes_min =
+        *image_format.bytes_per_row() * image_format.size()->height() * 3 / 2;
     // At least for now, don't cap the per-packet buffer size for output.  The
     // HW only cares about the portion we set up for output anyway, and the
     // client has no way to force output to occur into portions of the output
@@ -365,8 +383,10 @@ CodecAdapterFfmpegDecoder::CoreCodecGetBufferCollectionConstraints2(
     // larger range of dimensions that includes the required range indicated
     // here (via a-priori knowledge of the potential stream dimensions), an
     // initiator is free to do so.
-    image_constraints.required_min_size() = {image_format.size().width, image_format.size().height};
-    image_constraints.required_max_size() = {image_format.size().width, image_format.size().height};
+    image_constraints.required_min_size() = {image_format.size()->width(),
+                                             image_format.size()->height()};
+    image_constraints.required_max_size() = {image_format.size()->width(),
+                                             image_format.size()->height()};
 
     // Sysmem2 doesn't have required_min_bytes_per_row or
     // required_max_bytes_per_row (at least for now). If those later prove to be
@@ -388,7 +408,9 @@ CodecAdapterFfmpegDecoder::CoreCodecGetBufferCollectionConstraints2(
   // We don't have to fill out usage - CodecImpl takes care of that.
   ZX_DEBUG_ASSERT(!result.usage().has_value());
 
-  return result;
+  return CoreCodecGetBufferCollectionConstraints3Result{
+      .constraints = std::move(result),
+  };
 }
 
 void CodecAdapterFfmpegDecoder::CoreCodecSetBufferCollectionInfo(

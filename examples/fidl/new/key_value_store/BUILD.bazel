@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+filegroup(
+    name = "all",
+    testonly = True,
+    srcs = [
+        "//examples/fidl/new/key_value_store/add_iterator:all",
+        "//examples/fidl/new/key_value_store/add_read_item:all",
+        "//examples/fidl/new/key_value_store/baseline:all",
+        "//examples/fidl/new/key_value_store/support_exports:all",
+        "//examples/fidl/new/key_value_store/support_trees:all",
+        "//examples/fidl/new/key_value_store/use_generic_values:all",
+    ],
+    visibility = ["//examples/fidl/new:__pkg__"],
+)
+
+test_suite(
+    name = "hermetic_tests",
+    tests = [
+        "//examples/fidl/new/key_value_store/add_iterator:hermetic_tests",
+        "//examples/fidl/new/key_value_store/add_read_item:hermetic_tests",
+        "//examples/fidl/new/key_value_store/baseline:hermetic_tests",
+        "//examples/fidl/new/key_value_store/support_exports:hermetic_tests",
+        "//examples/fidl/new/key_value_store/support_trees:hermetic_tests",
+        "//examples/fidl/new/key_value_store/use_generic_values:hermetic_tests",
+    ],
+    visibility = ["//examples/fidl/new:__pkg__"],
+)

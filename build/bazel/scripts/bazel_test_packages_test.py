@@ -6,6 +6,7 @@
 import errno
 import json
 import os
+import sys
 import tempfile
 import typing as T
 import unittest
@@ -451,6 +452,59 @@ class ExportPackagesTest(unittest.TestCase):
         self.export([export_path])
 
         self.assertEqual(exported_manifest.stat().st_mtime, 1)
+
+    def test_main_extra_manifest(self) -> None:
+        self._write_bazel_file("bazel-out/cfg/bin/pkg/listed", "listed")
+        listed = self._write_manifest(
+            "bazel-out/cfg/bin/pkg/listed.package_manifest.json",
+            {"data": ("1111", "bazel-out/cfg/bin/pkg/listed")},
+        )
+        self._write_bazel_file("bazel-out/cfg/bin/pkg/extra", "extra")
+        extra = self._write_manifest(
+            "bazel-out/cfg/bin/pkg/extra.package_manifest.json",
+            {"data": ("2222", "bazel-out/cfg/bin/pkg/extra")},
+        )
+        (self.build_dir / bazel_test_packages.PACKAGES_LIST).write_text(
+            json.dumps({"content": {"manifests": [listed]}, "version": "1"})
+        )
+
+        with (
+            mock.patch.object(BazelPaths, "new", return_value=self.bazel_paths),
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "bazel_test_packages.py",
+                    "--ninja-build-dir",
+                    str(self.build_dir),
+                    "--incremental",
+                    "--extra-manifest",
+                    extra,
+                ],
+            ),
+        ):
+            self.assertEqual(bazel_test_packages.main(), 0)
+
+        self.assertTrue((self.build_dir / listed).is_file())
+        self.assertTrue((self.build_dir / extra).is_file())
+
+    def test_main_requires_packages_list(self) -> None:
+        # Without --extra-manifest, a missing list is an error rather than a
+        # reason to prune every exported package.
+        with (
+            mock.patch.object(BazelPaths, "new", return_value=self.bazel_paths),
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "bazel_test_packages.py",
+                    "--ninja-build-dir",
+                    str(self.build_dir),
+                ],
+            ),
+            mock.patch.object(sys, "stderr"),
+        ):
+            self.assertEqual(bazel_test_packages.main(), 1)
 
 
 if __name__ == "__main__":

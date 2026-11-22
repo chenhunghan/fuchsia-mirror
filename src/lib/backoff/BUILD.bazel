@@ -46,7 +46,6 @@ fx_cc_test_binary(
 
 fx_unittest_package(
     name = "backoff_tests",
-    package_name = "backoff_tests",
     unit_tests = [":backoff_unittests"],
     visibility = ["//src/lib:__pkg__"],
 )

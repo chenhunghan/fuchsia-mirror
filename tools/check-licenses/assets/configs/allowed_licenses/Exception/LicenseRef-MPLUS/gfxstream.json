@@ -1,0 +1,13 @@
+{
+    "allowed_licenses": {
+        "LicenseRef-MPLUS": [
+            {
+                "bug": "b/585200385",
+                "description": "Approved LicenseRef-MPLUS license usage for gfxstream projects",
+                "paths": [
+                    "third_party/gfxstream"
+                ]
+            }
+        ]
+    }
+}

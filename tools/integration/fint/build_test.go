@@ -183,7 +183,7 @@ func TestBuild(t *testing.T) {
 				GnArgs: []string{"enable_jobserver = true"},
 			},
 			expectedArtifacts: &fintpb.BuildArtifacts{},
-			mustRun:           []string{`ninja -C .*out/default --edge_weights_list=ninja_edge_weights\.csv --error_logging_output=[^ ]+ --chrome_trace ninja_build_trace\.json\.gz --action_metrics_output ninja_action_metrics\.json --jobserver$`},
+			mustRun:           []string{`ninja -C .*out/default --edge_weights_list=ninja_edge_weights\.csv --error_logging_output=[^ ]+ --chrome_trace ninja_build_trace\.json\.gz --action_metrics_output ninja_action_metrics\.json --jobserver-pool$`},
 		},
 		{
 			name: "use rs-sub-ninja when build_event_service_ninja is resultstore_infra",

@@ -71,7 +71,8 @@ your driver's `.fidl` file, for example:
 
   Note: To find out if driver runtime migration is needed, see the
   "How do I know if my driver talks to other drivers co-located in
-  the same process?" question in the [Before you start](#before-you-start)
+  the same process?" question in the [Before you
+  start](overview.md#before-you-start)
   section.
 
   For more examples on the Driver transport protocols, see this
@@ -167,7 +168,7 @@ Important: Driver runtime migration is required **only if** your driver
 talks to other drivers co-located in the same driver host. To find out
 if the driver runtime migration is needed, see the "How do I know if
 my driver talks to other drivers co-located in the same process?" question
-in the [Before you start](#before-you-start) section.
+in the [Before you start](overview.md#before-you-start) section.
 
 This section requires that the updated `.fidl` file from the
 [previous section](#update-the-dfv1-driver-from-banjo-to-fidl) can
@@ -831,7 +832,7 @@ All the **documentation pages** mentioned in this section:
 [brcmfmac-build-gn]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/BUILD.gn;l=170
 [wlanphy-impl-device-h]: https://fuchsia-review.git.corp.google.com/c/fuchsia/+/655947/75/src/connectivity/wlan/drivers/third_party/intel/iwlwifi/platform/wlanphy-impl-device.h
 [wlanphy-device-dfv2-h]: https://fuchsia-review.git.corp.google.com/c/fuchsia/+/655947/75/src/connectivity/wlan/drivers/wlanphy/device_dfv2.h
-[driver-service-protocol]: /docs/development/drivers/tutorials/sdk_build_driver/driver-service.md#define_a_driver_service_protocol
+[driver-service-protocol]: /docs/development/drivers/tutorials/sdk_build_driver/driver-service.md#define-a-device-service
 [phyimpl-fidl]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.wlan.phyimpl/phyimpl.fidl;l=96
 [ddktl-device-h]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/ddktl/include/ddktl/device.h;l=610;drc=172f766331e1dd3509833ce5a9a86917d945b2d2?q=ddkconnectruntimeprotocol&ss=fuchsia
 [wlanoftmac-device-cc]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/connectivity/wlan/drivers/wlansoftmac/device.cc;l=312
@@ -845,7 +846,7 @@ All the **documentation pages** mentioned in this section:
 [nxpfmac-device-cc-71]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/connectivity/wlan/drivers/third_party/nxp/nxpfmac/device.cc;l=71
 [implement-fidl-server]: /docs/development/languages/fidl/tutorials/cpp/basics/server.md
 [hanging-get]: /docs/development/api/fidl.md#hanging-get
-[flow-control]: /docs/development/api/fidl.md#flow_control
+[flow-control]: /docs/development/api/fidl.md#flow-control
 [softmac-fidl-393]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.wlan.softmac/softmac.fidl;l=393
 [softmac-fidl-200]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.wlan.softmac/softmac.fidl;l=200
 [throttle-events]: /docs/development/api/fidl.md#throttle-events-using-acknowledgements

@@ -22,6 +22,7 @@ see the **`rust_driver_best_practices`** skill.
 
 ## 1. Understand the Source Driver
 Analyze the existing C++ driver to understand:
+
 - Its bind rules (what parents it binds to).
 - The resources it accesses (MMIO, IRQs, etc.).
 - The services it offers and consumes via FIDL.
@@ -33,13 +34,12 @@ scratch, use the **`migrate-cpp-to-rust-scaffolding`** skill to automate the
 initial setup.
 
 This sets up a coexisting Rust driver target (e.g., `my-driver-rust`),
-boilerplate source code, Component Manifest (`.cml`), and integration into
-`all_drivers_list.txt`.
+boilerplate source code, and Component Manifest (`.cml`).
 
 Refer to the `migrate-cpp-to-rust-scaffolding` skill for:
+
 - Stating the automated `scaffold_migration.py` command.
-- Post-scaffolding manual steps (such as adding the driver `info` metadata
-  file).
+- Post-scaffolding manual steps (such as verifying the build and adding tests).
 - Implementing advanced parameterization for hot swapping between the C++ and
   Rust implementations under a feature flag (e.g. `use_my_driver_rust`).
 
@@ -90,7 +90,7 @@ impl Driver for MyDriver {
         Ok(MyDriver { node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         // Cleanup resources
     }
 }
@@ -125,6 +125,7 @@ and exposes. It should match the new component name and package path defined in
 your `BUILD.gn`.
 
 ## 7. Verification
+
 - Build the driver: `fx build`.
 - Run tests: `fx test <driver_test_package>`.
 - Use `ffx driver list` and `ffx driver dump` on a running system to verify the

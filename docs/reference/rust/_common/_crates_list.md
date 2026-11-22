@@ -16,7 +16,7 @@
     components by allowing for the run-time construction of realms and mocked
     components specific to individual test cases. For more information on how
     to use this library, see
-    [Realm Builder](/docs/development/testing/components/realm_builder.md#rust)
+    [Realm Builder](/docs/development/testing/components/realm_builder.md)
 
 * [fuchsia_async/](https://fuchsia-docs.firebaseapp.com/rust/fuchsia_async/index.html)
 

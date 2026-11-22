@@ -38,7 +38,7 @@ rustc_library("magma") {
     "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker_rust",
     "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_rust",
     "//sdk/rust/zx",
-    "//src/graphics/lib/magma/src/libmagma",
+    "//src/graphics/lib/magma/src/libmagma:libmagma_shared_engine",
     "//src/lib/fdio/rust:fdio",
     "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-component",

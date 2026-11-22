@@ -207,7 +207,20 @@ pub trait TargetResolver {
                         _ => (), // No manual target with this name
                     },
                     handles_res = handles_fut => match handles_res {
-                        Ok(r) => discovered = Some(r),
+                        Ok(r) => {
+                            if r.is_empty() {
+                                match manual_target_fut.await {
+                                    Err(e) => {
+                                        log::debug!(
+                                            "Failed to resolve target {s} as manual target: {e:?}"
+                                        );
+                                    }
+                                    Ok(Some(res)) => return Ok(vec![res]),
+                                    Ok(None) => (),
+                                }
+                            }
+                            discovered = Some(r);
+                        }
                         Err(e) => {
                             log::warn!("Target discovery failed: {e:?}");
                             return Err(FfxTargetError::OpenTargetError {
@@ -285,10 +298,40 @@ pub trait TargetResolver {
                 }
             };
 
-            expect_single_target(target_spec, resolutions, source)
+            let mut resolution = expect_single_target(target_spec, resolutions, source)
                 .or_else_maybe_analytics(|e| target_error_to_analytics(e).map(Into::into))
-                .await
+                .await?;
+            if resolution.expected_query.is_none() {
+                let desc = resolution.discovered.as_ref().map(discovery::Description::from);
+                resolution.expected_query = expected_query_for_match(
+                    target_spec,
+                    desc.as_ref().and_then(|d| d.nodename.as_deref()),
+                    desc.as_ref().and_then(|d| d.serial.as_deref()),
+                );
+            }
+            Ok(resolution)
         }
+    }
+}
+
+// Narrows an unannotated `NodenameOrId(s)` query to `Id(s)` when the resolved target matched `s`
+// by serial number rather than nodename, so `identity_matches` treats an absent system serial as
+// consistent instead of rejecting the target's different nodename.
+fn expected_query_for_match(
+    query: &TargetInfoQuery,
+    nodename: Option<&str>,
+    serial: Option<&str>,
+) -> Option<TargetInfoQuery> {
+    match query {
+        TargetInfoQuery::Id(_) => Some(query.clone()),
+        TargetInfoQuery::NodenameOrId(s) => {
+            if nodename != Some(s.as_str()) && serial == Some(s.as_str()) {
+                Some(TargetInfoQuery::Id(s.clone()))
+            } else {
+                Some(query.clone())
+            }
+        }
+        _ => None,
     }
 }
 
@@ -300,7 +343,15 @@ fn match_target_infos_to_resolutions(
     targets
         .into_iter()
         .filter(|ti| ti.match_query(target_spec))
-        .filter_map(|ti| ResolutionTarget::from_target_info(&ti).map(Resolution::from_target))
+        .filter_map(|ti| {
+            let mut res = ResolutionTarget::from_target_info(&ti).map(Resolution::from_target)?;
+            res.expected_query = expected_query_for_match(
+                target_spec,
+                ti.nodename.as_deref(),
+                ti.serial_number.as_deref(),
+            );
+            Some(res)
+        })
         .collect()
 }
 
@@ -441,7 +492,7 @@ pub fn build_discovery_builder_common(ctx: &EnvironmentContext) -> DiscoveryBuil
     // Fastboot targets (bootloaders) are not ssh-able and do not support target
     // address resolution, so we exclude them from configuration-based discovery.
     sources.remove(DiscoverySources::USB_FASTBOOT | DiscoverySources::FASTBOOT_FILE);
-    if !ctx.get(ffx_config::keys::USB_ENABLED).unwrap_or(false) {
+    if !ctx.get(ffx_config::keys::USB_ENABLED).unwrap_or(true) {
         sources.remove(DiscoverySources::USB_VSOCK);
     }
     if !ctx.get(ffx_config::keys::NETWORK_ENABLED).unwrap_or(true) {
@@ -588,7 +639,7 @@ pub fn get_discovery_stream(
     if usb {
         sources = sources | DiscoverySources::USB_FASTBOOT;
 
-        if ctx.get(keys::USB_ENABLED).unwrap_or(false) {
+        if ctx.get(keys::USB_ENABLED).unwrap_or(true) {
             sources = sources | DiscoverySources::USB_VSOCK;
         }
     }
@@ -619,7 +670,7 @@ pub async fn get_discovered_targets(
     if usb {
         sources = sources | DiscoverySources::USB_FASTBOOT;
 
-        if ctx.get(keys::USB_ENABLED).unwrap_or(false) {
+        if ctx.get(keys::USB_ENABLED).unwrap_or(true) {
             sources = sources | DiscoverySources::USB_VSOCK;
         }
     }
@@ -800,6 +851,29 @@ enum ConnectionState {
     Failed,
 }
 
+// The identity that RCS reports when it cannot ask the system for one (see `DefaultIdentifier`
+// in //src/developer/remote-control/src/host_identifier.rs).
+const DEFAULT_NODENAME: &str = "fuchsia-default-nodename";
+const DEFAULT_SERIAL_NUMBER: &str = "fuchsia-default-serial-number";
+
+// Returns whether `identify` is consistent with the target that `query` asked for. A target that
+// does not report what the query asks about (e.g. one booted without a serial number) cannot
+// contradict the query, so it is consistent with it.
+fn identity_matches(query: &TargetInfoQuery, identify: &IdentifyHostResponse) -> bool {
+    let nodename = identify.nodename.clone().filter(|n| !n.is_empty() && n != DEFAULT_NODENAME);
+    let serial =
+        identify.serial_number.clone().filter(|s| !s.is_empty() && s != DEFAULT_SERIAL_NUMBER);
+    match query {
+        TargetInfoQuery::Id(_) if serial.is_none() => true,
+        _ if nodename.is_none() && serial.is_none() => true,
+        _ => query.match_description(&discovery::Description {
+            nodename,
+            serial,
+            ..Default::default()
+        }),
+    }
+}
+
 // Group the information collected when resolving the address. (This is
 // particularly important for the rcs_proxy, which we may need when resolving
 // a manual target -- we don't want make an RCS connection just to resolve the
@@ -812,6 +886,10 @@ pub struct Resolution {
     // target succeeds, so it only marks resolutions that have not been verified against a live
     // target.
     from_cache: AtomicBool,
+    // Symbolic query (`id:<serial>` or `<nodename>`) that produced this resolution, used to
+    // verify the connected target's IdentifyHost identity. `None` for direct-address and
+    // wildcard (`First`) queries.
+    expected_query: Option<TargetInfoQuery>,
     connection: Mutex<ConnectionState>,
     rcs_proxy: Mutex<Option<RemoteControlProxy>>,
     identify_host_response: Mutex<Option<IdentifyHostResponse>>,
@@ -833,6 +911,7 @@ impl Resolution {
             target,
             discovered: None,
             from_cache: AtomicBool::new(false),
+            expected_query: None,
             connection: Mutex::new(ConnectionState::Uninitialized),
             rcs_proxy: Mutex::new(None),
             identify_host_response: Mutex::new(None),
@@ -984,7 +1063,8 @@ impl Resolution {
         // next attempt.
         *conn_guard = ConnectionState::Failed;
 
-        let conn_res = self.connect_new(context).await;
+        let conn_res =
+            self.connect_new(context).await.map_err(|err| self.explain_unreachable(err, context));
         match &conn_res {
             Ok(conn) => {
                 self.from_cache.store(false, Ordering::Relaxed);
@@ -999,6 +1079,81 @@ impl Resolution {
             }
         }
         conn_res
+    }
+
+    // Names the query and the address it was registered at when a strict-mode target can't be
+    // reached, since the transport's error shows neither and a stale registry entry is a likely
+    // cause.
+    fn explain_unreachable(
+        &self,
+        err: crate::FfxTargetCrateError,
+        context: &EnvironmentContext,
+    ) -> crate::FfxTargetCrateError {
+        match (err, &self.expected_query) {
+            (
+                crate::FfxTargetCrateError::Knock(crate::KnockError::NonCritical(source)),
+                Some(query),
+            ) if context.is_strict() => crate::KnockError::NonCritical(
+                crate::KnockNonCriticalError::RegisteredTargetUnreachable {
+                    query: query.to_string(),
+                    target_spec: self.target_spec(),
+                    source: Box::new(source),
+                },
+            )
+            .into(),
+            (err, _) => err,
+        }
+    }
+
+    // Checks that the target reached by `conn` is the one that `query` asked for, so that an
+    // address which now belongs to a different device is not mistaken for the target.
+    async fn verify_identity(
+        &self,
+        conn: &Connection,
+        query: &TargetInfoQuery,
+        context: &EnvironmentContext,
+    ) -> std::result::Result<(), crate::FfxTargetCrateError> {
+        let target_spec = self.target_spec();
+        let timeout_ms = context.get(CONFIG_TARGET_SSH_TIMEOUT).unwrap_or(DEFAULT_SSH_TIMEOUT_MS);
+        let answer = async {
+            // TODO(b/571246542): Cache the RCS proxy established here so `get_rcs_proxy()` reuses
+            // it instead of opening a second proxy and doubling `ffx_rcs_proxy` analytics.
+            let rcs_proxy = conn.rcs_proxy_fdomain().await.map_err(|e| e.to_string())?;
+            rcs_proxy.identify_host().await.map_err(|e| e.to_string())
+        }
+        .on_timeout(Duration::from_millis(timeout_ms), || Err("timed out".into()))
+        .await;
+        let identify = match answer {
+            Ok(Ok(identify)) => identify,
+            Ok(Err(e)) => {
+                log::warn!("Cannot verify that {target_spec} is '{query}': IdentifyHost: {e:?}");
+                return Ok(());
+            }
+            // The target did not answer, so report a failed connection, which callers may retry.
+            Err(why) => {
+                return Err(crate::KnockError::NonCritical(
+                    crate::KnockNonCriticalError::RcsKnockFailed {
+                        detail: format!("IdentifyHost on {target_spec}: {why}"),
+                    },
+                )
+                .into());
+            }
+        };
+        if !identity_matches(query, &identify) {
+            return Err(crate::error::TargetResolutionError::IdentityMismatch {
+                expected_query: query.to_string(),
+                target_spec,
+                actual_nodename: identify.nodename,
+                actual_serial: identify.serial_number,
+            }
+            .into());
+        }
+        // Save `identify()` a second IdentifyHost call. `identify()` does not hold this lock
+        // while it connects, so this only fails if another `identify()` is asking right now.
+        if let Ok(mut cached) = self.identify_host_response.try_lock() {
+            *cached = Some(identify);
+        }
+        Ok(())
     }
 
     async fn connect_new(
@@ -1018,7 +1173,7 @@ impl Resolution {
                 Connection::new(connector).await.map_err(crate::KnockError::from)?
             }
             ResolutionTarget::Usb(cid) => {
-                if !context.get(keys::USB_ENABLED).unwrap_or(false) {
+                if !context.get(keys::USB_ENABLED).unwrap_or(true) {
                     return Err(crate::error::TargetResolutionError::UsbDisabled.into());
                 }
                 let connector = UsbConnector::new(*cid, context).await?;
@@ -1042,6 +1197,9 @@ impl Resolution {
             ResolutionTarget::TestMockAsync(f) => f().await?,
         };
 
+        if let Some(query) = &self.expected_query {
+            self.verify_identity(&conn, query, context).await?;
+        }
         Ok(Arc::new(conn))
     }
 
@@ -1076,12 +1234,17 @@ impl Resolution {
         &self,
         context: &EnvironmentContext,
     ) -> std::result::Result<IdentifyHostResponse, crate::FfxTargetCrateError> {
+        if let Some(identify) = self.identify_host_response.lock().await.clone() {
+            return Ok(identify);
+        }
+        // Connect before taking the lock, so that a connection that verifies the target's
+        // identity can record the response it got instead of this asking again.
+        let rcs_proxy = self.get_rcs_proxy(context).await?;
         // Hold a lock to make sure only one IdentifyHost is being called at a time.
         // Note that this is a tokio Mutex, not a std Mutex, so it's safe to hold across
         // await points.
         let mut identify_guard = self.identify_host_response.lock().await;
         if identify_guard.is_none() {
-            let rcs_proxy = self.get_rcs_proxy(context).await?;
             *identify_guard = Some(
                 rcs_proxy
                     .identify_host()
@@ -1182,6 +1345,7 @@ impl TryFromEnvContext for Resolution {
 mod test {
     use super::*;
     use ffx_config::environment::ExecutableKind;
+    use fidl_fuchsia_developer_remotecontrol as rcs_fidl;
     use std::cmp::Ordering;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
@@ -1345,7 +1509,7 @@ mod test {
     async fn test_successful_connection_clears_from_cache() {
         #[derive(Debug)]
         struct PlaceholderConnector;
-        impl crate::TargetConnector for PlaceholderConnector {
+        impl crate::TransportConnector for PlaceholderConnector {
             const CONNECTION_TYPE: &'static str = "placeholder";
             async fn connect(
                 &mut self,
@@ -1977,5 +2141,417 @@ mod test {
         let results: Vec<TargetHandle> =
             short_circuit_stream_by_sources(inner_stream, query, sources).collect().await;
         assert_eq!(results, vec![usb_handle1]);
+    }
+
+    #[fuchsia::test]
+    async fn test_discover_matching_targets_waits_for_manual_target_when_discovery_empty() {
+        struct DelayedManualTargetResolver {
+            manual_addr: SocketAddr,
+        }
+
+        impl TargetResolver for DelayedManualTargetResolver {
+            async fn discovered_targets(
+                &self,
+                _query: TargetInfoQuery,
+            ) -> Result<Vec<TargetHandle>> {
+                Ok(vec![])
+            }
+
+            async fn try_resolve_manual_target(
+                &self,
+                name: &str,
+                _ctx: &EnvironmentContext,
+            ) -> Result<Option<Resolution>> {
+                fuchsia_async::Timer::new(Duration::from_millis(10)).await;
+                if name == "manual-node" {
+                    Ok(Some(Resolution::from_addr(self.manual_addr)))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+
+        let test_env = ffx_config::test_env().build().unwrap();
+        let sa: SocketAddr = "10.128.16.178:22".parse().unwrap();
+        let resolver = DelayedManualTargetResolver { manual_addr: sa };
+        let query = TargetInfoQuery::NodenameOrId("manual-node".to_string());
+        let res =
+            resolver.resolve_single_target(&query, false, &test_env.context, None).await.unwrap();
+        assert_eq!(res.addr().unwrap(), sa);
+    }
+
+    type FakeIdentity =
+        std::result::Result<rcs_fidl::IdentifyHostResponse, rcs_fidl::IdentifyHostError>;
+
+    #[derive(Clone)]
+    enum FakeIdentify {
+        Respond(FakeIdentity),
+        DropResponder,
+        Stall,
+    }
+
+    fn fake_identity(nodename: &str, serial: &str) -> FakeIdentify {
+        FakeIdentify::Respond(Ok(rcs_fidl::IdentifyHostResponse {
+            nodename: Some(nodename.into()),
+            serial_number: Some(serial.into()),
+            ..Default::default()
+        }))
+    }
+
+    // Returns a resolution of `query` whose target is a fake RCS that answers IdentifyHost
+    // according to `identify`, and the number of IdentifyHost calls the fake has received.
+    fn fake_rcs_resolution(
+        query: Option<&str>,
+        identify: FakeIdentify,
+    ) -> (Resolution, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let client = fdomain_local::local_client(move || {
+            let (namespace, mut opens) =
+                fidl::endpoints::create_request_stream::<fidl_fuchsia_io::DirectoryMarker>();
+            let (identify, counter) = (identify.clone(), Arc::clone(&counter));
+            fuchsia_async::Task::local(async move {
+                let mut stalled = Vec::new();
+                while let Some(Ok(fidl_fuchsia_io::DirectoryRequest::Open { object, .. })) =
+                    opens.next().await
+                {
+                    let mut requests =
+                        fidl::endpoints::ServerEnd::<rcs_fidl::RemoteControlMarker>::new(object)
+                            .into_stream();
+                    while let Some(Ok(rcs_fidl::RemoteControlRequest::IdentifyHost { responder })) =
+                        requests.next().await
+                    {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        match &identify {
+                            FakeIdentify::Respond(res) => {
+                                responder.send(res.as_ref().map_err(|e| *e)).unwrap();
+                            }
+                            FakeIdentify::DropResponder => {}
+                            FakeIdentify::Stall => stalled.push(responder),
+                        }
+                    }
+                }
+            })
+            .detach();
+            Ok(namespace)
+        });
+        let conn = std::sync::Mutex::new(Some(Connection::from_fdomain_client(client)));
+        let mut resolution = Resolution::mock(move || Ok(conn.lock().unwrap().take().unwrap()));
+        resolution.expected_query = query.map(|q| TargetInfoQuery::try_from(q).unwrap());
+        (resolution, calls)
+    }
+
+    // Connects a resolution from `fake_rcs_resolution`.
+    async fn connect_to_fake_rcs(
+        context: &EnvironmentContext,
+        query: Option<&str>,
+        identity: FakeIdentify,
+    ) -> (
+        Resolution,
+        std::result::Result<Arc<Connection>, crate::FfxTargetCrateError>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let (resolution, calls) = fake_rcs_resolution(query, identity);
+        let res = resolution.get_connection(context).await;
+        (resolution, res, calls)
+    }
+
+    #[fuchsia::test]
+    async fn test_identity_matches() {
+        let identify = |nodename: Option<&str>, serial: Option<&str>| IdentifyHostResponse {
+            nodename: nodename.map(Into::into),
+            serial_number: serial.map(Into::into),
+            ..Default::default()
+        };
+        let defaults = identify(Some(DEFAULT_NODENAME), Some(DEFAULT_SERIAL_NUMBER));
+        let empty = identify(Some(""), Some(""));
+        for (query, identify, want) in [
+            ("id:SER123", identify(Some("my-node"), Some("SER123")), true),
+            ("id:SER123", identify(Some("my-node"), Some("SER999")), false),
+            ("id:SER123", identify(Some("my-node"), None), true),
+            ("id:SER123", identify(Some("my-node"), Some("")), true),
+            ("id:SER123", defaults.clone(), true),
+            ("my-node", identify(Some("my-node"), Some("SER123")), true),
+            ("my-node", identify(Some("other-node"), None), false),
+            ("my-node", identify(None, Some("SER123")), false),
+            // A query without the `id:` prefix may also name a serial number.
+            ("SER123", identify(Some("my-node"), Some("SER123")), true),
+            ("my-node", identify(None, None), true),
+            ("my-node", defaults, true),
+            ("my-node", empty, true),
+        ] {
+            let matches = identity_matches(&TargetInfoQuery::try_from(query).unwrap(), &identify);
+            assert_eq!(matches, want, "query {query:?}, target reports {identify:?}");
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_get_connection_rejects_a_different_target() {
+        let env = ffx_config::test_init().unwrap();
+        let (resolution, res, _) =
+            connect_to_fake_rcs(&env.context, Some("id:SER123"), fake_identity("a-node", "SER999"))
+                .await;
+        let err = res.unwrap_err();
+        match &err {
+            crate::FfxTargetCrateError::Resolution(
+                crate::error::TargetResolutionError::IdentityMismatch {
+                    expected_query,
+                    target_spec,
+                    actual_nodename,
+                    actual_serial,
+                },
+            ) => {
+                assert_eq!(expected_query, "id:SER123");
+                assert_eq!(target_spec, "mock_target");
+                assert_eq!(actual_nodename.as_deref(), Some("a-node"));
+                assert_eq!(actual_serial.as_deref(), Some("SER999"));
+            }
+            other => panic!("expected IdentityMismatch, got {other:?}"),
+        }
+        assert!(!resolution.is_usable().await);
+        // The user has to act on a mismatch: connecting to the same address again cannot fix it.
+        let err = err.into_command_error();
+        assert!(matches!(err, ffx_command_error::Error::User(_)), "{err:?}");
+        assert!(err.downcast_non_fatal().is_err());
+    }
+
+    #[fuchsia::test]
+    async fn test_get_connection_accepts_the_target_and_remembers_its_identity() {
+        let env = ffx_config::test_init().unwrap();
+        let (resolution, res, calls) =
+            connect_to_fake_rcs(&env.context, Some("id:SER123"), fake_identity("a-node", "SER123"))
+                .await;
+        res.unwrap();
+        let identity = resolution.identify(&env.context).await.unwrap();
+        assert_eq!(identity.serial_number.as_deref(), Some("SER123"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[fuchsia::test]
+    async fn test_identify_that_connects_asks_only_once() {
+        let env = ffx_config::test_init().unwrap();
+        let (resolution, calls) =
+            fake_rcs_resolution(Some("id:SER123"), fake_identity("a-node", "SER123"));
+        let identity = resolution.identify(&env.context).await.unwrap();
+        assert_eq!(identity.serial_number.as_deref(), Some("SER123"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[fuchsia::test]
+    async fn test_get_connection_does_not_identify_without_a_symbolic_query() {
+        let env = ffx_config::test_init().unwrap();
+        let (_, res, calls) =
+            connect_to_fake_rcs(&env.context, None, fake_identity("a-node", "SER999")).await;
+        res.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[fuchsia::test]
+    async fn test_get_connection_accepts_a_target_that_cannot_identify_itself() {
+        let env = ffx_config::test_init().unwrap();
+        let identity =
+            FakeIdentify::Respond(Err(rcs_fidl::IdentifyHostError::ListInterfacesFailed));
+        let (resolution, res, _) =
+            connect_to_fake_rcs(&env.context, Some("id:SER123"), identity).await;
+        res.unwrap();
+        assert!(resolution.is_usable().await);
+    }
+
+    #[fuchsia::test]
+    async fn test_get_connection_can_be_retried_when_identify_host_closes_channel() {
+        let env = ffx_config::test_init().unwrap();
+        let (_, res, _) =
+            connect_to_fake_rcs(&env.context, Some("id:SER123"), FakeIdentify::DropResponder).await;
+        assert!(res.unwrap_err().into_command_error().downcast_non_fatal().is_ok());
+    }
+
+    #[fuchsia::test]
+    async fn test_get_connection_times_out_when_identify_host_stalls() {
+        let env =
+            ffx_config::test_env().runtime_config(CONFIG_TARGET_SSH_TIMEOUT, 10).build().unwrap();
+        // The timeout also covers opening the RCS proxy, so on a slow or loaded host it may fire
+        // before the fake receives IdentifyHost. Only check what holds either way.
+        let (_, res, _) =
+            connect_to_fake_rcs(&env.context, Some("id:SER123"), FakeIdentify::Stall).await;
+        let err = res.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err:?}");
+        assert!(err.into_command_error().downcast_non_fatal().is_ok());
+    }
+
+    #[fuchsia::test]
+    async fn test_get_connection_can_be_retried_when_rcs_proxy_fails() {
+        let env = ffx_config::test_init().unwrap();
+        let conn = std::sync::Mutex::new(Some(Connection::from_fdomain_client(
+            fdomain_local::local_client_empty(),
+        )));
+        let mut resolution = Resolution::mock(move || Ok(conn.lock().unwrap().take().unwrap()));
+        resolution.expected_query = Some(TargetInfoQuery::Id("SER123".into()));
+
+        let err = resolution.get_connection(&env.context).await.unwrap_err();
+        assert!(err.into_command_error().downcast_non_fatal().is_ok());
+    }
+
+    #[fuchsia::test]
+    async fn test_get_connection_times_out_when_rcs_proxy_stalls() {
+        struct PendingReader;
+        impl tokio::io::AsyncRead for PendingReader {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Pending
+            }
+        }
+
+        #[derive(Debug)]
+        struct StallingConnector;
+        impl crate::TransportConnector for StallingConnector {
+            const CONNECTION_TYPE: &'static str = "stalling";
+            async fn connect(
+                &mut self,
+            ) -> Result<crate::TargetConnection, crate::TargetConnectionError> {
+                let (_, errors) = async_channel::unbounded();
+                Ok(crate::TargetConnection::FDomain(crate::FDomainConnection {
+                    output: Box::new(tokio::io::BufReader::new(PendingReader)),
+                    input: Box::new(tokio::io::sink()),
+                    errors,
+                    main_task: None,
+                }))
+            }
+        }
+
+        let env =
+            ffx_config::test_env().runtime_config(CONFIG_TARGET_SSH_TIMEOUT, 10).build().unwrap();
+        let conn = std::sync::Mutex::new(Some(Connection::new(StallingConnector).await.unwrap()));
+        let mut resolution = Resolution::mock(move || Ok(conn.lock().unwrap().take().unwrap()));
+        resolution.expected_query = Some(TargetInfoQuery::Id("SER123".into()));
+
+        let err = resolution.get_connection(&env.context).await.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err:?}");
+        assert!(err.into_command_error().downcast_non_fatal().is_ok());
+    }
+
+    #[fuchsia::test]
+    async fn test_only_symbolic_queries_expect_an_identity() {
+        let env = ffx_config::test_init().unwrap();
+        let (sa, addr_spec) = get_addr_and_spec();
+        for (query, want) in [
+            (TargetInfoQuery::Id("SER123".into()), Some(TargetInfoQuery::Id("SER123".into()))),
+            (
+                TargetInfoQuery::NodenameOrId("foo".into()),
+                Some(TargetInfoQuery::NodenameOrId("foo".into())),
+            ),
+            // An unannotated serial query narrows to `Id(...)` so missing system serials match.
+            (
+                TargetInfoQuery::NodenameOrId("SER123".into()),
+                Some(TargetInfoQuery::Id("SER123".into())),
+            ),
+            (TargetInfoQuery::First, None),
+            (addr_spec, None),
+        ] {
+            let mut resolver = MockTargetResolver::new();
+            resolver.expect_try_resolve_manual_target().returning(|_, _| Ok(None));
+            resolver.expect_discovered_targets().returning(move |_| {
+                Ok(vec![TargetHandle {
+                    node_name: Some("foo".into()),
+                    state: discovery::TargetState::Product {
+                        addrs: vec![sa.into()],
+                        serial: Some("SER123".into()),
+                    },
+                    manual: false,
+                }])
+            });
+            let resolution =
+                resolver.resolve_target_address(&query, false, &env.context, None).await.unwrap();
+            assert_eq!(resolution.expected_query, want, "{query:?}");
+        }
+    }
+    #[fuchsia::test]
+    async fn test_match_target_infos_to_resolutions_narrows_unannotated_serial() {
+        let (sa, _) = get_addr_and_spec();
+        let target = TargetInfo {
+            nodename: Some("foo".into()),
+            serial_number: Some("SER123".into()),
+            target_state: info::TargetState::Product,
+            addresses: vec![sa.into()],
+            ..Default::default()
+        };
+        let resolutions = match_target_infos_to_resolutions(
+            vec![target.clone()],
+            &TargetInfoQuery::NodenameOrId("SER123".into()),
+        );
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].expected_query, Some(TargetInfoQuery::Id("SER123".into())));
+        // Targets whose nodename also matches keep `NodenameOrId`.
+        let same_name = TargetInfo { nodename: Some("SER123".into()), ..target };
+        let resolutions = match_target_infos_to_resolutions(
+            vec![same_name],
+            &TargetInfoQuery::NodenameOrId("SER123".into()),
+        );
+        assert_eq!(
+            resolutions[0].expected_query,
+            Some(TargetInfoQuery::NodenameOrId("SER123".into()))
+        );
+    }
+
+    fn unreachable_error() -> crate::FfxTargetCrateError {
+        crate::KnockError::NonCritical(crate::KnockNonCriticalError::RcsKnockFailed {
+            detail: "timeout".into(),
+        })
+        .into()
+    }
+
+    #[fuchsia::test]
+    async fn test_explain_unreachable_names_the_registered_query_in_strict_mode() {
+        let strict_ctx =
+            EnvironmentContext::strict(ExecutableKind::Test, ffx_config::ConfigMap::new()).unwrap();
+        let mut resolution = Resolution::mock(|| unreachable!());
+        resolution.expected_query = Some(TargetInfoQuery::try_from("id:SER123").unwrap());
+
+        let err = resolution.explain_unreachable(unreachable_error(), &strict_ctx);
+        // Callers that wait for a rebooting target retry on non-critical knock errors.
+        assert!(
+            matches!(
+                &err,
+                crate::FfxTargetCrateError::Knock(crate::KnockError::NonCritical(
+                    crate::KnockNonCriticalError::RegisteredTargetUnreachable { query, .. }
+                )) if query == "id:SER123"
+            ),
+            "{err:?}"
+        );
+        let err = err.into_command_error();
+        assert!(err.to_string().contains("Cannot reach 'id:SER123' at mock_target"), "{err}");
+        assert!(err.downcast_non_fatal().is_ok());
+    }
+
+    #[fuchsia::test]
+    async fn test_explain_unreachable_keeps_other_errors() {
+        let env = ffx_config::test_init().unwrap();
+        let strict_ctx =
+            EnvironmentContext::strict(ExecutableKind::Test, ffx_config::ConfigMap::new()).unwrap();
+        let mut symbolic = Resolution::mock(|| unreachable!());
+        symbolic.expected_query = Some(TargetInfoQuery::try_from("id:SER123").unwrap());
+        let direct = Resolution::mock(|| unreachable!());
+
+        for (resolution, err, context) in [
+            // Non-strict symbolic queries are not resolved from the registry.
+            (&symbolic, unreachable_error(), &env.context),
+            // Direct addresses were not looked up, so there is nothing to explain.
+            (&direct, unreachable_error(), &strict_ctx),
+            // Only failures to reach the target are explained.
+            (&symbolic, crate::error::TargetResolutionError::UsbDisabled.into(), &strict_ctx),
+        ] {
+            let err = resolution.explain_unreachable(err, context);
+            assert!(
+                !matches!(
+                    err,
+                    crate::FfxTargetCrateError::Knock(crate::KnockError::NonCritical(
+                        crate::KnockNonCriticalError::RegisteredTargetUnreachable { .. }
+                    ))
+                ),
+                "{err:?}"
+            );
+        }
     }
 }

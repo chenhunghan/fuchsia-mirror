@@ -7,7 +7,6 @@
 #include <fidl/fuchsia.hardware.gpu.mali/cpp/driver/wire.h>
 #include <lib/async/cpp/task.h>
 #include <lib/fit/defer.h>
-#include <lib/magma/platform/platform_barriers.h>
 #include <lib/magma/platform/platform_logger.h>
 #include <lib/magma/platform/platform_port.h>
 #include <lib/magma/platform/platform_trace.h>
@@ -15,6 +14,7 @@
 #include <lib/magma/util/macros.h>
 #include <lib/magma/util/short_macros.h>
 #include <lib/magma_service/msd_defs.h>
+#include <lib/memory_barriers/memory_barriers.h>
 
 #include <bitset>
 #include <chrono>
@@ -851,7 +851,7 @@ static bool IsHardwareResultCode(uint32_t result) {
 
 magma::Status MsdArmDevice::ProcessJobInterrupt(uint64_t time) {
   TRACE_DURATION("magma", "MsdArmDevice::ProcessJobInterrupt");
-  job_interrupt_time_ = time;
+  job_interrupt_time_.store(time, std::memory_order_relaxed);
 
   while (true) {
     auto irq_status = registers::JobIrqFlags::GetRawStat().ReadFrom(register_io_.get());
@@ -1153,7 +1153,7 @@ void MsdArmDevice::Dump(DumpState* dump_state, bool on_device_thread) {
   dump_state->mmu_interrupt_delay = mmu_interrupt_delay_;
   dump_state->gpu_interrupt_time = gpu_interrupt_time_;
   dump_state->mmu_interrupt_time = mmu_interrupt_time_;
-  dump_state->job_interrupt_time = job_interrupt_time_;
+  dump_state->job_interrupt_time = job_interrupt_time_.load(std::memory_order_relaxed);
 
   if (on_device_thread) {
     std::chrono::steady_clock::duration total_time;
@@ -1375,7 +1375,7 @@ void MsdArmDevice::ExecuteAtomOnDevice(MsdArmAtom* atom, mali::RegisterIo* regis
   // Ensure the client's writes/cache flushes to the job chain are complete
   // before scheduling. Unlikely to be an issue since several thread and
   // process hops already happened.
-  magma::barriers::WriteBarrier();
+  WriteDataSynchronizationBarrier();
 
   registers::JobSlotRegisters slot(atom->slot());
   slot.HeadNext().FromValue(atom->gpu_address()).WriteTo(register_io);
@@ -1431,7 +1431,7 @@ void MsdArmDevice::AtomCompleted(MsdArmAtom* atom, ArmMaliResultCode result) {
     // Ensure any client writes/reads from memory happen after the mmio access saying memory is
     // read. In practice unlikely to be an issue due to data dependencies and the thread/process
     // hops.
-    magma::barriers::Barrier();
+    DataSynchronizationBarrier();
     if (connection)
       connection->SendNotificationData(atom);
   }

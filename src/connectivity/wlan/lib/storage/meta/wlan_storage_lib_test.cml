@@ -13,12 +13,12 @@
     children: [
         {
             name: "stash_secure",
-            url: "fuchsia-pkg://fuchsia.com/wlan-storage-tests#meta/stash_secure.cm",
+            url: "#meta/stash_secure.cm",
             startup: "eager",
         },
         {
             name: "stash",
-            url: "fuchsia-pkg://fuchsia.com/wlan-storage-tests#meta/stash.cm",
+            url: "#meta/stash.cm",
             startup: "eager",
         },
     ],

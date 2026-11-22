@@ -4,6 +4,7 @@
 
 import("//build/components.gni")
 import("//build/rust/rustc_library.gni")
+import("//sdk/lib/c/experimental.gni")
 
 rustc_library("ffl") {
   edition = "2024"
@@ -22,9 +23,11 @@ rustc_library("ffl") {
   ]
   with_unit_tests = "both"
   deps = []
+  test_deps = experimental_libc_deps
 }
 
 fuchsia_unittest_package("ffl-rust-test-pkg") {
+  forward_variables_from(experimental_libc_package_args, "*")
   package_name = "ffl-rust-test"
   deps = [ ":ffl_test" ]
 }

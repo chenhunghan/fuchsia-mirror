@@ -74,8 +74,8 @@ sysroot_uninstrumented_libc_entries = [
         # in files that ensure the target API level is unstable.
         "zircon/syscalls/gen/cdecls-next.inc",
 
-        # Note: Most of zircon/device is excluded from SDKs.
-        # TODO(https://fxbug.dev/42155967,https://fxbug.dev/42107431): remove this allowlist.
+        # Note: Most of zircon/device is excluded from SDKs; audio.h is still
+        # exported for legacy audio definitions.
         "zircon/device/audio.h",
       ]
 
@@ -178,9 +178,13 @@ _optional_sysroot_variants = [
   "ubsan",
   "ubsan-sancov",
   "coverage",
+  "coverage-cts",
   "coverage-rust",
+  "heapdump",
   "profile",
   "profile-rust",
+  "profile-use",
+  "profile-use-rust",
 ]
 
 if (target_cpu == "arm64") {
@@ -239,6 +243,17 @@ foreach(variant, sysroot_variants) {
       _libc_target = system_libc_target
       _libc_stripped = system_libc_stripped
       _libc_unstripped = system_libc_unstripped
+    } else if (variant == "heapdump") {
+      # The heapdump variant only links
+      # //src/performance/memory/heapdump/instrumentation:autobind into
+      # executables (via executable_deps) and adds no C/C++ compiler flags,
+      # while libc cannot link fdio/FIDL dependencies. Executables built under
+      # heapdump still request PT_INTERP "heapdump/ld.so.1", so install the
+      # uninstrumented system libc at dist/lib/heapdump/ld.so.1.
+      _libprefix = "heapdump/"
+      _libc_target = system_libc_target
+      _libc_stripped = system_libc_stripped
+      _libc_unstripped = system_libc_unstripped
     } else {
       _libprefix = string_replace(variant, "-fuzzer", "") + "/"
       _libc_toolchain = "//sdk/lib/c:user.libc_${current_cpu}-$variant"
@@ -252,7 +267,8 @@ foreach(variant, sysroot_variants) {
     _libc_unstripped = rebase_path(_libc_unstripped, root_build_dir)
   }
 
-  # TODO(https://fxbug.dev/42052732): Correctly set link, debug, dist and deps here.
+  # TODO(https://fxbug.dev/576695947): Correctly set link, debug, dist and deps
+  # here.
   sysroot_instrumented_libc_entries += [
     {
       sdk = {

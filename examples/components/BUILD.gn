@@ -17,7 +17,6 @@ group("components") {
     "routing:components-routing-example",
     "routing_failed:components-routing-failed-example",
     "runner",
-    "services",
     "storage",
   ]
 }
@@ -29,11 +28,9 @@ group("hermetic_tests") {
     "config_from_parent:hermetic_tests",
     "dictionaries:hermetic_tests",
     "echo:hermetic_tests",
-    "realm_builder:hermetic_tests",
     "reverser:tests",
     "routing:hermetic_tests",
     "runner:hermetic_tests",
-    "services:hermetic_tests",
     "storage:hermetic_tests",
     "subpackages:hermetic_tests",
   ]

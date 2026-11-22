@@ -51,7 +51,7 @@ No other characters are permitted.
 
 The total maximum length of a hostname is 253 characters including the dots.
 
-### Repository root verification (known sources)
+### Repository root verification (known sources) {#repository-root-verification-known-sources}
 
 The repository's root role (a quorum of one or more public or private key pairs)
 establishes a chain of trust such that package authenticity, integrity, and
@@ -163,7 +163,7 @@ length.
 
 In a URL, a single `#` character precedes the percent-encoded resource path.
 
-Note: The scheme, [repository hostname](#repository-hostname),
+Note: The scheme, [repository hostname](#repository),
 [package name](#package-name), and [package hash](#package-hash) components are
 all defined to use a restricted subset of characters, none of which require
 encoding, unlike the resource path.

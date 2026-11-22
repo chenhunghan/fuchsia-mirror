@@ -29,7 +29,6 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 
 fidl("fuchsia.hardware.fan") {
   sources = [ "fan.fidl" ]
-  enable_hlcpp = true
   visibility = [ "*" ]
   public_deps = [
     "//sdk/fidl/fuchsia.thermal",

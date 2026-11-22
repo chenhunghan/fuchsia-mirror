@@ -11,13 +11,12 @@ Usage:
 import argparse
 import dataclasses
 import itertools
+import os
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-import cl_utils
-import remotetool
-import reproxy_logs
+from build.rbe import remotetool, reproxy_logs
 
 _SCRIPT_BASENAME = Path(__file__).name
 
@@ -339,10 +338,9 @@ def main(argv: Sequence[str]) -> int:
     logs = reproxy_logs.parse_logs(main_args.reproxy_logs)
     # len(logs) == 2, enforced by _MAIN_ARG_PARSER.
 
-    cfg_path = remotetool._REPROXY_CFG
-    reproxy_cfg = cl_utils.read_config_file_lines(
-        cfg_path.read_text().splitlines()
-    )
+    reproxy_cfg = remotetool.configure(
+        remotetool._REPROXY_CFG, env=os.environ
+    ).config
 
     left, right = logs
     differ = ActionDiffer(left=left, right=right, reproxy_cfg=reproxy_cfg)

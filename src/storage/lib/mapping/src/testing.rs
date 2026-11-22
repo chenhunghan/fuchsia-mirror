@@ -5,6 +5,7 @@
 use crate::{DeliveryHandler, PageRequest};
 use delivery_blob::compression::{ChunkedArchiveError, DataBuffer};
 use fuchsia_sync::{Condvar, Mutex};
+use std::num::NonZero;
 use std::ops::{Deref, DerefMut, Range};
 use std::sync::Arc;
 use storage_ptr_slice::MutPtrByteSlice;
@@ -196,7 +197,7 @@ impl PageRequest for TestVecBuffer {
     fn prepare(
         &mut self,
         read_range: Range<u64>,
-        _read_alignment: usize,
+        _flush_alignment: Option<NonZero<usize>>,
     ) -> Result<(), ChunkedArchiveError> {
         let size = (read_range.end - read_range.start) as usize;
         if self.data.len() < size {
@@ -231,7 +232,7 @@ impl PageRequest for TestVecBuffer {
 ///
 /// And returns `R: PageRequest` (any type implementing [`PageRequest`]) to receive the paged data.
 ///
-/// [`DeliveryHandler::register_blob`] defaults to a no-op `Ok(())`.
+/// [`DeliveryHandler::prepare_register_blob`] defaults to a no-op `Ok(())`.
 pub struct TestDeliveryHandler<F>(pub F);
 
 impl<F, R: PageRequest> DeliveryHandler for TestDeliveryHandler<F>
@@ -239,8 +240,17 @@ where
     F: Fn(u64, Range<u64>) -> R + Send + Sync + 'static,
 {
     type Request = R;
+    type BlobRegistration = ();
 
     fn get_page_request(self: &Arc<Self>, key: u64, range: Range<u64>) -> Self::Request {
         (self.0)(key, range)
+    }
+
+    fn prepare_register_blob(
+        &self,
+        _key: u64,
+        _max_leaf_bytes: usize,
+    ) -> Result<Self::BlobRegistration, anyhow::Error> {
+        Ok(())
     }
 }

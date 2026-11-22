@@ -34,15 +34,15 @@ Having flags in headers:
 * Provides a mechanism to help with soft transition, especially the requirement
   that bindings MUST NOT reject messages if they do not know about the use of
   certain flags, and instead just ignore them. For instance, this was used to
-  migrate [away from static unions](/docs/contribute/governance/rfcs/0061_extensible_unions.md#implementation_strategy).
+  migrate [away from static unions](/docs/contribute/governance/rfcs/0061_extensible_unions.md#implementation-strategy).
 * We prefer allocating more bytes to flags (3 bytes) than to magic numbers (1
   byte) as we expect a lot more features to be temporarily needed, than wire
   format flavors.
 
 On epitaph:
 
-* Epitaphs were [shoehorned](/docs/contribute/governance/rfcs/0029_increasing_method_ordinals.md#wire_format) into the `reserved` bytes,
-  which are now used for the magic number and the flags;
+* Epitaphs were [shoehorned](0029_increasing_method_ordinals.md) into the
+  `reserved` bytes, which are now used for the magic number and the flags;
 * Having epitaphs be a plain vanilla payload `struct{int32}` removes one special
   snowflake from the [wire format][wire-format], which typically simplifies
   bindings and reduces the likelihood of bugs or incompatibilities.

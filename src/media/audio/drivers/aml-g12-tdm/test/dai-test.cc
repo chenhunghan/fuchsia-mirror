@@ -63,15 +63,17 @@ metadata::AmlConfig GetDefaultMetadata() {
 }
 
 struct DaiClient {
-  explicit DaiClient(ddk::DaiProtocolClient proto_client) {
-    proto_client_ = proto_client;
-    ASSERT_TRUE(proto_client_.is_valid());
-    zx::channel channel_remote, channel_local;
-    ASSERT_OK(zx::channel::create(0, &channel_local, &channel_remote));
-    ASSERT_OK(proto_client_.Connect(std::move(channel_remote)));
-    dai_.Bind(std::move(channel_local));
+  explicit DaiClient(fidl::WireServer<fuchsia_hardware_audio::DaiConnector>* connector) {
+    ASSERT_OK(loop_.StartThread("dai-connector"));
+    auto connector_endpoints = fidl::Endpoints<fuchsia_hardware_audio::DaiConnector>::Create();
+    fidl::BindServer(loop_.dispatcher(), std::move(connector_endpoints.server), connector);
+    connector_ = std::move(connector_endpoints.client);
+    auto dai_endpoints = fidl::Endpoints<fuchsia_hardware_audio::Dai>::Create();
+    ASSERT_OK(fidl::WireCall(connector_)->Connect(std::move(dai_endpoints.server)).status());
+    dai_.Bind(dai_endpoints.client.TakeChannel());
   }
-  ddk::DaiProtocolClient proto_client_;
+  async::Loop loop_{&kAsyncLoopConfigNoAttachToCurrentThread};
+  fidl::ClientEnd<fuchsia_hardware_audio::DaiConnector> connector_;
   ::fuchsia::hardware::audio::DaiSyncPtr dai_;
 };
 
@@ -93,7 +95,6 @@ class TestAmlG12TdmDai : public AmlG12TdmDai {
  public:
   explicit TestAmlG12TdmDai(zx_device_t* parent, fdf::PDev pdev)
       : AmlG12TdmDai(parent, std::move(pdev)) {}
-  dai_protocol_t GetProto() { return {&this->dai_protocol_ops_, this}; }
   bool AllowNonContiguousRingBuffer() override { return true; }
   void Stop(StopCallback callback) override {
     AmlG12TdmDai::Stop(std::move(callback));
@@ -118,7 +119,12 @@ struct IncomingNamespace {
 
 class AmlG12TdmDaiTest : public zxtest::Test {
  public:
-  void SetUp() override {}
+  void SetUp() override {
+    // The global logger binds to the default dispatcher of the thread that logs first. Log here so
+    // it isn't created on the DAI loop thread while that loop shuts down, since the DAI channel
+    // error handler logs during device release.
+    zxlogf(INFO, "AmlG12TdmDaiTest SetUp");
+  }
 
  protected:
   zx::result<fdf::PDev> StartPDev() {
@@ -169,7 +175,7 @@ TEST_F(AmlG12TdmDaiTest, InitializeI2sOut) {
   zx::result pdev = StartPDev();
   ASSERT_OK(pdev);
   auto dai = std::make_unique<TestAmlG12TdmDai>(fake_parent.get(), std::move(pdev.value()));
-  auto dai_proto = dai->GetProto();
+  fidl::WireServer<fuchsia_hardware_audio::DaiConnector>* dai_connector = dai.get();
   ASSERT_OK(dai->InitPDev());
   ASSERT_OK(dai->DdkAdd("test"));
   dai.release();  // Managed by the DDK.
@@ -198,6 +204,9 @@ TEST_F(AmlG12TdmDaiTest, InitializeI2sOut) {
     if (step == 9) {
       return 0x8001'003f;
     }
+    if (step == 10) {
+      return 0x0001'003f;
+    }
     ADD_FAILURE();
     return 0;
   });
@@ -217,7 +226,7 @@ TEST_F(AmlG12TdmDaiTest, InitializeI2sOut) {
     } else if (step == 8) {
       EXPECT_EQ(0x3001'003f, value);  // Sync.
       step++;
-    } else if (step == 9) {
+    } else if (step == 9 || step == 10) {
       EXPECT_EQ(0x0001'003f, value);  // Disable on Shutdown.
       step++;
     } else {
@@ -250,18 +259,18 @@ TEST_F(AmlG12TdmDaiTest, InitializeI2sOut) {
     } else if (step == 2) {
       EXPECT_EQ(0xd220'0000, value);
       step++;
-    } else if (step == 10) {
+    } else if (step == 11) {
       EXPECT_EQ(0x0000'0000, value);  // Disable on Shutdown
       step++;
     }
   });
 
-  DaiClient client(&dai_proto);
+  DaiClient client(dai_connector);
   client.dai_->Reset();
   auto* child_dev = fake_parent->GetLatestChild();
   ASSERT_NOT_NULL(child_dev);
   child_dev->ReleaseOp();
-  EXPECT_EQ(step, 11);
+  EXPECT_EQ(step, 12);
 }
 
 TEST_F(AmlG12TdmDaiTest, InitializePcmOut) {
@@ -281,7 +290,7 @@ TEST_F(AmlG12TdmDaiTest, InitializePcmOut) {
   zx::result pdev = StartPDev();
   ASSERT_OK(pdev);
   auto dai = std::make_unique<TestAmlG12TdmDai>(fake_parent.get(), std::move(pdev.value()));
-  auto dai_proto = dai->GetProto();
+  fidl::WireServer<fuchsia_hardware_audio::DaiConnector>* dai_connector = dai.get();
   ASSERT_OK(dai->InitPDev());
   ASSERT_OK(dai->DdkAdd("test"));
   dai.release();  // Managed by the DDK.
@@ -311,6 +320,9 @@ TEST_F(AmlG12TdmDaiTest, InitializePcmOut) {
     if (step == 9) {
       return 0x8001'000f;
     }
+    if (step == 10) {
+      return 0x0001'000f;
+    }
     ADD_FAILURE();
     return 0;
   });
@@ -330,7 +342,7 @@ TEST_F(AmlG12TdmDaiTest, InitializePcmOut) {
     } else if (step == 8) {
       EXPECT_EQ(0x3001'000f, value);  // Sync.
       step++;
-    } else if (step == 9) {
+    } else if (step == 9 || step == 10) {
       EXPECT_EQ(0x0001'000f, value);  // Disable on Shutdown.
       step++;
     } else {
@@ -363,18 +375,18 @@ TEST_F(AmlG12TdmDaiTest, InitializePcmOut) {
     } else if (step == 2) {
       EXPECT_EQ(0xd220'0000, value);
       step++;
-    } else if (step == 10) {
+    } else if (step == 11) {
       EXPECT_EQ(0x0000'0000, value);  // Disable on Shutdown
       step++;
     }
   });
 
-  DaiClient client(&dai_proto);
+  DaiClient client(dai_connector);
   client.dai_->Reset();
   auto* child_dev = fake_parent->GetLatestChild();
   ASSERT_NOT_NULL(child_dev);
   child_dev->ReleaseOp();
-  EXPECT_EQ(step, 11);
+  EXPECT_EQ(step, 12);
 }
 
 TEST_F(AmlG12TdmDaiTest, GetPropertiesOutputDai) {
@@ -387,12 +399,12 @@ TEST_F(AmlG12TdmDaiTest, GetPropertiesOutputDai) {
   zx::result pdev = StartPDev();
   ASSERT_OK(pdev);
   auto dai = std::make_unique<TestAmlG12TdmDai>(fake_parent.get(), std::move(pdev.value()));
-  auto dai_proto = dai->GetProto();
+  fidl::WireServer<fuchsia_hardware_audio::DaiConnector>* dai_connector = dai.get();
   ASSERT_OK(dai->InitPDev());
   ASSERT_OK(dai->DdkAdd("test"));
   dai.release();  // Managed by the DDK.
 
-  DaiClient client(&dai_proto);
+  DaiClient client(dai_connector);
 
   ::fuchsia::hardware::audio::DaiProperties properties_out;
   ASSERT_OK(client.dai_->GetProperties(&properties_out));
@@ -403,6 +415,10 @@ TEST_F(AmlG12TdmDaiTest, GetPropertiesOutputDai) {
   // Must report a clock domain. Reports monotonic, i.e. 0.
   ASSERT_TRUE(properties_out.has_clock_domain());
   ASSERT_EQ(properties_out.clock_domain(), fuchsia::hardware::audio::CLOCK_DOMAIN_MONOTONIC);
+
+  auto* child_dev = fake_parent->GetLatestChild();
+  ASSERT_NOT_NULL(child_dev);
+  child_dev->ReleaseOp();
 }
 
 TEST_F(AmlG12TdmDaiTest, GetPropertiesInputDai) {
@@ -426,12 +442,12 @@ TEST_F(AmlG12TdmDaiTest, GetPropertiesInputDai) {
   zx::result pdev = StartPDev();
   ASSERT_OK(pdev);
   auto dai = std::make_unique<TestAmlG12TdmDai>(fake_parent.get(), std::move(pdev.value()));
-  auto dai_proto = dai->GetProto();
+  fidl::WireServer<fuchsia_hardware_audio::DaiConnector>* dai_connector = dai.get();
   ASSERT_OK(dai->InitPDev());
   ASSERT_OK(dai->DdkAdd("test"));
   dai.release();  // Managed by the DDK.
 
-  DaiClient client(&dai_proto);
+  DaiClient client(dai_connector);
 
   ::fuchsia::hardware::audio::DaiProperties properties_out;
   ASSERT_OK(client.dai_->GetProperties(&properties_out));
@@ -442,6 +458,10 @@ TEST_F(AmlG12TdmDaiTest, GetPropertiesInputDai) {
   // Must report a clock domain. Reports monotonic, i.e. 0.
   ASSERT_TRUE(properties_out.has_clock_domain());
   ASSERT_EQ(properties_out.clock_domain(), fuchsia::hardware::audio::CLOCK_DOMAIN_MONOTONIC);
+
+  auto* child_dev = fake_parent->GetLatestChild();
+  ASSERT_NOT_NULL(child_dev);
+  child_dev->ReleaseOp();
 }
 
 class AmlG12TdmDaiRingBufferTest : public AmlG12TdmDaiTest {
@@ -454,12 +474,12 @@ class AmlG12TdmDaiRingBufferTest : public AmlG12TdmDaiTest {
     zx::result pdev = StartPDev();
     ASSERT_OK(pdev);
     auto dai = std::make_unique<TestAmlG12TdmDai>(fake_parent_.get(), std::move(pdev.value()));
-    auto dai_proto = dai->GetProto();
+    fidl::WireServer<fuchsia_hardware_audio::DaiConnector>* dai_connector = dai.get();
     ASSERT_OK(dai->InitPDev());
     ASSERT_OK(dai->DdkAdd("test"));
     dai.release();  // Managed by the DDK.
 
-    client_.emplace(&dai_proto);
+    client_.emplace(dai_connector);
 
     // Get ring buffer formats.
     ::fuchsia::hardware::audio::Dai_GetRingBufferFormats_Result ring_buffer_formats_out;
@@ -533,6 +553,12 @@ class AmlG12TdmDaiRingBufferTest : public AmlG12TdmDaiTest {
     client_->dai_->CreateRingBuffer(std::move(dai_format), std::move(ring_buffer_format),
                                     std::move(ring_buffer_intf));
     ring_buffer_.emplace(std::move(local));
+  }
+
+  void TearDown() override {
+    auto* child_dev = fake_parent_->GetLatestChild();
+    ASSERT_NOT_NULL(child_dev);
+    child_dev->ReleaseOp();
   }
 
  protected:

@@ -67,7 +67,6 @@ fuchsia_driver_component("virtual-audio-driver-component") {
     ":virtual-audio-driver",
     ":virtual-audio-driver-bind",
   ]
-  info = "meta/virtual-audio-info.json"
   cm_label = ":virtual-audio_dml_manifest"
 }
 

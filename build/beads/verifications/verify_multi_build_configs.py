@@ -45,16 +45,16 @@ FINT_PARAMS_SEARCH_DIRS = (
     pathlib.Path("integration/infra/config/generated/turquoise/fint_params"),
 )
 
-# Built-in configuration presets (relative to global.ci under fuchsia fint_params).
+# Built-in configuration presets (resolved under fuchsia fint_params).
 PRESET_MODES: tuple[str, ...] = (
     # x64: debug, balanced, release
-    "core.x64-debug",
-    "core.x64-balanced",
-    "core.x64-release",
+    "fuchsia.x64-debug",
+    "fuchsia.x64-balanced",
+    "fuchsia.x64-release",
     # arm64: debug, balanced, release
-    "core.arm64-debug",
-    "core.arm64-balanced",
-    "core.arm64-release",
+    "fuchsia.arm64-debug",
+    "fuchsia.arm64-balanced",
+    "fuchsia.arm64-release",
     # riscv64: debug, balanced, release
     "minimal.riscv64-debug",
     "minimal.riscv64-balanced",
@@ -102,6 +102,8 @@ _TARGET_ARCH_MAP: dict[str, str] = {
 # should be omitted from minimal flag-verification build directories.
 _IGNORED_GN_ARG_VARS: frozenset[str] = frozenset(
     {
+        "additional_bazel_sdk_labels",
+        "additional_tefmocheck_labels",
         "allowed_test_device_types",
         "base_package_labels",
         "basic_env_names",
@@ -112,12 +114,15 @@ _IGNORED_GN_ARG_VARS: frozenset[str] = frozenset(
         "build_only_labels",
         "build_should_trace_actions",
         "cache_package_labels",
+        "clippy_cause_failure",
         "cxx_rbe_check",
         "cxx_rbe_enable",
         "developer_test_labels",
         "disable_boot_tests",
         "e2e_test_labels",
         "enable_bazel_remote_services",
+        "enable_jobserver",
+        "exported_package_labels",
         "extra_kernel_test_images",
         "fidl_api_coverage",
         "generate_cuckoo_tests",
@@ -125,12 +130,17 @@ _IGNORED_GN_ARG_VARS: frozenset[str] = frozenset(
         "hermetic_test_package_labels",
         "host_labels",
         "host_test_labels",
+        "include_clippy",
+        "include_rustdoc",
+        "is_postsubmit",
         "link_rbe_check",
         "link_rbe_enable",
         "link_rbe_exec_strategy",
         "rbe_mode",
         "rust_rbe_check",
         "rust_rbe_enable",
+        "sdk_archive_labels",
+        "sdk_cross_compile_host_tools",
         "test_package_labels",
         "universe_package_labels",
         "use_test_pilot",
@@ -235,9 +245,6 @@ class FintParamsConfig:
 
         if self.variants:
             vars_map["select_variant"] = list(self.variants)
-
-        # Skip running Bazel test queries during workspace regeneration.
-        vars_map["export_bazel_tests"] = False
 
         for raw_arg in self.gn_args:
             if not _should_keep_gn_arg(raw_arg):
@@ -788,7 +795,7 @@ def main(argv: T.Sequence[str] | None = None) -> int:
         default=[],
         help=(
             "One or more fint_params .textproto paths, glob patterns, or builder names "
-            "(e.g. 'core.x64-release' or 'integration/infra/config/generated/fuchsia/fint_params/global.ci/*.textproto'). "
+            "(e.g. 'fuchsia.x64-release' or 'integration/infra/config/generated/fuchsia/fint_params/global.ci/*.textproto'). "
             "Overrides --preset when specified."
         ),
     )

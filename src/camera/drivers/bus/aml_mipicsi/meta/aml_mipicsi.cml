@@ -16,7 +16,14 @@
         default_dispatcher_opts: [ "allow_sync_calls" ],
         bind: "meta/bind/aml_mipicsi.bindbc",
     },
-    capabilities: [],
+    capabilities: [
+        { service: "fuchsia.hardware.mipicsi.Service" },
+    ],
     use: [],
-    expose: [],
+    expose: [
+        {
+            service: "fuchsia.hardware.mipicsi.Service",
+            from: "self",
+        },
+    ],
 }

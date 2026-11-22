@@ -8,6 +8,9 @@
     program: {
         compat: "driver/cr50-spi-driver.so",
     },
+    capabilities: [
+        { service: "fuchsia.hardware.tpmimpl.Service" },
+    ],
     use: [
         {
             name: "acpi",
@@ -35,6 +38,12 @@
         {
             service: "fuchsia.hardware.spi.Service",
             generate_bind_rule: false,
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.tpmimpl.Service",
+            from: "self",
         },
     ],
 }

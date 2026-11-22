@@ -103,7 +103,7 @@ void RunVerbMemRead(const Command& cmd, fxl::RefPtr<CommandContext> cmd_context)
         else
           read_size = 64;
 
-        weak_target->GetProcess()->ReadMemory(address, read_size,
+        weak_target->GetProcess()->ReadMemory(address, static_cast<uint32_t>(read_size),
                                               [cmd_context](const Err& err, MemoryDump dump) {
                                                 if (err.has_error()) {
                                                   cmd_context->ReportError(err);

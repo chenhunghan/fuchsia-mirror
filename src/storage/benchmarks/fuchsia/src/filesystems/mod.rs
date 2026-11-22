@@ -7,7 +7,7 @@ use blob_writer::BlobWriter;
 use delivery_blob::{CompressionMode, DeliveryBlobType, Type1Blob, Type3Blob};
 use fidl::endpoints::ClientEnd;
 use fidl_fuchsia_fs_startup::{CreateOptions, MountOptions};
-use fidl_fuchsia_fxfs::{BlobCreatorProxy, BlobReaderProxy, CryptMarker};
+use fidl_fuchsia_fxfs::{BlobCreatorProxy, CryptMarker};
 use fidl_fuchsia_io as fio;
 use fs_management::FSConfig;
 use fs_management::filesystem::{
@@ -85,13 +85,7 @@ pub trait BlobFilesystem: CacheClearableFilesystem {
     }
 
     /// Gets a VMO backing a blob.
-    async fn get_vmo(&self, name: &Hash) -> zx::Vmo {
-        self.blob_reader()
-            .get_vmo(&*name)
-            .await
-            .expect("transport error on BlobReader.GetVmo")
-            .expect("failed to get vmo")
-    }
+    async fn get_vmo(&self, name: &Hash) -> zx::Vmo;
 
     async fn remove_blob(&self, name: &Hash) {
         let root = fuchsia_fs::directory::open_directory(
@@ -113,9 +107,6 @@ pub trait BlobFilesystem: CacheClearableFilesystem {
 
     /// Direct access to the BlobCreator protocol.
     fn blob_creator(&self) -> &BlobCreatorProxy;
-
-    /// Direct access to the BlobReader protocol.
-    fn blob_reader(&self) -> &BlobReaderProxy;
 
     /// Returns the exposed dir of the blob volume.
     fn exposed_dir(&self) -> &fio::DirectoryProxy;

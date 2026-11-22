@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::device::kobject::Device;
 use crate::security;
 use crate::task::{CurrentTask, Kernel};
 use crate::vfs::fs_args::MountParams;
@@ -63,6 +64,9 @@ pub struct FileSystem {
     /// The device ID of this filesystem. Returned in the st_dev field when stating an inode in
     /// this filesystem.
     pub dev_id: DeviceId,
+
+    /// Backing device info (`bdi`) class device registered under `/sys/class/bdi/<dev_id>`, if any.
+    bdi_device: Option<Device>,
 
     /// A file-system global mutex to serialize rename operations.
     ///
@@ -166,7 +170,7 @@ pub enum CacheMode {
     /// Entries are cached.
     Cached(CacheConfig),
     /// Entries are uncached. This can be appropriate in cases where it is difficult for the
-    /// filesystem to keep the cache coherent: e.g. the /proc/<pid>/task directory.
+    /// filesystem to keep the cache coherent.
     Uncached,
 }
 
@@ -186,12 +190,17 @@ impl FileSystem {
         let mount_options = security::sb_eat_lsm_opts(&kernel, &mut options.params)?;
         let security_state = security::file_system_init_security(&mount_options, &ops)?;
 
+        let dev_id = kernel.device_registry.next_anonymous_dev_id();
+        let bdi_device =
+            ops.has_bdi().then(|| kernel.device_registry.add_bdi_device(dev_id)).transpose()?;
+
         let file_system = Arc::new(FileSystem {
             kernel: kernel.weak_self.clone(),
             root: OnceLock::new(),
             ops: Box::new(ops),
             options,
-            dev_id: kernel.device_registry.next_anonymous_dev_id(),
+            dev_id,
+            bdi_device,
             rename_mutex: match fs_lockdep_type {
                 FsLockDepType::Normal => {
                     DynamicLockDepMutex::new::<FsRename>(FileSystemRenameToken::default())
@@ -503,6 +512,10 @@ impl FileSystem {
         self.ops.name()
     }
 
+    pub fn is_storage_backed(&self) -> bool {
+        self.ops.is_storage_backed()
+    }
+
     /// Returns the filesystem-specific mount options for display in /proc/mounts and
     /// /proc/[pid]/mountinfo, each preceded by a comma: the LSM options followed by the remaining
     /// mount parameters.
@@ -547,7 +560,12 @@ impl FileSystem {
         self.ops.sub_filesystems()
     }
 
-    pub fn purge_dcache(&self) {
+    /// Returns the filesystem stacking depth (equivalent to Linux `super_block::s_stack_depth`).
+    pub fn stack_depth(&self) -> u32 {
+        self.ops.stack_depth()
+    }
+
+    pub(super) fn purge_dcache(&self) {
         if let DirEntryCache::Lru(l) = &self.dcache {
             let entries = std::mem::take(&mut *l.entries.lock());
             // Entries will get dropped here outside of the lock.
@@ -555,17 +573,15 @@ impl FileSystem {
         }
     }
 
-    pub fn drop_backend_caches(&self) {
+    pub(super) fn drop_backend_caches(&self) {
         if let Err(e) = self.ops.drop_caches(self) {
             log_warn!("drop_caches failed for filesystem {:?}: {:?}", self.name(), e);
         }
     }
-
-    pub fn purge_all_entries(&self) {
-        self.purge_dcache();
-        self.drop_backend_caches();
-    }
 }
+
+/// Maximum allowed filesystem stacking depth (matches Linux `FILESYSTEM_MAX_STACK_DEPTH`).
+pub const FILESYSTEM_MAX_STACK_DEPTH: u32 = 2;
 
 /// The filesystem-implementation-specific data for FileSystem.
 pub trait FileSystemOps: AsAny + Send + Sync + 'static {
@@ -575,6 +591,11 @@ pub trait FileSystemOps: AsAny + Send + Sync + 'static {
     /// should override this to return `FsLockDepType::Recursive`.
     fn fs_lockdep_type(&self) -> FsLockDepType {
         FsLockDepType::Normal
+    }
+
+    /// Returns the stacking depth of this filesystem (equivalent to Linux `s_stack_depth`).
+    fn stack_depth(&self) -> u32 {
+        0
     }
 
     /// Return information about this filesystem.
@@ -617,6 +638,19 @@ pub trait FileSystemOps: AsAny + Send + Sync + 'static {
     }
 
     fn name(&self) -> &'static FsStr;
+
+    /// Returns whether this filesystem is backed by storage (such as `ext4`) as opposed to an
+    /// in-memory or pseudo filesystem (such as `tmpfs` or `procfs`). Used to filter
+    /// `starnix:syscalls:fs` syscall tracing.
+    fn is_storage_backed(&self) -> bool {
+        false
+    }
+
+    /// Returns whether this filesystem registers a backing device info (`bdi`) entry under
+    /// `/sys/class/bdi/<major>:<minor>`.
+    fn has_bdi(&self) -> bool {
+        self.is_storage_backed()
+    }
 
     /// Whether this file system uses external node IDs.
     ///
@@ -711,6 +745,11 @@ pub trait FileSystemOps: AsAny + Send + Sync + 'static {
 
 impl Drop for FileSystem {
     fn drop(&mut self) {
+        if let Some(bdi_device) = self.bdi_device.take()
+            && let Some(kernel) = self.kernel.upgrade()
+        {
+            kernel.device_registry.remove_device_with_kernel(&kernel, bdi_device);
+        }
         self.ops.unmount();
     }
 }

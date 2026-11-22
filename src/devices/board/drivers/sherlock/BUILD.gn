@@ -77,6 +77,7 @@ template("sherlock_driver") {
       "//sdk/fidl/fuchsia.hardware.i2c.businfo:fuchsia.hardware.i2c.businfo_cpp",
       "//sdk/fidl/fuchsia.hardware.light:fuchsia.hardware.light_cpp",
       "//sdk/fidl/fuchsia.hardware.lightsensor:fuchsia.hardware.lightsensor_cpp",
+      "//sdk/fidl/fuchsia.hardware.mipicsi:fuchsia.hardware.mipicsi_cpp",
       "//sdk/fidl/fuchsia.hardware.pinimpl:fuchsia.hardware.pinimpl_cpp",
       "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_cpp",
       "//sdk/fidl/fuchsia.hardware.pwm:fuchsia.hardware.pwm_cpp",
@@ -112,7 +113,6 @@ template("sherlock_driver") {
       "//src/devices/bind/fuchsia.pwm:fuchsia.pwm_cpp",
       "//src/devices/bind/fuchsia.sdio:fuchsia.sdio_cpp",
       "//src/devices/bind/fuchsia.sony.platform:fuchsia.sony.platform_cpp",
-      "//src/devices/bind/fuchsia.thermal:fuchsia.thermal_cpp",
       "//src/devices/bind/fuchsia.ti.platform:fuchsia.ti.platform_cpp",
       "//src/devices/lib/amlogic",
       "//src/devices/lib/broadcom",
@@ -144,7 +144,6 @@ template("sherlock_driver") {
 
   fuchsia_driver_component("${invoker.target_name}-component") {
     deps = [ ":${invoker.target_name}-driver" ]
-    info = "meta/${invoker.target_name}-info.json"
     manifest = "meta/${invoker.target_name}.cml"
   }
 

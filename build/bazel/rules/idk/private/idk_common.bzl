@@ -225,12 +225,13 @@ def get_atom_visibility(target_visibility, *, is_fidl_library = False):
 
     return atom_visibility
 
-def get_api_file_path(*, idk_name, stable, api_file_path):
+def get_api_file_path(*, idk_name, stable, api_file_path, no_headers = False):
     """Returns the string path to the API file for the given IDK atom.
 
-    If `stable` is False, `api_file_path` must be `None` and `None` is returned.
-    If `stable` is True and `api_file_path` is not specified, the returned path
-    is "<idk_name>.api". Otherwise, `api_file_path` is returned.
+    If `stable` is False or `no_headers` is True, `api_file_path` must be `None`
+    and `None` is returned.
+    Otherwise, if `api_file_path` is not specified, the returned path is
+    "<idk_name>.api"; otherwise, `api_file_path` is returned.
 
     `api_file_path` must not specify the default path. This is verified when
     possible.
@@ -240,28 +241,34 @@ def get_api_file_path(*, idk_name, stable, api_file_path):
         stable: Whether this atom is stabilized.
         api_file_path: String path for the file representing the API exposed by
             this atom. Overrides the default path. Can be `None`.
+        no_headers: Whether the library has no headers in the IDK.
+            Only applies to shared cc_prebuilt_library atoms.
 
     Returns:
         The string path to the API file for the given IDK target. May be `None`.
     """
-    if stable:
-        default_api_path = idk_name + ".api"
-        if api_file_path:
-            # Check that `api_file_path` does not specify the default path.
-            # We must assume that absolute paths are not specifying the default
-            # path because `relativize()` fails with absolute paths and we
-            # cannot get the package path at this point.
-            if not paths.is_absolute(api_file_path):
-                if paths.relativize(api_file_path, ".") == paths.relativize(default_api_path, "."):
-                    fail("The specified `api_file_path` (`%s`) matches the default. `api_file_path` only needs to be specified when overriding the default." % api_file_path)
-
-            return api_file_path
-        else:
-            return default_api_path
-    else:
+    if not stable:
         if api_file_path != None:
             fail("`api_file_path` must only be specified for stable IDK atoms.")
         return None
+    if no_headers:
+        if api_file_path != None:
+            fail("`api_file_path` must not be specified when `no_headers` is True.")
+        return None
+
+    default_api_path = idk_name + ".api"
+    if api_file_path:
+        # Check that `api_file_path` does not specify the default path.
+        # We must assume that absolute paths are not specifying the default
+        # path because `relativize()` fails with absolute paths and we
+        # cannot get the package path at this point.
+        if not paths.is_absolute(api_file_path):
+            if paths.relativize(api_file_path, ".") == paths.relativize(default_api_path, "."):
+                fail("The specified `api_file_path` (`%s`) matches the default. `api_file_path` only needs to be specified when overriding the default." % api_file_path)
+
+        return api_file_path
+    else:
+        return default_api_path
 
 def _get_golden_file_for_api_level(golden_file_name, api_level):
     """Returns the label of the specified golden file for the specified API level.

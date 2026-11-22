@@ -27,11 +27,18 @@ In the board's configuration, add a `block_devices` list to the `filesystems`
 dictionary. Each entry in this list is a dictionary that defines a new named
 device.
 
-* `device`: The semantic label you will use to refer to this partition in
-   component manifests.
-* `from`: Specifies where the partition should be found on the disk.
-  + `label`: The GPT label of the partition to be routed.
-  + `parent`: The parent device, which is usually "gpt".
+* `device`: The semantic label (or `/`-separated relative path, such as
+  `"ota/zircon_a"`) you will use to refer to this partition under `/block` and
+  in component manifests. Empty path segments (such as leading, trailing, or
+  consecutive `/`) are invalid, and an intermediate directory name cannot
+  collide with another `device` leaf path.
+* `from`: Specifies where the partition should be found on the disk. Multiple
+  entries in `block_devices` may specify the same `from` (`label` and `parent`)
+  with distinct `device` paths to publish the same physical partition at
+  multiple locations under `/block`.
+  + `label`: The partition label to be routed.
+  + `parent`: The parent device, which is `"gpt"` for the system GPT or `"dev"`
+    for a driver-provided block device.
 
 **Example**: In your board's `BUILD.bazel` file:
 
@@ -151,3 +158,100 @@ async fn connect_to_my_partition() -> Result<(), anyhow::Error> {
     Ok(())
 }
 ```
+
+## Grouping and sharing partitions
+
+### Grouping partitions under a subdirectory
+
+If a component needs access to a set of related partitions (for example, OTA
+target partitions), you can group them under a shared subdirectory prefix in
+`device`:
+
+```python
+    filesystems = {
+        "block_devices": [
+            {
+                "device": "ota/zircon_a",
+                "from": {
+                    "label": "zircon_a",
+                    "parent": "gpt",
+                },
+            },
+            {
+                "device": "ota/zircon_b",
+                "from": {
+                    "label": "zircon_b",
+                    "parent": "gpt",
+                },
+            },
+        ],
+    },
+```
+
+`fshost` creates the intermediate `/block/ota` directory and stages each entry
+inside it. You can then route the entire group directory to the component with a
+single `offer` and `use` stanza using `subdir: "ota"`:
+
+```cml
+// In the parent realm manifest (e.g., my_component.core_shard.cml)
+{
+    offer: [
+        {
+            directory: "block",
+            from: "parent",
+            to: "#my_component",
+            subdir: "ota",
+            as: "block_ota",
+        },
+    ],
+}
+```
+
+```cml
+// In my_component.cml
+{
+    use: [
+        {
+            directory: "block_ota",
+            rights: [ "r*" ],
+            path: "/block/ota",
+        },
+    ],
+}
+```
+
+Within `my_component`, each partition's `fuchsia.storage.block.Block` protocol
+is available at `/block/ota/<name>/fuchsia.storage.block.Block` (or you can
+still route a single nested entry individually using `subdir: "ota/zircon_a"`).
+
+### Publishing a partition to multiple paths
+
+When two components require the same physical partition through different
+capability scopes (for example, one component receives only `/block/durable_boot`
+while another receives the grouped `/block/ota` directory), list multiple
+`block_devices` entries with the same `from` identifiers and distinct `device`
+paths:
+
+```python
+    filesystems = {
+        "block_devices": [
+            {
+                "device": "durable_boot",
+                "from": {
+                    "label": "durable_boot",
+                    "parent": "gpt",
+                },
+            },
+            {
+                "device": "ota/durable_boot",
+                "from": {
+                    "label": "durable_boot",
+                    "parent": "gpt",
+                },
+            },
+        ],
+    },
+```
+
+When `fshost` matches the first physical partition with `(parent, label)`, it
+publishes that partition to every configured `device` path.

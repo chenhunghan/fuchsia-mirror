@@ -10,10 +10,15 @@ DEFAULT_WARNINGS_DEFINES = [
     "_LIBCPP_DISABLE_UNUSED_STRUCT_WARNINGS",
 ]
 
-DEFAULT_WARNINGS_CFLAGS = [
+# Shared warning flags preceding -Wno-sign-conversion.
+# Note: -Wconversion MUST precede -Wno-sign-conversion because -Wconversion is
+# a diagnostic group in Clang that enables -Wsign-conversion.
+_BASE_WARNINGS_CFLAGS_PREFIX = [
     "-Wall",
     "-Wextra",
-    "-Wextra-semi",
+]
+
+_BASE_WARNINGS_CFLAGS_SUFFIX = [
     "-Wnewline-eof",
     # TODO(b/315062126) Some in-tree builds are failing because we
     # are shadowing variables.
@@ -24,22 +29,43 @@ DEFAULT_WARNINGS_CFLAGS = [
     "-Wno-unused-parameter",
     "-Wnonportable-system-include-path",
 
+    # TODO(https://fxbug.dev/42142861): Disable "-Wmissing-field-initializers"
+    # which warns when designated initializers are used on some (but not all)
+    # fields in C++, but not C.
+    "-Wno-missing-field-initializers",
+
     # This is still needed for -Wmaybe-uninitialized which is added as a pragma in source code.
     # Clang hasn't implemented this yet.
     "-Wno-unknown-warning-option",
-    "-Wno-missing-field-initializers",
-
-    # TODO(https://fxbug.dev/477786942): Fix violations and enable the following checks.
-    # "-Wconversion",
-    # "-Wimplicit-fallthrough",
-
-    # TODO(https://fxbug.dev/534361287): Clean up unused templates in first-party code.
-    # This is currently applied globally to unblock the toolchain update.
-    # Eventually, this should be removed from default_warnings and only applied
-    # to third_party targets.
-    "-Wno-unused-template",
 ]
-# LINT.ThenChange(//build/config/BUILD.gn:default_warnings)
+
+# Used by OOT cc_features.bzl until OOT migrates to build_flags().
+# TODO(https://fxbug.dev/477786942): Fix violations in OOT and enable
+# -Wconversion and -Wimplicit-fallthrough (must precede -Wno-sign-conversion!).
+DEFAULT_WARNINGS_CFLAGS = (
+    _BASE_WARNINGS_CFLAGS_PREFIX +
+    ["-Wextra-semi"] +
+    _BASE_WARNINGS_CFLAGS_SUFFIX + [
+        # TODO(https://fxbug.dev/534361287): Clean up unused templates in first-party code.
+        # This is currently applied globally to unblock the toolchain update.
+        # Eventually, this should be removed from default_warnings and only applied
+        # to third_party targets. (In-tree adds this via subflags = [":Wno-unused-template"].)
+        "-Wno-unused-template",
+    ]
+)
+
+# Used by in-tree //build/config:default_warnings to match //build/config:default_warnings in GN.
+IN_TREE_DEFAULT_WARNINGS_CFLAGS = (
+    _BASE_WARNINGS_CFLAGS_PREFIX + [
+        "-Wconversion",
+        "-Wextra-semi",
+        "-Wimplicit-fallthrough",
+    ] + _BASE_WARNINGS_CFLAGS_SUFFIX
+)
+# LINT.ThenChange(
+#     //build/config/BUILD.bazel:default_warnings,
+#     //build/config/BUILD.gn:default_warnings,
+# )
 
 # LINT.IfChange(thread_safety_annotations)
 THREAD_SAFETY_DEFINES = [
@@ -58,4 +84,30 @@ THREAD_SAFETY_CFLAGS = [
 # LINT.ThenChange(
 #     //build/config/BUILD.bazel:thread_safety_annotations,
 #     //build/config/BUILD.gn:thread_safety_annotations,
+# )
+
+# LINT.IfChange(cpu_baseline)
+# C/C++ flags of the Fuchsia x86-64 platform baseline (cflags only, as in GN).
+X64_BASELINE_CFLAGS = [
+    "-march=x86-64-v2",
+    "-mtune=generic",
+]
+
+# C/C++ flags that mitigate the Skylake Jump Conditional Code erratum, part of
+# the Fuchsia x86-64 platform baseline (cflags only, as in GN).
+X64_MITIGATE_SKYLAKE_JCC_CFLAGS = [
+    "-mbranches-within-32B-boundaries",
+]
+
+# C/C++ flags of the Fuchsia AArch64 platform baseline, used for both
+# compiling and linking (c_family_flags in GN).
+ARM64_BASELINE_C_FAMILY_FLAGS = [
+    "-mtune=generic",
+    "-march=armv8-a+simd+crc+crypto",
+]
+# LINT.ThenChange(
+#     //build/config/arm64/BUILD.bazel:arm64_configs,
+#     //build/config/arm64/BUILD.gn:arm64_configs,
+#     //build/config/x64/BUILD.bazel:x64_configs,
+#     //build/config/x64/BUILD.gn:x64_configs,
 # )

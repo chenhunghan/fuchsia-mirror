@@ -28,25 +28,25 @@ constexpr uint32_t kDdrModeSize = 48 * kSize1Mb;
 
 }  // namespace
 
-uint32_t AmlMipiDevice::AdapGetDepth(const mipi_adap_info_t* info) {
+uint32_t AmlMipiDevice::AdapGetDepth(const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& info) {
   uint32_t depth = 0;
-  switch (info->format) {
-    case MIPI_IMAGE_FORMAT_AM_RAW6:
+  switch (info.format) {
+    case fuchsia_hardware_mipicsi::wire::MipiImageFormat::kAmRaw6:
       depth = 6;
       break;
-    case MIPI_IMAGE_FORMAT_AM_RAW7:
+    case fuchsia_hardware_mipicsi::wire::MipiImageFormat::kAmRaw7:
       depth = 7;
       break;
-    case MIPI_IMAGE_FORMAT_AM_RAW8:
+    case fuchsia_hardware_mipicsi::wire::MipiImageFormat::kAmRaw8:
       depth = 8;
       break;
-    case MIPI_IMAGE_FORMAT_AM_RAW10:
+    case fuchsia_hardware_mipicsi::wire::MipiImageFormat::kAmRaw10:
       depth = 10;
       break;
-    case MIPI_IMAGE_FORMAT_AM_RAW12:
+    case fuchsia_hardware_mipicsi::wire::MipiImageFormat::kAmRaw12:
       depth = 12;
       break;
-    case MIPI_IMAGE_FORMAT_AM_RAW14:
+    case fuchsia_hardware_mipicsi::wire::MipiImageFormat::kAmRaw14:
       depth = 14;
       break;
     default:
@@ -56,7 +56,8 @@ uint32_t AmlMipiDevice::AdapGetDepth(const mipi_adap_info_t* info) {
   return depth;
 }
 
-zx_status_t AmlMipiDevice::InitBuffer(const mipi_adap_info_t* /*info*/, size_t size) {
+zx_status_t AmlMipiDevice::InitBuffer(const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& /*info*/,
+                                      size_t size) {
   // Create a VMO for the ring buffer.
   zx_status_t status =
       zx_vmo_create_contiguous(bti_.get(), size, 0, ring_buffer_vmo_.reset_and_get_address());
@@ -85,7 +86,8 @@ zx_status_t AmlMipiDevice::InitBuffer(const mipi_adap_info_t* /*info*/, size_t s
  * Register information 8.1.2 (page 312)
  */
 
-zx_status_t AmlMipiDevice::AdapFrontendInit(const mipi_adap_info_t* info) {
+zx_status_t AmlMipiDevice::AdapFrontendInit(
+    const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& info) {
   // TODO(braval):    Add support for DOL_MODE
   auto frontend_reg = mipi_adap_mmio_->View(FRONTEND_BASE, kFrontEnd0Size);
 
@@ -94,13 +96,13 @@ zx_status_t AmlMipiDevice::AdapFrontendInit(const mipi_adap_info_t* info) {
   // enable frontend module clock and disable auto clock gating
   frontend_reg.Write32(0x6, CSI2_CLK_RESET);
 
-  if (info->mode == MIPI_MODES_DIR_MODE) {
-    if (info->path == MIPI_PATH_PATH0) {
+  if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDirMode) {
+    if (info.path == fuchsia_hardware_mipicsi::wire::MipiPath::kPath0) {
       // bit[0] 1:enable virtual channel 0
       frontend_reg.Write32(0x001f0001, CSI2_GEN_CTRL0);
     }
-  } else if (info->mode == MIPI_MODES_DDR_MODE) {
-    if (info->path == MIPI_PATH_PATH0) {
+  } else if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDdrMode) {
+    if (info.path == fuchsia_hardware_mipicsi::wire::MipiPath::kPath0) {
       frontend_reg.Write32(0x001f0011, CSI2_GEN_CTRL0);
     }
   } else {
@@ -112,16 +114,16 @@ zx_status_t AmlMipiDevice::AdapFrontendInit(const mipi_adap_info_t* info) {
   frontend_reg.Write32(0xffff0000, CSI2_X_START_END_MEM);
   frontend_reg.Write32(0xffff0000, CSI2_Y_START_END_MEM);
 
-  if (info->mode == MIPI_MODES_DDR_MODE) {
+  if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDdrMode) {
     // config ddr_buf[0] address
     frontend_reg.ModifyBits32(static_cast<uint32_t>(pinned_ring_buffer_.region(0).phys_addr), 0, 32,
                               CSI2_DDR_START_PIX);
-  } else if (info->mode == MIPI_MODES_DOL_MODE) {
+  } else if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDolMode) {
     // TODO(braval):    Add support for DOL_MODE.
   }
 
   // set frame size
-  if (info->mode == MIPI_MODES_DOL_MODE) {
+  if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDolMode) {
     zxlogf(ERROR, "%s, unsupported mode.", __func__);
   } else {
     frontend_reg.Write32(0x00000780, CSI2_DDR_STRIDE_PIX);
@@ -132,8 +134,8 @@ zx_status_t AmlMipiDevice::AdapFrontendInit(const mipi_adap_info_t* info) {
   return ZX_OK;
 }
 
-void AmlMipiDevice::AdapFrontEndStart(const mipi_adap_info_t* info) {
-  auto width = safemath::checked_cast<uint32_t>(info->resolution.x);
+void AmlMipiDevice::AdapFrontEndStart(const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& info) {
+  auto width = safemath::checked_cast<uint32_t>(info.resolution.x);
   uint32_t depth, val;
   depth = AdapGetDepth(info);
   if (!depth) {
@@ -156,14 +158,15 @@ void AmlMipiDevice::AdapFrontEndStart(const mipi_adap_info_t* info) {
  * Register information 8.1.2 (page 322)
  */
 
-zx_status_t AmlMipiDevice::AdapReaderInit(const mipi_adap_info_t* info) {
+zx_status_t AmlMipiDevice::AdapReaderInit(
+    const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& info) {
   // TODO(braval):    Add support for DOL_MODE
   auto reader_reg = mipi_adap_mmio_->View(RD_BASE, kReaderSize);
 
-  if (info->mode == MIPI_MODES_DIR_MODE) {
+  if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDirMode) {
     reader_reg.Write32(0x02d00078, MIPI_ADAPT_DDR_RD0_CNTL1);
     reader_reg.Write32(0xb5000005, MIPI_ADAPT_DDR_RD0_CNTL0);
-  } else if (info->mode == MIPI_MODES_DDR_MODE) {
+  } else if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDdrMode) {
     reader_reg.Write32(0x02d00078, MIPI_ADAPT_DDR_RD0_CNTL1);
     // ddr mode config frame address
     reader_reg.ModifyBits32(static_cast<uint32_t>(pinned_ring_buffer_.region(0).phys_addr), 0, 32,
@@ -176,9 +179,9 @@ zx_status_t AmlMipiDevice::AdapReaderInit(const mipi_adap_info_t* info) {
   return ZX_OK;
 }
 
-void AmlMipiDevice::AdapReaderStart(const mipi_adap_info_t* info) {
-  auto height = safemath::checked_cast<uint32_t>(info->resolution.y);
-  auto width = safemath::checked_cast<uint32_t>(info->resolution.x);
+void AmlMipiDevice::AdapReaderStart(const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& info) {
+  auto height = safemath::checked_cast<uint32_t>(info.resolution.y);
+  auto width = safemath::checked_cast<uint32_t>(info.resolution.x);
   uint32_t val, depth;
   depth = AdapGetDepth(info);
   if (!depth) {
@@ -202,15 +205,15 @@ void AmlMipiDevice::AdapReaderStart(const mipi_adap_info_t* info) {
  * Register information 8.1.2 (page 330)
  */
 
-zx_status_t AmlMipiDevice::AdapPixelInit(const mipi_adap_info_t* info) {
+zx_status_t AmlMipiDevice::AdapPixelInit(const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& info) {
   // TODO(braval):    Add support for  DOL_MODE
   auto pixel_reg = mipi_adap_mmio_->View(PIXEL_BASE, kPixelSize);
 
-  if (info->mode == MIPI_MODES_DIR_MODE) {
+  if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDirMode) {
     // default width 1280
     pixel_reg.Write32(0x8000a500, MIPI_ADAPT_PIXEL0_CNTL0);
     pixel_reg.Write32(0x80000808, MIPI_ADAPT_PIXEL0_CNTL1);
-  } else if (info->mode == MIPI_MODES_DDR_MODE) {
+  } else if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDdrMode) {
     pixel_reg.Write32(0x0000a500, MIPI_ADAPT_PIXEL0_CNTL0);
     pixel_reg.Write32(0x80000008, MIPI_ADAPT_PIXEL0_CNTL1);
   } else {
@@ -220,11 +223,11 @@ zx_status_t AmlMipiDevice::AdapPixelInit(const mipi_adap_info_t* info) {
   return ZX_OK;
 }
 
-void AmlMipiDevice::AdapPixelStart(const mipi_adap_info_t* info) {
+void AmlMipiDevice::AdapPixelStart(const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& info) {
   auto pixel_reg = mipi_adap_mmio_->View(PIXEL_BASE, kPixelSize);
 
-  pixel_reg.ModifyBits32(info->format, 13, 3, MIPI_ADAPT_PIXEL0_CNTL0);
-  pixel_reg.ModifyBits32(safemath::checked_cast<uint32_t>(info->resolution.x), 0, 13,
+  pixel_reg.ModifyBits32(static_cast<uint32_t>(info.format), 13, 3, MIPI_ADAPT_PIXEL0_CNTL0);
+  pixel_reg.ModifyBits32(safemath::checked_cast<uint32_t>(info.resolution.x), 0, 13,
                          MIPI_ADAPT_PIXEL0_CNTL0);
 
   // TODO(braval):    Add support for DOL_MODE
@@ -236,11 +239,11 @@ void AmlMipiDevice::AdapPixelStart(const mipi_adap_info_t* info) {
  * Register information 8.1.2 (page 333)
  */
 
-zx_status_t AmlMipiDevice::AdapAlignInit(const mipi_adap_info_t* info) {
+zx_status_t AmlMipiDevice::AdapAlignInit(const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& info) {
   // TODO(braval):    Add support for DDR_MODE & DOL_MODE
   auto align_reg = mipi_adap_mmio_->View(ALIGN_BASE, kAlignSize);
 
-  if (info->mode == MIPI_MODES_DOL_MODE) {
+  if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDolMode) {
     zxlogf(ERROR, "%s, unsupported mode.", __func__);
     return ZX_ERR_NOT_SUPPORTED;
   }
@@ -250,11 +253,11 @@ zx_status_t AmlMipiDevice::AdapAlignInit(const mipi_adap_info_t* info) {
   align_reg.Write32(0x05000000, MIPI_ADAPT_ALIG_CNTL1);  // associate width
   align_reg.Write32(0x02d00000, MIPI_ADAPT_ALIG_CNTL2);  // associate height
 
-  if (info->mode == MIPI_MODES_DIR_MODE) {
+  if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDirMode) {
     align_reg.Write32(0x00fff011, MIPI_ADAPT_ALIG_CNTL6);
     align_reg.Write32(0xc350c000, MIPI_ADAPT_ALIG_CNTL7);
     align_reg.Write32(0x85231020, MIPI_ADAPT_ALIG_CNTL8);
-  } else if (info->mode == MIPI_MODES_DDR_MODE) {
+  } else if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDdrMode) {
     align_reg.Write32(0x00fff001, MIPI_ADAPT_ALIG_CNTL6);
     align_reg.Write32(0x0, MIPI_ADAPT_ALIG_CNTL7);
     align_reg.Write32(0x80000020, MIPI_ADAPT_ALIG_CNTL8);
@@ -267,11 +270,11 @@ zx_status_t AmlMipiDevice::AdapAlignInit(const mipi_adap_info_t* info) {
   return ZX_OK;
 }
 
-void AmlMipiDevice::AdapAlignStart(const mipi_adap_info_t* info) {
+void AmlMipiDevice::AdapAlignStart(const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& info) {
   auto align_reg = mipi_adap_mmio_->View(ALIGN_BASE, kAlignSize);
 
-  auto width = safemath::checked_cast<uint32_t>(info->resolution.x);
-  auto height = safemath::checked_cast<uint32_t>(info->resolution.y);
+  auto width = safemath::checked_cast<uint32_t>(info.resolution.x);
+  auto height = safemath::checked_cast<uint32_t>(info.resolution.y);
   uint32_t alig_width = width + 40;    // hblank > 32 cycles
   uint32_t alig_height = height + 60;  // vblank > 48 lines
   uint32_t val = width + 35;           // width < val < alig_width
@@ -302,10 +305,10 @@ int AmlMipiDevice::AdapterIrqHandler() {
   return status;
 }
 
-zx_status_t AmlMipiDevice::MipiAdapInit(const mipi_adap_info_t* info) {
+zx_status_t AmlMipiDevice::MipiAdapInit(const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& info) {
   // TODO(braval):    Add support for DOL_MODE
 
-  if (info->mode == MIPI_MODES_DDR_MODE) {
+  if (info.mode == fuchsia_hardware_mipicsi::wire::MipiModes::kDdrMode) {
     zx_status_t status = InitBuffer(info, kDdrModeSize);
     if (status != ZX_OK) {
       return status;
@@ -356,7 +359,7 @@ zx_status_t AmlMipiDevice::MipiAdapInit(const mipi_adap_info_t* info) {
   return status;
 }
 
-void AmlMipiDevice::MipiAdapStart(const mipi_adap_info_t* info) {
+void AmlMipiDevice::MipiAdapStart(const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& info) {
   AdapAlignStart(info);
   AdapPixelStart(info);
   AdapReaderStart(info);

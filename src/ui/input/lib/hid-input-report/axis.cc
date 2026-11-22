@@ -5,7 +5,7 @@
 #include "src/ui/input/lib/hid-input-report/axis.h"
 
 namespace hid_input_report {
-fuchsia_input::wire::Unit HidUnitToLlcppUnit(hid::unit::UnitType unit) {
+fuchsia_input::wire::Unit HidUnitToWireUnit(hid::unit::UnitType unit) {
   fuchsia_input::wire::Unit out_unit;
   out_unit.type = fuchsia_input::wire::UnitType::kNone;
   out_unit.exponent = 0;
@@ -60,8 +60,8 @@ fuchsia_input::wire::Unit HidUnitToLlcppUnit(hid::unit::UnitType unit) {
   }
 }
 
-zx_status_t HidSensorUsageToLlcppSensorType(hid::usage::Sensor usage,
-                                            fuchsia_input_report::wire::SensorType* type) {
+zx_status_t HidSensorUsageToWireSensorType(hid::usage::Sensor usage,
+                                           fuchsia_input_report::wire::SensorType* type) {
   switch (usage) {
     case hid::usage::Sensor::kAccelerationAxisX:
       *type = fuchsia_input_report::wire::SensorType::kAccelerometerX;
@@ -108,8 +108,8 @@ zx_status_t HidSensorUsageToLlcppSensorType(hid::usage::Sensor usage,
   return ZX_OK;
 }
 
-zx_status_t HidLedUsageToLlcppLedType(hid::usage::LEDs usage,
-                                      fuchsia_input_report::wire::LedType* type) {
+zx_status_t HidLedUsageToWireLedType(hid::usage::LEDs usage,
+                                     fuchsia_input_report::wire::LedType* type) {
   switch (usage) {
     case hid::usage::LEDs::kNumLock:
       *type = fuchsia_input_report::wire::LedType::kNumLock;
@@ -132,13 +132,13 @@ zx_status_t HidLedUsageToLlcppLedType(hid::usage::LEDs usage,
   return ZX_OK;
 }
 
-fuchsia_input::wire::Axis LlcppAxisFromAttribute(const hid::Attributes& attrs) {
+fuchsia_input::wire::Axis WireAxisFromAttribute(const hid::Attributes& attrs) {
   fuchsia_input::wire::Axis axis;
   axis.range.min = static_cast<int64_t>(
       hid::unit::ConvertValToUnitType(attrs.unit, static_cast<double>(attrs.phys_mm.min)));
   axis.range.max = static_cast<int64_t>(
       hid::unit::ConvertValToUnitType(attrs.unit, static_cast<double>(attrs.phys_mm.max)));
-  axis.unit = HidUnitToLlcppUnit(hid::unit::GetUnitTypeFromUnit(attrs.unit));
+  axis.unit = HidUnitToWireUnit(hid::unit::GetUnitTypeFromUnit(attrs.unit));
   return axis;
 }
 

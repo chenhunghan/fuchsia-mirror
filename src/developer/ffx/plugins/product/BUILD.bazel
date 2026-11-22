@@ -2,18 +2,61 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//src/developer/ffx/build:gn_ffx_test_data.bzl", "gn_ffx_test_data")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/idk:idk_ffx_tool.bzl", "idk_ffx_tool")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
-# Exposes the GN-built ffx-product subtool and metadata JSON to Bazel host
-# tests until //src/developer/ffx/plugins/product is migrated to Bazel.
-# @bazel2gn:skip
-gn_ffx_test_data(
-    name = "ffx_product_tool_test_data",
-    expected_files = [
-        "ffx-product",
-        "ffx-product.json",
-    ],
-    visibility = ["//src/developer/ffx/build/tests:__pkg__"],
+exports_files(
+    ["data/config.json"],
+    visibility = ["//src/developer/ffx:__pkg__"],
 )
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/args.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "ffx_product_tool_lib",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/plugins/product/create_old:lib",
+        "//src/developer/ffx/plugins/product/download:lib",
+        "//src/developer/ffx/plugins/product/extract_blobs:lib",
+        "//src/developer/ffx/plugins/product/get_artifacts:lib",
+        "//src/developer/ffx/plugins/product/get_image_path:lib",
+        "//src/developer/ffx/plugins/product/get_repository:lib",
+        "//src/developer/ffx/plugins/product/get_version:lib",
+        "//src/developer/ffx/plugins/product/list:lib",
+        "//src/developer/ffx/plugins/product/lookup:lib",
+        "//src/developer/ffx/plugins/product/show:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+# LINT.IfChange
+# Avoid instrumenting this target as it has a large negative impact on
+# performance.
+# TODO(https://fxbug.dev/576944236): Disable instrumentation (asan, coverage,
+# profile) for this tool once Rust rules support it in Bazel.
+idk_ffx_tool(
+    name = "ffx_product_tool",
+    srcs = ["src/main.rs"],
+    category = "partner",
+    edition = "2024",
+    idk_name = "ffx-product",
+    visibility = [
+        "//src/developer/ffx/build/tests:__pkg__",
+        "//src/sys/pkg/tests/system-tests:__pkg__",
+    ],
+    deps = [
+        ":lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)

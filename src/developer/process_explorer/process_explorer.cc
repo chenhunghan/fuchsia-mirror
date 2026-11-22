@@ -4,9 +4,9 @@
 
 #include "src/developer/process_explorer/process_explorer.h"
 
-#include <fuchsia/kernel/cpp/fidl.h>
 #include <lib/fdio/directory.h>
 #include <lib/syslog/cpp/macros.h>
+#include <lib/zx/job.h>
 #include <zircon/status.h>
 
 #include <inspector/inspector.h>

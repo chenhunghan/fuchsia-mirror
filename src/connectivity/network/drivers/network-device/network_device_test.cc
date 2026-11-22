@@ -50,7 +50,16 @@ class NetDeviceDriverTest : public ::testing::Test {
   static constexpr uint8_t kPortId = 11;
 
   void SetUp() override {
-    zx::result<> result = driver_test().StartDriver();
+    zx::event node_token;
+    ASSERT_OK(zx::event::create(0, &node_token));
+    zx_info_handle_basic_t info;
+    ASSERT_OK(node_token.get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr));
+    node_token_koid_ = info.koid;
+
+    zx::result<> result = driver_test().StartDriverWithCustomStartArgs(
+        [node_token = std::move(node_token)](fdf::DriverStartArgs& args) mutable {
+          args.node_token(std::move(node_token));
+        });
     ASSERT_EQ(ZX_OK, result.status_value());
   }
 
@@ -86,13 +95,12 @@ class NetDeviceDriverTest : public ::testing::Test {
   }
 
   zx::result<fidl::WireSyncClient<netdev::Device>> ConnectNetDevice() {
-    auto [dev_client_end, dev_server_end] = fidl::Endpoints<netdev::Device>::Create();
-    driver_test().RunInDriverContext(
-        [server_end = std::move(dev_server_end)](network::NetworkDevice& driver) mutable {
-          driver.GetInterface()->Bind(std::move(server_end));
-        });
+    zx::result dev_client_end = driver_test().Connect<fuchsia_hardware_network::Service::Device>();
+    if (dev_client_end.is_error()) {
+      return dev_client_end.take_error();
+    }
 
-    return zx::ok(fidl::WireSyncClient(std::move(dev_client_end)));
+    return zx::ok(fidl::WireSyncClient(std::move(dev_client_end.value())));
   }
 
   FakeNetworkPortImpl& port_impl() { return port_impl_; }
@@ -154,9 +162,11 @@ class NetDeviceDriverTest : public ::testing::Test {
   }
 
   fdf_testing::BackgroundDriverTest<TestFixtureConfig>& driver_test() { return driver_test_; }
+  zx_koid_t node_token_koid() const { return node_token_koid_; }
 
  private:
   fdf_testing::BackgroundDriverTest<TestFixtureConfig> driver_test_;
+  zx_koid_t node_token_koid_ = ZX_KOID_INVALID;
   bool shutdown_ = false;
   async_dispatcher_t* fidl_dispatcher_ =
       driver_test().runtime().StartBackgroundDispatcher()->async_dispatcher();
@@ -166,6 +176,20 @@ class NetDeviceDriverTest : public ::testing::Test {
 };
 
 TEST_F(NetDeviceDriverTest, TestCreateSimple) { ASSERT_OK(this->CreateDevice()); }
+
+TEST_F(NetDeviceDriverTest, TestNodeToken) {
+  ASSERT_OK(this->CreateDevice());
+  zx::result token_client = driver_test().Connect<fuchsia_hardware_network::Service::Token>();
+  ASSERT_OK(token_client.status_value());
+
+  fidl::WireResult result = fidl::WireCall(*token_client)->Get();
+  ASSERT_OK(result.status());
+  ASSERT_TRUE(result->is_ok()) << zx_status_get_string(result->error_value());
+  zx_info_handle_basic_t info;
+  ASSERT_OK(
+      result->value()->token.get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr));
+  EXPECT_EQ(info.koid, this->node_token_koid());
+}
 
 TEST_F(NetDeviceDriverTest, TestOpenSession) {
   ASSERT_OK(this->CreateDevice());

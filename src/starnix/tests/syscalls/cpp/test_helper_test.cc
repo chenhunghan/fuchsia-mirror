@@ -6,19 +6,29 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <lib/fit/defer.h>
 #include <signal.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/ptrace.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cstring>
 #include <thread>
+#include <utility>
 
 #include <gmock/gmock.h>
+#include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
+#include <linux/capability.h>
 
+#include "src/lib/files/file.h"
+#include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 
 namespace {
@@ -280,6 +290,24 @@ TEST(TestHelperTest, KillChildrenOnDestroyHandlesExitedAndReapedChildren) {
   EXPECT_THAT(waitpid(running_child, &status, WNOHANG), SyscallFailsWithErrno(ECHILD));
 }
 
+TEST(TestHelperTest, KillChildrenExplicitlyKillsAndReapsChildren) {
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+
+  pid_t exited_child = helper.RunInForkedProcess([] { _exit(0); });
+  siginfo_t info = {};
+  ASSERT_THAT(HANDLE_EINTR(waitid(P_PID, exited_child, &info, WEXITED | WNOWAIT)),
+              SyscallSucceeds());
+
+  pid_t running_child = helper.RunInForkedProcess([] { pause(); });
+
+  EXPECT_TRUE(helper.KillChildren());
+
+  int status = 0;
+  EXPECT_THAT(waitpid(exited_child, &status, WNOHANG), SyscallFailsWithErrno(ECHILD));
+  EXPECT_THAT(waitpid(running_child, &status, WNOHANG), SyscallFailsWithErrno(ECHILD));
+}
+
 TEST(SyscallResultMatchersTest, SyscallResultIsOk) {
   fit::result<int> ok_result = fit::ok();
   EXPECT_THAT(ok_result, SyscallResultIsOk());
@@ -319,11 +347,361 @@ TEST(SyscallResultMatchersTest, SyscallResultIsErrno) {
   EXPECT_THAT(ok_result, ::testing::Not(SyscallResultIsErrno(ENOENT)));
 }
 
+TEST(SyscallMatchersTest, SyscallSucceedsRejectsMinusOneEvenWhenErrnoIsZero) {
+  errno = 0;
+  EXPECT_THAT(-1, ::testing::Not(SyscallSucceeds()));
+  EXPECT_THAT(0, SyscallSucceeds());
+}
+
+TEST(SyscallMatchersTest, SyscallMatchesResultAndSucceedsOrFailsWithErrno) {
+  EXPECT_THAT(0, SyscallMatchesResult(fit::ok()));
+  EXPECT_THAT(42, SyscallMatchesResult(fit::ok()));
+  EXPECT_THAT(intptr_t{-4096}, SyscallMatchesResult(fit::ok()));
+  EXPECT_THAT(0, SyscallSucceedsOrFailsWithErrno(/* expect_success = */ true, EACCES));
+
+  errno = EACCES;
+  EXPECT_THAT(-1, ::testing::Not(SyscallMatchesResult(fit::ok())));
+  EXPECT_THAT(-1,
+              ::testing::Not(SyscallSucceedsOrFailsWithErrno(/* expect_success = */ true, EACCES)));
+  EXPECT_THAT(-1, SyscallMatchesResult(fit::error(EACCES)));
+  EXPECT_THAT(-1, SyscallSucceedsOrFailsWithErrno(/* expect_success = */ false, EACCES));
+
+  EXPECT_THAT(0, ::testing::Not(SyscallMatchesResult(fit::error(EACCES))));
+  EXPECT_THAT(
+      0, ::testing::Not(SyscallSucceedsOrFailsWithErrno(/* expect_success = */ false, EACCES)));
+
+  errno = ENOENT;
+  EXPECT_THAT(-1, ::testing::Not(SyscallMatchesResult(fit::error(EACCES))));
+  EXPECT_THAT(
+      -1, ::testing::Not(SyscallSucceedsOrFailsWithErrno(/* expect_success = */ false, EACCES)));
+}
+
+TEST(TestHelperTest, SignalMaskHelperBlocksMultipleSignalsAndRestoresOnDestroy) {
+  sigset_t initial_mask;
+  ASSERT_THAT(sigprocmask(SIG_SETMASK, nullptr, &initial_mask), SyscallSucceeds());
+  ASSERT_EQ(sigismember(&initial_mask, SIGUSR1), 0);
+  ASSERT_EQ(sigismember(&initial_mask, SIGUSR2), 0);
+
+  {
+    test_helper::SignalMaskHelper mask_helper;
+    mask_helper.blockSignal(SIGUSR1);
+    mask_helper.blockSignal(SIGUSR2);
+
+    sigset_t current_mask;
+    ASSERT_THAT(sigprocmask(SIG_SETMASK, nullptr, &current_mask), SyscallSucceeds());
+    EXPECT_EQ(sigismember(&current_mask, SIGUSR1), 1);
+    EXPECT_EQ(sigismember(&current_mask, SIGUSR2), 1);
+  }
+
+  sigset_t restored_mask;
+  ASSERT_THAT(sigprocmask(SIG_SETMASK, nullptr, &restored_mask), SyscallSucceeds());
+  EXPECT_EQ(sigismember(&restored_mask, SIGUSR1), 0);
+  EXPECT_EQ(sigismember(&restored_mask, SIGUSR2), 0);
+}
+
+TEST(TestHelperTest, SignalMaskHelperWaitsForSpecificPendingSignal) {
+  test_helper::SignalMaskHelper mask_helper;
+  mask_helper.blockSignal(SIGUSR1);
+  mask_helper.blockSignal(SIGUSR2);
+
+  ASSERT_THAT(raise(SIGUSR1), SyscallSucceeds());
+  ASSERT_THAT(raise(SIGUSR2), SyscallSucceeds());
+
+  // Wait for SIGUSR2 even though SIGUSR1 is also pending.
+  ASSERT_NO_FATAL_FAILURE(mask_helper.waitForSignal(SIGUSR2));
+
+  sigset_t pending;
+  ASSERT_THAT(sigpending(&pending), SyscallSucceeds());
+  EXPECT_EQ(sigismember(&pending, SIGUSR1), 1);
+
+  EXPECT_EQ(mask_helper.timedWaitForSignal(SIGUSR1, 100), SIGUSR1);
+  EXPECT_THAT(mask_helper.timedWaitForSignal(SIGUSR1, 1), SyscallFailsWithErrno(EAGAIN));
+}
+
+TEST(TestHelperTest, ScopedSocketPairLifecycleAndAccessors) {
+  int closed_client_fd = -1;
+  int closed_server_fd = -1;
+  {
+    test_helper::ScopedSocketPair pair;
+    ASSERT_TRUE(pair.is_valid());
+    ASSERT_TRUE(static_cast<bool>(pair));
+    EXPECT_EQ(pair[0].get(), pair.client_fd());
+    EXPECT_EQ(pair[1].get(), pair.server_fd());
+
+    const char kMessage[] = "ping";
+    ASSERT_EQ(write(pair.client_fd(), kMessage, sizeof(kMessage)),
+              static_cast<ssize_t>(sizeof(kMessage)));
+    char buf[sizeof(kMessage)] = {};
+    ASSERT_EQ(read(pair.server_fd(), buf, sizeof(buf)), static_cast<ssize_t>(sizeof(buf)));
+    EXPECT_STREQ(buf, kMessage);
+
+    test_helper::ScopedSocketPair moved(std::move(pair));
+    EXPECT_TRUE(moved.is_valid());
+    EXPECT_FALSE(pair.is_valid());
+    closed_client_fd = moved.client_fd();
+    closed_server_fd = moved.server_fd();
+  }
+  EXPECT_THAT(fcntl(closed_client_fd, F_GETFD), SyscallFailsWithErrno(EBADF));
+  EXPECT_THAT(fcntl(closed_server_fd, F_GETFD), SyscallFailsWithErrno(EBADF));
+
+  auto dgram =
+      ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedSocketPair::Create(AF_UNIX, SOCK_DGRAM));
+  EXPECT_TRUE(dgram.is_valid());
+  EXPECT_THAT(test_helper::ScopedSocketPair::Create(-1, SOCK_STREAM),
+              SyscallResultIsErrno(EAFNOSUPPORT));
+}
+
+TEST(TestHelperTest, ScopedMMapDefaultAndSelfMove) {
+  test_helper::ScopedMMap empty;
+  EXPECT_FALSE(empty.is_valid());
+  EXPECT_FALSE(static_cast<bool>(empty));
+
+  const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  auto mapped = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, 2 * page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  EXPECT_TRUE(mapped.is_valid());
+
+  test_helper::ScopedMMap* self = &mapped;
+  mapped = std::move(*self);
+  EXPECT_TRUE(mapped.is_valid());
+}
+
+TEST(CapabilitiesHelperTest, GetLastCap) {
+  EXPECT_THAT(test_helper::GetLastCap(), SyscallResultIsOk(::testing::Gt(0)));
+}
+
+TEST(CapabilitiesHelperTest, RejectsInvalidCapabilityIndex) {
+  EXPECT_THAT(test_helper::TrySetCapabilityEffective(-1), SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(test_helper::TrySetCapabilityEffective(64), SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(test_helper::TrySetCapabilityPermitted(64), SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(test_helper::TryUnsetCapabilityPermitted(-1), SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(test_helper::TrySetCapabilityAmbient(-1), SyscallResultIsErrno(EINVAL));
+
+  EXPECT_NONFATAL_FAILURE(EXPECT_FALSE(test_helper::HasCapabilityEffective(-1)),
+                          "Invalid capability");
+  EXPECT_NONFATAL_FAILURE(EXPECT_FALSE(test_helper::HasCapabilityEffective(64)),
+                          "Invalid capability");
+}
+
+TEST(CapabilitiesHelperTest, SwitchToUnprivilegedUser) {
+  if (!test_helper::HasCapability(CAP_SETUID) || !test_helper::HasCapability(CAP_SETGID)) {
+    GTEST_SKIP() << "Requires CAP_SETUID and CAP_SETGID";
+  }
+
+  test_helper::ForkHelper fork_helper;
+  fork_helper.RunInForkedProcess([] {
+    const gid_t groups[] = {1000};
+    ASSERT_THAT(setgroups(1, groups), SyscallSucceeds());
+    ASSERT_THAT(prctl(PR_SET_KEEPCAPS, 1UL, 0UL, 0UL, 0UL), SyscallSucceeds());
+    ASSERT_TRUE(test_helper::SwitchToUnprivilegedUser(65534, 65534, /*keep_caps=*/false));
+
+    uid_t ruid = 0, euid = 0, suid = 0;
+    gid_t rgid = 0, egid = 0, sgid = 0;
+    ASSERT_THAT(getresuid(&ruid, &euid, &suid), SyscallSucceeds());
+    ASSERT_THAT(getresgid(&rgid, &egid, &sgid), SyscallSucceeds());
+    EXPECT_EQ(ruid, 65534u);
+    EXPECT_EQ(euid, 65534u);
+    EXPECT_EQ(suid, 65534u);
+    EXPECT_EQ(rgid, 65534u);
+    EXPECT_EQ(egid, 65534u);
+    EXPECT_EQ(sgid, 65534u);
+    EXPECT_EQ(getgroups(0, nullptr), 0);
+    EXPECT_EQ(prctl(PR_GET_KEEPCAPS, 0UL, 0UL, 0UL, 0UL), 0);
+    EXPECT_FALSE(test_helper::HasCapabilityPermitted(CAP_SETUID));
+    EXPECT_FALSE(test_helper::SwitchToUnprivilegedUser(0, 0));
+  });
+
+  fork_helper.RunInForkedProcess([] {
+    const gid_t groups[] = {1000};
+    ASSERT_THAT(setgroups(1, groups), SyscallSucceeds());
+    test_helper::UnsetCapabilityEffective(CAP_SETGID);
+    EXPECT_FALSE(test_helper::SwitchToUnprivilegedUser(getuid(), getgid()));
+  });
+
+  fork_helper.RunInForkedProcess([] {
+    ASSERT_TRUE(test_helper::SwitchToUnprivilegedUser(65534, 65534, /*keep_caps=*/true));
+
+    uid_t ruid = 0, euid = 0, suid = 0;
+    gid_t rgid = 0, egid = 0, sgid = 0;
+    ASSERT_THAT(getresuid(&ruid, &euid, &suid), SyscallSucceeds());
+    ASSERT_THAT(getresgid(&rgid, &egid, &sgid), SyscallSucceeds());
+    EXPECT_EQ(ruid, 65534u);
+    EXPECT_EQ(euid, 65534u);
+    EXPECT_EQ(suid, 65534u);
+    EXPECT_EQ(rgid, 65534u);
+    EXPECT_EQ(egid, 65534u);
+    EXPECT_EQ(sgid, 65534u);
+    EXPECT_EQ(getgroups(0, nullptr), 0);
+    EXPECT_EQ(prctl(PR_GET_KEEPCAPS, 0UL, 0UL, 0UL, 0UL), 1);
+    EXPECT_TRUE(test_helper::HasCapabilityPermitted(CAP_SETUID));
+  });
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
 TEST(TestHelperTest, GetTaskState) {
   EXPECT_EQ(test_helper::GetTaskState("123 (test_binary) S 1 123 123 0 -1"), "S");
   EXPECT_EQ(test_helper::GetTaskState("456 (name (with) parens) R 1 456 456"), "R");
   EXPECT_EQ(test_helper::GetTaskState("789 (Z) T 1 789 789"), "T");
   EXPECT_EQ(test_helper::GetTaskState("invalid stat"), std::nullopt);
+}
+
+TEST(TestHelperTest, GetStatusFieldInKb) {
+  test_helper::ScopedTempFD status_file;
+  ASSERT_TRUE(status_file.is_valid());
+  ASSERT_TRUE(files::WriteFile(status_file.name(),
+                               "Name:\ttest\nVmSize:\t  1234 kB\nVmLck:\t0 kB\nBad:\tnot_kb\n"));
+
+  EXPECT_EQ(test_helper::GetStatusFieldInKb(status_file.name(), "VmSize"), 1234u);
+  EXPECT_EQ(test_helper::GetStatusFieldInKb(status_file.name(), "VmLck"), 0u);
+  EXPECT_EQ(test_helper::GetStatusFieldInKb(status_file.name(), "Bad"), std::nullopt);
+  EXPECT_EQ(test_helper::GetStatusFieldInKb(status_file.name(), "Missing"), std::nullopt);
+  EXPECT_EQ(test_helper::GetStatusFieldInKb("/proc/nonexistent_test_helper_status", "VmSize"),
+            std::nullopt);
+
+  auto self_vmsize = test_helper::GetStatusFieldInKb("/proc/self/status", "VmSize");
+  ASSERT_TRUE(self_vmsize.has_value());
+  EXPECT_GT(*self_vmsize, 0u);
+}
+
+TEST(TestHelperTest, ScopedSysctlCreateRestoresAndReturnsErrno) {
+  test_helper::ScopedSysctl empty;
+  EXPECT_FALSE(empty.is_valid());
+  EXPECT_FALSE(static_cast<bool>(empty));
+  empty.Restore();
+  EXPECT_FALSE(empty.is_valid());
+
+  test_helper::ScopedTempFD temp_file;
+  ASSERT_TRUE(temp_file.is_valid());
+  ASSERT_TRUE(files::WriteFile(temp_file.name(), "initial"));
+
+  {
+    auto sysctl = test_helper::ScopedSysctl::Create(temp_file.name(), "updated");
+    ASSERT_THAT(sysctl, SyscallResultIsOk());
+    EXPECT_TRUE(sysctl.value().is_valid());
+    EXPECT_TRUE(static_cast<bool>(sysctl.value()));
+    std::string content;
+    ASSERT_TRUE(files::ReadFileToString(temp_file.name(), &content));
+    EXPECT_EQ(content, "updated");
+  }
+
+  std::string restored;
+  ASSERT_TRUE(files::ReadFileToString(temp_file.name(), &restored));
+  EXPECT_EQ(restored, "initial");
+
+  {
+    auto save_only = test_helper::ScopedSysctl::Create(temp_file.name());
+    ASSERT_THAT(save_only, SyscallResultIsOk());
+    EXPECT_TRUE(save_only.value().is_valid());
+    ASSERT_TRUE(files::WriteFile(temp_file.name(), "modified_later"));
+  }
+
+  ASSERT_TRUE(files::ReadFileToString(temp_file.name(), &restored));
+  EXPECT_EQ(restored, "initial");
+
+  test_helper::ScopedTempFD second_file;
+  ASSERT_TRUE(second_file.is_valid());
+  ASSERT_TRUE(files::WriteFile(second_file.name(), "second_initial"));
+  {
+    auto first = test_helper::ScopedSysctl::Create(temp_file.name(), "first_updated");
+    ASSERT_THAT(first, SyscallResultIsOk());
+    test_helper::ScopedSysctl moved(std::move(first.value()));
+    EXPECT_FALSE(first.value().is_valid());
+    EXPECT_TRUE(moved.is_valid());
+    ASSERT_TRUE(files::WriteFile(temp_file.name(), "clobbered_before_restore"));
+
+    auto second = test_helper::ScopedSysctl::Create(second_file.name(), "second_updated");
+    ASSERT_THAT(second, SyscallResultIsOk());
+    moved = std::move(second.value());
+    EXPECT_FALSE(second.value().is_valid());
+    EXPECT_TRUE(moved.is_valid());
+
+    // Move-assigning over `moved` must have restored `temp_file` to "initial".
+    ASSERT_TRUE(files::ReadFileToString(temp_file.name(), &restored));
+    EXPECT_EQ(restored, "initial");
+    ASSERT_TRUE(files::WriteFile(temp_file.name(), "stays_after_moved_from_destroyed"));
+
+    // Self-move-assignment must remain valid without prematurely restoring `second_file`.
+    test_helper::ScopedSysctl* self = &moved;
+    moved = std::move(*self);
+    EXPECT_TRUE(moved.is_valid());
+    ASSERT_TRUE(files::ReadFileToString(second_file.name(), &restored));
+    EXPECT_EQ(restored, "second_updated");
+
+    // Explicit `Restore()` restores immediately and is idempotent.
+    moved.Restore();
+    EXPECT_FALSE(moved.is_valid());
+    ASSERT_TRUE(files::ReadFileToString(second_file.name(), &restored));
+    EXPECT_EQ(restored, "second_initial");
+    ASSERT_TRUE(files::WriteFile(second_file.name(), "stays_after_explicit_restore"));
+    moved.Restore();
+  }
+
+  ASSERT_TRUE(files::ReadFileToString(temp_file.name(), &restored));
+  EXPECT_EQ(restored, "stays_after_moved_from_destroyed");
+  ASSERT_TRUE(files::ReadFileToString(second_file.name(), &restored));
+  EXPECT_EQ(restored, "stays_after_explicit_restore");
+
+  {
+    ASSERT_TRUE(files::WriteFile(temp_file.name(), "before_assign_empty"));
+    auto early_result = test_helper::ScopedSysctl::Create(temp_file.name(), "during_assign_empty");
+    ASSERT_THAT(early_result, SyscallResultIsOk());
+    test_helper::ScopedSysctl early = std::move(early_result.value());
+    early = {};
+    EXPECT_FALSE(early.is_valid());
+    ASSERT_TRUE(files::ReadFileToString(temp_file.name(), &restored));
+    EXPECT_EQ(restored, "before_assign_empty");
+    ASSERT_TRUE(files::WriteFile(temp_file.name(), "stays_after_assign_empty"));
+  }
+
+  ASSERT_TRUE(files::ReadFileToString(temp_file.name(), &restored));
+  EXPECT_EQ(restored, "stays_after_assign_empty");
+
+  auto missing = test_helper::ScopedSysctl::Create("/proc/sys/nonexistent_test_helper_sysctl", "1");
+  EXPECT_THAT(missing, SyscallResultIsErrno(ENOENT));
+
+  test_helper::ScopedTempFD read_only_file;
+  ASSERT_TRUE(read_only_file.is_valid());
+  ASSERT_TRUE(files::WriteFile(read_only_file.name(), "read_only_initial"));
+  ASSERT_THAT(fchmod(read_only_file.fd(), 0444), SyscallSucceeds());
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&read_only_file] {
+    test_helper::DropAllCapabilities();
+    EXPECT_THAT(test_helper::ScopedSysctl::Create(read_only_file.name(), "updated"),
+                SyscallResultIsErrno(EACCES));
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+  ASSERT_TRUE(files::ReadFileToString(read_only_file.name(), &restored));
+  EXPECT_EQ(restored, "read_only_initial");
+}
+
+void DummySignalHandler(int) {}
+void DummySigInfoHandler(int, siginfo_t*, void*) {}
+
+TEST(TestHelperTest, ScopedSigActionRestoresPreviousHandler) {
+  struct sigaction original = {};
+  ASSERT_THAT(sigaction(SIGUSR1, nullptr, &original), SyscallSucceeds());
+  {
+    test_helper::ScopedSigAction scoped(SIGUSR1, DummySignalHandler, SA_RESTART);
+    struct sigaction active = {};
+    ASSERT_THAT(sigaction(SIGUSR1, nullptr, &active), SyscallSucceeds());
+    EXPECT_EQ(active.sa_handler, &DummySignalHandler);
+    EXPECT_EQ(active.sa_flags & SA_RESTART, SA_RESTART);
+
+    {
+      test_helper::ScopedSigAction nested(SIGUSR1, DummySigInfoHandler, SA_RESTART);
+      ASSERT_THAT(sigaction(SIGUSR1, nullptr, &active), SyscallSucceeds());
+      EXPECT_EQ(active.sa_sigaction, &DummySigInfoHandler);
+      EXPECT_EQ(active.sa_flags & (SA_SIGINFO | SA_RESTART), SA_SIGINFO | SA_RESTART);
+    }
+
+    ASSERT_THAT(sigaction(SIGUSR1, nullptr, &active), SyscallSucceeds());
+    EXPECT_EQ(active.sa_handler, &DummySignalHandler);
+    EXPECT_EQ(active.sa_flags & (SA_SIGINFO | SA_RESTART), SA_RESTART);
+  }
+  struct sigaction restored = {};
+  ASSERT_THAT(sigaction(SIGUSR1, nullptr, &restored), SyscallSucceeds());
+  EXPECT_EQ(restored.sa_handler, original.sa_handler);
 }
 
 }  // namespace

@@ -148,6 +148,12 @@ closed protocol PairingDelegate {
     /// response is received. The OnPairingComplete method will be called when this
     /// occurs.  Any response sent in this case will be ignored.
     ///
+    /// This request is not ordered with respect to other protocols such as
+    /// `fuchsia.bluetooth.le` or `Access.WatchPeers`. A delegate may receive a
+    /// pairing request for a peer before being notified of that peer or its
+    /// connection on another protocol, and should use the provided `peer`
+    /// information rather than assuming prior notification.
+    ///
     /// + request `peer` information about the peer being paired
     /// + request `method` method of pairing active. See `PairingMethod`
     /// + request `displayed_passkey` a passkey to display to the user if
@@ -200,8 +206,10 @@ closed protocol PairingDelegate {
     /// pairing when entering a passkey.
     ///
     /// This should only be sent after an OnPairingRequest has been received
-    /// with a PASSKEY_ENTRY method, and before the reponse for that pairing
+    /// with a PASSKEY_ENTRY method, and before the response for that pairing
     /// request.
+    ///
+    /// Note: local keypress events are not guaranteed to be propagated to the peer.
     ///
     /// * request `id` id of a peer with a pairing request active
     /// * request `keypress` the type of notification which should be sent
@@ -257,6 +265,8 @@ closed protocol PairingRequest {
     /// Used to communicate local keypresses to update the remote peer on
     /// the progress of the pairing. The responses to this method should
     /// be used for flow control.
+    ///
+    /// Note: local keypresses are not guaranteed to be propagated to the peer.
     strict Keypress(struct {
         keypress PairingKeypress;
     }) -> ();
@@ -299,6 +309,12 @@ closed protocol PairingDelegate2 {
     /// Multiple requests can be active at one time for different peers, and
     /// requests can outlive this protocol.  Dropping the request protocol will
     /// automatically reject the pairing.
+    ///
+    /// This request is not ordered with respect to other protocols such as
+    /// `fuchsia.bluetooth.le` or `Access.WatchPeers`. A delegate may receive a
+    /// pairing request for a peer before being notified of that peer or its
+    /// connection on another protocol, and should use the provided `peer`
+    /// information rather than assuming prior notification.
     ///
     /// All fields will always be present.
     strict StartRequest(resource table {

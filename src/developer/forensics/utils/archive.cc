@@ -18,7 +18,7 @@
 namespace forensics {
 namespace {
 
-using fuchsia::mem::Buffer;
+using fuchsia_mem::Buffer;
 
 bool Archive(const std::map<std::string, std::string>& files, const std::string& archive_filename,
              zipFile* zf, std::map<std::string, ArchiveFileStats>* file_to_size_stats) {
@@ -172,14 +172,15 @@ bool Unpack(const Buffer& archive, std::map<std::string, std::string>* files) {
   std::string archive_filename;
   tmp_dir.NewTempFile(&archive_filename);
 
-  auto data = std::make_unique<uint8_t[]>(archive.size);
-  if (const zx_status_t status = archive.vmo.read(data.get(), 0u, archive.size); status != ZX_OK) {
+  auto data = std::make_unique<uint8_t[]>(archive.size());
+  if (const zx_status_t status = archive.vmo().read(data.get(), /*offset=*/0u, archive.size());
+      status != ZX_OK) {
     FX_PLOGS(ERROR, status) << "failed to read input zip archive VMO";
     return false;
   }
 
   if (!files::WriteFile(archive_filename, reinterpret_cast<const char*>(data.get()),
-                        archive.size)) {
+                        archive.size())) {
     FX_LOGS(ERROR) << "failed to write input zip archive VMO to temporary file";
     return false;
   }

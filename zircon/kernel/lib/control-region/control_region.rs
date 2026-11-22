@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-mod control_region_ffi;
-
 use crate::kernel::relaxed_atomic::RelaxedAtomicU32;
 use crate::ksync_kernel::{NoIrqSavePolicy, TrackedSpinlock};
 use core::convert::Infallible;
@@ -55,7 +53,6 @@ use pin_init::{PinInit, pin_init};
 ///  resource.r#use();
 /// ```
 #[guarded]
-#[repr(C)]
 pub struct ControlRegion {
     #[mutex]
     lock: KMutex<TrackedSpinlock>,
@@ -74,9 +71,6 @@ pub struct ControlRegion {
     #[guarded_by(lock)]
     count: u32,
 }
-
-zr::static_assert!(size_of::<ControlRegion>() == size_of::<TrackedSpinlock>() + 8);
-zr::static_assert!(align_of::<ControlRegion>() == 8);
 
 #[repr(u32)]
 enum State {

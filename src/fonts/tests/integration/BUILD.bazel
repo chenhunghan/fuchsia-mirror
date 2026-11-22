@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Integration tests without a `main()` function.
+rustc_test(
+    name = "font_provider_integration_tests_bin",
+    srcs = [
+        "src/experimental_api/get_typeface_by_id.rs",
+        "src/experimental_api/get_typefaces_by_family.rs",
+        "src/experimental_api/list_typefaces.rs",
+        "src/experimental_api/mod.rs",
+        "src/experimental_api/util/mod.rs",
+        "src/lib.rs",
+        "src/old_api/mod.rs",
+        "src/reviewed_api/get_font_family_info.rs",
+        "src/reviewed_api/get_typeface.rs",
+        "src/reviewed_api/mod.rs",
+        "src/reviewed_api/util/mod.rs",
+        "src/util.rs",
+    ],
+    crate_name = "font_provider_integration_tests",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.fonts.experimental:fuchsia.fonts.experimental_rust",
+        "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_rust",
+        "//sdk/fidl/fuchsia.intl:fuchsia.intl_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

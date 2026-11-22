@@ -12,13 +12,26 @@
     },
 
     // [START config]
-    config: {
-        greeting: {
+    use: [
+        // The greeting to log.
+        {
+            config: "fuchsia.example.config.Greeting",
+            key: "greeting",
             type: "string",
             max_size: 512,
+            availability: "transitional",
+            default: "World",
         },
-        delay_ms: { type: "uint64" },
-    },
+
+        // Delay in milliseconds before logging greeting.
+        {
+            config: "fuchsia.example.config.DelayMs",
+            key: "delay_ms",
+            type: "uint64",
+            availability: "transitional",
+            default: 100,
+        },
+    ],
 
     // [END config]
 }

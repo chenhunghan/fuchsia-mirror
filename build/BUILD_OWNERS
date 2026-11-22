@@ -1,0 +1,19 @@
+# Owners of build-related directories and files, including all GN files.
+#
+# Inclusion in this file grants broad ownership of build-related directories
+# and files throughout the tree.
+# Prefer adding to `OWNERS` files in specific directories or in more specific
+# `*_OWNERS` files. (Create new ones if appropriate.)
+#
+# Keep the list small and ensure everyone listed understands the power that
+# inclusion grants and are careful to avoid unintended approval when publishing
+# and CR+2'ing CLs.
+# This is especially important in the context of AI-generated CLs and
+# potentially reduced human review requirements.
+
+aaronwood@google.com
+ddorwin@google.com
+digit@google.com
+fangism@google.com
+jayzhuang@google.com
+olivernewman@google.com

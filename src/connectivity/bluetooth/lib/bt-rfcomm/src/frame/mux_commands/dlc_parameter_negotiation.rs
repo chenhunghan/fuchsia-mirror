@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 use bitfield::bitfield;
-use packet_encoding::{decodable_enum, Decodable, Encodable};
+use packet_encoding::{Decodable, Encodable, decodable_enum};
 
-use crate::frame::FrameParseError;
 use crate::DLCI;
+use crate::frame::FrameParseError;
 
 /// The length (in bytes) of a DLC Parameter Negotiation command.
 /// Defined in GSM 7.10 Section 5.4.6.3.1.
@@ -126,7 +126,7 @@ impl Encodable for ParameterNegotiationParams {
         params.set_initial_credits(self.initial_credits);
 
         let params_bytes = params.0;
-        buf.copy_from_slice(&params_bytes[..]);
+        buf[..self.encoded_len()].copy_from_slice(&params_bytes[..]);
 
         Ok(())
     }
@@ -277,5 +277,20 @@ mod tests {
             0b00000110, // Initial Credits = 6.
         ];
         assert_eq!(buf, expected_buf);
+    }
+
+    #[test]
+    fn test_encode_oversized_buf_preserves_trailing_bytes() {
+        const SENTINEL: u8 = 0xAA;
+        let dlc_pn_command = ParameterNegotiationParams {
+            dlci: DLCI::try_from(5).unwrap(),
+            credit_based_flow_handshake: CreditBasedFlowHandshake::SupportedRequest,
+            priority: 8,
+            max_frame_size: 260,
+            initial_credits: 6,
+        };
+        let mut buf = vec![SENTINEL; dlc_pn_command.encoded_len() + 4];
+        assert!(dlc_pn_command.encode(&mut buf[..]).is_ok());
+        assert_eq!(&buf[dlc_pn_command.encoded_len()..], &[SENTINEL; 4]);
     }
 }

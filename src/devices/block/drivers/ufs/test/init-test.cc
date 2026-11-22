@@ -434,4 +434,575 @@ TEST_F(InitTest, AutoHibernateQemuQuirk) {
   EXPECT_EQ(ahit_reg.timer_value(), 0u);
 }
 
+TEST_F(InitTest, CommandTimeoutConfig) {
+  TestUfs::SetMockDevice(&mock_device_);
+
+  zx::result result = driver_test().StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
+    ufs_config::Config fake_config;
+    fake_config.enable_suspend() = false;
+    fake_config.storage_power_management_enabled() = false;
+    fake_config.enable_auto_hibernate() = false;
+    fake_config.command_timeout_sec() = 15;
+    args.config(fake_config.ToVmo());
+  });
+  ASSERT_OK(result);
+  dut_ = driver_test().driver();
+
+  EXPECT_EQ(dut_->GetTransferRequestProcessor().GetTimeout(), zx::sec(15));
+  EXPECT_EQ(dut_->GetTaskManagementRequestProcessor().GetTimeout(), zx::sec(15));
+}
+
+TEST_F(InitTest, UniproTimingQuirksSamsungDevice) {
+  mock_device_.GetDeviceDesc().wManufacturerID = htobe16(kSamsungManufacturerId);
+  auto& uic = mock_device_.GetUicCmdProcessor();
+
+  // Both host and peer start at 200 us (2 * 100 us); the quirk must raise peer PA_TActivate above
+  // host PA_TActivate and add 1 unit of PA_Hibern8Time margin.
+  uic.SetMibValue(PA_TActivate, 2);
+  uic.SetMibValue(PA_Granularity, 6);
+  uic.SetMibValue(PA_Hibern8Time, 1);
+  uic.SetMibValue(PA_TActivate, 2, /*peer=*/true);
+  uic.SetMibValue(PA_Granularity, 6, /*peer=*/true);
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver());
+
+  using DmeSetRecord = ufs_mock_device::DmeSetRecord;
+  EXPECT_EQ(uic.GetDmeSetLog({PA_TActivate, PA_Hibern8Time}),
+            (std::vector<DmeSetRecord>{
+                {.key = {.attribute = PA_TActivate, .peer = true}, .value = 3},
+                {.key = {.attribute = PA_Hibern8Time, .peer = false}, .value = 2},
+            }));
+  EXPECT_EQ(uic.GetDmeGetCount(PA_Hibern8Time), 1u);
+
+  // Repeated RestoreDeviceAndLinkConfig() calls must set PA_Hibern8Time idempotently to 2 (from
+  // the cached initial baseline) without re-reading or incrementing it further.
+  uic.SetMibValue(PA_TActivate, 2, /*peer=*/true);
+  ASSERT_OK(dut_->GetDeviceManager().RestoreDeviceAndLinkConfig());
+  EXPECT_EQ(uic.GetDmeSetLog({PA_TActivate, PA_Hibern8Time}),
+            (std::vector<DmeSetRecord>{
+                {.key = {.attribute = PA_TActivate, .peer = true}, .value = 3},
+                {.key = {.attribute = PA_Hibern8Time, .peer = false}, .value = 2},
+                {.key = {.attribute = PA_TActivate, .peer = true}, .value = 3},
+                {.key = {.attribute = PA_Hibern8Time, .peer = false}, .value = 2},
+            }));
+  EXPECT_EQ(uic.GetDmeGetCount(PA_Hibern8Time), 1u);
+
+  // A failing quirk DME_PEER_SET fails the restore (so resume retries) instead of continuing with
+  // a link that lacks the Hibern8 exit margin; PA_Hibern8Time is not touched afterwards.
+  uic.SetMibValue(PA_TActivate, 2, /*peer=*/true);
+  uic.FailDmeSet(PA_TActivate, /*peer=*/true);
+  EXPECT_TRUE(dut_->GetDeviceManager().RestoreDeviceAndLinkConfig().is_error());
+  EXPECT_EQ(uic.GetDmeSetLog({PA_TActivate, PA_Hibern8Time}).size(), 4u);
+
+  // Inspect still reports the values from the last successful configuration.
+  fpromise::result<inspect::Hierarchy> hierarchy =
+      fpromise::run_single_threaded(inspect::ReadFromInspector(dut_->inspect()));
+  ASSERT_TRUE(hierarchy.is_ok());
+  const auto* unipro = hierarchy.value().GetByPath({"ufs", "controller", "unipro"});
+  ASSERT_NE(unipro, nullptr);
+  EXPECT_EQ(unipro->node().get_property<inspect::UintPropertyValue>("host_t_activate")->value(),
+            2u);
+  EXPECT_EQ(unipro->node().get_property<inspect::UintPropertyValue>("device_t_activate")->value(),
+            3u);
+  EXPECT_EQ(unipro->node().get_property<inspect::UintPropertyValue>("host_hibern8_time")->value(),
+            2u);
+  EXPECT_TRUE(
+      unipro->node().get_property<inspect::BoolPropertyValue>("peer_pa_tactivate_quirk")->value());
+  EXPECT_TRUE(unipro->node()
+                  .get_property<inspect::BoolPropertyValue>("host_pa_hibern8time_quirk")
+                  ->value());
+}
+
+TEST_F(InitTest, UniproTimingQuirksMixedGranularityAndUnitAwareComparison) {
+  mock_device_.GetDeviceDesc().wManufacturerID = htobe16(kSamsungManufacturerId);
+  auto& uic = mock_device_.GetUicCmdProcessor();
+
+  // Host PA_TActivate = 2 with gran 1 (1 us -> 2 us), Peer PA_TActivate = 1 with gran 6
+  // (100 us -> 100 us). Raw 2 > 1, but 2 us < 100 us, so peer PA_TActivate must NOT be modified
+  // during StartDriver().
+  uic.SetMibValue(PA_TActivate, 2);
+  uic.SetMibValue(PA_Granularity, 1);
+  uic.SetMibValue(PA_Hibern8Time, 4);
+  uic.SetMibValue(PA_TActivate, 1, /*peer=*/true);
+  uic.SetMibValue(PA_Granularity, 6, /*peer=*/true);
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver());
+  EXPECT_TRUE(uic.GetDmeSets(PA_TActivate, /*peer=*/true).empty());
+  EXPECT_EQ(uic.GetDmeSets(PA_Hibern8Time), (std::vector<uint32_t>{5u}));
+
+  // Mixed granularity where host = 128 * 1 us (128 us) > peer = 1 * 100 us (100 us) ->
+  // new peer PA_TActivate = (128 / 100) + 1 = 2 (200 us > 128 us).
+  uic.SetMibValue(PA_TActivate, 128);
+  ASSERT_OK(dut_->GetDeviceManager().RestoreDeviceAndLinkConfig());
+  EXPECT_EQ(uic.GetDmeSets(PA_TActivate, /*peer=*/true), (std::vector<uint32_t>{2u}));
+  EXPECT_EQ(uic.GetDmeSets(PA_Hibern8Time), (std::vector<uint32_t>{5u, 5u}));
+}
+
+TEST_F(InitTest, UniproTimingQuirksGoogleHostAndSamsungDevice) {
+  HostControllerProdManufIdReg::Get()
+      .FromValue(0)
+      .set_manufacturer_id(kGoogleManufacturerId)
+      .WriteTo(mock_device_.GetRegisters());
+  mock_device_.GetDeviceDesc().wManufacturerID = htobe16(kSamsungManufacturerId);
+  auto& uic = mock_device_.GetUicCmdProcessor();
+
+  // Host starts at 100 us (1 * 100 us) and peer starts at 200 us (2 * 100 us). The Google host
+  // quirk must increment local PA_TActivate to 200 us first so the Samsung device quirk then
+  // observes host == peer and raises peer PA_TActivate to 300 us (3 * 100 us).
+  uic.SetMibValue(PA_TActivate, 1);
+  uic.SetMibValue(PA_Granularity, 6);
+  uic.SetMibValue(PA_Hibern8Time, 1);
+  uic.SetMibValue(PA_TActivate, 2, /*peer=*/true);
+  uic.SetMibValue(PA_Granularity, 6, /*peer=*/true);
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver());
+
+  using DmeSetRecord = ufs_mock_device::DmeSetRecord;
+  EXPECT_EQ(uic.GetDmeSetLog({PA_TActivate, PA_Hibern8Time}),
+            (std::vector<DmeSetRecord>{
+                {.key = {.attribute = PA_TActivate, .peer = false}, .value = 2},
+                {.key = {.attribute = PA_TActivate, .peer = true}, .value = 3},
+                {.key = {.attribute = PA_Hibern8Time, .peer = false}, .value = 2},
+            }));
+
+  // RestoreDeviceAndLinkConfig() must restore local PA_TActivate idempotently to 2 even if the
+  // mock retains the previous value, and only adjust peer PA_TActivate when needed.
+  uic.SetMibValue(PA_TActivate, 2, /*peer=*/true);
+  ASSERT_OK(dut_->GetDeviceManager().RestoreDeviceAndLinkConfig());
+  EXPECT_EQ(uic.GetDmeSetLog({PA_TActivate, PA_Hibern8Time}),
+            (std::vector<DmeSetRecord>{
+                {.key = {.attribute = PA_TActivate, .peer = false}, .value = 2},
+                {.key = {.attribute = PA_TActivate, .peer = true}, .value = 3},
+                {.key = {.attribute = PA_Hibern8Time, .peer = false}, .value = 2},
+                {.key = {.attribute = PA_TActivate, .peer = false}, .value = 2},
+                {.key = {.attribute = PA_TActivate, .peer = true}, .value = 3},
+                {.key = {.attribute = PA_Hibern8Time, .peer = false}, .value = 2},
+            }));
+
+  fpromise::result<inspect::Hierarchy> hierarchy =
+      fpromise::run_single_threaded(inspect::ReadFromInspector(dut_->inspect()));
+  ASSERT_TRUE(hierarchy.is_ok());
+  const auto* unipro = hierarchy.value().GetByPath({"ufs", "controller", "unipro"});
+  ASSERT_NE(unipro, nullptr);
+  EXPECT_EQ(unipro->node().get_property<inspect::UintPropertyValue>("host_t_activate")->value(),
+            2u);
+  EXPECT_EQ(unipro->node().get_property<inspect::UintPropertyValue>("device_t_activate")->value(),
+            3u);
+}
+
+namespace {
+
+// Starts the driver with suspend disabled and returns the start result so tests can check that a
+// timing-quirk DME failure aborts initialization.
+template <typename DriverTest>
+auto StartDriverExpectingResult(ufs_mock_device::UfsMockDevice& mock_device,
+                                DriverTest& driver_test) {
+  TestUfs::SetMockDevice(&mock_device);
+  return driver_test.StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
+    ufs_config::Config fake_config;
+    fake_config.enable_suspend() = false;
+    fake_config.storage_power_management_enabled() = false;
+    args.config(fake_config.ToVmo());
+  });
+}
+
+}  // namespace
+
+TEST_F(InitTest, UniproTimingQuirksGoogleHostOnly) {
+  HostControllerProdManufIdReg::Get()
+      .FromValue(0)
+      .set_manufacturer_id(kGoogleManufacturerId)
+      .WriteTo(mock_device_.GetRegisters());
+  auto& uic = mock_device_.GetUicCmdProcessor();
+  uic.SetMibValue(PA_TActivate, kTActivate);
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver());
+  EXPECT_EQ(uic.GetDmeSets(PA_TActivate), (std::vector<uint32_t>{kTActivate + 1}));
+
+  // The mock keeps the incremented value, as hardware would without a PowerDown reset; the restore
+  // must still program baseline + 1 rather than compounding the increment.
+  ASSERT_OK(dut_->GetDeviceManager().RestoreDeviceAndLinkConfig());
+  EXPECT_EQ(uic.GetDmeSets(PA_TActivate), (std::vector<uint32_t>{kTActivate + 1, kTActivate + 1}));
+  EXPECT_TRUE(uic.GetDmeSets(PA_TActivate, /*peer=*/true).empty());
+  EXPECT_TRUE(uic.GetDmeSets(PA_Hibern8Time).empty());
+
+  fpromise::result<inspect::Hierarchy> hierarchy =
+      fpromise::run_single_threaded(inspect::ReadFromInspector(dut_->inspect()));
+  ASSERT_TRUE(hierarchy.is_ok());
+  const auto* unipro = hierarchy.value().GetByPath({"ufs", "controller", "unipro"});
+  ASSERT_NE(unipro, nullptr);
+  EXPECT_TRUE(
+      unipro->node().get_property<inspect::BoolPropertyValue>("host_pa_tactivate_quirk")->value());
+  EXPECT_FALSE(
+      unipro->node().get_property<inspect::BoolPropertyValue>("peer_pa_tactivate_quirk")->value());
+  EXPECT_FALSE(unipro->node()
+                   .get_property<inspect::BoolPropertyValue>("host_pa_hibern8time_quirk")
+                   ->value());
+  EXPECT_EQ(unipro->node().get_property<inspect::UintPropertyValue>("host_t_activate")->value(),
+            kTActivate + 1);
+}
+
+TEST_F(InitTest, UniproTimingQuirksInvalidGranularitySkipsPeerTuning) {
+  mock_device_.GetDeviceDesc().wManufacturerID = htobe16(kSamsungManufacturerId);
+  auto& uic = mock_device_.GetUicCmdProcessor();
+  // PA_Granularity 7 is outside the UniPro 1..6 encoding, so the peer margin cannot be computed.
+  uic.SetMibValue(PA_Granularity, 7, /*peer=*/true);
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver());
+  EXPECT_TRUE(uic.GetDmeSets(PA_TActivate, /*peer=*/true).empty());
+  EXPECT_EQ(uic.GetDmeSets(PA_Hibern8Time), (std::vector<uint32_t>{kHibern8Time + 1}));
+}
+
+TEST_F(InitTest, UniproTimingQuirksHostTActivateSetFailureFailsInit) {
+  HostControllerProdManufIdReg::Get()
+      .FromValue(0)
+      .set_manufacturer_id(kGoogleManufacturerId)
+      .WriteTo(mock_device_.GetRegisters());
+  mock_device_.GetUicCmdProcessor().FailDmeSet(PA_TActivate);
+
+  EXPECT_TRUE(StartDriverExpectingResult(mock_device_, driver_test()).is_error());
+}
+
+TEST_F(InitTest, UniproTimingQuirksHibern8TimeSetFailureFailsInit) {
+  mock_device_.GetDeviceDesc().wManufacturerID = htobe16(kSamsungManufacturerId);
+  mock_device_.GetUicCmdProcessor().FailDmeSet(PA_Hibern8Time);
+
+  EXPECT_TRUE(StartDriverExpectingResult(mock_device_, driver_test()).is_error());
+}
+
+TEST_F(InitTest, PendingInterruptAtStartupDoesNotCrashIsr) {
+  // Leave UE, UTRCS, and UTMRCS latched and the virtual IRQ already pending before Start(),
+  // matching a stale interrupt left over across a driver restart.
+  InterruptStatusReg::Get()
+      .ReadFrom(mock_device_.GetRegisters())
+      .set_uic_error(true)
+      .set_utp_transfer_request_completion_status(true)
+      .set_utp_task_management_request_completion_status(true)
+      .WriteTo(mock_device_.GetRegisters());
+  mock_device_.TriggerInterrupt();
+
+  auto utmrc_cleared = std::make_shared<libsync::Completion>();
+  auto kinit_wait_status = std::make_shared<std::atomic<zx_status_t>>(ZX_OK);
+  auto pre_link_wait_status = std::make_shared<std::atomic<zx_status_t>>(ZX_ERR_TIMED_OUT);
+  mock_device_.GetRegisterMmioProcessor().SetHook(
+      RegisterMap::kIS, [utmrc_cleared](UfsMockDevice& mock_device, uint32_t value) {
+        RegisterMmioProcessor::DefaultISHandler(mock_device, value);
+        if (InterruptStatusReg::Get()
+                .FromValue(value)
+                .utp_task_management_request_completion_status()) {
+          utmrc_cleared->Signal();
+        }
+      });
+
+  // Pause briefly in NotifyEvent::kInit, which runs before the request processors are created. If
+  // irq_handler_.Begin() ran earlier, the pending IRQ invokes Isr() while both processors are null.
+  // Wait for the stale ISR to finish clearing kIS in NotifyEvent::kPreLinkStartup so it does not
+  // race with SendLinkStartUp()'s unlocked FakeRegisters kIS read-modify-writes.
+  TestUfs::SetStartupHostControllerCallback(
+      [utmrc_cleared, kinit_wait_status, pre_link_wait_status](NotifyEvent event,
+                                                               uint64_t data) -> zx::result<> {
+        if (event == NotifyEvent::kInit) {
+          kinit_wait_status->store(utmrc_cleared->Wait(zx::msec(50)));
+        } else if (event == NotifyEvent::kPreLinkStartup) {
+          pre_link_wait_status->store(utmrc_cleared->Wait(zx::sec(5)));
+        }
+        return Ufs::NotifyEventCallback(event, data);
+      });
+  auto clear_callback = fit::defer([this] {
+    TestUfs::SetStartupHostControllerCallback(nullptr);
+    if (dut_ != nullptr) {
+      dut_->SetHostControllerCallback(Ufs::NotifyEventCallback);
+    }
+  });
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver());
+  EXPECT_EQ(kinit_wait_status->load(), ZX_ERR_TIMED_OUT);
+  EXPECT_OK(pre_link_wait_status->load());
+  EXPECT_FALSE(InterruptStatusReg::Get()
+                   .ReadFrom(mock_device_.GetRegisters())
+                   .utp_task_management_request_completion_status());
+
+  fpromise::result<inspect::Hierarchy> hierarchy =
+      fpromise::run_single_threaded(inspect::ReadFromInspector(dut_->inspect()));
+  ASSERT_TRUE(hierarchy.is_ok());
+  const auto* ufs_node = hierarchy.value().GetByPath({"ufs"});
+  ASSERT_NE(ufs_node, nullptr);
+  EXPECT_EQ(ufs_node->node().get_property<inspect::UintPropertyValue>("uic_error_count")->value(),
+            1u);
+}
+
+TEST_F(InitTest, FailedInitControllerWithPendingInterruptDoesNotCrash) {
+  InterruptStatusReg::Get()
+      .ReadFrom(mock_device_.GetRegisters())
+      .set_utp_transfer_request_completion_status(true)
+      .WriteTo(mock_device_.GetRegisters());
+  mock_device_.TriggerInterrupt();
+
+  auto is_read = std::make_shared<libsync::Completion>();
+  mock_device_.GetRegisterMmioProcessor().SetReadHook(
+      RegisterMap::kIS, [is_read](UfsMockDevice& mock_device) {
+        is_read->Signal();
+        return mock_device.GetRegisters()->Read<uint32_t>(RegisterMap::kIS);
+      });
+
+  TestUfs::SetStartupHostControllerCallback(
+      [is_read](NotifyEvent event, uint64_t data) -> zx::result<> {
+        if (event == NotifyEvent::kInit) {
+          static_cast<void>(is_read->Wait(zx::msec(50)));
+          return zx::error(ZX_ERR_IO);
+        }
+        return Ufs::NotifyEventCallback(event, data);
+      });
+  auto clear_callback = fit::defer([] { TestUfs::SetStartupHostControllerCallback(nullptr); });
+
+  zx::result<> result = StartDriverExpectingResult(mock_device_, driver_test());
+  ASSERT_TRUE(result.is_error());
+  EXPECT_EQ(result.status_value(), ZX_ERR_IO);
+  EXPECT_FALSE(is_read->signaled());
+}
+
+TEST_F(InitTest, RejectedPowerModeReadsDiagnosticMibsAndDumpsErrorRegisters) {
+  // UFSHCI 3.0 section 5.6.3 / MIPI UniPro ConfigResultCode: INVALID_MIB_ATTRIBUTE_VALUE.
+  constexpr uint8_t kInvalidMibAttributeValue = 2;
+
+  auto& uic = mock_device_.GetUicCmdProcessor();
+  std::atomic<uint32_t> uecn_reads{0};
+  std::atomic<bool> dumped_before_diag_mibs{false};
+  auto reset_hooks = fit::defer([this] { StopDriverAndResetHooks(); });
+
+  uic.SetHook(UicCommandOpcode::kDmeSet, [](UfsMockDevice& mock_device, uint32_t arg1,
+                                            uint32_t arg2, uint32_t arg3) {
+    const uint16_t attr =
+        static_cast<uint16_t>(UicCommandArgument1Reg::Get().FromValue(arg1).mib_attribute());
+    if (attr == PA_PWRMode) {
+      UicCommandArgument2Reg::Get()
+          .ReadFrom(mock_device.GetRegisters())
+          .set_result_code(
+              static_cast<UicCommandArgument2Reg::GenericErrorCode>(kInvalidMibAttributeValue))
+          .WriteTo(mock_device.GetRegisters());
+      return;
+    }
+    UicCmdProcessor::DefaultDmeSetHandler(mock_device, arg1, arg2, arg3);
+  });
+
+  mock_device_.GetRegisterMmioProcessor().SetReadHook(
+      RegisterMap::kUECN,
+      [&uecn_reads, &uic, &dumped_before_diag_mibs](UfsMockDevice& mock_device) {
+        if (uecn_reads.fetch_add(1) == 0 && uic.GetDmeGetCount(PA_ConnectedTxDataLanes) == 0) {
+          dumped_before_diag_mibs.store(true);
+        }
+        return mock_device.GetRegisters()->Read<uint32_t>(RegisterMap::kUECN);
+      });
+
+  zx::result<> result = StartDriverExpectingResult(mock_device_, driver_test());
+  ASSERT_TRUE(result.is_error());
+  EXPECT_EQ(result.status_value(), ZX_ERR_INTERNAL);
+
+  EXPECT_EQ(uic.GetDmeGetCount(PA_ConnectedTxDataLanes), 1u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_ConnectedRxDataLanes), 1u);
+  // Each attribute is queried once during power-mode setup and once in the rejection diagnostic.
+  EXPECT_EQ(uic.GetDmeGetCount(PA_AvailTxDataLanes), 2u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_AvailRxDataLanes), 2u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_MaxRxHSGear), 2u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_MaxRxHSGear, /*peer=*/true), 1u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_PWRMode), 1u);
+  EXPECT_EQ(uecn_reads.load(), 1u);
+  EXPECT_TRUE(dumped_before_diag_mibs.load());
+}
+
+TEST_F(InitTest, RejectedPowerModeDumpsErrorRegistersWhenBestEffortReadFails) {
+  constexpr uint8_t kInvalidMibAttributeValue = 2;
+
+  auto& uic = mock_device_.GetUicCmdProcessor();
+  std::atomic<uint32_t> uecn_reads{0};
+  auto reset_hooks = fit::defer([this] { StopDriverAndResetHooks(); });
+
+  uic.SetHook(UicCommandOpcode::kDmeSet, [](UfsMockDevice& mock_device, uint32_t arg1,
+                                            uint32_t arg2, uint32_t arg3) {
+    const uint16_t attr =
+        static_cast<uint16_t>(UicCommandArgument1Reg::Get().FromValue(arg1).mib_attribute());
+    if (attr == PA_PWRMode) {
+      UicCommandArgument2Reg::Get()
+          .ReadFrom(mock_device.GetRegisters())
+          .set_result_code(
+              static_cast<UicCommandArgument2Reg::GenericErrorCode>(kInvalidMibAttributeValue))
+          .WriteTo(mock_device.GetRegisters());
+      return;
+    }
+    UicCmdProcessor::DefaultDmeSetHandler(mock_device, arg1, arg2, arg3);
+  });
+  uic.SetHook(UicCommandOpcode::kDmePeerGet, [](UfsMockDevice& mock_device, uint32_t arg1,
+                                                uint32_t arg2, uint32_t arg3) {
+    const uint16_t attr =
+        static_cast<uint16_t>(UicCommandArgument1Reg::Get().FromValue(arg1).mib_attribute());
+    if (attr == PA_MaxRxHSGear) {
+      UicCommandArgument2Reg::Get()
+          .ReadFrom(mock_device.GetRegisters())
+          .set_result_code(UicCommandArgument2Reg::GenericErrorCode::kFailure)
+          .WriteTo(mock_device.GetRegisters());
+      return;
+    }
+    UicCmdProcessor::DefaultDmePeerGetHandler(mock_device, arg1, arg2, arg3);
+  });
+
+  mock_device_.GetRegisterMmioProcessor().SetReadHook(
+      RegisterMap::kUECN, [&uecn_reads](UfsMockDevice& mock_device) {
+        uecn_reads.fetch_add(1);
+        return mock_device.GetRegisters()->Read<uint32_t>(RegisterMap::kUECN);
+      });
+
+  zx::result<> result = StartDriverExpectingResult(mock_device_, driver_test());
+  ASSERT_TRUE(result.is_error());
+  EXPECT_EQ(result.status_value(), ZX_ERR_INTERNAL);
+
+  EXPECT_EQ(uic.GetDmeGetCount(PA_PWRMode), 1u);
+  EXPECT_EQ(uecn_reads.load(), 1u);
+}
+
+TEST_F(InitTest, ClearsUecpaAndUecdlAfterLinkStartup) {
+  const uint32_t stale_uecpa = HostUicErrorCodePhyAdapterLayerReg::Get()
+                                   .FromValue(0)
+                                   .set_uic_phy_adapter_layer_error(true)
+                                   .set_uic_phy_adapter_layer_error_code(0x10)
+                                   .reg_value();
+  const uint32_t stale_uecdl = HostUicErrorCodeDataLinkLayerReg::Get()
+                                   .FromValue(0)
+                                   .set_uic_data_link_layer_error(true)
+                                   .set_uic_data_link_layer_error_code(0x01)
+                                   .reg_value();
+
+  std::atomic<uint32_t> uecpa_reads{0};
+  std::atomic<uint32_t> uecdl_reads{0};
+  std::atomic<bool> cleared_before_is_ue{false};
+  auto reset_hooks = fit::defer([this] { StopDriverAndResetHooks(); });
+
+  auto install_read_to_clear = [&](RegisterMap reg, uint32_t initial_val,
+                                   std::atomic<uint32_t>& counter) {
+    mock_device_.GetRegisters()->Write<uint32_t>(initial_val, reg);
+    mock_device_.GetRegisterMmioProcessor().SetReadHook(
+        reg, [&counter, reg](UfsMockDevice& mock_device) {
+          counter.fetch_add(1);
+          const uint32_t val = mock_device.GetRegisters()->Read<uint32_t>(reg);
+          mock_device.GetRegisters()->Write<uint32_t>(0, reg);
+          return val;
+        });
+  };
+  install_read_to_clear(RegisterMap::kUECPA, stale_uecpa, uecpa_reads);
+  install_read_to_clear(RegisterMap::kUECDL, stale_uecdl, uecdl_reads);
+
+  mock_device_.GetRegisterMmioProcessor().SetHook(
+      RegisterMap::kIS, [&](UfsMockDevice& mock_device, uint32_t value) {
+        if (InterruptStatusReg::Get().FromValue(value).uic_error() && uecpa_reads.load() > 0 &&
+            uecdl_reads.load() > 0) {
+          cleared_before_is_ue.store(true);
+        }
+        RegisterMmioProcessor::DefaultISHandler(mock_device, value);
+      });
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver());
+
+  EXPECT_EQ(uecpa_reads.load(), 1u);
+  EXPECT_EQ(uecdl_reads.load(), 1u);
+  EXPECT_TRUE(cleared_before_is_ue.load());
+  EXPECT_EQ(mock_device_.GetRegisters()->Read<uint32_t>(RegisterMap::kUECPA), 0u);
+  EXPECT_EQ(mock_device_.GetRegisters()->Read<uint32_t>(RegisterMap::kUECDL), 0u);
+}
+
+TEST_F(InitTest, RejectedPowerModeSkipsDiagnosticMibsOnTimeout) {
+  TestUfs::SetUicCommandTimeoutUsec(1000);
+  auto& uic = mock_device_.GetUicCmdProcessor();
+  std::atomic<uint32_t> uecn_reads{0};
+  auto reset_hooks = fit::defer([this] { StopDriverAndResetHooks(); });
+
+  mock_device_.GetRegisterMmioProcessor().SetHook(
+      RegisterMap::kUICCMD, [](UfsMockDevice& mock_device, uint32_t value) {
+        const auto opcode =
+            static_cast<UicCommandOpcode>(UicCommandReg::Get().FromValue(value).command_opcode());
+        const uint16_t attr = static_cast<uint16_t>(
+            UicCommandArgument1Reg::Get().ReadFrom(mock_device.GetRegisters()).mib_attribute());
+        if (opcode == UicCommandOpcode::kDmeSet && attr == PA_PWRMode) {
+          // Omit IS.UCCS so DME_SET(PA_PWRMode) fails with ZX_ERR_TIMED_OUT.
+          UicCommandReg::Get().FromValue(value).WriteTo(mock_device.GetRegisters());
+          return;
+        }
+        RegisterMmioProcessor::DefaultUICCMDHandler(mock_device, value);
+      });
+
+  mock_device_.GetRegisterMmioProcessor().SetReadHook(
+      RegisterMap::kUECN, [&uecn_reads](UfsMockDevice& mock_device) {
+        uecn_reads.fetch_add(1);
+        return mock_device.GetRegisters()->Read<uint32_t>(RegisterMap::kUECN);
+      });
+
+  zx::result<> result = StartDriverExpectingResult(mock_device_, driver_test());
+  ASSERT_TRUE(result.is_error());
+  EXPECT_EQ(result.status_value(), ZX_ERR_TIMED_OUT);
+
+  // None of the 7 diagnostic MIB reads should run after a UIC timeout.
+  EXPECT_EQ(uic.GetDmeGetCount(PA_ConnectedTxDataLanes), 0u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_ConnectedRxDataLanes), 0u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_AvailTxDataLanes), 1u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_AvailRxDataLanes), 1u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_MaxRxHSGear), 1u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_MaxRxHSGear, /*peer=*/true), 0u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_PWRMode), 0u);
+  EXPECT_EQ(uecn_reads.load(), 1u);
+}
+
+TEST_F(InitTest, RejectedPowerModeStopsDiagnosticReadsAfterFirstTimeout) {
+  constexpr uint8_t kInvalidMibAttributeValue = 2;
+  TestUfs::SetUicCommandTimeoutUsec(1000);
+
+  auto& uic = mock_device_.GetUicCmdProcessor();
+  std::atomic<uint32_t> peer_gear_attempts{0};
+  std::atomic<uint32_t> uecn_reads{0};
+  auto reset_hooks = fit::defer([this] { StopDriverAndResetHooks(); });
+
+  uic.SetHook(UicCommandOpcode::kDmeSet, [](UfsMockDevice& mock_device, uint32_t arg1,
+                                            uint32_t arg2, uint32_t arg3) {
+    const uint16_t attr =
+        static_cast<uint16_t>(UicCommandArgument1Reg::Get().FromValue(arg1).mib_attribute());
+    if (attr == PA_PWRMode) {
+      UicCommandArgument2Reg::Get()
+          .ReadFrom(mock_device.GetRegisters())
+          .set_result_code(
+              static_cast<UicCommandArgument2Reg::GenericErrorCode>(kInvalidMibAttributeValue))
+          .WriteTo(mock_device.GetRegisters());
+      return;
+    }
+    UicCmdProcessor::DefaultDmeSetHandler(mock_device, arg1, arg2, arg3);
+  });
+
+  mock_device_.GetRegisterMmioProcessor().SetHook(
+      RegisterMap::kUICCMD, [&peer_gear_attempts](UfsMockDevice& mock_device, uint32_t value) {
+        const auto opcode =
+            static_cast<UicCommandOpcode>(UicCommandReg::Get().FromValue(value).command_opcode());
+        const uint16_t attr = static_cast<uint16_t>(
+            UicCommandArgument1Reg::Get().ReadFrom(mock_device.GetRegisters()).mib_attribute());
+        if (opcode == UicCommandOpcode::kDmePeerGet && attr == PA_MaxRxHSGear) {
+          peer_gear_attempts.fetch_add(1);
+          UicCommandReg::Get().FromValue(value).WriteTo(mock_device.GetRegisters());
+          return;
+        }
+        RegisterMmioProcessor::DefaultUICCMDHandler(mock_device, value);
+      });
+
+  mock_device_.GetRegisterMmioProcessor().SetReadHook(
+      RegisterMap::kUECN, [&uecn_reads](UfsMockDevice& mock_device) {
+        uecn_reads.fetch_add(1);
+        return mock_device.GetRegisters()->Read<uint32_t>(RegisterMap::kUECN);
+      });
+
+  zx::result<> result = StartDriverExpectingResult(mock_device_, driver_test());
+  ASSERT_TRUE(result.is_error());
+  EXPECT_EQ(result.status_value(), ZX_ERR_INTERNAL);
+
+  EXPECT_EQ(uic.GetDmeGetCount(PA_ConnectedTxDataLanes), 1u);
+  EXPECT_EQ(uic.GetDmeGetCount(PA_ConnectedRxDataLanes), 1u);
+  EXPECT_EQ(peer_gear_attempts.load(), 1u);
+  // PA_PWRMode comes after peer PA_MaxRxHSGear and must be skipped once a read times out.
+  EXPECT_EQ(uic.GetDmeGetCount(PA_PWRMode), 0u);
+  EXPECT_EQ(uecn_reads.load(), 1u);
+}
+
 }  // namespace ufs

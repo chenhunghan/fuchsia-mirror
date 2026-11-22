@@ -74,3 +74,57 @@ type EmptyFlexibleUnion = flexible union {};
 type StructOfEmptyFlexibleUnion = struct {
     empty EmptyFlexibleUnion;
 };
+
+type EmptyFlexibleResourceUnion = flexible resource union {};
+
+type StructOfEmptyFlexibleResourceUnion = resource struct {
+    empty EmptyFlexibleResourceUnion;
+};
+
+type StructOfOptionalEmptyFlexibleResourceUnion = resource struct {
+    empty EmptyFlexibleResourceUnion:optional;
+};
+
+type InlineOnlyFlexibleUnion = flexible union {
+    1: x uint32;
+};
+
+type StructOfInlineOnlyFlexibleUnion = struct {
+    u InlineOnlyFlexibleUnion;
+};
+
+type FlexibleValueUnionSandwich = resource struct {
+    before handle:EVENT;
+    s_before string;
+    xu SampleUnion;
+    s_after string;
+    after handle:CHANNEL;
+};
+
+type FlexibleResourceUnionSandwich = resource struct {
+    before handle:EVENT;
+    s_before string;
+    xu SampleResourceUnion;
+    s_after string;
+    after handle:CHANNEL;
+};
+
+type EmptyFlexibleResourceUnionThenHandle = resource struct {
+    u EmptyFlexibleResourceUnion;
+    valid bool;
+    after handle:CHANNEL;
+};
+
+type FlexibleValueUnionThenBool = struct {
+    xu SampleUnion;
+    valid bool;
+};
+
+type FlexibleValueUnionThenResourceHandle = resource struct {
+    xu SampleUnion;
+    after handle:CHANNEL;
+};
+
+type VectorOfFlexibleResourceUnionStruct = resource struct {
+    v vector<SampleResourceUnion>;
+};

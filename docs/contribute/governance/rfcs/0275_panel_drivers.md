@@ -84,7 +84,7 @@ This section may be used to describe how the design was socialized before
 advancing to the "Iterate" stage of the RFC process. For example: "This RFC went
 through a design review with the Component Framework team."
 
-## Requirements
+## Requirements {:#requirements}
 
 A big part of successful software engineering is predicting what aspects of a
 domain will not change, and building a system's high-level abstractions around
@@ -99,7 +99,7 @@ out mismatches in the Fuchsia driver topology. The subsections' names aim to
 capture the essence of the systems they cover, rather than pointing to specific
 hardware.
 
-### Desktop
+### Desktop {:#desktop}
 
 The display path is fairly independent from other subsystems in computers with
 external displays. The diagram below describes both the Intel NUC system with an
@@ -731,7 +731,7 @@ know how to convert a brightness level (nits) to a backlight voltage level, but
 translating the voltage level to I2C commands may be done by a dedicated
 brightness IC driver.
 
-### Panel device topology setup
+### Panel device topology setup {:#panel-device-topology-setup}
 
 Setting up the panel device topology involves two primary stages: detecting the
 existence of a panel and identifying its type and capabilities.
@@ -1319,7 +1319,7 @@ synchronous interface with a dedicated dispatcher handling DDIC commands as a
 temporary workaround, but they must be migrated to issue async calls as soon as
 possible, as handling multiple threads and dispatchers can be error-prone.
 
-## Challenges
+## Challenges {:#challenges}
 
 While separating the display engine and panel drivers provides a more scalable
 and modular architecture, this approach introduces several complexities and
@@ -1356,7 +1356,7 @@ section above, for the short- to medium-term future, we would not introduce new
 identification drivers (and their shutdown logic) unless necessitated by future
 boards.
 
-### Performance overhead from FIDL calls
+### Performance overhead from FIDL calls {:#performance-overhead-from-fidl-calls}
 
 Interactions that were previously simple in-process function calls now become
 inter-driver FIDL calls. This could introduce latency for operations like panel
@@ -1365,7 +1365,7 @@ initialization, potentially slowing down system boot or resume from sleep.
 The overhead can be mitigated / minimized as we colocate the display engine and
 panel drivers and use [FIDL driver transport][fidl-driver-transport].
 
-### Migration cost
+### Migration cost {:#migration-cost}
 
 This architectural shift introduces a migration cost for existing display
 drivers. All current display engine drivers, which presently manage both engine
@@ -1452,7 +1452,7 @@ the concept of panel drivers. New FIDL interfaces will be thoroughly documented.
 [khadas-ts050]: https://www.khadas.com/product-page/ts050-touchscreen
 [lib-edid]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/graphics/display/lib/edid/;drc=db2e9dea6532726295faafa80ea9b192474be827
 [nelson-post-init-display-gpio]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/board/drivers/nelson/post-init/display.cc;l=107-120;drc=3280cb7ce57dfed35b7153928895796070d3137a
-[ti-lp8556]:https://www.ti.com/product/LP8556
+[ti-lp8556]: https://www.ti.com/product/LP8556
 [ti-lp8556-panel-list]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/ui/backlight/drivers/ti-lp8556/ti-lp8556.cc;l=26-81;drc=9e83a23ee806ccb8686fa42891d69f10d8698684
 [vesa-standards]: https://vesa.org/vesa-standards/
 

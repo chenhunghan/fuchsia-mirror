@@ -47,6 +47,7 @@ TEST(ConfigTest, NoDir) {
   EXPECT_TRUE(under_test.valid());
   EXPECT_EQ("", under_test.error());
   EXPECT_TRUE(under_test.perform_host_name_probe());
+  EXPECT_EQ(Media::kBoth, under_test.media());
   EXPECT_TRUE(under_test.publications().empty());
 
   EXPECT_TRUE(files::DeletePath(kTestDir, true));
@@ -61,6 +62,7 @@ TEST(ConfigTest, Empty) {
   EXPECT_TRUE(under_test.valid());
   EXPECT_EQ("", under_test.error());
   EXPECT_TRUE(under_test.perform_host_name_probe());
+  EXPECT_EQ(Media::kBoth, under_test.media());
   EXPECT_TRUE(under_test.publications().empty());
 
   EXPECT_TRUE(files::DeletePath(kTestDir, true));
@@ -71,6 +73,7 @@ TEST(ConfigTest, OneValidFile) {
   EXPECT_TRUE(files::CreateDirectory(kTestDir));
   EXPECT_TRUE(WriteFile("valid", R"({
     "perform_host_name_probe": false,
+    "media": "wired",
     "publications" : [
       {"service" : "_fuchsia._udp.", "port" : 5353, "perform_probe" : false,
        "text": ["chins=2", "thumbs=10"], "media": "wireless"}
@@ -83,6 +86,7 @@ TEST(ConfigTest, OneValidFile) {
   EXPECT_TRUE(under_test.valid());
   EXPECT_EQ("", under_test.error());
   EXPECT_FALSE(under_test.perform_host_name_probe());
+  EXPECT_EQ(Media::kWired, under_test.media());
   EXPECT_EQ(1u, under_test.publications().size());
   if (!under_test.publications().empty()) {
     EXPECT_TRUE((Config::Publication{
@@ -365,6 +369,57 @@ TEST(ConfigTest, IncludesSerialWithNoSerial) {
   EXPECT_EQ(DnsName("_altsvc1._udp."), under_test.alt_services()[0]);
   EXPECT_EQ(DnsName("_altsvc2._tcp."), under_test.alt_services()[1]);
 
+  EXPECT_TRUE(files::DeletePath(kTestDir, true));
+}
+
+TEST(ConfigTest, Media) {
+  const std::pair<const char*, Media> valid_cases[] = {
+      {"wired", Media::kWired},
+      {"wireless", Media::kWireless},
+      {"both", Media::kBoth},
+  };
+  for (const auto& [media_str, expected_media] : valid_cases) {
+    SCOPED_TRACE(media_str);
+    EXPECT_TRUE(files::CreateDirectory(kTestDir));
+    EXPECT_TRUE(WriteFile("valid", std::string(R"({"media": ")") + media_str + R"("})"));
+
+    Config under_test;
+    under_test.ReadConfigFiles(kHostName, kSerialNumber, kTestDir);
+    EXPECT_TRUE(under_test.valid());
+    EXPECT_EQ("", under_test.error());
+    EXPECT_EQ(expected_media, under_test.media());
+
+    EXPECT_TRUE(files::DeletePath(kTestDir, true));
+  }
+
+  // Invalid media value fails schema validation.
+  EXPECT_TRUE(files::CreateDirectory(kTestDir));
+  EXPECT_TRUE(WriteFile("invalid", R"({"media": "invalid"})"));
+  {
+    Config under_test;
+    under_test.ReadConfigFiles(kHostName, kSerialNumber, kTestDir);
+    EXPECT_FALSE(under_test.valid());
+    EXPECT_NE("", under_test.error());
+  }
+  EXPECT_TRUE(files::DeletePath(kTestDir, true));
+
+  // Matching media values across files succeed; conflicting values fail.
+  EXPECT_TRUE(files::CreateDirectory(kTestDir));
+  EXPECT_TRUE(WriteFile("file1", R"({"media": "wired"})"));
+  EXPECT_TRUE(WriteFile("file2", R"({"media": "wired"})"));
+  {
+    Config under_test;
+    under_test.ReadConfigFiles(kHostName, kSerialNumber, kTestDir);
+    EXPECT_TRUE(under_test.valid());
+    EXPECT_EQ(Media::kWired, under_test.media());
+  }
+  EXPECT_TRUE(WriteFile("file2", R"({"media": "wireless"})"));
+  {
+    Config under_test;
+    under_test.ReadConfigFiles(kHostName, kSerialNumber, kTestDir);
+    EXPECT_FALSE(under_test.valid());
+    EXPECT_NE("", under_test.error());
+  }
   EXPECT_TRUE(files::DeletePath(kTestDir, true));
 }
 

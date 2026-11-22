@@ -53,7 +53,11 @@ StreamCycler::StreamCycler(async_dispatcher_t* dispatcher, bool manual_mode)
   SetAbortOnError(device_, "fuchsia.camera3.Device disconnected.");
 }
 
-StreamCycler::~StreamCycler() = default;
+StreamCycler::~StreamCycler() {
+  force_next_stream_task_.Cancel();
+  check_watchdogs_task_.Cancel();
+  DisconnectAllStreams();
+}
 
 fpromise::result<std::unique_ptr<StreamCycler>, zx_status_t> StreamCycler::Create(
     fuchsia::camera3::DeviceWatcherHandle watcher, fuchsia::sysmem2::AllocatorHandle allocator,
@@ -111,8 +115,8 @@ void StreamCycler::WatchDevicesCallback(std::vector<fuchsia::camera3::WatchDevic
           });
 
       // Start watch dog.
-      async::PostDelayedTask(dispatcher_, fit::bind_member(this, &StreamCycler::CheckAllWatchdogs),
-                             kCheckInterval);
+      check_watchdogs_task_.Cancel();
+      check_watchdogs_task_.PostDelayed(dispatcher_, kCheckInterval);
     }
   }
 
@@ -122,7 +126,9 @@ void StreamCycler::WatchDevicesCallback(std::vector<fuchsia::camera3::WatchDevic
 
 void StreamCycler::WatchMuteStateHandler(bool software_muted, bool hardware_muted) {
   muted_ = software_muted | hardware_muted;
-  mute_state_handler_(muted_);
+  if (mute_state_handler_) {
+    mute_state_handler_(muted_);
+  }
   device_->WatchMuteState(fit::bind_member(this, &StreamCycler::WatchMuteStateHandler));
 
   // If we just un-muted, reset all watchdogs so we do not trip it.
@@ -155,8 +161,8 @@ void StreamCycler::WatchCurrentConfigurationCallback(uint32_t config_index) {
     // After a specified demo period, set the next stream configuration, which will end up cutting
     // off all existing streams.
     if (auto_cycle_interval_) {
-      async::PostDelayedTask(
-          dispatcher_, [this]() { ForceNextStreamConfiguration(); }, *auto_cycle_interval_);
+      force_next_stream_task_.Cancel();
+      force_next_stream_task_.PostDelayed(dispatcher_, *auto_cycle_interval_);
     }
   }
 
@@ -166,6 +172,7 @@ void StreamCycler::WatchCurrentConfigurationCallback(uint32_t config_index) {
 }
 
 void StreamCycler::ConnectToAllStreams() {
+  DisconnectAllStreams();
   for (size_t i = 0; i < configurations_[current_config_index_].streams().size(); i++) {
     ConnectToStream(current_config_index_, static_cast<uint32_t>(i));
   }
@@ -183,7 +190,7 @@ void StreamCycler::ConnectToStream(uint32_t config_index, uint32_t stream_index)
   // Connect to specific stream
   StreamInfo new_stream_info;
   new_stream_info.last_received = zx::clock::get_monotonic();  // Initialize to current time
-  stream_infos_.emplace(stream_index, std::move(new_stream_info));
+  stream_infos_[stream_index] = std::move(new_stream_info);
 
   auto& stream = stream_infos_[stream_index].stream;
   auto stream_request = stream.NewRequest(dispatcher_);
@@ -328,6 +335,13 @@ void StreamCycler::DisconnectStream(uint32_t stream_index) {
   stream_infos_.erase(stream_index);
 }
 
+void StreamCycler::DisconnectAllStreams() {
+  // DisconnectStream() erases the entry from stream_infos_, so this loop terminates.
+  while (!stream_infos_.empty()) {
+    DisconnectStream(stream_infos_.begin()->first);
+  }
+}
+
 uint32_t StreamCycler::NextConfigIndex() {
   ZX_ASSERT(!configurations_.empty());
   ZX_ASSERT(current_config_index_ < configurations_.size());
@@ -349,11 +363,19 @@ void StreamCycler::CheckAllWatchdogs() {
   auto now = zx::clock::get_monotonic();
   if (!muted_) {
     for (const auto& [stream_index, info] : stream_infos_) {
-      ZX_ASSERT_MSG((now - info.last_received) < kFrameTimeout, "stream=%u", stream_index);
+      if ((now - info.last_received) >= kFrameTimeout) {
+        FX_LOGS(WARNING) << "Stream " << stream_index << " timed out after "
+                         << (now - info.last_received).to_msecs() << " ms without frames.";
+        if (!manual_mode_) {
+          FX_LOGS(INFO) << "Forcing next stream configuration due to frame timeout.";
+          ForceNextStreamConfiguration();
+          return;
+        }
+      }
     }
   }
-  async::PostDelayedTask(dispatcher_, fit::bind_member(this, &StreamCycler::CheckAllWatchdogs),
-                         kCheckInterval);
+  check_watchdogs_task_.Cancel();
+  check_watchdogs_task_.PostDelayed(dispatcher_, kCheckInterval);
 }
 
 void StreamCycler::ExecuteCommand(Command command, CommandStatusHandler handler) {

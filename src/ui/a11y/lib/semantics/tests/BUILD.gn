@@ -40,7 +40,7 @@ cc_test_executable("semantics_tests") {
     "//sdk/fidl/fuchsia.ui.gfx:fuchsia.ui.gfx_hlcpp",
     "//sdk/lib/inspect/testing/cpp",
     "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//sdk/lib/syslog/cpp",
     "//src/lib/files",
     "//src/lib/fsl",
@@ -121,12 +121,8 @@ fuchsia_test_package("web-semantics-test") {
       max_severity = "ERROR"
     }
     environments = [
-      {
-        dimensions = {
-          # Ensure the device has Vulkan.
-          device_type = "AEMU"
-        }
-      },
+      # Ensure the device has Vulkan.
+      aemu_env,
     ]
   }
 }

@@ -9,16 +9,10 @@
 #include <lib/power-management/energy-model.h>
 #include <lib/power-management/power-level-controller.h>
 #include <lib/power-management/power-state.h>
+#include <lib/stdcompat/utility.h>
 #include <lib/unittest/unittest.h>
 #include <zircon/errors.h>
 #include <zircon/rights.h>
-
-// TODO(https://fxbug.dev/415033686): Stop using `syscalls-next.h` on host.
-#define FUCHSIA_UNSUPPORTED_ALLOW_SYSCALLS_NEXT_ON_HOST
-#include <zircon/syscalls-next.h>
-#undef FUCHSIA_UNSUPPORTED_ALLOW_SYSCALLS_NEXT_ON_HOST
-#include <lib/stdcompat/array.h>
-#include <lib/stdcompat/utility.h>
 #include <zircon/syscalls/port.h>
 #include <zircon/time.h>
 #include <zircon/types.h>
@@ -36,6 +30,7 @@
 #include <kernel/scheduler.h>
 #include <kernel/spinlock.h>
 #include <kernel/thread.h>
+#include <kernel/timer.h>
 #include <ktl/limits.h>
 #include <ktl/optional.h>
 
@@ -45,62 +40,15 @@ using power_management::ControlInterface;
 using power_management::EnergyModel;
 using power_management::PowerDomain;
 using power_management::PowerDomainSet;
-
 using power_management::PowerLevelController;
 using power_management::PowerLevelUpdateRequest;
-using power_management::ProcessorPowerLevel;
-using power_management::ProcessorPowerLevelTransition;
 
-constexpr uint8_t kIdlePowerLevel = 0;
-constexpr uint8_t kLowPowerLevel = 1;
-constexpr uint8_t kMediumPowerLevel = 2;
-constexpr uint8_t kHighPowerLevel = 3;
-constexpr uint8_t kMaxPowerLevel = 4;
-
-constexpr auto kPowerLevels = cpp20::to_array<ProcessorPowerLevel>({
-    {
-        .options = 0,
-        .processing_rate = 0,                // 0%
-        .power_coefficient_nw = 10'000'000,  // 10 mW
-        .control_interface = ControlInterface::kArmWfi,
-        .control_argument = kIdlePowerLevel,
-        .diagnostic_name = "wfi",
-    },
-    {
-        .options = 0,
-        .processing_rate = 250,               // 25%
-        .power_coefficient_nw = 100'000'000,  // 100 mW
-        .control_interface = ControlInterface::kCpuDriver,
-        .control_argument = kLowPowerLevel,
-        .diagnostic_name = "OPP 1",
-    },
-    {
-        .options = 0,
-        .processing_rate = 500,               // 50%
-        .power_coefficient_nw = 250'000'000,  // 250 mW
-        .control_interface = ControlInterface::kCpuDriver,
-        .control_argument = kMediumPowerLevel,
-        .diagnostic_name = "OPP 1",
-    },
-    {
-        .options = 0,
-        .processing_rate = 750,               // 75%
-        .power_coefficient_nw = 400'000'000,  // 400 mW
-        .control_interface = ControlInterface::kCpuDriver,
-        .control_argument = kHighPowerLevel,
-        .diagnostic_name = "OPP 2",
-    },
-    {
-        .options = 0,
-        .processing_rate = 1000,              // 100%
-        .power_coefficient_nw = 600'000'000,  // 600 mW
-        .control_interface = ControlInterface::kCpuDriver,
-        .control_argument = kMaxPowerLevel,
-        .diagnostic_name = "OPP 3",
-    },
-});
-
-constexpr auto kTransitions = cpp20::to_array<ProcessorPowerLevelTransition>({{}});
+constexpr size_t kIdleStates = 1;
+constexpr size_t kActiveLevels = 4;
+constexpr uint8_t kLowPowerLevel = 0;
+constexpr uint8_t kMediumPowerLevel = 1;
+constexpr uint8_t kHighPowerLevel = 2;
+constexpr uint8_t kMaxPowerLevel = 3;
 
 class FakePowerLevelController final : public PowerLevelController {
  public:
@@ -144,15 +92,14 @@ bool SchedulerFlushesPendingControlRequests() {
   // from a different CPU than the target CPU.
   Scheduler& scheduler = percpu::GetCurrent().scheduler;
 
-  zx::result energy_model = EnergyModel::Create(kPowerLevels, kTransitions);
-  ASSERT_TRUE(energy_model.is_ok());
+  EnergyModel energy_model = EnergyModel::CreateForTest(kIdleStates, kActiveLevels);
 
   fbl::AllocChecker ac;
   fbl::RefPtr controller = fbl::MakeRefCountedChecked<FakePowerLevelController>(&ac);
   ASSERT_TRUE(ac.check());
 
   auto domain = fbl::MakeRefCountedChecked<PowerDomain>(
-      &ac, 1, cpu_num_to_mask(scheduler.this_cpu()), ktl::move(*energy_model), controller);
+      &ac, 1, cpu_num_to_mask(scheduler.this_cpu()), ktl::move(energy_model), controller);
   ASSERT_TRUE(ac.check());
 
   // Set the current power domain, saving the previous domain to restore at the end of the test.
@@ -165,7 +112,18 @@ bool SchedulerFlushesPendingControlRequests() {
     }
   });
   ASSERT_EQ(domain.get(), scheduler.GetPowerDomainForTesting().get());
+  EXPECT_EQ(scheduler.GetIdlePowerNwForTesting(), 0u);
+
+  auto reschedule_target_cpu = [&] {
+    const cpu_mask_t previous_affinity =
+        Thread::Current::Get()->SetCpuAffinity(cpu_num_to_mask(scheduler.this_cpu()));
+    Thread::Current::Yield();
+    Thread::Current::Get()->SetCpuAffinity(previous_affinity);
+  };
+
   ASSERT_OK(scheduler.UpdateActivePowerLevel(kMaxPowerLevel).status_value());
+  reschedule_target_cpu();
+  EXPECT_EQ(scheduler.GetIdlePowerNwForTesting(), (kMaxPowerLevel + 1u) * 10u);
 
   // Request a transition to each active power level.
   for (size_t count = 0;
@@ -190,6 +148,8 @@ bool SchedulerFlushesPendingControlRequests() {
     // loop to get stuck in FakePowerLevelController::Wait if the requested transition matches the
     // current power level (i.e. kMaxPowerLevel set above), since redundant requests are dropped.
     ASSERT_OK(scheduler.UpdateActivePowerLevel(power_level).status_value());
+    reschedule_target_cpu();
+    EXPECT_EQ(scheduler.GetIdlePowerNwForTesting(), (power_level + 1u) * 10u);
 
     controller->reset_request();
   }
@@ -211,15 +171,14 @@ bool SchedulerElidesPendingControlRequests() {
   // from a different CPU than the target CPU.
   Scheduler& scheduler = percpu::GetCurrent().scheduler;
 
-  zx::result energy_model = EnergyModel::Create(kPowerLevels, kTransitions);
-  ASSERT_TRUE(energy_model.is_ok());
+  EnergyModel energy_model = EnergyModel::CreateForTest(kIdleStates, kActiveLevels);
 
   fbl::AllocChecker ac;
   fbl::RefPtr controller = fbl::MakeRefCountedChecked<FakePowerLevelController>(&ac);
   ASSERT_TRUE(ac.check());
 
   auto domain = fbl::MakeRefCountedChecked<PowerDomain>(
-      &ac, 1, cpu_num_to_mask(scheduler.this_cpu()), ktl::move(*energy_model), controller);
+      &ac, 1, cpu_num_to_mask(scheduler.this_cpu()), ktl::move(energy_model), controller);
   ASSERT_TRUE(ac.check());
 
   // Set the current power domain, saving the previous domain to restore at the end of the test.
@@ -261,15 +220,14 @@ bool SchedulerCanPendControlRequestsInIrqContext() {
   // from a different CPU than the target CPU.
   Scheduler& scheduler = percpu::GetCurrent().scheduler;
 
-  zx::result energy_model = EnergyModel::Create(kPowerLevels, kTransitions);
-  ASSERT_TRUE(energy_model.is_ok());
+  EnergyModel energy_model = EnergyModel::CreateForTest(kIdleStates, kActiveLevels);
 
   fbl::AllocChecker ac;
   fbl::RefPtr controller = fbl::MakeRefCountedChecked<FakePowerLevelController>(&ac);
   ASSERT_TRUE(ac.check());
 
   auto domain = fbl::MakeRefCountedChecked<PowerDomain>(
-      &ac, 1, cpu_num_to_mask(scheduler.this_cpu()), ktl::move(*energy_model), controller);
+      &ac, 1, cpu_num_to_mask(scheduler.this_cpu()), ktl::move(energy_model), controller);
   ASSERT_TRUE(ac.check());
 
   // Set the current power domain, saving the previous domain to restore at the end of the test.
@@ -321,15 +279,14 @@ bool SchedulerCanPendControlRequestsAcrossCpus() {
   // from a different CPU than the target CPU.
   Scheduler& scheduler = percpu::GetCurrent().scheduler;
 
-  zx::result energy_model = EnergyModel::Create(kPowerLevels, kTransitions);
-  ASSERT_TRUE(energy_model.is_ok());
+  EnergyModel energy_model = EnergyModel::CreateForTest(kIdleStates, kActiveLevels);
 
   fbl::AllocChecker ac;
   fbl::RefPtr controller = fbl::MakeRefCountedChecked<FakePowerLevelController>(&ac);
   ASSERT_TRUE(ac.check());
 
   auto domain = fbl::MakeRefCountedChecked<PowerDomain>(
-      &ac, 1, cpu_num_to_mask(scheduler.this_cpu()), ktl::move(*energy_model), controller);
+      &ac, 1, cpu_num_to_mask(scheduler.this_cpu()), ktl::move(energy_model), controller);
   ASSERT_TRUE(ac.check());
 
   // Set the current power domain, saving the previous domain to restore at the end of the test.

@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -12,15 +12,17 @@ test_suite(
     tests = [
         "//src/starnix/lib:target_tests",
         "//src/starnix/modules/kgsl:tests",
+        "//src/starnix/modules/perfetto_consumer:tests",
         "//src/starnix/psi_provider:psi_provider-tests",
     ],
 )
 
 test_suite(
     name = "host_tests",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
         "//src/starnix/lib:host_tests",
+        "//src/starnix/modules/kgsl/uapi_manual:host_tests",
         "//src/starnix/tools/tar_to_pkg:host_tests",
     ],
 )

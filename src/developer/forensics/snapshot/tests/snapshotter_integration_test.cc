@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fuchsia/mem/cpp/fidl.h>
+#include <fidl/fuchsia.mem/cpp/fidl.h>
 #include <lib/sys/cpp/service_directory.h>
 
 #include <gtest/gtest.h>
@@ -38,7 +38,7 @@ TEST_F(SnapshotterIntegrationTest, SmokeTest) {
   // We simply assert that we can unpack the snapshot archive.
   fsl::SizedVmo vmo;
   ASSERT_TRUE(fsl::VmoFromFilename(snapshot_path_, &vmo));
-  fuchsia::mem::Buffer buffer = std::move(vmo).ToTransport();
+  fuchsia_mem::Buffer buffer = std::move(vmo).ToNaturalTransport();
   std::map<std::string, std::string> unpacked_attachments;
   ASSERT_TRUE(Unpack(buffer, &unpacked_attachments));
 }

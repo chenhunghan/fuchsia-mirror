@@ -69,6 +69,8 @@ pub struct ManifestParams {
     pub flash_min_timeout_seconds: u64,
     pub ssh_key: Option<String>,
     pub streaming_flash: bool,
+    /// Base names (without any slot suffix) of partitions not to flash.
+    pub skip_partitions: Vec<String>,
 }
 
 impl Default for ManifestParams {
@@ -85,6 +87,7 @@ impl Default for ManifestParams {
             flash_min_timeout_seconds: 200,
             ssh_key: None,
             streaming_flash: true,
+            skip_partitions: vec![],
         }
     }
 }

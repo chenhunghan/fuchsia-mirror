@@ -18,6 +18,7 @@ use fidl_fuchsia_component_decl::ChildRef;
 use fidl_fuchsia_io as fio;
 use fuchsia_component_directory::{AsRefDirectory, open_directory_async};
 use fuchsia_fs::directory::{WatchEvent, Watcher};
+use futures::channel::oneshot;
 use futures::stream::FusedStream;
 use futures::{Stream, StreamExt};
 use pin_project::pin_project;
@@ -349,21 +350,34 @@ impl MemberOpener for ServiceInstanceDirectory {
     }
 }
 
-/// An instance of an aggregated fidl service that has been enumerated by [`ServiceWatcher::watch`]
-/// or [`ServiceWatcher::watch_for_any`].
-struct ServiceInstance<S> {
-    /// The name of the service instance within the service directory
+/// An instance of an aggregated fidl service that has been enumerated by [`Service::watch`],
+/// [`Service::watch_for_any`], or [`Service::enumerate`].
+struct ServiceInstance {
+    /// The name of the service instance within the service directory.
     name: String,
-    service: Service<S>,
+    dir: fio::DirectoryProxy,
 }
 
-impl<S: ServiceMarker> MemberOpener for ServiceInstance<S> {
+impl MemberOpener for ServiceInstance {
     fn open_member(&self, member: &str, server_end: zx::Channel) -> Result<(), fidl::Error> {
-        self.service.connect_to_instance_member_with_channel(&self.name, member, server_end)
+        connect_to_instance_member_with_channel(&self.dir, &self.name, member, server_end)
     }
     fn instance_name(&self) -> &str {
-        return &self.name;
+        &self.name
     }
+}
+
+fn connect_to_instance_member_with_channel(
+    dir: &fio::DirectoryProxy,
+    instance: &str,
+    member: &str,
+    server_end: zx::Channel,
+) -> Result<(), fidl::Error> {
+    let path = format!("{instance}/{member}");
+    #[cfg(fuchsia_api_level_at_least = "27")]
+    return dir.open(&path, fio::Flags::PROTOCOL_SERVICE, &fio::Options::default(), server_end);
+    #[cfg(not(fuchsia_api_level_at_least = "27"))]
+    return dir.open3(&path, fio::Flags::PROTOCOL_SERVICE, &fio::Options::default(), server_end);
 }
 
 /// A service from an incoming namespace's `/svc` directory.
@@ -444,38 +458,14 @@ impl<S: ServiceMarker> Service<S> {
         ))))
     }
 
-    /// Connects to the named instance member without waiting for it to appear. You should only use this
-    /// after the instance name has been returned by the [`Self::watch`] stream, or if the
-    /// instance is statically routed so component manager will lazily load it.
-    fn connect_to_instance_member_with_channel(
-        &self,
-        instance: impl AsRef<str>,
-        member: impl AsRef<str>,
-        server_end: zx::Channel,
-    ) -> Result<(), fidl::Error> {
-        let path = format!("{}/{}", instance.as_ref(), member.as_ref());
-        #[cfg(fuchsia_api_level_at_least = "27")]
-        return self.dir.open(
-            &path,
-            fio::Flags::PROTOCOL_SERVICE,
-            &fio::Options::default(),
-            server_end,
-        );
-        #[cfg(not(fuchsia_api_level_at_least = "27"))]
-        return self.dir.open3(
-            &path,
-            fio::Flags::PROTOCOL_SERVICE,
-            &fio::Options::default(),
-            server_end,
-        );
-    }
-
     /// Returns an async stream of service instances that are enumerated within this service
     /// directory.
     pub async fn watch(self) -> Result<ServiceInstanceStream<S>, Error> {
-        let watcher = Watcher::new(&self.dir).await?;
-        let finished = false;
-        Ok(ServiceInstanceStream { service: self, watcher, finished })
+        let state = watch_service_dir(self.dir).await?;
+        Ok(ServiceInstanceStream {
+            lifecycle: StreamLifecycle::Active(state),
+            _marker: self._marker,
+        })
     }
 
     /// Asynchronously returns the first service instance available within this service directory.
@@ -489,18 +479,142 @@ impl<S: ServiceMarker> Service<S> {
 
     /// Returns an list of all instances that are currently available.
     pub async fn enumerate(self) -> Result<Vec<S::Proxy>, Error> {
-        let instances: Vec<S::Proxy> = fuchsia_fs::directory::readdir(&self.dir)
+        let instances: Vec<S::Proxy> = enumerate_service_dir(self.dir)
             .await?
             .into_iter()
-            .map(|dirent| {
-                S::Proxy::from_member_opener(Box::new(ServiceInstance {
-                    service: self.clone(),
-                    name: dirent.name,
-                }))
-            })
+            .map(S::Proxy::from_member_opener)
             .collect();
         Ok(instances)
     }
+}
+
+enum IdleSignal {
+    Unset,
+    SeenIdle,
+    Pending(oneshot::Sender<()>),
+    Signaled,
+}
+
+impl IdleSignal {
+    fn was_set(&self) -> bool {
+        matches!(self, Self::Pending(_) | Self::Signaled)
+    }
+}
+
+struct ServiceInstanceStreamState {
+    dir: fio::DirectoryProxy,
+    watcher: Watcher,
+    idle_signal: IdleSignal,
+}
+
+enum StreamLifecycle {
+    Active(ServiceInstanceStreamState),
+    Terminated { had_idle_signal: bool },
+}
+
+async fn watch_service_dir(dir: fio::DirectoryProxy) -> Result<ServiceInstanceStreamState, Error> {
+    let watcher = Watcher::new(&dir).await?;
+    Ok(ServiceInstanceStreamState { dir, watcher, idle_signal: IdleSignal::Unset })
+}
+
+async fn enumerate_service_dir(
+    dir: fio::DirectoryProxy,
+) -> Result<Vec<Box<dyn MemberOpener>>, Error> {
+    let entries = fuchsia_fs::directory::readdir(&dir).await?;
+    Ok(entries
+        .into_iter()
+        .map(|dirent| -> Box<dyn MemberOpener> {
+            Box::new(ServiceInstance { dir: Clone::clone(&dir), name: dirent.name })
+        })
+        .collect())
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn panic_idle_sender_already_set() -> ! {
+    panic!("ServiceInstanceStream::with_idle_signal called more than once");
+}
+
+#[track_caller]
+fn register_idle_signal(lifecycle: &mut StreamLifecycle, idle_sender: oneshot::Sender<()>) {
+    match lifecycle {
+        StreamLifecycle::Active(state) => match &state.idle_signal {
+            IdleSignal::Unset => {
+                state.idle_signal = IdleSignal::Pending(idle_sender);
+            }
+            IdleSignal::SeenIdle => {
+                state.idle_signal = IdleSignal::Signaled;
+                let _ = idle_sender.send(());
+            }
+            IdleSignal::Pending(_) | IdleSignal::Signaled => {
+                panic_idle_sender_already_set();
+            }
+        },
+        StreamLifecycle::Terminated { had_idle_signal } => {
+            if *had_idle_signal {
+                panic_idle_sender_already_set();
+            }
+            *had_idle_signal = true;
+        }
+    }
+}
+
+fn poll_next_service_instance(
+    lifecycle: &mut StreamLifecycle,
+    cx: &mut std::task::Context<'_>,
+) -> Poll<Option<Result<Box<dyn MemberOpener>, Error>>> {
+    use Poll::*;
+    let StreamLifecycle::Active(state) = lifecycle else {
+        return Ready(None);
+    };
+    // poll the inner watcher until we either find something worth returning or it
+    // returns Pending.
+    while let Ready(next) = state.watcher.poll_next_unpin(cx) {
+        match next {
+            Some(Ok(msg)) => match msg.event {
+                WatchEvent::DELETED => {
+                    let had_idle_signal = state.idle_signal.was_set();
+                    *lifecycle = StreamLifecycle::Terminated { had_idle_signal };
+                    return Ready(None);
+                }
+                WatchEvent::ADD_FILE | WatchEvent::EXISTING => {
+                    let filename = msg.filename.to_str().unwrap();
+                    if filename != "." {
+                        let opener: Box<dyn MemberOpener> = Box::new(ServiceInstance {
+                            dir: Clone::clone(&state.dir),
+                            name: filename.to_owned(),
+                        });
+                        return Ready(Some(Ok(opener)));
+                    }
+                }
+                WatchEvent::IDLE => {
+                    match std::mem::replace(&mut state.idle_signal, IdleSignal::SeenIdle) {
+                        IdleSignal::Pending(sender) => {
+                            state.idle_signal = IdleSignal::Signaled;
+                            let _ = sender.send(());
+                        }
+                        IdleSignal::Signaled => {
+                            state.idle_signal = IdleSignal::Signaled;
+                        }
+                        IdleSignal::Unset | IdleSignal::SeenIdle => {}
+                    }
+                }
+                WatchEvent::REMOVE_FILE => {}
+            },
+            Some(Err(err)) => {
+                let had_idle_signal = state.idle_signal.was_set();
+                *lifecycle = StreamLifecycle::Terminated { had_idle_signal };
+                return Ready(Some(Err(err.into())));
+            }
+            None => {
+                let had_idle_signal = state.idle_signal.was_set();
+                *lifecycle = StreamLifecycle::Terminated { had_idle_signal };
+                return Ready(None);
+            }
+        }
+    }
+    Pending
 }
 
 /// A stream iterator for a service directory that produces one item for every service instance
@@ -510,9 +624,31 @@ impl<S: ServiceMarker> Service<S> {
 /// the client must decide when it has found all the instances it's looking for.
 #[pin_project]
 pub struct ServiceInstanceStream<S: Clone> {
-    service: Service<S>,
-    watcher: Watcher,
-    finished: bool,
+    lifecycle: StreamLifecycle,
+    _marker: S,
+}
+
+impl<S: Clone> ServiceInstanceStream<S> {
+    /// Registers a oneshot sender that is signaled once all pre-existing service instances have
+    /// been yielded by this stream (when the underlying directory watcher emits
+    /// `WatchEvent::IDLE`).
+    ///
+    /// Because `poll_next` yields each `EXISTING` instance before polling the directory watcher
+    /// further, `idle_sender` is only signaled on the poll after the last pre-existing instance
+    /// has been yielded (or on the first poll if the service directory was initially empty). If
+    /// `WatchEvent::IDLE` has already been observed on this stream, `idle_sender` is signaled
+    /// immediately. If the stream terminates or errors before `WatchEvent::IDLE` is reached,
+    /// `idle_sender` is dropped immediately so any receiver resolves with
+    /// `Err(oneshot::Canceled)` even if this `ServiceInstanceStream` value remains alive.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `with_idle_signal` has already been called on this stream.
+    #[track_caller]
+    pub fn with_idle_signal(mut self, idle_sender: oneshot::Sender<()>) -> Self {
+        register_idle_signal(&mut self.lifecycle, idle_sender);
+        self
+    }
 }
 
 impl<S: ServiceMarker> Stream for ServiceInstanceStream<S> {
@@ -523,48 +659,13 @@ impl<S: ServiceMarker> Stream for ServiceInstanceStream<S> {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        use Poll::*;
-        if *this.finished {
-            return Poll::Ready(None);
-        }
-        // poll the inner watcher until we either find something worth returning or it
-        // returns Pending.
-        while let Ready(next) = this.watcher.poll_next_unpin(cx) {
-            match next {
-                Some(Ok(state)) => match state.event {
-                    WatchEvent::DELETED => {
-                        *this.finished = true;
-                        return Ready(None);
-                    }
-                    WatchEvent::ADD_FILE | WatchEvent::EXISTING => {
-                        let filename = state.filename.to_str().unwrap();
-                        if filename != "." {
-                            let proxy = S::Proxy::from_member_opener(Box::new(ServiceInstance {
-                                service: this.service.clone(),
-                                name: filename.to_owned(),
-                            }));
-                            return Ready(Some(Ok(proxy)));
-                        }
-                    }
-                    _ => {}
-                },
-                Some(Err(err)) => {
-                    *this.finished = true;
-                    return Ready(Some(Err(err.into())));
-                }
-                None => {
-                    *this.finished = true;
-                    return Ready(None);
-                }
-            }
-        }
-        Pending
+        poll_next_service_instance(this.lifecycle, cx).map_ok(S::Proxy::from_member_opener)
     }
 }
 
 impl<S: ServiceMarker> FusedStream for ServiceInstanceStream<S> {
     fn is_terminated(&self) -> bool {
-        self.finished
+        matches!(self.lifecycle, StreamLifecycle::Terminated { .. })
     }
 }
 
@@ -809,5 +910,164 @@ mod tests {
         assert!(["default", "another_instance"].contains(&found.instance_name()));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_service_instance_watcher_idle_signal_with_existing() -> Result<(), Error> {
+        let mut exec = fasync::TestExecutor::new();
+        let dir_proxy = vfs::directory::serve_read_only(
+            make_service_instance_tree(),
+            vfs::execution_scope::ExecutionScope::new(),
+        );
+        let service = Service::open_from_dir_prefix(&dir_proxy, SVC_DIR, ServiceMarker)?;
+        let (idle_tx, mut idle_rx) = oneshot::channel();
+        let mut stream = exec.run_singlethreaded(service.watch())?.with_idle_signal(idle_tx);
+
+        assert_matches::assert_matches!(exec.run_until_stalled(&mut idle_rx), Poll::Pending);
+
+        let first = match exec.run_until_stalled(&mut stream.next()) {
+            Poll::Ready(Some(res)) => res?,
+            _ => panic!("expected first instance"),
+        };
+        assert_matches::assert_matches!(exec.run_until_stalled(&mut idle_rx), Poll::Pending);
+
+        let second = match exec.run_until_stalled(&mut stream.next()) {
+            Poll::Ready(Some(res)) => res?,
+            _ => panic!("expected second instance"),
+        };
+        assert_matches::assert_matches!(exec.run_until_stalled(&mut idle_rx), Poll::Pending);
+
+        assert_eq!(
+            HashSet::<_>::from_iter([
+                first.instance_name().to_owned(),
+                second.instance_name().to_owned()
+            ]),
+            HashSet::from_iter(["default".to_owned(), "another_instance".to_owned()])
+        );
+
+        assert!(exec.run_until_stalled(&mut stream.next()).is_pending());
+        assert_matches::assert_matches!(exec.run_until_stalled(&mut idle_rx), Poll::Ready(Ok(())));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_service_instance_watcher_idle_signal_when_empty() -> Result<(), Error> {
+        let mut exec = fasync::TestExecutor::new();
+        let empty_tree = pseudo_directory! {
+            "svc" => pseudo_directory! {
+                ServiceMarker::SERVICE_NAME => pseudo_directory! {},
+            },
+        };
+        let dir_proxy = vfs::directory::serve_read_only(
+            empty_tree,
+            vfs::execution_scope::ExecutionScope::new(),
+        );
+        let service = Service::open_from_dir_prefix(&dir_proxy, SVC_DIR, ServiceMarker)?;
+        let (idle_tx, mut idle_rx) = oneshot::channel();
+        let mut stream = exec.run_singlethreaded(service.watch())?.with_idle_signal(idle_tx);
+
+        assert!(exec.run_until_stalled(&mut stream.next()).is_pending());
+        assert_matches::assert_matches!(exec.run_until_stalled(&mut idle_rx), Poll::Ready(Ok(())));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_service_instance_watcher_idle_signal_canceled_on_early_termination() -> Result<(), Error>
+    {
+        let mut exec = fasync::TestExecutor::new();
+        let (dir_proxy, mut dir_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fio::DirectoryMarker>();
+        let server_task = fasync::Task::local(async move {
+            if let Some(Ok(fio::DirectoryRequest::Watch { watcher, responder, .. })) =
+                dir_stream.next().await
+            {
+                // Acknowledge Watch, then immediately drop `watcher` without emitting IDLE.
+                drop(watcher);
+                responder.send(zx::sys::ZX_OK).unwrap();
+            }
+        });
+        exec.run_singlethreaded(&mut Box::pin(async {
+            let service = Service::from_service_dir_proxy(dir_proxy, ServiceMarker);
+            let (idle_tx, idle_rx) = oneshot::channel();
+            let mut stream = service.watch().await.unwrap().with_idle_signal(idle_tx);
+            server_task.await;
+
+            // Stream errors/terminates before IDLE while `stream` is still retained in scope.
+            assert!(matches!(stream.next().await, Some(Err(_)) | None));
+            assert!(stream.is_terminated());
+            assert_matches::assert_matches!(idle_rx.await, Err(oneshot::Canceled));
+        }));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_service_instance_watcher_idle_signal_registered_after_idle_fires_immediately()
+    -> Result<(), Error> {
+        let mut exec = fasync::TestExecutor::new();
+        let empty_tree = pseudo_directory! {
+            "svc" => pseudo_directory! {
+                ServiceMarker::SERVICE_NAME => pseudo_directory! {},
+            },
+        };
+        let dir_proxy = vfs::directory::serve_read_only(
+            empty_tree,
+            vfs::execution_scope::ExecutionScope::new(),
+        );
+        let service = Service::open_from_dir_prefix(&dir_proxy, SVC_DIR, ServiceMarker)?;
+        let mut stream = exec.run_singlethreaded(service.watch())?;
+
+        // Poll past WatchEvent::IDLE before registering an idle signal.
+        assert!(exec.run_until_stalled(&mut stream.next()).is_pending());
+
+        let (idle_tx, mut idle_rx) = oneshot::channel();
+        let _stream = stream.with_idle_signal(idle_tx);
+        assert_matches::assert_matches!(exec.run_until_stalled(&mut idle_rx), Poll::Ready(Ok(())));
+
+        Ok(())
+    }
+
+    #[test]
+    #[should_panic(expected = "ServiceInstanceStream::with_idle_signal called more than once")]
+    fn test_service_instance_watcher_idle_signal_panics_if_set_twice() {
+        let mut exec = fasync::TestExecutor::new();
+        let dir_proxy = vfs::directory::serve_read_only(
+            make_service_instance_tree(),
+            vfs::execution_scope::ExecutionScope::new(),
+        );
+        let service = Service::open_from_dir_prefix(&dir_proxy, SVC_DIR, ServiceMarker).unwrap();
+        let (tx1, _rx1) = oneshot::channel();
+        let (tx2, _rx2) = oneshot::channel();
+        let _stream = exec
+            .run_singlethreaded(service.watch())
+            .unwrap()
+            .with_idle_signal(tx1)
+            .with_idle_signal(tx2);
+    }
+
+    #[test]
+    #[should_panic(expected = "ServiceInstanceStream::with_idle_signal called more than once")]
+    fn test_service_instance_watcher_idle_signal_panics_if_set_twice_after_idle() {
+        let mut exec = fasync::TestExecutor::new();
+        let empty_tree = pseudo_directory! {
+            "svc" => pseudo_directory! {
+                ServiceMarker::SERVICE_NAME => pseudo_directory! {},
+            },
+        };
+        let dir_proxy = vfs::directory::serve_read_only(
+            empty_tree,
+            vfs::execution_scope::ExecutionScope::new(),
+        );
+        let service = Service::open_from_dir_prefix(&dir_proxy, SVC_DIR, ServiceMarker).unwrap();
+        let (tx1, mut rx1) = oneshot::channel();
+        let mut stream = exec.run_singlethreaded(service.watch()).unwrap().with_idle_signal(tx1);
+
+        assert!(exec.run_until_stalled(&mut stream.next()).is_pending());
+        assert_matches::assert_matches!(exec.run_until_stalled(&mut rx1), Poll::Ready(Ok(())));
+
+        let (tx2, _rx2) = oneshot::channel();
+        let _stream = stream.with_idle_signal(tx2);
     }
 }

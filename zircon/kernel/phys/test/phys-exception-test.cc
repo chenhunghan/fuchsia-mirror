@@ -8,7 +8,8 @@
 #include <zircon/assert.h>
 
 #include <phys/runtime/exception.h>
-#include <phys/symbolize.h>
+#include <phys/runtime/stack.h>
+#include <phys/runtime/symbolize.h>
 
 #ifdef __aarch64__
 #include <lib/arch/arm64/system.h>
@@ -39,6 +40,12 @@ PHYS_SINGLETHREAD uint64_t HandleExpectedException(uint64_t vector, const char* 
   PrintPhysException(vector, vector_name, state);
 
   ZX_ASSERT(state.pc() == kExceptionSite);
+
+  // The exception entry switched to the exception shadow call stack, so the
+  // handler's own frames are on it.
+  if constexpr (BootShadowCallStack::kEnabled) {
+    ZX_ASSERT(!phys_exception_shadow_call_stack.BackTrace().empty());
+  }
 
   uint64_t& test_value = TestRegister(state);
   ZX_ASSERT(test_value == 17);

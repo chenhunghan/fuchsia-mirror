@@ -12,14 +12,14 @@ group("tests") {
 # `pty_tests_component` and `pty_tests` remain in GN until `fx_package` supports
 # `subpackages` and `//src/bringup/bin/ptysvc:package`,
 # `//src/testing/zx-test-util:exit_with_code_util`, and
-# `//src/zircon/bin/zxsh:sh` are available in Bazel.
+# `//src/developer/zxsh:sh` are available in Bazel.
 fuchsia_test_component("pty_tests_component") {
   component_name = "pty_tests"
   manifest = "meta/pty_tests.cml"
   deps = [
     ":pty_test",
+    "//src/developer/zxsh:sh",
     "//src/testing/zx-test-util:exit_with_code_util",
-    "//src/zircon/bin/zxsh:sh",
   ]
 }
 

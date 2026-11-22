@@ -19,6 +19,16 @@ group("linux_vm_tests") {
     "cpp:linux_vm_tests",
     "rust:linux_vm_tests",
   ]
+  assert_no_deps = [
+    "//src/starnix/build:generate_container_config_component",
+    "//src/starnix/build:generate_container_config_shard",
+    "//src/starnix/containers/*",
+    "//src/starnix/kernel/*",
+    "//src/starnix/runner/*",
+    "//src/starnix/tests:starnix_test",
+    "//src/starnix/tests:starnix_test_with_expectations",
+    "//src/ui/testing/test_ui_stack/*",
+  ]
 }
 
 # For the time being, the Rust and C++ syscall tests all share a singular

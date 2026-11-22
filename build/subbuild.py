@@ -14,10 +14,15 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 logger = logging.getLogger("subbuild.py")
+
+# Relative paths to ResultStore wrappers that work together to manage the
+# proxy daemon and stream Ninja build events to ResultStore.
+_FUCHSIA_RSPROXY_WRAP: Path = Path("build/resultstore/fuchsia-rsproxy-wrap.sh")
+_RSNINJA_SH: Path = Path("build/resultstore/rsninja.sh")
 
 _ARGS_GN_TEMPLATE = r"""# Auto-generated - DO NOT EDIT
 target_cpu = "{cpu}"
@@ -32,7 +37,7 @@ build_only_labels = [{sdk_labels_list}]
 """
 
 
-def get_host_platform() -> str:
+def _get_host_platform() -> str:
     """Return host platform name, following Fuchsia conventions."""
     if sys.platform == "linux":
         return "linux"
@@ -42,7 +47,7 @@ def get_host_platform() -> str:
         return os.uname().sysname
 
 
-def get_host_arch() -> str:
+def _get_host_arch() -> str:
     """Return host CPU architecture, following Fuchsia conventions."""
     host_arch = os.uname().machine
     if host_arch == "x86_64":
@@ -53,12 +58,12 @@ def get_host_arch() -> str:
         return host_arch
 
 
-def get_host_tag() -> str:
+def _get_host_tag() -> str:
     """Return host tag, following Fuchsia conventions."""
-    return "%s-%s" % (get_host_platform(), get_host_arch())
+    return "%s-%s" % (_get_host_platform(), _get_host_arch())
 
 
-def write_file_if_changed(path: Path, content: str) -> bool:
+def _write_file_if_changed(path: Path, content: str) -> bool:
     """Write |content| into |path| if needed. Return True on write."""
     if path.exists() and path.read_text() == content:
         # Nothing to do
@@ -69,7 +74,7 @@ def write_file_if_changed(path: Path, content: str) -> bool:
     return True
 
 
-def command_args_to_string(
+def _command_args_to_string(
     args: Sequence[str | Path],
     env: dict[str, str] | None,
     cwd: Path | str | None,
@@ -88,7 +93,7 @@ def command_args_to_string(
     return " ".join(elements)
 
 
-def run_command(
+def _run_command(
     args: Sequence[str | Path],
     capture_output: bool = False,
     env: dict[str, str] | None = None,
@@ -103,7 +108,7 @@ def run_command(
     Returns:
         a subprocess.run() result value.
     """
-    logger.info("RUN: " + command_args_to_string(args, env, cwd))
+    logger.info("RUN: " + _command_args_to_string(args, env, cwd))
     start_time = time.time()
     result = subprocess.run(
         [str(a) for a in args],
@@ -117,7 +122,7 @@ def run_command(
     return result
 
 
-def run_checked_command(
+def _run_checked_command(
     args: Sequence[str | Path],
     capture_output: bool,
     env: dict[str, str] | None = None,
@@ -134,21 +139,40 @@ def run_checked_command(
         stdout + stderr, then return False.
     """
     try:
-        ret = run_command(args, env=env, cwd=cwd, capture_output=capture_output)
+        ret = _run_command(
+            args, env=env, cwd=cwd, capture_output=capture_output
+        )
         if ret.returncode == 0:
             return True
     except KeyboardInterrupt:
         # If the user interrupts a long-running command, do not print anything.
         return False
 
-    args_str = command_args_to_string(args, env, cwd)
+    args_str = _command_args_to_string(args, env, cwd)
+    stdout = ret.stdout or ""
+    stderr = ret.stderr or ""
     logger.error(
-        f"Exit code {ret.returncode} when running command: `{args_str}`\nOutput:\n{ret.stdout}\nError:\n{ret.stderr}\n"
+        f"Exit code {ret.returncode} when running command: `{args_str}`\nOutput:\n{stdout}\nError:\n{stderr}\n"
     )
     return False
 
 
-def main() -> int:
+def _label_partition(target_label: str) -> tuple[str, str]:
+    """Split a GN label into a (dir, name) pair."""
+    # Expected format is //<dir>:<name>
+    path, colon, name = target_label.partition(":")
+    if colon != ":" or not path.startswith("//"):
+        raise ValueError(f"Invalid target label: {target_label}")
+    return (path[2:], name)
+
+
+def _label_to_ninja_target(target_label: str) -> str:
+    """Convert GN label to Ninja target path."""
+    target_dir, target_name = _label_partition(target_label)
+    return f"{target_dir}:{target_name}"
+
+
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--target-label",
@@ -228,7 +252,7 @@ def main() -> int:
         help="If set, write the API level to this file in the output directory.",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logging.basicConfig(
         stream=sys.stderr, level=logging.INFO if args.verbose else logging.WARN
@@ -240,40 +264,19 @@ def main() -> int:
     if args.host_tag:
         host_tag = args.host_tag
     else:
-        host_tag = get_host_tag()
+        host_tag = _get_host_tag()
 
     gn_path = fuchsia_dir / "prebuilt" / "third_party" / "gn" / host_tag / "gn"
     if not gn_path.exists():
         logger.error(f"Missing gn prebuilt binary: {gn_path}")
         return 1
 
-    # Use a drop-in replacement for ninja that enables ResultStore passively.
-    # Enabling ResultStore is triggered by the inherited environment variable
-    # FX_INTERNAL_RESULTSTORE_NINJA, which is set by build/scripts/main_build.py.
-    # When disabled, the un-needed wrappers will be bypassed down to raw ninja
-    # with zero overhead.
-    ninja_path = fuchsia_dir / "build" / "resultstore" / "rs-sub-ninja.sh"
-    if not ninja_path.exists():
-        logger.error(f"Missing ninja prebuilt binary: {ninja_path}")
+    ninja_bin = (
+        fuchsia_dir / "prebuilt" / "third_party" / "ninja" / host_tag / "ninja"
+    )
+    if not ninja_bin.exists():
+        logger.error(f"Missing ninja prebuilt binary: {ninja_bin}")
         return 1
-
-    ninja_cmd_prefix: list[str | Path] = [ninja_path]
-    if not args.verbose:
-        ninja_cmd_prefix.append("--quiet")
-
-    def label_partition(target_label: str) -> tuple[str, str]:
-        """Split an GN label into a (dir, name) pair."""
-        # Expected format is //<dir>:<name>
-        path, colon, name = target_label.partition(":")
-        assert colon == ":" and path.startswith(
-            "//"
-        ), f"Invalid target label: {target_label}"
-        return (path[2:], name)
-
-    def label_to_ninja_target(target_label: str) -> str:
-        """Convert GN label to Ninja target path."""
-        target_dir, target_name = label_partition(target_label)
-        return f"{target_dir}:{target_name}"
 
     target_cpu = args.target_cpu
     api_level = args.api_level
@@ -286,7 +289,9 @@ def main() -> int:
 
     if args.clean and build_dir.exists():
         logger.info(f"{build_dir}: Cleaning build directory")
-        run_command([*ninja_cmd_prefix, "-C", str(build_dir), "-t", "clean"])
+        # Note: ninja's clean tool (-t clean) does not support top-level flags like --quiet.
+        # Cleaning is a local bookkeeping step and does not require ResultStore wrapping.
+        _run_command([str(ninja_bin), "-C", str(build_dir), "-t", "clean"])
 
     # Copy regenerator.py-created files from the root build dir to the subbuild dir.
     files = ["icu_build_config.json"]
@@ -311,6 +316,7 @@ def main() -> int:
     cxx_exec_strategy = subbuild_config.get("cxx_rbe_exec_strategy")
     link_exec_strategy = subbuild_config.get("link_rbe_exec_strategy")
     rust_exec_strategy = subbuild_config.get("rust_rbe_exec_strategy")
+    disable_xattr_for_rbe = subbuild_config.get("disable_xattr_for_rbe", False)
 
     sdk_id = subbuild_config.get("sdk_id")
     compress_debuginfo = subbuild_config.get("compress_debuginfo")
@@ -335,6 +341,8 @@ def main() -> int:
         args_gn_content += f'link_rbe_exec_strategy = "{link_exec_strategy}"\n'
     if rust_exec_strategy:
         args_gn_content += f'rust_rbe_exec_strategy = "{rust_exec_strategy}"\n'
+    if disable_xattr_for_rbe:
+        args_gn_content += "disable_xattr_for_rbe = true\n"
 
     if sdk_id:
         args_gn_content += f'sdk_id = "{sdk_id}"\n'
@@ -385,10 +393,10 @@ def main() -> int:
 
     logger.info(f"{build_dir}: args.gn content:\n{args_gn_content}")
     if (
-        write_file_if_changed(build_dir / "args.gn", args_gn_content)
+        _write_file_if_changed(build_dir / "args.gn", args_gn_content)
         or not (build_dir / "build.ninja").exists()
     ):
-        if not run_checked_command(
+        if not _run_checked_command(
             [
                 gn_path,
                 "--root=%s" % fuchsia_dir.resolve(),
@@ -404,7 +412,7 @@ def main() -> int:
         # Adjust the NINJA_STATUS environment variable before launching Ninja
         # in order to add a prefix distinguishing its build actions from
         # the top-level ones.
-        ninja_status = os.environ.get("NINJA_STATUS", "[%f/%t][%p/%w](%r) ")
+        ninja_status = env.get("NINJA_STATUS", "[%f/%t][%p/%w](%r) ")
 
         status_prefix = f"IDK_SUBBUILD_api_{api_level}_{target_cpu} "
         ninja_status = status_prefix + ninja_status
@@ -414,8 +422,7 @@ def main() -> int:
             "ninja_edge_weights.csv", build_dir
         )
 
-        ninja_cmd = [
-            *ninja_cmd_prefix,
+        ninja_cmd: list[str] = [
             "--chrome_trace",
             "ninja_build_trace.json.gz",
             "--action_metrics_output",
@@ -424,12 +431,15 @@ def main() -> int:
             "-C",
             str(build_dir),
         ]
+        if not args.verbose:
+            ninja_cmd.append("--quiet")
+
         use_jobserver = bool(args.use_jobserver)
         if use_jobserver:
             # Check that the jobserver pool is setup by scanning the MAKEFLAGS
             # environment variable. If it does not contain --jobserver-auth
             # something is wrong, and the argument will be ignored.
-            makeflags = os.environ.get("MAKEFLAGS", "")
+            makeflags = env.get("MAKEFLAGS", "")
             if "--jobserver-auth" not in makeflags:
                 print(
                     f"WARNING: --use-jobserver used, but no jobserver pool in MAKEFLAGS [{makeflags}]",
@@ -458,13 +468,35 @@ def main() -> int:
             ]
 
         ninja_cmd += [
-            label_to_ninja_target(args.target_label),
+            _label_to_ninja_target(args.target_label),
         ]
 
-        if not run_checked_command(
-            ninja_cmd,
+        # Invoke the ResultStore wrappers (fuchsia-rsproxy-wrap.sh and rsninja.sh)
+        # around ninja. These two scripts work together as a coordinated pair:
+        # fuchsia-rsproxy-wrap.sh manages the rsproxy daemon and creates the FIFO,
+        # and rsninja.sh connects to the FIFO to stream build events. If ResultStore
+        # is disabled in the environment, both scripts detect this and bypass to
+        # plain ninja with zero overhead.
+        #
+        # Note: We invoke fuchsia-rsproxy-wrap.sh directly as a subprocess rather
+        # than importing build.resultstore.rsproxy_wrap here. subbuild.py is invoked
+        # by Ninja action rules with `python3 -S` without PYTHONPATH set, so
+        # importing in-tree modules would require sys.path manipulation. Invoking
+        # fuchsia-rsproxy-wrap.sh ensures that PYTHONPATH is hermetically set in the
+        # child process without polluting or mutating sys.path in this process.
+        fuchsia_rsproxy_wrap = fuchsia_dir / _FUCHSIA_RSPROXY_WRAP
+        rsninja_sh = fuchsia_dir / _RSNINJA_SH
+        full_cmd: list[str] = [
+            str(fuchsia_rsproxy_wrap),
+            "--",
+            str(rsninja_sh),
+            *ninja_cmd,
+        ]
+
+        if not _run_checked_command(
+            full_cmd,
             capture_output=not args.verbose,
-            env=os.environ | ninja_env,
+            env=dict(env) | ninja_env,
         ):
             return 1
 
@@ -481,4 +513,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:], os.environ))

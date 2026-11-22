@@ -74,7 +74,6 @@ fuchsia_driver_component("aml-trip") {
   dml_label = ":aml-trip-dml"
   component_name = "aml-trip"
   deps = [ ":aml-trip-driver" ]
-  info = "meta/aml-trip-info.json"
 }
 
 fuchsia_driver_package("package") {

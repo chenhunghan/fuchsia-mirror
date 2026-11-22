@@ -52,7 +52,6 @@ fx_component(
     name = "svc",
     testonly = True,
     compiled_manifest = ":svc_manifest",
-    visibility = ["//src/connectivity/policy/tests/integration:__pkg__"],
     deps = [":fake_socket_proxy_svc_packaged_bin"],
 )
 

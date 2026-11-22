@@ -11,14 +11,7 @@
 #include <lib/uart/uart.h>
 #include <lib/zbi-format/driver-config.h>
 
-#include <ktl/optional.h>
 #include <phys/handoff/handoff.h>
-
-// Returns the |irq| number to be used for registering an IRQ Handler if such |irq_num| can be
-// translated.
-// Returns |nullopt| if there is no irq wired to the provided |irq_num|, if the provided
-// |irq_num| has a platform specific meaning.
-ktl::optional<uint32_t> PlatformUartGetIrqNumber(uint32_t irq_num);
 
 // ulib/uart IoProvider implementation for the kernel.
 template <typename Config, uart::IoRegisterType>

@@ -5,8 +5,8 @@
 """Macros for defining Fuchsia components in the Bazel SDK."""
 
 load(
-    "@fuchsia_rules_common//components:fuchsia_component_common.bzl",
-    "fuchsia_component_common",
+    "@fuchsia_rules_common//components:component.bzl",
+    "component_common",
 )
 load(":fuchsia_component_manifest.bzl", "ensure_compiled_component_manifest")
 
@@ -60,7 +60,7 @@ def fuchsia_component(
 
     manifest_target = _manifest_target(name, manifest, component_name, tags, testonly = False)
 
-    fuchsia_component_common(
+    component_common(
         name = name,
         moniker = moniker,
         compiled_manifest = manifest_target,
@@ -101,7 +101,7 @@ def fuchsia_test_component(
 
     manifest_target = _manifest_target(name, manifest, component_name, tags, testonly = True)
 
-    fuchsia_component_common(
+    component_common(
         name = name,
         moniker = None,
         compiled_manifest = manifest_target,
@@ -150,7 +150,7 @@ def fuchsia_driver_component(
 
     manifest_target = _manifest_target(name, manifest, component_name, tags, testonly = False)
 
-    fuchsia_component_common(
+    component_common(
         name = name,
         moniker = None,
         compiled_manifest = manifest_target,

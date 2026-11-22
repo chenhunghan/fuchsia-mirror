@@ -2,10 +2,21 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
 load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":ffx_setui_night_mode_args_test",
+        ":ffx_setui_night_mode_test",
+    ],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
 
 ffx_plugin(
     name = "ffx_setui_night_mode",

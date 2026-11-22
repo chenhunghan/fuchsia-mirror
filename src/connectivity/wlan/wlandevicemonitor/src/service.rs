@@ -7,6 +7,7 @@ use crate::{phy_event_service, watcher_service};
 use anyhow::{Error, format_err};
 use core::sync::atomic::AtomicUsize;
 use fidl::endpoints::create_endpoints;
+use fidl_fuchsia_diagnostics as fidl_diagnostics;
 use fidl_fuchsia_wlan_common as fidl_common;
 use fidl_fuchsia_wlan_device_service::{self as fidl_svc, DeviceMonitorRequest};
 use fidl_fuchsia_wlan_internal as fidl_internal;
@@ -46,6 +47,7 @@ pub(crate) async fn handle_monitor_request(
     new_iface_sink: &mpsc::UnboundedSender<NewIface>,
     iface_counter: &IfaceCounter,
     cfg: &wlandevicemonitor_config::Config,
+    network_identifier_redaction: Option<&fidl_sme::NetworkIdentifierRedaction>,
 ) -> Result<(), Error> {
     match request {
         DeviceMonitorRequest::ListPhys { responder } => responder.send(&list_phys(phys))?,
@@ -105,6 +107,7 @@ pub(crate) async fn handle_monitor_request(
                 sta_address,
                 iface_counter,
                 cfg,
+                network_identifier_redaction,
             )
             .await
             {
@@ -411,6 +414,42 @@ async fn get_tx_power_scenario(phys: &PhyMap, phy_id: u16) -> Result<TxPowerScen
     phy.proxy.get_tx_power_scenario().await.map_phy_result(phy_id, "GetTxPowerScenario")
 }
 
+/// Returns how the SME should redact network identifiers in its logs and Inspect.
+pub(crate) async fn network_identifier_redaction(
+    cfg: &wlandevicemonitor_config::Config,
+) -> Option<fidl_sme::NetworkIdentifierRedaction> {
+    if !cfg.redact_network_identifiers {
+        return None;
+    }
+    Some(
+        redaction_from_salt_provider(fuchsia_component::client::connect_to_protocol::<
+            fidl_diagnostics::SaltProviderMarker,
+        >())
+        .await,
+    )
+}
+
+/// Fetches the per-boot salt from `salt_provider`, falling back to masking if it is unavailable.
+async fn redaction_from_salt_provider(
+    salt_provider: Result<fidl_diagnostics::SaltProviderProxy, Error>,
+) -> fidl_sme::NetworkIdentifierRedaction {
+    let salt = match salt_provider {
+        Ok(proxy) => proxy.get_salt().await.map_err(Error::from),
+        Err(e) => Err(e),
+    };
+    match salt {
+        Ok(salt) => fidl_sme::NetworkIdentifierRedaction::Salted(salt),
+        Err(e) => {
+            warn!(
+                "Failed to fetch salt from fuchsia.diagnostics.SaltProvider; \
+                 the SME will mask network identifiers: {:?}",
+                e
+            );
+            fidl_sme::NetworkIdentifierRedaction::Masked(fidl_sme::Masked)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, reason = "mass allow for https://fxbug.dev/381896734")]
 async fn create_iface(
     new_iface_sink: &mpsc::UnboundedSender<NewIface>,
@@ -420,6 +459,7 @@ async fn create_iface(
     sta_address: MacAddr,
     iface_counter: &IfaceCounter,
     cfg: &wlandevicemonitor_config::Config,
+    network_identifier_redaction: Option<&fidl_sme::NetworkIdentifierRedaction>,
 ) -> Result<(NewIface, zx::Vmo), Error> {
     if sta_address != NULL_ADDR
         && (!sta_address.is_unicast() || !sta_address.is_locally_administered())
@@ -444,10 +484,14 @@ async fn create_iface(
         wpa1_supported: cfg.wpa1_supported,
     };
 
-    // Pipeline the GenericSme channel and the legacy privacy support configuration, via
-    // the bootstrap channel. This request will be handled after our call to
-    // create_iface in the phy proxy, so we cannot await the result yet.
-    let bootstrap_result = usme_bootstrap_proxy.start(generic_sme_server, &legacy_privacy_support);
+    // Pipeline the GenericSme channel, the legacy privacy support configuration and the network
+    // identifier redaction configuration, via the bootstrap channel. This request will be handled
+    // after our call to create_iface in the phy proxy, so we cannot await the result yet.
+    let bootstrap_result = usme_bootstrap_proxy.start(
+        generic_sme_server,
+        &legacy_privacy_support,
+        network_identifier_redaction,
+    );
 
     let phy_req = fidl_fuchsia_wlan_phy::WlanPhyCreateIfaceRequest {
         role: Some(role),
@@ -494,11 +538,11 @@ async fn create_iface(
     if iface_role != role {
         warn!("Created iface has unexpected role: expected {:?}, actual {:?}", role, iface_role);
     }
-    if sta_address != NULL_ADDR && iface_sta_address != sta_address.to_array() {
+    let iface_sta_address = MacAddr::from(iface_sta_address);
+    if sta_address != NULL_ADDR && iface_sta_address != sta_address {
         warn!(
-            "Created iface has unexpected sta_address: expected {:?}, actual {:?}",
-            sta_address.to_array(),
-            iface_sta_address
+            "Created iface has unexpected sta_address: expected {}, actual {}",
+            sta_address, iface_sta_address
         );
     }
 
@@ -1004,6 +1048,64 @@ mod tests {
         alpha2
     }
 
+    #[fuchsia::test]
+    async fn network_identifier_redaction_disabled() {
+        assert_matches!(network_identifier_redaction(&fake_wlandevicemonitor_config()).await, None);
+    }
+
+    #[fuchsia::test]
+    async fn network_identifier_redaction_masks_without_salt() {
+        // The test component does not use fuchsia.diagnostics.SaltProvider, so the salt cannot be
+        // fetched and the SME is told to mask identifiers rather than log them unredacted.
+        let cfg = wlandevicemonitor_config::Config {
+            redact_network_identifiers: true,
+            ..fake_wlandevicemonitor_config()
+        };
+        assert_matches!(
+            network_identifier_redaction(&cfg).await,
+            Some(fidl_sme::NetworkIdentifierRedaction::Masked(fidl_sme::Masked))
+        );
+    }
+
+    #[fuchsia::test]
+    async fn redaction_from_salt_provider_salted() {
+        const SALT: [u8; 32] = [0x5a; 32];
+        let (proxy, mut stream) =
+            fidl::endpoints::create_proxy_and_stream::<fidl_diagnostics::SaltProviderMarker>();
+        let server = async move {
+            let Some(Ok(fidl_diagnostics::SaltProviderRequest::GetSalt { responder })) =
+                stream.next().await
+            else {
+                panic!("expected a GetSalt request");
+            };
+            responder.send(&SALT).expect("failed to send salt");
+        };
+        let (redaction, ()) = futures::join!(redaction_from_salt_provider(Ok(proxy)), server);
+        assert_matches!(
+            redaction,
+            fidl_sme::NetworkIdentifierRedaction::Salted(salt) if salt == SALT
+        );
+    }
+
+    #[fuchsia::test]
+    async fn redaction_from_salt_provider_masks_when_get_salt_fails() {
+        let (proxy, stream) =
+            fidl::endpoints::create_proxy_and_stream::<fidl_diagnostics::SaltProviderMarker>();
+        drop(stream);
+        assert_matches!(
+            redaction_from_salt_provider(Ok(proxy)).await,
+            fidl_sme::NetworkIdentifierRedaction::Masked(fidl_sme::Masked)
+        );
+    }
+
+    #[fuchsia::test]
+    async fn redaction_from_salt_provider_masks_when_connect_fails() {
+        assert_matches!(
+            redaction_from_salt_provider(Err(format_err!("SaltProvider unavailable"))).await,
+            fidl_sme::NetworkIdentifierRedaction::Masked(fidl_sme::Masked)
+        );
+    }
+
     fn fake_wlandevicemonitor_config() -> wlandevicemonitor_config::Config {
         wlandevicemonitor_config::Config {
             wep_supported: false,
@@ -1035,6 +1137,7 @@ mod tests {
                 new_iface_sink,
                 iface_counter,
                 cfg,
+                None,
             )
             .await
             .unwrap()
@@ -2995,6 +3098,7 @@ mod tests {
                 wpa1_supported: true,
                 redact_network_identifiers: false,
             },
+            None,
         );
         let mut fut = pin!(fut);
         assert_matches!(

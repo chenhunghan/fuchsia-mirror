@@ -46,7 +46,7 @@ if (is_host && current_cpu == "x64") {
       ":test_tools",
       "//src/developer/ffx:ffx_bin",
     ]
-    environments = [ qemu_env ]
+    environments = [ emu_env ]
   }
 
   host_test("driver_lspci_test") {
@@ -59,7 +59,7 @@ if (is_host && current_cpu == "x64") {
       ":test_tools",
       "//src/developer/ffx:ffx_bin",
     ]
-    environments = [ qemu_env ]
+    environments = [ emu_env ]
   }
 
   group("host_tests") {

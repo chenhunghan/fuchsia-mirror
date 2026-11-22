@@ -126,12 +126,8 @@ template("ctf_components_packages") {
         max_severity = "ERROR"
       }
       environments = [
-        {
-          dimensions = {
-            # Ensure the device has Vulkan.
-            device_type = "AEMU"
-          }
-        },
+        # Ensure the device has Vulkan.
+        aemu_env,
       ]
     }
   }

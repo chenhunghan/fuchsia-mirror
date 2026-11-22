@@ -14,10 +14,14 @@ from assembly import (
     AIBCreator,
     AssemblyInputBundle,
     BlobEntry,
+    DriverBoardInfo,
     FileEntry,
     FilePath,
+    ImageAssemblyConfig,
+    KernelInfo,
     PackageManifest,
     PackageMetaData,
+    PlatformId,
     SubpackageEntry,
 )
 from assembly.assembly_input_bundle import (
@@ -871,3 +875,61 @@ class AIBCreatorIncludeRulesTest(unittest.TestCase):
                 creator.add_allowed_in("standard::user")
         finally:
             outdir.cleanup()
+
+
+class ImageAssemblyConfigTest(unittest.TestCase):
+    def test_platform_id_and_driver_board_info_serialization(self) -> None:
+        raw_json = """{
+  "base": [],
+  "cache": [],
+  "on_demand": [],
+  "anchored_automatic": [],
+  "anchored_on_demand": [],
+  "system": [],
+  "kernel": {
+    "path": "path/to/kernel",
+    "args": []
+  },
+  "qemu_kernel": "path/to/qemu/kernel",
+  "boot_args": [],
+  "bootfs_files": [],
+  "bootfs_packages": [],
+  "platform_id": {
+    "vendor_id": 1,
+    "product_id": 2,
+    "name": "my_platform"
+  },
+  "driver_board_info": {
+    "revision": 3
+  },
+  "netboot_mode": false,
+  "board_name": "my_board",
+  "build_type": "eng",
+  "images_config": {}
+}"""
+        config = serialization.json_loads(ImageAssemblyConfig, raw_json)
+        self.assertEqual(
+            config.platform_id,
+            PlatformId(vendor_id=1, product_id=2, name="my_platform"),
+        )
+        self.assertEqual(config.driver_board_info, DriverBoardInfo(revision=3))
+        self.assertEqual(
+            config.kernel, KernelInfo(path="path/to/kernel", args=set())
+        )
+        self.assertEqual(serialization.json_dumps(config, indent=2), raw_json)
+
+    def test_optional_platform_id_and_driver_board_info_default_to_none(
+        self,
+    ) -> None:
+        raw_json = """{
+  "kernel": {
+    "path": "path/to/kernel",
+    "args": []
+  },
+  "qemu_kernel": "path/to/qemu/kernel",
+  "board_name": "my_board",
+  "build_type": "eng"
+}"""
+        config = serialization.json_loads(ImageAssemblyConfig, raw_json)
+        self.assertIsNone(config.platform_id)
+        self.assertIsNone(config.driver_board_info)

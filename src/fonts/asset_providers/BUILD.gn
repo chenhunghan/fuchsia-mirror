@@ -72,11 +72,6 @@ fuchsia_package("provider.package") {
   deps = [ ":provider.component" ]
 }
 
-# Generate bazel inputs for the font asset provider packages above.
-group("bazel_inputs") {
-  public_deps = [ "//build/bazel/target_tests:font_manifest_generator_bazel_input($host_toolchain)" ]
-}
-
 # LINT.IfChange
 # Font asset provider definitions.
 # Expect to have one for each font collection in //src/fonts/collections.

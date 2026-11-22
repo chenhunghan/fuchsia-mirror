@@ -147,9 +147,20 @@ pub fn save_restricted_iframe_state(state: &mut zx_restricted_state_t, frame: &I
     save_restricted_syscall_state(state, frame);
 }
 
-pub fn save_restricted_exception_state(state: &mut zx_restricted_state_t) {
+/// Saves restricted mode register state during exception handling.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - The calling thread (`current_get()`) is a live user `Thread` stopped in an exception with
+///   saved user state (and any non-null `suspended_general_regs` frame valid, writable, and
+///   unaliased for the duration of the call).
+/// - No chain lock transaction is active on the calling CPU.
+pub unsafe fn save_restricted_exception_state(state: &mut zx_restricted_state_t) {
     let mut regs = zx_thread_state_general_regs_t::default();
-    // SAFETY: Gets general registers of the current thread into a local.
+    // SAFETY: Caller guarantees `current_get()` is a live `Thread` stopped in an exception with
+    // saved user state and no active chain lock transaction, and `regs` is a stack local disjoint
+    // from the thread's state.
     let status = unsafe {
         super::debugger::arch_get_general_regs(
             crate::kernel::thread::current_get().cast(),
@@ -162,7 +173,16 @@ pub fn save_restricted_exception_state(state: &mut zx_restricted_state_t) {
     *state = regs;
 }
 
-pub fn redirect_restricted_exception_to_normal(
+/// Redirects an exception in restricted mode back to normal mode's `vector_table`.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - The calling thread (`current_get()`) is a live user `Thread` stopped in an exception with
+///   saved user state (and any non-null `suspended_general_regs` frame valid, writable, and
+///   unaliased for the duration of the call).
+/// - No chain lock transaction is active on the calling CPU.
+pub unsafe fn redirect_restricted_exception_to_normal(
     _arch_state: &ArchSavedNormalState,
     vector_table: usize,
     context: usize,
@@ -174,7 +194,9 @@ pub fn redirect_restricted_exception_to_normal(
         a1: reason,
         ..Default::default()
     };
-    // SAFETY: Sets general registers of the current thread from a local.
+    // SAFETY: Caller guarantees `current_get()` is a live `Thread` stopped in a synchronous
+    // exception with saved user state and no active chain lock transaction, and `regs` is a stack
+    // local disjoint from the thread's state.
     let status = unsafe {
         super::debugger::arch_set_general_regs(crate::kernel::thread::current_get().cast(), &regs)
     };

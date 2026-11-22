@@ -57,7 +57,6 @@ fidl("test.protocol.connector") {
 fidl("test.empty.protocol") {
   testonly = true
   sources = [ "empty_protocol.test.fidl" ]
-  enable_hlcpp = true
   visibility = [
     ":*",
     "//src/lib/fidl/llcpp/tests/dispatcher:*",
@@ -68,7 +67,6 @@ fidl("test.empty.protocol") {
 fidl("test.error.methods") {
   testonly = true
   sources = [ "error_methods.test.fidl" ]
-  enable_hlcpp = true
   visibility = [
     ":*",
     "//sdk/lib/fidl/cpp/tests/integration:*",
@@ -80,7 +78,6 @@ fidl("test.error.methods") {
 fidl("test.basic.protocol") {
   testonly = true
   sources = [ "basic_protocol.test.fidl" ]
-  enable_hlcpp = true
   visibility = [
     ":*",
     "//sdk/lib/fidl/cpp/tests/integration:*",

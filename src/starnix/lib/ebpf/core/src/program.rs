@@ -206,28 +206,29 @@ impl PartialEq for ProgramLinkageInfo {
             (None, None) => {}
             _ => return false,
         }
+        let mut equal = true;
         let mut i = 0;
-        while i < self.struct_mappings.len() {
+        while i < self.struct_mappings.len() && equal {
             if self.struct_mappings[i] != other.struct_mappings[i] {
-                return false;
+                equal = false;
             }
             i += 1;
         }
         let mut j = 0;
-        while j < self.helpers.len() {
+        while j < self.helpers.len() && equal {
             if self.helpers[j] != other.helpers[j] {
-                return false;
+                equal = false;
             }
             j += 1;
         }
         let mut k = 0;
-        while k < self.maps.len() {
+        while k < self.maps.len() && equal {
             if self.maps[k] != other.maps[k] {
-                return false;
+                equal = false;
             }
             k += 1;
         }
-        true
+        equal
     }
 }
 
@@ -322,7 +323,7 @@ fn apply_struct_access_mapping(
 
 fn link_single_instruction(
     pc: usize,
-    program: &VerifiedEbpfProgram,
+    verified_program: &VerifiedEbpfProgram,
     linkage: &ProgramLinkageInfo,
     has_packet_load_fn: bool,
     code: &mut Vec<EbpfInstruction>,
@@ -379,12 +380,12 @@ fn link_single_instruction(
                     }));
                 }
                 let map_index = imm as usize;
-                if map_index >= program.maps.len() || map_index >= linkage.maps.len() {
+                if map_index >= verified_program.maps.len() || map_index >= linkage.maps.len() {
                     return Err(LinkError::InvalidMapLinkage(MapLinkageError::InvalidMapIndex {
                         map_index,
                     }));
                 }
-                let schema = &program.maps[map_index];
+                let schema = &verified_program.maps[map_index];
                 let map = &linkage.maps[map_index];
 
                 let value = if src_reg == BPF_PSEUDO_MAP_IDX {
@@ -439,12 +440,12 @@ fn link_single_instruction(
 /// Links a verified eBPF program's instructions for a target process using `linkage` by
 /// updating struct access offsets/widths and resolving `BPF_LDDW` map pointers.
 pub fn link_instructions(
-    program: &VerifiedEbpfProgram,
+    verified_program: &VerifiedEbpfProgram,
     linkage: &ProgramLinkageInfo,
 ) -> Result<Vec<EbpfInstruction>, LinkError> {
-    if linkage.maps.len() != program.maps.len() {
+    if linkage.maps.len() != verified_program.maps.len() {
         return Err(LinkError::InvalidMapLinkage(MapLinkageError::MapCountMismatch {
-            expected: program.maps.len(),
+            expected: verified_program.maps.len(),
             actual: linkage.maps.len(),
         }));
     }
@@ -456,17 +457,17 @@ pub fn link_instructions(
 
     let mut code = Vec::new();
     let mut idx = 0;
-    while idx < program.code.len() {
-        code.push(program.code[idx]);
+    while idx < verified_program.code.len() {
+        code.push(verified_program.code[idx]);
         idx += 1;
     }
 
     // Update offsets in the instructions that access structs.
     let mut loop_err: Option<LinkError> = None;
     let mut sa_idx = 0;
-    while sa_idx < program.struct_access_instructions.len() && loop_err.is_none() {
+    while sa_idx < verified_program.struct_access_instructions.len() && loop_err.is_none() {
         match apply_struct_access_mapping(
-            &program.struct_access_instructions[sa_idx],
+            &verified_program.struct_access_instructions[sa_idx],
             &linkage.struct_mappings,
             &mut code,
         ) {
@@ -484,7 +485,8 @@ pub fn link_instructions(
 
     let mut pc = 0;
     while pc < code.len() && loop_err.is_none() {
-        match link_single_instruction(pc, program, linkage, has_packet_load_fn, &mut code) {
+        match link_single_instruction(pc, verified_program, linkage, has_packet_load_fn, &mut code)
+        {
             Ok(step) => {
                 pc += step;
             }

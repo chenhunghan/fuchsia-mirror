@@ -1,0 +1,110 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fxfs-mapper-integration-test"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
+rustc_test(
+    name = "fxfs_mapper_integration_test_bin",
+    srcs = ["src/mapper_integration_test.rs"],
+    crate_root = "src/mapper_integration_test.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+        "//sdk/fidl/fuchsia.storage.partitions:fuchsia.storage.partitions_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/storage/fidl/fuchsia.fs.startup:fuchsia.fs.startup_rust",
+        "//src/storage/fidl/fuchsia.storage.mapping:fuchsia.storage.mapping_rust",
+        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
+        "//src/storage/lib/blob_pager_and_verifier",
+        "//src/storage/lib/blob_writer:blob-writer",
+        "//src/storage/lib/block_client/rust:block-client",
+        "//src/storage/lib/block_matcher",
+        "//src/storage/lib/block_server/vmo_backed:test_vmo_backed_block_server",
+        "//src/storage/lib/delivery_blob",
+        "//src/storage/lib/fs_management/rust:fs_management",
+        "//src/storage/lib/mapping",
+        "//src/storage/lib/profile",
+        "//src/storage/lib/vmo-fifo",
+        "//src/sys/pkg/lib/fuchsia-merkle",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fxfs_mapper_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":fxfs_mapper_integration_test_bin",
+    binary_name = "fxfs_mapper_integration_test",
+)
+
+fx_component_manifest(
+    name = "fxfs-mapper-integration-test-manifest",
+    testonly = True,
+    component_name = "fxfs-mapper-integration-test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/storage/fs_test/meta:fxfs_crypt_test.shard",
+        "//src/storage/lib/fs_management:client.shard.cml",
+        "//src/sys/test_runners/rust:next-vdso.shard.cml",
+    ],
+    manifest = "meta/fxfs_mapper_integration_test.cml",
+)
+
+fx_test_component(
+    name = "fxfs-mapper-integration-test-component",
+    compiled_manifest = ":fxfs-mapper-integration-test-manifest",
+    test_type = "storage",
+    deps = [":fxfs_mapper_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "fxfs-mapper-integration-test-package",
+    package_name = "fxfs-mapper-integration-test",
+    components = [
+        "//src/storage/crypt/fxfs",
+        "//src/storage/fvm:fvm-component",
+        "//src/storage/fxfs:fxfs_component",
+        "//src/storage/gpt/component",
+    ],
+    test_components = [":fxfs-mapper-integration-test-component"],
+)
+
+fx_test(
+    name = "fxfs-mapper-integration-test",
+    environments = [
+        "//build/testing/environments:emu_env",
+        "//build/testing/environments:sorrel_env",
+    ],
+    package = ":fxfs-mapper-integration-test-package",
+)

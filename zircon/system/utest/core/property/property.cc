@@ -2,7 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/fit/defer.h>
+#include <lib/zx/channel.h>
+#include <lib/zx/exception.h>
+#include <lib/zx/process.h>
 #include <lib/zx/stream.h>
+#include <lib/zx/thread.h>
+#include <lib/zx/time.h>
 #include <lib/zx/vmo.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,8 +17,11 @@
 #include <threads.h>
 #include <zircon/process.h>
 #include <zircon/syscalls.h>
+#include <zircon/syscalls/exception.h>
 #include <zircon/syscalls/object.h>
 #include <zircon/threads.h>
+
+#include <thread>
 
 #include <zxtest/zxtest.h>
 
@@ -216,6 +225,93 @@ TEST(Property, NameWrongType) {
   ASSERT_OK(vmo.get_property(ZX_PROP_NAME, name, sizeof(name)));
   ASSERT_OK(vmo.set_property(ZX_PROP_NAME, name, sizeof(name)));
   ASSERT_OK(vmo.get_property(ZX_PROP_NAME, name, sizeof(name)));
+}
+
+TEST(Property, WrongTypeBeforeBufferTooSmall) {
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(zx_system_get_page_size(), 0, &vmo));
+
+  uint32_t buf = 0;
+
+  // Mismatched object types must fail with ZX_ERR_WRONG_TYPE even when the
+  // buffer size is smaller than the property's scalar type.
+  EXPECT_EQ(ZX_ERR_WRONG_TYPE, vmo.get_property(ZX_PROP_STREAM_MODE_APPEND, &buf, 0));
+  EXPECT_EQ(ZX_ERR_WRONG_TYPE, vmo.set_property(ZX_PROP_STREAM_MODE_APPEND, &buf, 0));
+  EXPECT_EQ(ZX_ERR_WRONG_TYPE, vmo.get_property(ZX_PROP_EXCEPTION_STATE, &buf, 0));
+  EXPECT_EQ(ZX_ERR_WRONG_TYPE, vmo.set_property(ZX_PROP_EXCEPTION_STATE, &buf, 0));
+  EXPECT_EQ(ZX_ERR_WRONG_TYPE, vmo.get_property(ZX_PROP_EXCEPTION_STRATEGY, &buf, 0));
+  EXPECT_EQ(ZX_ERR_WRONG_TYPE, vmo.set_property(ZX_PROP_EXCEPTION_STRATEGY, &buf, 0));
+
+  // Matching stream handle with an undersized buffer must fail with
+  // ZX_ERR_BUFFER_TOO_SMALL.
+  zx::stream stream;
+  ASSERT_OK(zx::stream::create(ZX_STREAM_MODE_WRITE, vmo, 0, &stream));
+  EXPECT_EQ(ZX_ERR_BUFFER_TOO_SMALL, stream.get_property(ZX_PROP_STREAM_MODE_APPEND, &buf, 0));
+  EXPECT_EQ(ZX_ERR_BUFFER_TOO_SMALL, stream.set_property(ZX_PROP_STREAM_MODE_APPEND, &buf, 0));
+
+  // Matching debugger exception handle with an undersized buffer must fail with
+  // ZX_ERR_BUFFER_TOO_SMALL.
+  zx::channel exc_channel;
+  ASSERT_OK(
+      zx::process::self()->create_exception_channel(ZX_EXCEPTION_CHANNEL_DEBUGGER, &exc_channel));
+
+  zx::exception exc;
+  zx::thread helper_thread;
+  std::thread helper([] {});
+  auto cleanup = fit::defer([&] {
+    // Close the exception channel before releasing the exception handle so
+    // ZX_EXCP_THREAD_EXITING is not delivered when the helper thread exits,
+    // then wait for kernel thread termination after join().
+    exc_channel.reset();
+    exc.reset();
+    if (helper.joinable()) {
+      helper.join();
+    }
+    if (helper_thread.is_valid()) {
+      EXPECT_OK(helper_thread.wait_one(ZX_THREAD_TERMINATED, zx::time::infinite(), nullptr));
+    }
+  });
+
+  ASSERT_OK(zx::unowned_thread(native_thread_get_zx_handle(helper.native_handle()))
+                ->duplicate(ZX_RIGHT_SAME_RIGHTS, &helper_thread));
+  zx_info_handle_basic_t helper_info = {};
+  ASSERT_OK(helper_thread.get_info(ZX_INFO_HANDLE_BASIC, &helper_info, sizeof(helper_info), nullptr,
+                                   nullptr));
+
+  // std::thread::join() in earlier tests returns once libc wakes the userspace
+  // lifecycle futex, before kernel zx_thread_exit() finishes. Drain any
+  // trailing ZX_EXCP_THREAD_EXITING packets from earlier threads until the
+  // helper thread's ZX_EXCP_THREAD_STARTING packet arrives.
+  zx_exception_info_t exc_info = {};
+  for (;;) {
+    zx_signals_t pending = 0;
+    ASSERT_OK(exc_channel.wait_one(ZX_CHANNEL_READABLE | ZX_CHANNEL_PEER_CLOSED,
+                                   zx::time::infinite(), &pending));
+    ASSERT_NE(0u, pending & ZX_CHANNEL_READABLE);
+
+    exc_info = {};
+    uint32_t nbytes = 0;
+    uint32_t nhandles = 0;
+    ASSERT_OK(exc_channel.read(0, &exc_info, exc.reset_and_get_address(), sizeof(exc_info), 1,
+                               &nbytes, &nhandles));
+    ASSERT_EQ(sizeof(exc_info), nbytes);
+    ASSERT_EQ(1u, nhandles);
+    if (exc_info.tid == helper_info.koid) {
+      break;
+    }
+    EXPECT_EQ(ZX_EXCP_THREAD_EXITING, exc_info.type);
+    exc.reset();
+  }
+  ASSERT_EQ(ZX_EXCP_THREAD_STARTING, exc_info.type);
+
+  EXPECT_EQ(ZX_ERR_BUFFER_TOO_SMALL,
+            exc.get_property(ZX_PROP_EXCEPTION_STATE, &buf, sizeof(uint32_t) - 1));
+  EXPECT_EQ(ZX_ERR_BUFFER_TOO_SMALL,
+            exc.set_property(ZX_PROP_EXCEPTION_STATE, &buf, sizeof(uint32_t) - 1));
+  EXPECT_EQ(ZX_ERR_BUFFER_TOO_SMALL,
+            exc.get_property(ZX_PROP_EXCEPTION_STRATEGY, &buf, sizeof(uint32_t) - 1));
+  EXPECT_EQ(ZX_ERR_BUFFER_TOO_SMALL,
+            exc.set_property(ZX_PROP_EXCEPTION_STRATEGY, &buf, sizeof(uint32_t) - 1));
 }
 
 }  // namespace

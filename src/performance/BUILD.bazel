@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    tests = [
+        "//src/performance/lib/fxt/rust/tests/goldens:host_tests",
+        "//src/performance/lib/perf_publish/tests:host_tests",
+        "//src/performance/trace2json:host_tests",
+    ],
+)
+
+test_suite(
+    name = "performance_tests",
+    tests = [
+        "//src/performance/lib/fxt:tests",
+        "//src/performance/lib/test_utils:tests",
+        "//src/performance/lib/trace_converters:tests",
+        "//src/performance/trace_session_manager:tests",
+    ],
+)

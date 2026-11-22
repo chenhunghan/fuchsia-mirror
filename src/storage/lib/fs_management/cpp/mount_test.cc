@@ -66,7 +66,6 @@ class RamdiskTestFixture : public testing::Test {
   }
 
   std::string ramdisk_path() const { return ramdisk_.path(); }
-  ramdisk_client_t* ramdisk_client() const { return ramdisk_.client(); }
 
   struct MountResult {
     FsComponent component;

@@ -9,13 +9,15 @@ pub mod resource;
 pub mod userabi_ffi;
 pub mod vdso;
 
-pub use userabi_ffi::HandoffEnd;
+pub use elf::{HandoffEnd, HandoffEndElf};
 pub use vdso::{VDso, valid_syscall_pc};
 
 use crate::counters::{
     ARENA_VMO_NAME, CounterArena, CounterDesc, DESCRIPTOR_VMO_NAME, define_kcounter,
 };
 use crate::crashlog::crashlog_stash;
+#[cfg(enable_entropy_collector_test)]
+use crate::crypto::entropy::{ENTROPY_VMO, ENTROPY_VMO_STREAM_SIZE, ENTROPY_WAS_LOST};
 use crate::instrumentation::InstrumentationData;
 use crate::object::{
     ChannelDispatcher, HandleOwner, InitialMutability, JobDispatcher, KernelHandle, LogDispatcher,
@@ -33,17 +35,15 @@ use core::ffi::{c_char, c_int, c_void};
 use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr::from_mut;
+#[cfg(enable_entropy_collector_test)]
+use core::sync::atomic::Ordering;
 use core::{mem, slice};
 use debug::{dprintf, kernel_oops};
 use elf::{initial_stack_pointer, map_handoff_elf};
 use fbl::{RefPtr, Vector};
 use page::SIZE as PAGE_SIZE;
 use resource::get_resource_handle;
-#[cfg(all(target_arch = "aarch64", debug_assertions))]
-use userabi_ffi::arm64_print_midr_cpu_name;
-use userabi_ffi::{HandoffEndElf, boot_options_show};
-#[cfg(enable_entropy_collector_test)]
-use userabi_ffi::{entropy_vmo, entropy_vmo_stream_size, entropy_was_lost};
+use userabi_ffi::boot_options_show;
 use zr::{defer, slice_from_raw_parts_mut};
 use zx_status::Status;
 #[cfg(target_arch = "x86_64")]
@@ -337,9 +337,7 @@ fn bootstrap_vmos(
     };
 
     // ZBI VMO
-    if let Some(zbi) = handoff_end.zbi {
-        push_handle(zbi);
-    }
+    push_handle(handoff_end.zbi);
 
     // vDSO VMOs & TimeValues
     let (vdso, mut vdso_kernel_handles, time_values_handle) = VDso::create(&handoff_end.vdso);
@@ -375,11 +373,17 @@ fn bootstrap_vmos(
 
     #[cfg(enable_entropy_collector_test)]
     {
-        if entropy_was_lost() {
+        if ENTROPY_WAS_LOST.load(Ordering::Relaxed) {
             return Err(Status::NO_MEMORY);
         }
-        let entropy_handle =
-            get_vmo_handle(entropy_vmo().as_deref(), true, entropy_vmo_stream_size())?;
+        // SAFETY: `setup_entropy_vmo` initializes `ENTROPY_VMO` at `LK_INIT_LEVEL_VM + 1` before
+        // `userboot_init` runs, and never mutates it afterwards.
+        let entropy_vmo = unsafe { (*ENTROPY_VMO.0.get()).as_deref().map(Deref::deref) };
+        let entropy_handle = get_vmo_handle(
+            entropy_vmo,
+            true,
+            ENTROPY_VMO_STREAM_SIZE.load(Ordering::Relaxed) as u64,
+        )?;
         push_handle(entropy_handle);
     }
 
@@ -404,11 +408,11 @@ fn bootstrap_vmos(
     {
         const MIDR_TXT: &[u8] = b"midr.txt";
         let mut midr_txt = VmoBuffer::new()?;
-        let midr_txt_file = File::new(&mut midr_txt);
+        let mut midr_txt_file = File::new(&mut midr_txt);
         #[cfg(all(target_arch = "aarch64", debug_assertions))]
-        arm64_print_midr_cpu_name(&midr_txt_file);
+        crate::arch_rs::arm64::arm64_print_midr_cpu_name(&mut midr_txt_file.file);
         #[cfg(not(all(target_arch = "aarch64", debug_assertions)))]
-        let _ = &midr_txt_file;
+        let _ = &mut midr_txt_file;
         if midr_txt.stream_size() > 0 {
             let _ = midr_txt.vmo().set_name(MIDR_TXT);
         }
@@ -427,7 +431,7 @@ fn bootstrap_vmos(
     }
 
     // Extra phys VMOs
-    for extra_vmo in handoff_end.extra_phys_vmos.into_iter().flatten() {
+    for extra_vmo in handoff_end.extra_phys_vmos {
         push_handle(extra_vmo);
     }
 
@@ -490,11 +494,14 @@ fn make_thread(
     process: RefPtr<ProcessDispatcher>,
 ) -> Result<(RefPtr<ThreadDispatcher>, HandleOwner), Status> {
     let (thread_handle, thread_rights) = ThreadDispatcher::create(process, 0, b"userboot")?;
-    thread_handle.dispatcher().initialize()?;
+    // SAFETY: The thread has not started running, and no chain lock transaction is active on this
+    // CPU.
+    unsafe { thread_handle.dispatcher().initialize() }?;
     let thread = thread_handle.dispatcher().clone();
     Ok((thread, HandleOwner::make(thread_handle, thread_rights).ok_or(Status::NO_MEMORY)?))
 }
 
+#[inline(never)]
 fn try_userboot_init(handoff_end: HandoffEnd) -> Result<(), Status> {
     // Create process.
     let status = ProcessDispatcher::create(get_root_job_dispatcher().clone(), b"userboot", 0);

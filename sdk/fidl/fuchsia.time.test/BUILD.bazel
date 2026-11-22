@@ -11,6 +11,5 @@ fidl_library(
     srcs = [
         "rtc.fidl",
     ],
-    enable_hlcpp = True,
     visibility = ["//visibility:public"],
 )

@@ -113,4 +113,36 @@ TEST(ObjectPool, PreinitializePolicy) {
   EXPECT_EQ(leak_count, 0U);
 }
 
+TEST(ObjectPool, BlockSizeGrowthCapsAtMaxShift) {
+  using Pool = ObjectPool<TestObj>;
+  EXPECT_EQ(64U, Pool::NumObjectsInBlock(0));
+  EXPECT_EQ(128U, Pool::NumObjectsInBlock(1));
+  EXPECT_EQ(256U, Pool::NumObjectsInBlock(2));
+  EXPECT_EQ(512U, Pool::NumObjectsInBlock(3));
+  EXPECT_EQ(1024U, Pool::NumObjectsInBlock(4));
+  EXPECT_EQ(1024U, Pool::NumObjectsInBlock(5));
+  EXPECT_EQ(1024U, Pool::NumObjectsInBlock(10));
+
+  // Allocate past the capped block 4 so `AllocateBlock()`, `GetCapacity()`, and
+  // `Clear()` all handle capped blocks 4 and 5 consistently.
+  size_t leak_count = 0;
+  ObjectPool<TestObj, TestObjPreinitializePolicy> pool(&leak_count);
+  constexpr size_t kAllocated = 64 + 128 + 256 + 512 + 1024 + 1;
+  std::vector<TestObj*> allocated;
+  allocated.reserve(kAllocated);
+  for (size_t i = 0; i < kAllocated; ++i) {
+    allocated.push_back(pool.Allocate());
+  }
+  EXPECT_EQ(6U, pool.num_blocks());
+  EXPECT_EQ(3008U, pool.GetCapacity());
+  EXPECT_EQ(3008U, leak_count);
+
+  for (TestObj* obj : allocated) {
+    pool.Free(obj);
+  }
+  EXPECT_EQ(0U, pool.UnfreedObjectCount());
+  pool.Clear();
+  EXPECT_EQ(0U, leak_count);
+}
+
 }  // namespace

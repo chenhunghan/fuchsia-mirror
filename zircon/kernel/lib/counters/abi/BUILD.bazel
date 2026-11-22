@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Note: The GN targets below the sentinel in BUILD.gn are auto-generated from
+# this file via `fx bazel2gn`. This library is used by the kernel build, which
+# stays on GN.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The layout of the kernel counter VMOs. The kernel's counters-rs checks these
+# definitions against the C++ <lib/counter-vmo-abi.h> using bindgen.
+rustc_library(
+    name = "counters-abi",
+    srcs = ["src/abi.rs"],
+    crate_root = "src/abi.rs",
+    edition = "2024",
+    visibility = [
+        "//src/zircon/bin/kcounter:__pkg__",
+        "//src/zircon/bin/kcounter/lib:__pkg__",
+        "//src/zircon/tests/kcounter:__pkg__",
+        "//zircon/kernel:__subpackages__",
+        "//zircon/system/ulib/kcounter:__subpackages__",
+    ],
+    deps = [
+        "//src/lib/zr",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

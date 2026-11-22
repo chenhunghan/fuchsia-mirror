@@ -8,12 +8,11 @@
 
 #include <lib/object-constants.h>
 
-#include <arch/hypervisor.h>
 #include <kernel/ffi.h>
 
-GuestDispatcher::GuestDispatcher(ktl::unique_ptr<Guest> guest) : Dispatcher(0u) {
+GuestDispatcher::GuestDispatcher(Guest* guest) : Dispatcher(0u) {
   DISPATCHER_VERIFY_OFFSET(GuestDispatcher, kGuestDispatcherStateOffset);
-  rust_guest_dispatcher_state_init(&opaque_storage_, this, guest.release());
+  rust_guest_dispatcher_state_init(&opaque_storage_, this, guest);
 }
 
 IMPLEMENT_DISPATCHER_RUST_STATE(GuestDispatcher, rust_guest_dispatcher_state_get_lock,

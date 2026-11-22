@@ -117,8 +117,8 @@ TEST(NaturalResponseWithHandle, Encode) {
   };
 
   // Set up an object.
-  test_types::MsgWrapperTestXUnionResponse response{
-      test_types::TestXUnion::WithH(std::move(event)),
+  test_types::MsgWrapperTestFlexibleUnionResponse response{
+      test_types::TestFlexibleUnion::WithH(std::move(event)),
   };
 
   // Perform encoding.
@@ -126,7 +126,7 @@ TEST(NaturalResponseWithHandle, Encode) {
   ASSERT_TRUE(result.message().ok(), "Error encoding: %s",
               result.message().error().FormatDescription().c_str());
   // Handles are moved.
-  ASSERT_EQ(test_types::TestXUnion::Tag::kH, response.result().Which());
+  ASSERT_EQ(test_types::TestFlexibleUnion::Tag::kH, response.result().Which());
   ASSERT_EQ(zx::handle(), response.result().h().value());
 
   // Check encoded bytes.

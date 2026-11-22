@@ -881,6 +881,26 @@ impl BuiltProcess {
 struct ReservationVmar(Option<zx::Vmar>);
 
 impl ReservationVmar {
+    /// Calculate the size of the low-address-space reservation for a VMAR with the given `base`
+    /// and `len`.
+    fn reservation_size(base: usize, len: usize) -> usize {
+        // (base+len) represents the full address space, assuming this is used with a root VMAR and
+        // length extends to the end of the address space, including a region the kernel reserves
+        // at the start of the space.
+        // TODO(https://fxbug.dev/42099306): Clean up address space reservation to avoid unnecessary
+        // reservations.
+        let full_aspace_midpoint = util::page_end((base + len) / 2);
+        if base < full_aspace_midpoint {
+            // Reserve the lower half of the full address space.
+            full_aspace_midpoint - base
+        } else {
+            // The VMAR does not intersect the lower half of the full address space (e.g. a
+            // top-half root VMAR in a ZX_PROCESS_SHARED process); reserve the lower half of the
+            // VMAR itself, matching ld::VmarBottomHalf in //sdk/lib/ld/include/lib/ld/vmar.h.
+            util::page_end(len / 2)
+        }
+    }
+
     /// Reserve the lower half of the address space of the given VMAR by allocating another VMAR.
     ///
     /// The VMAR wrapped by this reservation is automatically destroyed when the reservation
@@ -890,27 +910,14 @@ impl ReservationVmar {
             .info()
             .map_err(|s| ProcessBuilderError::GenericStatus("Failed to get VMAR info", s))?;
 
-        // Reserve the lower half of the full address space, not just half of the VMAR length.
-        // (base+len) represents the full address space, assuming this is used with a root VMAR and
-        // length extends to the end of the address space, including a region the kernel reserves
-        // at the start of the space.
-        // TODO(https://fxbug.dev/42099306): Clean up address space reservation to avoid unnecessary
-        // reservations, which should also avoid the "fake" reservation in the else-clause.
-        if let Some(reserve_size) =
-            util::page_end((info.base + info.len) / 2).checked_sub(info.base)
-        {
-            let (reserve_vmar, reserve_base) =
-                vmar.allocate(0, reserve_size, zx::VmarFlags::SPECIFIC).map_err(|s| {
-                    ProcessBuilderError::GenericStatus("Failed to allocate reservation VMAR", s)
-                })?;
-            assert_eq!(reserve_base, info.base, "Reservation VMAR allocated at wrong address");
+        let reserve_size = Self::reservation_size(info.base, info.len);
+        let (reserve_vmar, reserve_base) =
+            vmar.allocate(0, reserve_size, zx::VmarFlags::SPECIFIC).map_err(|s| {
+                ProcessBuilderError::GenericStatus("Failed to allocate reservation VMAR", s)
+            })?;
+        assert_eq!(reserve_base, info.base, "Reservation VMAR allocated at wrong address");
 
-            Ok(ReservationVmar(Some(reserve_vmar)))
-        } else {
-            // The VMAR does not intersect the "bottom half," so return a success but without an
-            // actual reservation.
-            Ok(ReservationVmar(None))
-        }
+        Ok(ReservationVmar(Some(reserve_vmar)))
     }
 
     /// Destroy the reservation. The reservation is also automatically destroyed when
@@ -1465,6 +1472,63 @@ mod tests {
             .root_vmar
             .allocate(0, lower_half_len, zx::VmarFlags::SPECIFIC)
             .context("Unable to allocate lower address range of new process")?;
+        Ok(())
+    }
+
+    #[test]
+    fn reservation_size_calculations() {
+        let page_size = zx::system_get_page_size() as usize;
+
+        // Standard full-address-space root VMAR with a kernel-reserved low region (2 MiB).
+        let kernel_reserved = 0x20_0000;
+        let full_aspace = 1usize << 47;
+        assert_eq!(
+            ReservationVmar::reservation_size(kernel_reserved, full_aspace - kernel_reserved),
+            (full_aspace / 2) - kernel_reserved,
+        );
+
+        // Top-half VMAR starting right at the address-space midpoint (base == full_aspace_midpoint).
+        let midpoint = 1usize << 46;
+        assert_eq!(ReservationVmar::reservation_size(midpoint, midpoint), midpoint / 2);
+
+        // Top-half VMAR with a 1-page guard gap above the midpoint (ZX_PROCESS_SHARED).
+        let shared_base = midpoint + page_size;
+        let shared_len = midpoint - 2 * page_size;
+        assert_eq!(
+            ReservationVmar::reservation_size(shared_base, shared_len),
+            (shared_len / 2).next_multiple_of(page_size),
+        );
+
+        // Top-half VMAR with an odd number of pages rounds half-length up to page boundary.
+        assert_eq!(
+            ReservationVmar::reservation_size(1000 * page_size, 3 * page_size),
+            2 * page_size,
+        );
+    }
+
+    // Checks that ReservationVmar::reserve_low_address_space allocates the lower half of a VMAR
+    // whose base equals the full-address-space midpoint (base == util::page_end((base + len) / 2)).
+    #[test]
+    fn reserve_low_address_space_at_midpoint() -> Result<(), Error> {
+        let job = fuchsia_runtime::job_default();
+        // Keep `_process` bound until the end of scope so `root_vmar` stays alive until
+        // `reservation` is dropped first.
+        let (_process, root_vmar) =
+            job.create_child_process(zx::ProcessOptions::empty(), b"midpoint_vmar_test")?;
+        let root_info = root_vmar.info()?;
+        let vmar_len = root_info.base * 2;
+        let (vmar, vmar_base) = root_vmar.allocate(
+            root_info.base,
+            vmar_len,
+            zx::VmarFlags::SPECIFIC | zx::VmarFlags::CAN_MAP_SPECIFIC,
+        )?;
+        assert_eq!(vmar_base, util::page_end((vmar_base + vmar_len) / 2));
+
+        let reservation = ReservationVmar::reserve_low_address_space(&vmar)?;
+        let reserve_vmar = reservation.0.as_ref().expect("expected reservation VMAR");
+        let reserve_info = reserve_vmar.info()?;
+        assert_eq!(reserve_info.base, vmar_base);
+        assert_eq!(reserve_info.len, util::page_end(vmar_len / 2));
         Ok(())
     }
 

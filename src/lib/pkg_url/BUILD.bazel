@@ -20,7 +20,7 @@ fx_cc_library(
     ],
     implementation_deps = [
         "//sdk/lib/stdcompat",
-        "@re2",
+        "//third_party/re2",
     ],
     visibility = ["//src/sys/fuzzing/common:__pkg__"],
     deps = ["//src/lib/fxl"],
@@ -45,6 +45,5 @@ fx_cc_binary(
 
 fx_unittest_package(
     name = "pkg_url_unittests",
-    package_name = "pkg_url_unittests",
     unit_tests = [":tests"],
 )

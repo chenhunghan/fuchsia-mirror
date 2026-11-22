@@ -3,11 +3,21 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
-# TODO(https://fxbug.dev/571945302): Migrate the unit tests, which remain in
-# BUILD.gn.
+# BUILD.gn keeps a hand-written group("tests") that also includes bt-hfp-tests.
+# @bazel2gn:skip
+test_suite(
+    name = "tests",
+    tests = [":bt-hfp-a2dp-controller-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/571945302): Migrate the library unit tests
+# (`bt-hfp-tests`), which remain in BUILD.gn.
 rustc_library(
     name = "bt-hfp",
     srcs = [
@@ -68,4 +78,33 @@ rustc_library(
         "//third_party/rust_crates/vendor:log",
         "//third_party/rust_crates/vendor:thiserror",
     ],
+)
+
+rustc_test(
+    name = "bt_hfp_a2dp_controller_tests",
+    srcs = ["src/a2dp.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_features = ["test_a2dp_controller"],
+    crate_root = "src/a2dp.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth.internal.a2dp:fuchsia.bluetooth.internal.a2dp_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/lib/async-utils",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fx_unittest_package(
+    name = "bt-hfp-a2dp-controller-tests",
+    unit_tests = [":bt_hfp_a2dp_controller_tests"],
 )

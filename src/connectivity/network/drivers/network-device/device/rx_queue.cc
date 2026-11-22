@@ -164,7 +164,6 @@ void RxQueue::PurgeSession() {
     auto b = available_queue_->Pop();
     in_flight_->Free(b);
   }
-  session_->MarkRxPurged();
 }
 
 std::tuple<RxQueue::InFlightBuffer*, uint32_t> RxQueue::GetBuffer() {
@@ -484,13 +483,15 @@ void RxQueue::SetRxBufferManagement(const netdriver::RxBufferManagement& managem
     __TA_REQUIRES(parent_->rx_lock()) {
   auto new_estimator = RxBufferEstimatorFromFidl(management);
 
-  bool request_rx_space = false;
   if (new_estimator) {
     uint16_t default_min =
         rx_vmo_state_.vmos.is_empty() ? 0 : rx_vmo_state_.vmos.begin()->num_rx_buffers;
     rx_vmo_state_.min_buffers = parent_->info().min_rx_buffers().value_or(
         parent_->info().rx_threshold().value_or(default_min));
-    request_rx_space = SetTargetRxBuffersIfMore(rx_vmo_state_.min_buffers);
+    // Callers of SetRxBufferManagement already invoke RequestRxSpace() (or
+    // TriggerSessionChanged()) afterwards, and RequestRxSpace() cannot be
+    // called directly here because it acquires `control_lock_`.
+    (void)SetTargetRxBuffersIfMore(rx_vmo_state_.min_buffers);
   } else {
     rx_vmo_state_.min_buffers = rx_vmo_state_.target_available_buffers =
         rx_vmo_state_.total_buffers;

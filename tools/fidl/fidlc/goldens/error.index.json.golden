@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/error.test.fidl",
       "data": "test.error",
       "start_offset": 8,
       "end_offset": 18
@@ -52,7 +52,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/error.test.fidl",
             "data": "s",
             "start_offset": 79,
             "end_offset": 80
@@ -71,7 +71,7 @@
           "name": "y",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/error.test.fidl",
             "data": "y",
             "start_offset": 117,
             "end_offset": 118
@@ -88,7 +88,7 @@
       "identifier": "test.error/Example",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/error.test.fidl",
         "data": "Example",
         "start_offset": 37,
         "end_offset": 44
@@ -98,7 +98,7 @@
           "identifier": "foo",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/error.test.fidl",
             "data": "foo",
             "start_offset": 58,
             "end_offset": 61

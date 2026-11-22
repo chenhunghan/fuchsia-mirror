@@ -33,10 +33,9 @@ class CodecAdapterSWDummy : public CodecAdapterSW<fit::deferred_action<fit::clos
     in_use_by_client_[nullptr] = fit::defer(std::move(deferred));
   }
 
-  fuchsia_sysmem2::BufferCollectionConstraints CoreCodecGetBufferCollectionConstraints2(
-      CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-      const fuchsia::media::StreamBufferPartialSettings& partial_settings) override {
-    return fuchsia_sysmem2::BufferCollectionConstraints();
+  std::optional<CoreCodecGetBufferCollectionConstraints3Result>
+  CoreCodecGetBufferCollectionConstraints3(CodecPort port) override {
+    return CoreCodecGetBufferCollectionConstraints3Result{};
   }
 
   void CoreCodecSetBufferCollectionInfo(
@@ -48,9 +47,9 @@ class CodecAdapterSWDummy : public CodecAdapterSW<fit::deferred_action<fit::clos
 
   void CleanUpAfterStream() __TA_EXCLUDES(lock_) override {}
 
-  std::pair<fuchsia::media::FormatDetails, size_t> OutputFormatDetails()
+  std::pair<fuchsia_media::FormatDetails, size_t> OutputFormatDetails()
       __TA_EXCLUDES(lock_) override {
-    return {fuchsia::media::FormatDetails(), 0};
+    return {fuchsia_media::FormatDetails(), 0};
   }
 };
 

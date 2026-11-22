@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = [":license"])
+
+# Third-party license targets (per README.fuchsia) are Bazel-only and have no GN equivalent.
+# @bazel2gn:skip
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:MIT"],
+    license_text = "src/LICENSE",
+)
+
+# GN python_library() lists type-hint files (py.typed, .pyi) in sources rather
+# than data.
+# @bazel2gn:raw_attribute:sources += [ "src/src/typing_inspection/py.typed", "src/src/typing_inspection/typing_objects.pyi" ]
+py_library(
+    name = "typing_inspection",
+    srcs = [
+        "src/src/typing_inspection/__init__.py",
+        "src/src/typing_inspection/introspection.py",
+        "src/src/typing_inspection/typing_objects.py",
+    ],
+    # Non-.py files (py.typed, .pyi) are passed via data in Bazel and added to GN sources via raw_attribute.
+    # @bazel2gn:skip
+    data = [
+        "src/src/typing_inspection/py.typed",
+        "src/src/typing_inspection/typing_objects.pyi",
+    ],
+    imports = ["src/src"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//third_party/pylibs/pydantic:__pkg__",
+    ],
+)

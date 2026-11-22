@@ -21,13 +21,19 @@ namespace {
 // A repeated message is folded into an earlier line if that line is this recent.
 constexpr size_t kFoldWindow = 16;
 
-// Whether the last moniker segment belongs to a storage or suspend component. Drivers look like
-// "boot-drivers:ufs-3c400000". The Starnix kernels ("kernels:...") don't count.
+// Whether the last moniker segment belongs to a storage, suspend, or bus dependency component.
+// Drivers look like "boot-drivers:ufs-3c400000" (prefix "ufs" also covers "ufs-phy-..."). The
+// Starnix kernels ("kernels:...") don't count.
 bool IsStorageComponent(std::string_view segment) {
   constexpr std::string_view kComponents[] = {
-      "fshost", "fxfs", "system-activity-governor", "power-broker", "starnix_runner",
+      "fshost", "fxfs", "pkg-cache", "system-activity-governor", "power-broker", "starnix_runner",
   };
-  constexpr std::string_view kDrivers[] = {"ufs", "sdmmc", "nvme"};
+  constexpr std::string_view kDrivers[] = {
+      "ufs",
+      "sdmmc",
+      "nvme",
+      "interconnect",
+  };
   if (std::ranges::any_of(kComponents, [&](auto name) { return segment.starts_with(name); })) {
     return true;
   }
@@ -284,6 +290,49 @@ std::vector<std::string> InspectLines(std::span<const std::string> batches,
   return lines;
 }
 
+std::string FormatTaskRuntimeDelta(const TaskRuntimeSample& before,
+                                   const TaskRuntimeSample& after) {
+  struct Counter {
+    const char* label;
+    int64_t before_ns;
+    int64_t after_ns;
+  };
+  const Counter counters[] = {
+      {.label = "cpu", .before_ns = before.cpu_ns, .after_ns = after.cpu_ns},
+      {.label = "queue", .before_ns = before.queue_ns, .after_ns = after.queue_ns},
+      {.label = "page_fault", .before_ns = before.page_fault_ns, .after_ns = after.page_fault_ns},
+      {
+          .label = "lock_contention",
+          .before_ns = before.lock_contention_ns,
+          .after_ns = after.lock_contention_ns,
+      },
+  };
+  std::string out;
+  char buf[48];
+  for (const Counter& counter : counters) {
+    if (counter.before_ns < 0 || counter.after_ns <= counter.before_ns) {
+      continue;
+    }
+    const int64_t delta_ns = counter.after_ns - counter.before_ns;
+    if (!out.empty()) {
+      out += ' ';
+    }
+    if (delta_ns < 100'000) {
+      const int64_t us = std::max<int64_t>(1, (delta_ns + 500) / 1'000);
+      snprintf(buf, sizeof(buf), "%s=+%" PRId64 "us", counter.label, us);
+    } else {
+      snprintf(buf, sizeof(buf), "%s=+%.1fms", counter.label,
+               static_cast<double>(delta_ns) / 1'000'000.0);
+    }
+    out += buf;
+  }
+  return out;
+}
+
+size_t DebuglogCost(std::string_view text) {
+  return text.size() + (kDebuglogRecordHeader * std::ranges::count(text, '\n'));
+}
+
 size_t DebuglogCost(std::span<const std::string> lines) {
   size_t cost = 0;
   for (const std::string& line : lines) {
@@ -301,6 +350,17 @@ std::span<const std::string> NewestWithinBudget(std::span<const std::string> lin
     }
   }
   return lines.subspan(first);
+}
+
+std::span<const std::string> FirstWithinBudget(std::span<const std::string> texts, size_t budget) {
+  size_t count = 0;
+  for (size_t cost = 0; count < texts.size(); count++) {
+    cost += DebuglogCost(std::string_view(texts[count]));
+    if (cost > budget) {
+      break;
+    }
+  }
+  return texts.first(count);
 }
 
 }  // namespace storage_watchdog

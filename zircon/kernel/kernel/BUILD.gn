@@ -14,31 +14,14 @@ source_set("kernel") {
   public_deps = [ ":headers" ]
 
   sources = [
-    "brwlock.cc",
     "cpu_distance_map.cc",
     "cpu_distance_map_ffi.cc",
-    "cpu_search_set.cc",
-    "cpu_search_set_ffi.cc",
-    "idle_power_thread_ffi.cc",
-    "init.cc",
-    "interrupt_ffi.cc",
     "koid_ffi.cc",
     "mp_ffi.cc",
-    "mutex.cc",
-    "owned_wait_queue.cc",
-    "owned_wait_queue_ffi.cc",
     "restricted_ffi.cc",
-    "rppm_ffi.cc",
     "scheduler.cc",
     "scheduler_ffi.cc",
-    "scheduler_pi.cc",
-    "scheduler_state.cc",
-    "scheduler_state_ffi.cc",
-    "stats_ffi.cc",
-    "task_runtime_stats.cc",
-    "thread.cc",
     "thread_ffi.cc",
-    "timer.cc",
     "timer_ffi.cc",
     "wait.cc",
     "wait_ffi.cc",
@@ -49,9 +32,7 @@ source_set("kernel") {
     "//src/lib/lazy_init",
     "//zircon/kernel/dev/interrupt",
     "//zircon/kernel/dev/pdev/hw_watchdog",
-    "//zircon/kernel/dev/pdev/power:headers",
     "//zircon/kernel/lib/arch",
-    "//zircon/kernel/lib/boot-options:headers",
     "//zircon/kernel/lib/console",
     "//zircon/kernel/lib/control-region",
     "//zircon/kernel/lib/counters",
@@ -70,16 +51,12 @@ source_set("kernel") {
     "//zircon/kernel/lib/page-map",
     "//zircon/kernel/lib/power-management",
     "//zircon/kernel/lib/sched",
-    "//zircon/kernel/lib/stall",
-    "//zircon/kernel/lib/thread_sampler",
     "//zircon/kernel/lib/topology",
     "//zircon/kernel/lib/userabi",
-    "//zircon/kernel/lib/wake-vector",
     "//zircon/kernel/object",
     "//zircon/kernel/vm",
     "//zircon/system/ulib/affine",
     "//zircon/system/ulib/explicit-memory",
-    "//zircon/system/ulib/pretty",
     "//zircon/system/ulib/zircon-internal",
     "//zircon/system/ulib/zx",
   ]
@@ -87,22 +64,6 @@ source_set("kernel") {
 
 library_headers("headers") {
   headers = []
-}
-
-source_set("tests") {
-  testonly = true
-  sources = [ "mutex_tests.cc" ]
-  deps = [
-    "//zircon/kernel/lib/arch",
-    "//zircon/kernel/lib/console",
-    "//zircon/kernel/lib/unittest",
-    "//zircon/system/ulib/zircon-internal",
-  ]
-}
-
-group("kernel-tests") {
-  testonly = true
-  deps = [ ":tests" ]
 }
 
 kernel_bindgen_crate("event-bindings") {
@@ -146,81 +107,50 @@ kernel_bindgen_crate("percpu-bindings") {
   notice_year = 2026
 
   function_blocklist = [ ".*" ]
+  var_allowlist = [ "PerCpuStdoutStateLayout_k.*" ]
 
   type_allowlist = [
     "percpu",
+    "OpaqueStorage",
     "ktl::atomic",
     "std::atomic",
     "guest_stats",
     "cpu_stats",
-    "TimerQueue",
     "CpuSearchSet",
     "Scheduler",
-    "IdlePowerThread",
-    "DpcRunner",
     "vm_page_counts",
     "vm_page_counts_t",
-    "Timer",
-    "StallAccumulator",
-    "PlatformCpuResumeState",
-    "lockdep::ThreadLockState",
+    "PerCpuStdoutState",
     "ChainLockTransaction",
   ]
   type_blocklist = [
     "zx_duration_mono_t",
     "zx_instant_mono_t",
-    "TimerQueue_.*",
-    "CpuSearchSet_.*",
     "Scheduler_.*",
-    "IdlePowerThread_.*",
-    "DpcRunner_.*",
-    "Timer_.*",
-    "StallAccumulator_.*",
-    "PlatformCpuResumeState_.*",
+    "PerCpuStdoutState_.*",
     "ChainLockTransaction_.*",
   ]
   opaque_types = [
-    "TimerQueue",
+    "OpaqueStorage",
     "CpuSearchSet",
     "Scheduler",
-    "IdlePowerThread",
-    "DpcRunner",
-    "Timer",
-    "StallAccumulator",
-    "PlatformCpuResumeState",
+    "PerCpuStdoutState",
     "ktl::atomic",
     "std::atomic",
-    "lockdep::ThreadLockState",
     "vm_page_counts",
     "ChainLockTransaction",
   ]
-  additional_bindgen_flags = [
-    "--no-recursive-allowlist",
-    "--with-derive-default",
-  ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
   deps = [ "//sdk/rust/zx-types" ]
-  expect_lints = [ "non_camel_case_types" ]
+  expect_lints = [
+    "non_camel_case_types",
+    "non_upper_case_globals",
+  ]
   raw_lines = [
     "#![no_std]",
     "pub use zx_types::{zx_duration_mono_t, zx_instant_mono_t};",
     "pub type ulong = ::core::ffi::c_ulong;",
   ]
-}
-
-kernel_bindgen_crate("thread-lock-guard-bindings") {
-  visibility = [ "//zircon/kernel/*" ]
-  headers = [ "//zircon/kernel/include/kernel/thread_ffi.h" ]
-  non_rust_deps = [ ":kernel" ]
-  output_name = "thread_lock_guard_bindings.rs"
-  cpp = true
-
-  edition = "2024"
-  notice_year = 2026
-  type_allowlist = [ "ThreadLockGuard" ]
-  opaque_types = [ "ThreadLockGuard" ]
-  function_blocklist = [ "ThreadLockGuard_.*" ]
-  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  raw_lines = [ "#![no_std]" ]
 }
 
 kernel_bindgen_crate("thread-layout-bindings") {
@@ -238,6 +168,7 @@ kernel_bindgen_crate("thread-layout-bindings") {
     "PreemptionStateLayout_k.*",
     "TaskStateLayout_k.*",
     "MemoryAllocationStateLayout_k.*",
+    "ThreadLinebufferLayout_k.*",
   ]
   type_allowlist = [
     "Thread.*Storage",
@@ -257,33 +188,26 @@ kernel_bindgen_crate("wait-queue-bindings") {
   cpp = true
 
   notice_year = 2026
-  function_allowlist = [ "cpp_wait_queue_.*" ]
   type_allowlist = [
     "ResourceOwnership",
     "Interruptible",
-    "ForceInheritance",
     "WaitQueueCollection",
     "WaitQueueCollection::ThreadState",
     "WaitQueueCollection_ThreadState",
     "WaitQueueBase",
     "WaitQueue",
-    "SchedulerState::EffectiveProfile",
-    "SchedulerState_EffectiveProfile",
     "SchedulerState::WaitQueueInheritedSchedulerState",
     "SchedulerState_WaitQueueInheritedSchedulerState",
   ]
   var_allowlist = [ "WaitQueue_kMagic" ]
   var_blocklist = [ "WaitQueueCollection_kPrimaryKeyZero" ]
   opaque_types = [
-    "SchedulerState::EffectiveProfile",
-    "SchedulerState_EffectiveProfile",
     "SchedulerState::WaitQueueInheritedSchedulerState",
     "SchedulerState_WaitQueueInheritedSchedulerState",
   ]
   rustified_enum = [
     "ResourceOwnership",
     "Interruptible",
-    "ForceInheritance",
   ]
   type_blocklist = [
     "Deadline",
@@ -302,7 +226,6 @@ kernel_bindgen_crate("wait-queue-bindings") {
     "WaitQueueCollection_.*",
     "WaitQueueBase_.*",
     "WaitQueue_.*",
-    "SchedulerState_EffectiveProfile_.*",
     "SchedulerState_WaitQueueInheritedSchedulerState_.*",
   ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
@@ -319,102 +242,6 @@ kernel_bindgen_crate("wait-queue-bindings") {
     "pub type Thread = core::ffi::c_void;",
     "pub type Timer = core::ffi::c_void;",
   ]
-}
-
-kernel_bindgen_crate("owned-wait-queue-bindings") {
-  visibility = [ "//zircon/kernel/*" ]
-  headers = [ "//zircon/kernel/include/kernel/owned_wait_queue.h" ]
-  non_rust_deps = [ ":kernel" ]
-  cpp = true
-
-  notice_year = 2026
-  function_allowlist = [
-    "cpp_owned_wait_queue_.*",
-    "cpp_thread_unblock_list_.*",
-  ]
-  type_allowlist = [
-    "WaitQueueBase",
-    "OwnedWaitQueue",
-    "OwnedWaitQueue::BAAOLockingDetails",
-    "OwnedWaitQueue_BAAOLockingDetails",
-    "OwnedWaitQueue::IWakeRequeueHook",
-    "OwnedWaitQueue_IWakeRequeueHook",
-    "OwnedWaitQueue::WakeThreadsResult",
-    "OwnedWaitQueue_WakeThreadsResult",
-    "OwnedWaitQueue::WakeOption",
-    "OwnedWaitQueue_WakeOption",
-    "ResourceOwnership",
-    "Interruptible",
-    "ForceInheritance",
-    "SchedulerState::EffectiveProfile",
-    "SchedulerState_EffectiveProfile",
-    "Thread::UnblockList",
-    "Thread_UnblockList",
-  ]
-  var_allowlist = [ "OwnedWaitQueue_kOwnedMagic" ]
-  var_blocklist = [ "OwnedWaitQueue_default_wake_hooks_" ]
-  opaque_types = [
-    "WaitQueueBase",
-    "OwnedWaitQueue::IWakeRequeueHook",
-    "OwnedWaitQueue_IWakeRequeueHook",
-    "SchedulerState::EffectiveProfile",
-    "SchedulerState_EffectiveProfile",
-    "Thread::UnblockList",
-    "Thread_UnblockList",
-  ]
-  rustified_enum = [
-    "OwnedWaitQueue::WakeOption",
-    "OwnedWaitQueue_WakeOption",
-    "ResourceOwnership",
-    "Interruptible",
-    "ForceInheritance",
-  ]
-  type_blocklist = [
-    "WaitQueueBase_.*",
-    "OwnedWaitQueue_DefaultWakeHooks",
-    "Deadline",
-    "SchedulerState_BaseProfile",
-    "SchedulerState_WaitQueueInheritedSchedulerState",
-    "Thread",
-    "zx_status_t",
-  ]
-  function_blocklist = [
-    "WaitQueueBase_.*",
-    "OwnedWaitQueue_.*",
-    "SchedulerState_EffectiveProfile_.*",
-  ]
-  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  deps = [ "//sdk/rust/zx-types" ]
-  expect_lints = [
-    "non_camel_case_types",
-    "non_upper_case_globals",
-  ]
-  raw_lines = [
-    "#![no_std]",
-    "pub use zx_types::zx_status_t;",
-    "pub type Deadline = core::ffi::c_void;",
-    "pub type Thread = core::ffi::c_void;",
-    "pub type SchedulerState_BaseProfile = core::ffi::c_void;",
-    "pub type SchedulerState_WaitQueueInheritedSchedulerState = core::ffi::c_void;",
-  ]
-}
-
-kernel_bindgen_crate("owned-wait-queue-pool-bindings") {
-  visibility = [ "//zircon/kernel/*" ]
-  headers = [ "//zircon/kernel/include/kernel/owned_wait_queue_pool.h" ]
-  non_rust_deps = [ ":kernel" ]
-  cpp = true
-
-  edition = "2024"
-  notice_year = 2026
-
-  # Layout contract only: the Rust `OwnedWaitQueuePool` asserts its size and
-  # alignment against the C++ `OwnedWaitQueuePool`.
-  type_allowlist = [ "OwnedWaitQueuePool" ]
-  opaque_types = [ "OwnedWaitQueuePool" ]
-  function_blocklist = [ ".*" ]
-  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  raw_lines = [ "#![no_std]" ]
 }
 
 kernel_bindgen_crate("mp-unplug-event-bindings") {
@@ -440,73 +267,22 @@ kernel_bindgen_crate("mp-unplug-event-bindings") {
   raw_lines = [ "#![no_std]" ]
 }
 
-kernel_bindgen_crate("idle-power-thread-bindings") {
-  visibility = [ "//zircon/kernel/*" ]
-  headers = [ "//zircon/kernel/include/kernel/idle_power_thread_layout.h" ]
-  non_rust_deps = [ ":kernel" ]
-  cpp = true
-
-  notice_year = 2026
-
-  function_blocklist = [ ".*" ]
-  var_allowlist = [ "IdlePowerThreadLayout_k.*" ]
-  type_allowlist = [ "IdlePowerThreadTransitionResult" ]
-  type_blocklist = [ "zx_status_t" ]
-  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  deps = [ "//sdk/rust/zx-types" ]
-  expect_lints = [ "non_upper_case_globals" ]
-  raw_lines = [
-    "#![no_std]",
-    "pub use zx_types::zx_status_t;",
-  ]
-}
-
-kernel_bindgen_crate("semaphore-bindings") {
-  visibility = [ "//zircon/kernel/*" ]
-  headers = [ "//zircon/kernel/include/kernel/semaphore.h" ]
-  non_rust_deps = [ ":kernel" ]
-  cpp = true
-
-  edition = "2024"
-  notice_year = 2026
-
-  # Layout contract only: the Rust `Semaphore` asserts its size, alignment and
-  # field offsets against the C++ `Semaphore`.
-  type_allowlist = [
-    "Semaphore",
-    "WaitQueue",
-    "std::atomic",
-  ]
-  opaque_types = [
-    "WaitQueue",
-    "std::atomic",
-  ]
-  function_blocklist = [ ".*" ]
-  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  expect_lints = [ "non_camel_case_types" ]
-  raw_lines = [ "#![no_std]" ]
-}
-
 kernel_bindgen_crate("mutex-bindings") {
   visibility = [ "//zircon/kernel/*" ]
-  headers = [ "//zircon/kernel/include/kernel/mutex_layout.h" ]
+  headers = [ "//zircon/kernel/include/kernel/mutex.h" ]
   non_rust_deps = [ ":kernel" ]
   cpp = true
 
   notice_year = 2026
 
-  # Layout contract only: the opaque `Mutex`/`CriticalMutex` types (for FFI
-  # pointer signatures) and the `MutexLayout` constants the Rust `Mutex` and
-  # `CriticalMutex` assert their layout and constants against.
-  #
-  # The C++ types are opaque because bindgen does not apply the empty base
-  # optimization to the `spin_tracing::LockNameStorage` base of `Mutex` (a class
-  # template specialized on a non-type `bool` parameter): when both scheduler
-  # lock spin tracing and lock name tracing are disabled, it emits the empty
-  # base as a 1-byte `_base` field, shifting every field offset and producing an
-  # underflowed trailing padding array.
+  # Layout contract only: the Rust `Mutex` and `CriticalMutex` assert their
+  # size, alignment, and constants against the C++ `Mutex` and `CriticalMutex`
+  # facades.
   function_blocklist = [ ".*" ]
-  var_allowlist = [ "MutexLayout_k.*" ]
+  var_allowlist = [
+    "Mutex_SPIN_MAX_DURATION",
+    "Mutex_DEFAULT_TIMESLICE_EXTENSION",
+  ]
   type_allowlist = [
     "Mutex",
     "CriticalMutex",
@@ -538,19 +314,23 @@ kernel_rust_mod("kernel-rs") {
     "align.rs",
     "auto_preempt_disabler.rs",
     "bits.rs",
+    "brwlock.rs",
     "cpu_distance_map.rs",
     "cpu_search_set.rs",
     "deadline.rs",
     "debug.rs",
+    "deferred_deleter.rs",
     "dpc.rs",
     "event.rs",
     "event_limiter.rs",
     "idle_power_thread.rs",
+    "init.rs",
     "intensive_thread_test.rs",
     "interrupt.rs",
     "koid.rs",
     "lazy_owned_wait_queue.rs",
     "lock_trace.rs",
+    "loop_limiter.rs",
     "mod.rs",
     "mp.rs",
     "mutex.rs",
@@ -567,6 +347,7 @@ kernel_rust_mod("kernel-rs") {
     "spin_tracing.rs",
     "spinlock.rs",
     "stats.rs",
+    "task_runtime_stats.rs",
     "task_runtime_timers.rs",
     "thread.rs",
     "timer.rs",
@@ -575,15 +356,10 @@ kernel_rust_mod("kernel-rs") {
   ]
   deps = [
     ":event-bindings",
-    ":idle-power-thread-bindings",
     ":mp-unplug-event-bindings",
     ":mutex-bindings",
-    ":owned-wait-queue-bindings",
-    ":owned-wait-queue-pool-bindings",
     ":percpu-bindings",
-    ":semaphore-bindings",
     ":thread-layout-bindings",
-    ":thread-lock-guard-bindings",
     ":wait-queue-bindings",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
@@ -598,6 +374,7 @@ kernel_rust_mod("kernel-rs") {
     "//third_party/rust_crates:bitflags",
     "//third_party/rust_crates:paste",
     "//third_party/rust_crates:pin-init",
+    "//third_party/rust_crates:zerocopy",
     "//zircon/kernel/lib/arch:arch-rs",
     "//zircon/kernel/lib/backtrace:backtrace-rs",
     "//zircon/kernel/lib/boot-options:boot-options-rs",
@@ -607,10 +384,12 @@ kernel_rust_mod("kernel-rs") {
     "//zircon/kernel/lib/object-constants:object-constants-rs",
     "//zircon/kernel/lib/object_cache:object_cache-rs",
     "//zircon/kernel/lib/page:page-rs",
+    "//zircon/kernel/lib/stall:stall_rs",
     "//zircon/kernel/lib/suspend_wakeup_timer:suspend_wakeup_timer-rs",
     "//zircon/kernel/lib/wake-vector:wake-vector-rs",
     "//zircon/system/ulib/affine/rust:affine",
     "//zircon/system/ulib/fbl/rust:fbl",
+    "//zircon/system/ulib/pretty/rust:pretty",
   ]
   test_deps = [
     "//third_party/rust_crates:rand",

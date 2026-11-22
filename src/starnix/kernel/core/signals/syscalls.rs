@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use std::sync::Arc;
+
 pub use super::signal_handling::sys_restart_syscall;
 use super::signalfd::SignalFd;
 use crate::mm::MemoryAccessorExt;
@@ -328,16 +330,14 @@ pub fn sys_rt_sigtimedwait(
 
             waiter = Waiter::new();
             task_state.wait_on_signal(&waiter);
+            // A new signal is enqueued when it's masked in the SignalState. So we need to invert
+            // the SigSet to block them.
+            let tmp_mask = task_state.signal_mask() & !unblock;
+            task_state.set_temporary_signal_mask(tmp_mask);
         }
 
-        // A new signal is enqueued when it's masked in the SignalState. So we need to invert
-        // the SigSet to block them.
-        let tmp_mask = current_task.read().signal_mask() & !unblock;
-
         // Wait for a timeout or a new signal.
-        let waiter_result = current_task.wait_with_temporary_mask(tmp_mask, |current_task| {
-            waiter.wait_until(current_task, deadline)
-        });
+        let waiter_result = waiter.wait_until(current_task, deadline);
 
         // Restore mask after timeout or get a new signal.
         current_task.write().restore_signal_mask();
@@ -845,14 +845,15 @@ impl WaitingOptions {
 /// - `pid`: The id of the task to wait on.
 /// - `options`: The options passed to the wait syscall.
 fn wait_on_pid(
-    current_task: &CurrentTask,
+    current_task: &mut CurrentTask,
     selector: &ProcessSelector,
     options: &WaitingOptions,
 ) -> Result<Option<WaitResult>, Errno> {
     let waiter = Waiter::new();
+    let kernel = Arc::clone(current_task.kernel());
     loop {
         {
-            let mut pids = current_task.kernel().pids.lock();
+            let mut pids = kernel.pids.lock();
             // Waits and notifies on a given task need to be done atomically
             // with respect to changes to the task's waitable state; otherwise,
             // we see missing notifications. We do that by holding the task lock.
@@ -862,13 +863,13 @@ fn wait_on_pid(
             // task lock.  We therefore have to check to see if a tracee has
             // become waitable again, after we acquire the lock.
             if let Some(tracee) =
-                current_task.thread_group().get_waitable_ptracee(selector, options, &mut pids)
+                current_task.ptrace().get_waitable_ptracee(selector, options, &mut pids)
             {
                 return Ok(Some(tracee));
             }
             let mut has_waitable_tracee = false;
             let mut has_any_tracee = false;
-            current_task.thread_group().get_ptracees_and(
+            current_task.ptrace().get_ptracees_and(
                 selector,
                 &mut |task: &Task, task_state: &TaskMutableState| {
                     if let Some(ptrace) = &task_state.ptrace {
@@ -928,7 +929,7 @@ fn wait_on_pid(
 /// # Returns
 /// `Ok(())` on success. Otherwise, returns an `Errno` with the error code.
 pub fn sys_waitid(
-    current_task: &CurrentTask,
+    current_task: &mut CurrentTask,
     id_type: u32,
     id: i32,
     user_info: MultiArchUserRef<uapi::siginfo_t, uapi::arch32::siginfo_t>,
@@ -1020,7 +1021,7 @@ pub fn sys_waitid(
 /// On success, returns the PID of the process that changed state, or 0 if `WNOHANG` was
 /// specified and no child has changed state. On error, returns an `Errno`.
 pub fn sys_wait4(
-    current_task: &CurrentTask,
+    current_task: &mut CurrentTask,
     raw_selector: pid_t,
     user_wstatus: UserRef<i32>,
     options: u32,
@@ -1958,26 +1959,14 @@ mod tests {
     async fn test_waitid_options() {
         spawn_kernel_and_run(async |current_task| {
             let id = 1;
+            let null_user_info = MultiArchUserRef::null(current_task);
+            let null_rusage = UserRef::default().into();
             assert_eq!(
-                sys_waitid(
-                    &current_task,
-                    P_PID,
-                    id,
-                    MultiArchUserRef::null(current_task),
-                    0,
-                    UserRef::default().into()
-                ),
+                sys_waitid(current_task, P_PID, id, null_user_info, 0, null_rusage),
                 error!(EINVAL)
             );
             assert_eq!(
-                sys_waitid(
-                    &current_task,
-                    P_PID,
-                    id,
-                    MultiArchUserRef::null(current_task),
-                    0xffff,
-                    UserRef::default().into()
-                ),
+                sys_waitid(current_task, P_PID, id, null_user_info, 0xffff, null_rusage),
                 error!(EINVAL)
             );
         })
@@ -1989,34 +1978,17 @@ mod tests {
     async fn test_wait4_options() {
         spawn_kernel_and_run(async |current_task| {
             let id = 1;
+            let null_rusage = RUsagePtr::null(current_task);
             assert_eq!(
-                sys_wait4(
-                    &current_task,
-                    id,
-                    UserRef::default(),
-                    WEXITED,
-                    RUsagePtr::null(current_task)
-                ),
+                sys_wait4(current_task, id, UserRef::default(), WEXITED, null_rusage),
                 error!(EINVAL)
             );
             assert_eq!(
-                sys_wait4(
-                    &current_task,
-                    id,
-                    UserRef::default(),
-                    WNOWAIT,
-                    RUsagePtr::null(current_task)
-                ),
+                sys_wait4(current_task, id, UserRef::default(), WNOWAIT, null_rusage),
                 error!(EINVAL)
             );
             assert_eq!(
-                sys_wait4(
-                    &current_task,
-                    id,
-                    UserRef::default(),
-                    0xffff,
-                    RUsagePtr::null(current_task)
-                ),
+                sys_wait4(current_task, id, UserRef::default(), 0xffff, null_rusage),
                 error!(EINVAL)
             );
         })
@@ -2035,7 +2007,7 @@ mod tests {
             // block waiting for.
             assert_eq!(
                 wait_on_pid(
-                    &current_task,
+                    current_task,
                     &ProcessSelector::Any,
                     &WaitingOptions::new_for_wait4(0).expect("WaitingOptions")
                 ),
@@ -2063,7 +2035,7 @@ mod tests {
 
             assert_eq!(
                 wait_on_pid(
-                    &current_task,
+                    current_task,
                     &ProcessSelector::Any,
                     &WaitingOptions::new_for_wait4(0).expect("WaitingOptions")
                 ),
@@ -2081,7 +2053,7 @@ mod tests {
             // No child is currently terminated.
             assert_eq!(
                 wait_on_pid(
-                    &task,
+                    task,
                     &ProcessSelector::Any,
                     &WaitingOptions::new_for_wait4(WNOHANG).expect("WaitingOptions")
                 ),
@@ -2105,7 +2077,7 @@ mod tests {
 
             // Block until child is terminated.
             let waited_child = wait_on_pid(
-                &task,
+                task,
                 &ProcessSelector::Any,
                 &WaitingOptions::new_for_wait4(0).expect("WaitingOptions"),
             )
@@ -2136,7 +2108,7 @@ mod tests {
             send_standard_signal(&task, SignalInfo::kernel(SIGUSR1));
 
             let errno = wait_on_pid(
-                &task,
+                task,
                 &ProcessSelector::Any,
                 &WaitingOptions::new_for_wait4(0).expect("WaitingOptions"),
             )
@@ -2163,8 +2135,8 @@ mod tests {
                 std::mem::size_of::<i32>() as u64,
             );
             let address_ref = UserRef::<i32>::new(address);
-            sys_wait4(&current_task, -1, address_ref, 0, RUsagePtr::null(current_task))
-                .expect("wait4");
+            let null_rusage = RUsagePtr::null(current_task);
+            sys_wait4(current_task, -1, address_ref, 0, null_rusage).expect("wait4");
             let wstatus = current_task.read_object(address_ref).expect("read memory");
             assert_eq!(wstatus, SIGKILL.number() as i32);
         })
@@ -2191,8 +2163,8 @@ mod tests {
                 std::mem::size_of::<i32>() as u64,
             );
             let address_ref = UserRef::<i32>::new(address);
-            sys_wait4(&current_task, -1, address_ref, 0, RUsagePtr::null(current_task))
-                .expect("wait4");
+            let null_rusage = RUsagePtr::null(current_task);
+            sys_wait4(current_task, -1, address_ref, 0, null_rusage).expect("wait4");
             let wstatus = current_task.read_object(address_ref).expect("read memory");
             assert_eq!(wstatus, wait_status);
         })
@@ -2220,18 +2192,13 @@ mod tests {
             child2.thread_group().kill(ExitStatus::Exit(42), None);
             std::mem::drop(child2);
 
+            let null_rusage = RUsagePtr::null(current_task);
             assert_eq!(
-                sys_wait4(
-                    &current_task,
-                    -child2_pid,
-                    UserRef::default(),
-                    0,
-                    RUsagePtr::null(current_task)
-                ),
+                sys_wait4(current_task, -child2_pid, UserRef::default(), 0, null_rusage),
                 Ok(child2_pid)
             );
             assert_eq!(
-                sys_wait4(&current_task, 0, UserRef::default(), 0, RUsagePtr::null(current_task)),
+                sys_wait4(current_task, 0, UserRef::default(), 0, null_rusage),
                 Ok(child1_pid)
             );
         })
@@ -2255,7 +2222,7 @@ mod tests {
                 map_memory(&current_task, UserAddress::default(), *PAGE_SIZE).into();
             assert_eq!(
                 sys_waitid(
-                    &current_task,
+                    current_task,
                     P_PGID,
                     child2_pid,
                     address.into(),
@@ -2272,7 +2239,7 @@ mod tests {
 
             assert_eq!(
                 sys_waitid(
-                    &current_task,
+                    current_task,
                     P_PGID,
                     0,
                     address.into(),

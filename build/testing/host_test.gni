@@ -36,6 +36,9 @@ import("//build/testing/test_spec.gni")
 #     [string]: Forwarded from invoker. It's the argument to call the test binary with
 #               to list test cases.
 #
+#   produces_perf_results (optional)
+#     [bool]: Whether the test produces performance results. See test_spec().
+#
 #   deps, environments, data_deps, public_deps, visibility
 #     Forwarded from invoker.
 #
@@ -107,6 +110,7 @@ template("host_test") {
                              "expects_ssh",
                              "needs_package_server",
                              "list_cases_argument",
+                             "produces_perf_results",
                            ])
 
     # If we have args, we put most deps on the script target,

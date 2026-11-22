@@ -18,6 +18,7 @@ pub mod fault;
 pub mod heap;
 pub mod kstack;
 pub mod lz4_compressor;
+pub mod mapping_cursor;
 #[cfg(console_enabled)]
 mod mem_command;
 pub mod memory_stats;
@@ -52,3 +53,5 @@ pub mod vm_object_paged;
 pub mod vm_object_physical;
 pub mod vm_page_list;
 pub mod vmm;
+
+pub use vmm::page_fault_handler;

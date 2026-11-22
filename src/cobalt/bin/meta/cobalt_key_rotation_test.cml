@@ -1,0 +1,76 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "//src/sys/test_runners/gtest/default.shard.cml",
+        "sys/component/realm_builder.shard.cml",
+        "syslog/client.shard.cml",
+    ],
+    program: {
+        binary: "bin/cobalt_key_rotation_test",
+    },
+    children: [
+        {
+            name: "sysinfo",
+            url: "fuchsia-boot:///#meta/sysinfo.cm",
+        },
+        {
+            name: "fake_channel_control",
+            url: "#meta/fake-channel-control.cm",
+        },
+    ],
+    use: [
+        { protocol: "fuchsia.diagnostics.ArchiveAccessor" },
+        {
+            storage: "tmp",
+            path: "/tmp",
+        },
+    ],
+    offer: [
+        {
+            directory: "pkg",
+            from: "framework",
+            as: "config-data",
+            to: "#realm_builder",
+            rights: [ "r*" ],
+            subdir: "cobalt_tests_config_data",
+        },
+        {
+            protocol: [
+                "fuchsia.scheduler.RoleManager",
+                "fuchsia.tracing.provider.Registry",
+            ],
+            from: "parent",
+            to: "#realm_builder",
+        },
+        {
+            protocol: [
+                "fuchsia.scheduler.RoleManager",
+                "fuchsia.tracing.provider.Registry",
+            ],
+            from: "parent",
+            to: [ "#sysinfo" ],
+        },
+        {
+            protocol: "fuchsia.boot.WriteOnlyLog",
+            from: "parent",
+            to: "#sysinfo",
+        },
+        {
+            protocol: "fuchsia.sysinfo.SysInfo",
+            from: "#sysinfo",
+            to: "#realm_builder",
+        },
+        {
+            dictionary: "diagnostics",
+            from: "parent",
+            to: [ "#sysinfo" ],
+        },
+        {
+            protocol: "fuchsia.update.channel.Provider",
+            from: "#fake_channel_control",
+            to: [ "#realm_builder" ],
+        },
+    ],
+}

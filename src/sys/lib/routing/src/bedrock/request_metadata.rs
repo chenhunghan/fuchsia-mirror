@@ -5,8 +5,8 @@
 use crate::rights::Rights;
 use crate::subdir::SubDir;
 use cm_rust::{CapabilityTypeName, EventScope, NativeIntoFidl};
-use fidl_fuchsia_component_runtime::RouteRequest;
-use fidl_fuchsia_io as fio;
+use fidl_fuchsia_component_runtime_common::RouteRequest;
+use fidl_fuchsia_io_common as fio;
 use moniker::Moniker;
 
 /// Returns a `RouteRequest` specifying a Protocol build type.

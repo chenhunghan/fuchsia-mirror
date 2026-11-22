@@ -1444,7 +1444,7 @@ TYPED_TEST(ElfldltlPhdrTests, ReadPhdrsFromFileBadSize) {
 
   Ehdr ehdr{.phentsize = sizeof(Phdr) + 1, .phnum = 1};
   elfldltl::DirectMemory file;
-  auto result = ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
+  auto result = elfldltl::ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
 
   EXPECT_EQ(1u, diag.errors());
   ASSERT_EQ(1u, errors.size());
@@ -1463,7 +1463,7 @@ TYPED_TEST(ElfldltlPhdrTests, ReadPhdrsFromFileBadOffset) {
 
   Ehdr ehdr{.phoff = 0, .phentsize = sizeof(Phdr), .phnum = 1};
   elfldltl::DirectMemory file;
-  auto result = ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
+  auto result = elfldltl::ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
 
   EXPECT_EQ(1u, diag.errors());
   ASSERT_EQ(1u, errors.size());
@@ -1482,7 +1482,7 @@ TYPED_TEST(ElfldltlPhdrTests, ReadPhdrsFromFileBadAlign) {
 
   Ehdr ehdr{.phoff = sizeof(Ehdr) + 1, .phentsize = sizeof(Phdr), .phnum = 1};
   elfldltl::DirectMemory file;
-  auto result = ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
+  auto result = elfldltl::ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
 
   EXPECT_EQ(1u, diag.errors());
   ASSERT_EQ(1u, errors.size());
@@ -1506,7 +1506,7 @@ TYPED_TEST(ElfldltlPhdrTests, ReadPhdrsFromFilePhXNumBadShSize) {
             .shentsize = sizeof(Shdr) + 1,
             .shnum = 1};
   elfldltl::DirectMemory file;
-  auto result = ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
+  auto result = elfldltl::ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
 
   EXPECT_EQ(1u, diag.errors());
   ASSERT_EQ(1u, errors.size());
@@ -1531,7 +1531,7 @@ TYPED_TEST(ElfldltlPhdrTests, ReadPhdrsFromFilePhXNumBadShOff) {
             .shentsize = sizeof(Shdr),
             .shnum = 1};
   elfldltl::DirectMemory file;
-  auto result = ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
+  auto result = elfldltl::ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
 
   EXPECT_EQ(1u, diag.errors());
   ASSERT_EQ(1u, errors.size());
@@ -1556,7 +1556,7 @@ TYPED_TEST(ElfldltlPhdrTests, ReadPhdrsFromFilePhXNumNoShdrs) {
             .shentsize = sizeof(Shdr),
             .shnum = 0};
   elfldltl::DirectMemory file;
-  auto result = ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
+  auto result = elfldltl::ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
 
   EXPECT_EQ(1u, diag.errors());
   ASSERT_EQ(1u, errors.size());
@@ -1581,7 +1581,7 @@ TYPED_TEST(ElfldltlPhdrTests, ReadPhdrsFromFilePhXNumCantReadShdr) {
             .shentsize = sizeof(Shdr),
             .shnum = 1};
   elfldltl::DirectMemory file;
-  auto result = ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
+  auto result = elfldltl::ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
 
   EXPECT_EQ(1u, diag.errors());
   ASSERT_EQ(1u, errors.size());
@@ -1600,7 +1600,7 @@ TYPED_TEST(ElfldltlPhdrTests, ReadPhdrsFromFileCantReadPhdr) {
 
   Ehdr ehdr{.phoff = sizeof(Ehdr), .phentsize = sizeof(Phdr), .phnum = 1};
   elfldltl::DirectMemory file;
-  auto result = ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
+  auto result = elfldltl::ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
 
   EXPECT_EQ(1u, diag.errors());
   ASSERT_EQ(1u, errors.size());
@@ -1619,7 +1619,7 @@ TYPED_TEST(ElfldltlPhdrTests, ReadPhdrsFromFileNoPhdrs) {
 
   Ehdr ehdr{.phnum = 0};
   elfldltl::DirectMemory file;
-  auto result = ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
+  auto result = elfldltl::ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), ehdr);
 
   EXPECT_EQ(0u, diag.errors());
   EXPECT_EQ(0u, diag.warnings());
@@ -1641,7 +1641,8 @@ TYPED_TEST(ElfldltlPhdrTests, ReadPhdrsFromFile) {
   } elfbytes;
   elfldltl::DirectMemory file{
       std::span<std::byte>{reinterpret_cast<std::byte*>(&elfbytes), sizeof(elfbytes)}};
-  auto result = ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), elfbytes.ehdr);
+  auto result =
+      elfldltl::ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), elfbytes.ehdr);
 
   EXPECT_EQ(0u, diag.errors());
   EXPECT_EQ(0u, diag.warnings());
@@ -1672,7 +1673,8 @@ TYPED_TEST(ElfldltlPhdrTests, ReadPhdrsFromFilePhXNum) {
   } elfbytes;
   elfldltl::DirectMemory file{
       std::span<std::byte>{reinterpret_cast<std::byte*>(&elfbytes), sizeof(elfbytes)}};
-  auto result = ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), elfbytes.ehdr);
+  auto result =
+      elfldltl::ReadPhdrsFromFile(diag, file, elfldltl::NoArrayFromFile<Phdr>(), elfbytes.ehdr);
 
   EXPECT_EQ(0u, diag.errors());
   EXPECT_EQ(0u, diag.warnings());

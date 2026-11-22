@@ -69,7 +69,7 @@ COMMON_PLATFORM = {
     "connectivity": {
         "network": {
             # Prefer using the built-in NIC to the CDC-ether interface.
-            "netsvc_interface": "/dwmac-ff3f0000/dwmac/Designware-MAC/network-device",
+            "netsvc_interface": "/ethernet-phy-ff634000",
         },
     },
     "development_support": {

@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/config/derived:compilation_modes.bzl", "is_release")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+
+package(default_applicable_licenses = ["//:license"])
+
+cml_shard(
+    name = "vulkan_test_realm.shard",
+    includes = ["//sdk/lib/trace:client.shard"],
+    shard = "vulkan_test_realm.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+# LINT.IfChange(vulkan_targets)
+# Provides only the Vulkan headers without the loader.
+fx_cc_library(
+    name = "headers",
+    visibility = ["//:__subpackages__"],
+    deps = ["//third_party/Vulkan-Headers:vulkan_headers"],
+)
+
+fx_cc_library(
+    name = "vulkan_headers_and_loader",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":headers",
+        "//third_party/Vulkan-Loader:libvulkan",
+    ],
+)
+# LINT.ThenChange(//src/lib/vulkan/BUILD.gn:vulkan_targets)
+
+# LINT.IfChange(vulkan_hpp)
+# Provides the Vulkan headers and entry points via the Vulkan loader.
+fx_cc_library(
+    name = "vulkan",
+    defines = [
+        "VULKAN_HPP_NO_EXCEPTIONS",
+        "VULKAN_HPP_ASSERT(expr)=do {} while(0)" if is_release else "VULKAN_HPP_ASSERT(expr)=((void)(expr))",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":headers",
+        "//third_party/Vulkan-Loader:libvulkan",
+    ],
+)
+# LINT.ThenChange(//src/lib/vulkan/BUILD.gn:vulkan_targets, //src/lib/vulkan/BUILD.gn:vulkan_hpp)

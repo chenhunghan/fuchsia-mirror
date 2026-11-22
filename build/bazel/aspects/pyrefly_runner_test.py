@@ -107,13 +107,12 @@ class PyreflyRunnerMainTest(unittest.TestCase):
     def test_no_python_sources_writes_stamp_without_spawning(
         self, mock_subprocess
     ):
-        rc = pyrefly_runner.main(self._argv("/unused/pyrefly", "README.md"))
+        rc = pyrefly_runner.main(self._argv("/unused/pyrefly", "README.md"), {})
 
         self.assertEqual(rc, 0)
         mock_subprocess.run.assert_not_called()
         self.assertEqual(self.stamp.read_text(), "ok\n")
 
-    @mock.patch.dict(os.environ, {"PYTHONPATH": "/ambient/leak"})
     def test_spawns_pyrefly_scrubs_pythonpath_and_dedupes_search_paths(self):
         dir_a = self.tmp_path / "pkg_a"
         dir_b = self.tmp_path / "pkg_b"
@@ -141,7 +140,8 @@ class PyreflyRunnerMainTest(unittest.TestCase):
                 "--search-path",
                 str(dir_b),
                 str(src),
-            )
+            ),
+            {"PYTHONPATH": "/ambient/leak"},
         )
 
         self.assertEqual(rc, 0)
@@ -190,7 +190,7 @@ class PyreflyRunnerMainTest(unittest.TestCase):
             f'cat "{err_json_file}"\n' 'printf "extra note\\n" >&2\n' "exit 1\n"
         )
 
-        rc = pyrefly_runner.main(self._argv(fake_pyrefly, str(src)))
+        rc = pyrefly_runner.main(self._argv(fake_pyrefly, str(src)), {})
 
         self.assertEqual(rc, 1)
         self.assertFalse(self.stamp.exists())
@@ -207,7 +207,7 @@ class PyreflyRunnerMainTest(unittest.TestCase):
             'printf "invalid CLI flag\\n" >&2\nexit 2\n'
         )
 
-        rc = pyrefly_runner.main(self._argv(fake_pyrefly, str(src)))
+        rc = pyrefly_runner.main(self._argv(fake_pyrefly, str(src)), {})
 
         self.assertEqual(rc, 2)
         self.assertFalse(self.stamp.exists())

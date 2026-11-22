@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+#include <inttypes.h>
 #include <lib/code-patching/code-patching.h>
 #include <lib/memalloc/range.h>
 #include <lib/zbitl/error-stdio.h>
@@ -16,9 +17,11 @@
 #include <ktl/span.h>
 #include <ktl/string_view.h>
 #include <ktl/utility.h>
-#include <phys/address-space.h>
-#include <phys/symbolize.h>
-#include <phys/zbitl-allocation.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/zbitl.h>
+#include <phys/memory/init.h>
+#include <phys/runtime/self.h>
+#include <phys/runtime/symbolize.h>
 
 #include "../test-main.h"
 #include "test.h"
@@ -39,7 +42,7 @@ namespace {
 
 using Bootfs = zbitl::Bootfs<ktl::span<ktl::byte>>;
 
-constexpr size_t kExpectedNumPatches = 2;
+constexpr size_t kExpectedNumPatches = 4;
 
 // Returns the address range within this executable associated with a given
 // link-time, virtual range.
@@ -114,6 +117,73 @@ int TestMultiplyByFactorPatching(code_patching::PatcherWithGlobalCacheConsistenc
   }
 
   return 0;
+}
+
+int TestAddValuePatching(code_patching::PatcherWithGlobalCacheConsistency& patcher,
+                         const code_patching::Directive& patch) {
+  auto insns = GetInstructionRange(patch.range_start, patch.range_size);
+
+  auto test_case = [&](ktl::string_view alternative, uint64_t addend) -> bool {
+    if (auto result = patcher.PatchWithAlternative(insns, alternative); result.is_error()) {
+      printf("FAILED (%.*s): ", static_cast<int>(alternative.size()), alternative.data());
+      zbitl::PrintBootfsError(result.error_value());
+      return false;
+    }
+    patcher.Commit();
+
+    uint64_t result = add_value(583);
+    if (result != 583 + addend) {
+      printf("FAILED: add_value(583) [%.*s] returned %" PRIu64 "; expected %" PRIu64 ".\n",
+             static_cast<int>(alternative.size()), alternative.data(), result, 583 + addend);
+      return false;
+    }
+    return true;
+  };
+
+  bool ok = test_case("by-config/add_value"sv, 2);
+  ok = test_case("add_value"sv, 3) && ok;
+  ok = test_case("by-deps/add_ten"sv, 10) && ok;
+  return ok ? 0 : 1;
+}
+
+// multiply_by_factor and multiply_by_factor_twin are identical except for
+// their patch case IDs, so identical code folding could merge them into one.
+// Then patching either would patch both.
+int TestTwinPatching(code_patching::PatcherWithGlobalCacheConsistency& patcher,
+                     const code_patching::Directive& patch,
+                     const code_patching::Directive& twin_patch) {
+  int failed = 0;
+  if (patch.range_start == twin_patch.range_start) {
+    printf("FAILED: multiply_by_factor and multiply_by_factor_twin both at %#x\n",
+           patch.range_start);
+    failed = 1;
+  }
+
+  auto insns = GetInstructionRange(patch.range_start, patch.range_size);
+  auto twin_insns = GetInstructionRange(twin_patch.range_start, twin_patch.range_size);
+  for (auto [range, alternative] : {
+           ktl::pair{insns, "multiply_by_ten"sv},
+           ktl::pair{twin_insns, "multiply_by_two"sv},
+       }) {
+    if (auto result = patcher.PatchWithAlternative(range, alternative); result.is_error()) {
+      printf("FAILED: ");
+      zbitl::PrintBootfsError(result.error_value());
+      return 1;
+    }
+  }
+  patcher.Commit();
+
+  if (uint64_t result = multiply_by_factor(583); result != 10 * 583) {
+    printf("FAILED: multiply_by_factor(583) returned %" PRIu64 "; expected %d.\n", result,
+           10 * 583);
+    failed = 1;
+  }
+  if (uint64_t result = multiply_by_factor_twin(583); result != 2 * 583) {
+    printf("FAILED: multiply_by_factor_twin(583) returned %" PRIu64 "; expected %d.\n", result,
+           2 * 583);
+    failed = 1;
+  }
+  return failed;
 }
 
 }  // namespace
@@ -196,6 +266,8 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
     return 1;
   }
 
+  const code_patching::Directive* multiply_by_factor_patch = nullptr;
+  const code_patching::Directive* multiply_by_factor_twin_patch = nullptr;
   for (const auto& patch : patches) {
     switch (patch.id) {
       case kAddOneCaseId:
@@ -207,6 +279,15 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
         if (int result = TestMultiplyByFactorPatching(patcher, patch); result != 0) {
           return result;
         }
+        multiply_by_factor_patch = &patch;
+        break;
+      case kMultiplyByFactorTwinCaseId:
+        multiply_by_factor_twin_patch = &patch;
+        break;
+      case kAddValueCaseId:
+        if (int result = TestAddValuePatching(patcher, patch); result != 0) {
+          return result;
+        }
         break;
       default:
         printf("Unexpected patch case ID: %u\n", patch.id);
@@ -214,5 +295,7 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
     }
   }
 
-  return 0;
+  ZX_ASSERT(multiply_by_factor_patch);
+  ZX_ASSERT(multiply_by_factor_twin_patch);
+  return TestTwinPatching(patcher, *multiply_by_factor_patch, *multiply_by_factor_twin_patch);
 }

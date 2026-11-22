@@ -1,11 +1,3 @@
-aaronwood@google.com
-ddorwin@google.com
-digit@google.com
-fangism@google.com
-jayzhuang@google.com
-olivernewman@google.com
-waynechou@google.com
-wittrock@google.com
+file:/build/BUILD_OWNERS
 
 per-file fuzz.gni = file://src/sys/fuzzing/OWNERS
-per-file security.gni = file://src/security/OWNERS

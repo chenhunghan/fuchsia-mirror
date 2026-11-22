@@ -19,10 +19,16 @@ package(default_applicable_licenses = ["//:license"])
 rustc_library(
     name = "remote_volume",
     srcs = [
+        "src/directory.rs",
+        "src/file.rs",
         "src/lib.rs",
+        "src/symlink.rs",
         "src/testing.rs",
     ],
     edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
     visibility = [
         "//src/starnix/kernel:__subpackages__",
         "//src/storage/fxfs:__subpackages__",
@@ -30,11 +36,17 @@ rustc_library(
     deps = [
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/storage/fxfs:lib",
+        "//src/storage/fxfs/crypto",
+        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
         "//src/storage/fxfs/platform",
         "//src/storage/lib/sync_io_client",
-        "//src/storage/lib/vfs/rust:vfs_static",
+        "//src/storage/lib/units",
+        "//src/storage/lib/vfs/rust:vfs",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
     ],
 )
 
@@ -43,11 +55,10 @@ rustc_test(
     crate = ":remote_volume",
     edition = "2024",
     deps = [
-        "//sdk/fidl/fuchsia.fs:fuchsia.fs_rust",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
-        "//src/performance/memory/attribution/refaults_vmo",
-        "//src/storage/fxfs:lib",
+        "//src/memory/attribution/refaults_vmo",
+        "//src/storage/fxfs/crypto/insecure",
         "//src/storage/lib/storage_device",
     ],
 )

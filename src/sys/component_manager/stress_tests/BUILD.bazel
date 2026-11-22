@@ -32,7 +32,7 @@ rustc_library(
     deps = [
         ":test.componentmanager.stresstests_rust",
         "//src/lib/fidl/rust/fidl",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//third_party/rust_crates/vendor:anyhow",
     ],
 )

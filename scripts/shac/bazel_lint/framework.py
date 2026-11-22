@@ -7,7 +7,7 @@
 import ast
 import dataclasses
 import enum
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Sequence, TypedDict
 
 from allowlist import Allowlist
@@ -25,6 +25,8 @@ class FileKind(enum.Enum):
     MODULE = "module"
     # WORKSPACE, WORKSPACE.bazel, WORKSPACE.bzlmod, *.WORKSPACE.bazel
     WORKSPACE = "workspace"
+    # REPO.bazel, *.REPO.bazel
+    REPO = "repo"
     # *.py (Starlark load() statements do not exist in Python; check_load is disallowed)
     PYTHON = "python"
 
@@ -38,6 +40,7 @@ ALL_BAZEL_FILE_KINDS: frozenset[FileKind] = frozenset(
         FileKind.BZL,
         FileKind.MODULE,
         FileKind.WORKSPACE,
+        FileKind.REPO,
     }
 )
 
@@ -64,6 +67,8 @@ def classify_file(rel_path: str) -> FileKind:
         "WORKSPACE.bzlmod",
     ) or name.endswith(".WORKSPACE.bazel"):
         return FileKind.WORKSPACE
+    if name == "REPO.bazel" or name.endswith(".REPO.bazel"):
+        return FileKind.REPO
     if name.endswith(".py"):
         return FileKind.PYTHON
     raise ValueError(f"Unsupported file kind for path: {rel_path}")
@@ -284,6 +289,7 @@ class FileContext:
         tree (ast.Module): Parsed Python/Starlark AST root.
         lines (list[str]): File content split into lines as strings without trailing
             newlines (1-indexed line numbers correspond to `lines[lineno - 1]`).
+        root (pathlib.Path): The workspace root directory (defaults to Path.cwd()).
         loaded_symbols (dict[str, tuple[str, str]]): Map of local symbol name to
             `(module_label, exported_symbol_name)` for all symbols imported via
             `load()`, where `module_label` is normalized via
@@ -304,11 +310,13 @@ class FileContext:
         lines: list[str],
         *,
         supports_targets_allowlist: bool = False,
+        root: Path | str | None = None,
     ) -> None:
         self.path = path
         self.kind = kind
         self.tree = tree
         self.lines = lines
+        self.root = Path(root) if root is not None else Path.cwd()
         self._supports_targets_allowlist = supports_targets_allowlist
         self._raw_findings: list[_RawFinding] = []
 
@@ -808,8 +816,20 @@ def run_check_on_contents(
     rel_path: str,
     *,
     allowlist: Allowlist | None = None,
+    root: Path | str | None = None,
 ) -> list[Finding]:
-    """Runs `check` on in-memory `content` for `rel_path`."""
+    """Runs `check` on in-memory `content` for `rel_path`.
+
+    Args:
+        check: The check to run.
+        content: The file content as a string.
+        rel_path: Repository-relative path to the file.
+        allowlist: Optional allowlist to filter findings.
+        root: Optional workspace root directory (defaults to Path.cwd()).
+
+    Returns:
+        List of findings for un-allowlisted violations.
+    """
     if not check.supports_allowlist and allowlist is not None:
         raise ValueError(
             f"Check '{check.name}' does not support allowlists (supports_allowlist = False)"
@@ -860,6 +880,7 @@ def run_check_on_contents(
         tree=tree,
         lines=content.splitlines(),
         supports_targets_allowlist=check.supports_targets_allowlist,
+        root=root,
     )
     check.check_module(fc)
     for load in fc.loads:

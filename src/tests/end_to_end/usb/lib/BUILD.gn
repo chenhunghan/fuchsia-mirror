@@ -8,6 +8,7 @@ import("//build/python/python_library.gni")
 python_library("usb_lib") {
   testonly = true
   library_name = "usb_lib"
+  source_root = "usb_lib"
   sources = [
     "__init__.py",
     "dmc_virtual_usb_hub.py",
@@ -21,10 +22,11 @@ python_library("usb_lib") {
     "usb_config.py",
     "usb_power_hub_base_test.py",
     "usb_reset.py",
+    "usb_traffic.py",
   ]
 
   # Shared with //src/tests/end_to_end/usb/lib/disconnect/udev.sh. Read by
-  # linux_virtual_usb_hub.py via `from . import data`.
+  # usb_lib/linux_virtual_usb_hub.py via `from . import data`.
   data_sources = [ "fuchsia_usb_pids.json" ]
   data_package_name = "data"
   library_deps = [
@@ -84,7 +86,10 @@ if (is_host) {
 
   python_host_test("usb_cli_diag_test") {
     main_source = "usb_cli_diag_test.py"
-    libraries = [ ":usb_lib" ]
+    libraries = [
+      ":usb_lib",
+      "//src/testing/end_to_end/honeydew",
+    ]
     main_callable = "unittest.main"
     extra_args = [ "-v" ]
   }

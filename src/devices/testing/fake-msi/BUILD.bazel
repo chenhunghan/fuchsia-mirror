@@ -2,11 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules:zx_library.bzl", "cc_static_library_zx")
+load("//build/bazel/rules/cc:fx_cc_static_library_zx.bzl", "fx_cc_static_library_zx")
 
 package(default_applicable_licenses = ["//:license"])
 
-cc_static_library_zx(
+fx_cc_static_library_zx(
     name = "fake-msi",
     testonly = True,
     srcs = ["fake-msi.cc"],
@@ -22,6 +22,7 @@ cc_static_library_zx(
     includes = ["include"],
     target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = [
+        "//src/devices/board/lib/acpi:__pkg__",
         "//src/devices/pci/drivers/pci/test:__pkg__",
         "//src/devices/pci/drivers/pciroot-banjo-adapter:__pkg__",
         "//src/devices/pci/lib/pci:__pkg__",

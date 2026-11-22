@@ -17,9 +17,6 @@ type hart_id_t = u32;
 
 unsafe extern "C" {
     pub static mut riscv64_num_cpus: u32;
-    fn cpp_interrupt_send_ipi(cpu_mask: cpu_mask_t, ipi: MpIpi) -> Result<(), Status>;
-    fn cpp_interrupt_init_percpu();
-    fn cpp_platform_halt_cpu();
 }
 
 /// Per-CPU structure aligned on the architectural cache line boundary (64 bytes).
@@ -193,10 +190,29 @@ pub fn percpu_dec_num_spinlocks() {
 }
 
 /// Returns the number of spinlocks held on the current CPU.
+// TODO(https://fxbug.dev/581987928): Remove `#[coverage(off)]` once compiler options can control
+// atomic coverage counter updates.
+#[coverage(off)]
 #[inline(always)]
 pub fn num_spinlocks_held() -> u32 {
-    // SAFETY: Single-instruction read of cpu_num from s11 percpu struct.
+    // SAFETY: Single-instruction read of num_spinlocks from s11 percpu struct.
     unsafe { read_percpu_u32::<NUM_SPINLOCKS_OFFSET>() }
+}
+
+/// Returns the calling CPU's flag that tracks whether it is in restricted mode.
+///
+/// Call with interrupts or preemption disabled so the calling thread cannot migrate across CPUs
+/// and observe a stale flag.
+///
+/// # Safety
+///
+/// `s11` must already point to the calling hart's initialized `riscv64_percpu` (after
+/// `riscv64_mp_early_init_percpu`).
+#[inline(always)]
+pub unsafe fn arch_get_restricted_flag() -> bool {
+    // SAFETY: Caller guarantees `s11` points to this hart's initialized `riscv64_percpu`, and
+    // `IN_RESTRICTED_MODE_OFFSET` is the 4-byte aligned offset of its `in_restricted_mode` field.
+    unsafe { read_percpu_u32::<IN_RESTRICTED_MODE_OFFSET>() != 0 }
 }
 
 /// Early initialization for a CPU's per-CPU structure and hart tracking.
@@ -286,8 +302,11 @@ pub extern "C" fn arch_mp_send_ipi(target: MpIpiTarget, mut cpu_mask: cpu_mask_t
 
     // Try the pdev based interrupt method first (e.g. AIA / PLIC), otherwise fall
     // back to SBI below.
-    // SAFETY: FFI call to C++ interrupt setup. Bounds/masking handled inside C++.
-    if unsafe { cpp_interrupt_send_ipi(cpu_mask, ipi) }.is_ok() {
+    // SAFETY: `pdev_interrupt` initializes `ACTIVE_DRIVER` to `DEFAULT_DRIVER` (whose
+    // `send_ipi` returns `Err(Status::NOT_SUPPORTED)`), and any PLIC registration occurs once
+    // on the boot CPU in `driver_handoff_post_vm` before secondary CPUs start, so no write
+    // races with `get_driver()`.
+    if unsafe { crate::pdev_interrupt::interrupt_send_ipi(cpu_mask, ipi) }.is_ok() {
         return;
     }
 
@@ -376,8 +395,11 @@ pub extern "C" fn riscv64_software_exception() {
 /// Initialize per-CPU interrupts.
 #[unsafe(no_mangle)]
 pub extern "C" fn arch_mp_init_percpu() {
-    // SAFETY: takes no arguments; initializes the calling CPU's interrupt controller state.
-    unsafe { cpp_interrupt_init_percpu() };
+    // SAFETY: `pdev_interrupt` initializes `ACTIVE_DRIVER` to `DEFAULT_DRIVER` (whose
+    // `init_percpu` is a no-op), and any PLIC registration occurs once on the boot CPU in
+    // `driver_handoff_post_vm` before `arch_init` and before secondary CPUs start, so no write
+    // races with `get_driver()`.
+    unsafe { crate::pdev_interrupt::interrupt_init_percpu() };
 }
 
 /// Flush CPU state and halt execution on CPU unplug.
@@ -394,13 +416,11 @@ pub unsafe extern "C" fn arch_flush_state_and_halt(flush_done: *mut MpUnplugEven
     crate::kernel::thread::preempt_disable();
     // SAFETY: The caller guarantees `flush_done` points at a live `MpUnplugEvent`, the current
     // `Thread` is initialized, and no spinlocks or active `ChainLockTransaction` are held;
-    // signalling it is the last thing this CPU does before halting, and `cpp_platform_halt_cpu`
-    // takes no arguments and does not return.
+    // signalling it is the last thing this CPU does before halting.
     unsafe {
         crate::kernel::mp::unplug_event_signal(flush_done);
-        cpp_platform_halt_cpu();
     }
-    panic!("control should never reach here");
+    crate::generic_riscv64::platform::platform_halt_cpu()
 }
 
 /// Prepare for CPU unplug.

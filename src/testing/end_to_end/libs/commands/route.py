@@ -7,9 +7,9 @@ import re
 import subprocess
 from typing import Iterator, Literal
 
+from libs import errors
 from libs.commands.command import LinuxCommand
 from libs.proc.runner import Runner
-from mobly import signals
 
 
 class LinuxRouteCommand(LinuxCommand):
@@ -57,7 +57,7 @@ class LinuxRouteCommand(LinuxCommand):
             )
         except subprocess.CalledProcessError as e:
             if b"File exists" in e.stderr:
-                raise signals.TestError(
+                raise errors.TestError(
                     "Route already exists",
                     extras={
                         "stderr": e.stderr,
@@ -66,7 +66,7 @@ class LinuxRouteCommand(LinuxCommand):
                     },
                 )
             if b"Network is down" in e.stderr:
-                raise signals.TestError(
+                raise errors.TestError(
                     "Device must be up for adding a route.",
                     extras={
                         "stderr": e.stderr,
@@ -182,7 +182,7 @@ class LinuxRouteCommand(LinuxCommand):
             if b"RTNETLINK answers: No such process" in e.stderr:
                 # The route didn't exist.
                 return
-            raise signals.TestError(
+            raise errors.TestError(
                 f"Failed to delete route {address}: {e}"
             ) from e
 

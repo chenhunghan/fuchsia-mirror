@@ -16,8 +16,12 @@ Each profile JSON file supports the following fields:
 
 - `rbe_instance` (string, required): The target RBE instance URI
   (e.g., `projects/<project-id>/instances/<instance-name>`).
-- `remote_exec_root` (string, required): The root path of the execution
-  workspace on remote workers (typically `/b/f/w`).
+- `remote_exec_root` (string, required): The absolute root path (or fixed-depth
+  single-segment glob pattern) of the execution workspace on remote workers
+  (typically `"/b/f/w"`). Single-segment wildcards such as `"/tmp/buildbox-*"`
+  or `"/*/*/*"` as well as `"/"` are supported for RBE backends with dynamic or
+  container-root sandboxes; recursive `"**"` wildcards and `".."` segments are
+  not allowed.
 - `container_image` (string, required): The fully-qualified Docker container image
   URI for the baseline remote execution environment (e.g., `docker://gcr.io/...`).
   Individual actions can override this per-action (in GN/Ninja via

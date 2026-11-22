@@ -26,6 +26,9 @@ namespace {
 // are updated to be unique constants, the various API contracts need to be updated accordingly.
 static_assert(kNdmUncorrectableEcc == kNdmError, "kNdmUncorrectableEcc should map to kNdmError!");
 
+static_assert(kDefaultReadWearLimit == SLC_NAND_RC_LIMIT,
+              "kDefaultReadWearLimit should match the default used by the FTL!");
+
 bool g_init_performed = false;
 
 // Extra configuration data saved to the partition info.
@@ -257,6 +260,13 @@ const char* NdmBaseDriver::CreateNdmVolume(const Volume* ftl_volume, const Volum
   partition.exploded.basic_data.num_blocks = ndmGetNumVBlocks(ndm_);
   strncpy(partition.exploded.basic_data.name, "ftl", sizeof(partition.exploded.basic_data.name));
   CopyConfigData(options, ftl, &partition.exploded.data);
+
+  // The read wear limit is a property of how this driver talks to the device and not of the
+  // volume, so it is set after the configuration data to be saved has been captured.
+  if (read_wear_limit_) {
+    ftl.flags |= FSF_READ_WEAR_LIMIT;
+    ftl.read_wear_limit = read_wear_limit_;
+  }
 
   if (save_volume_data) {
     const NDMPartitionInfo* info = ndmGetPartitionInfo(ndm_);

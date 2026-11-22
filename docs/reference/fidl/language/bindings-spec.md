@@ -652,7 +652,7 @@ ensuring their rights are the same.
 [attributes]: /docs/reference/fidl/language/attributes.md
 [Life of a handle]: /docs/concepts/fidl/life-of-a-handle.md
 [C++ wire bindings]: /docs/reference/fidl/bindings/cpp-bindings.md
-[source-compatible]: /docs/development/languages/fidl/guides/compatibility/README.md#strict-flexible
+[source-compatible]: /docs/development/languages/fidl/guides/compatibility/README.md
 [soft-transitions]: /docs/contribute/governance/rfcs/0002_platform_versioning.md#terminology
 [strict-event]: /docs/contribute/governance/rfcs/0138_handling_unknown_interactions.md#changes-to-bindings
 [unknown-attr]: /docs/reference/fidl/language/attributes.md#unknown

@@ -203,7 +203,7 @@ class WithErrorSyntaxResponseAsStructResult {
   WithErrorSyntaxResponseAsStructResult(WithErrorSyntaxResponseAsStructResult&&) = default;
   WithErrorSyntaxResponseAsStructResult& operator=(WithErrorSyntaxResponseAsStructResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -235,7 +235,7 @@ class WithErrorSyntaxResponseAsStructResult {
   ::test_protocols::wire::WithErrorSyntaxResponseAsStructResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -258,7 +258,7 @@ class WithErrorSyntaxErrorAsPrimitiveResult {
   WithErrorSyntaxErrorAsPrimitiveResult(WithErrorSyntaxErrorAsPrimitiveResult&&) = default;
   WithErrorSyntaxErrorAsPrimitiveResult& operator=(WithErrorSyntaxErrorAsPrimitiveResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -284,7 +284,7 @@ class WithErrorSyntaxErrorAsPrimitiveResult {
   ::test_protocols::wire::WithErrorSyntaxErrorAsPrimitiveResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -307,7 +307,7 @@ class WithErrorSyntaxErrorAsEnumResult {
   WithErrorSyntaxErrorAsEnumResult(WithErrorSyntaxErrorAsEnumResult&&) = default;
   WithErrorSyntaxErrorAsEnumResult& operator=(WithErrorSyntaxErrorAsEnumResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -333,7 +333,7 @@ class WithErrorSyntaxErrorAsEnumResult {
   ::test_protocols::wire::WithErrorSyntaxErrorAsEnumResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -357,7 +357,7 @@ class WithErrorSyntaxHandleInResultResult {
   WithErrorSyntaxHandleInResultResult(WithErrorSyntaxHandleInResultResult&& other);
   WithErrorSyntaxHandleInResultResult& operator=(WithErrorSyntaxHandleInResultResult&& other);
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -384,7 +384,7 @@ class WithErrorSyntaxHandleInResultResult {
   void _CloseHandles();
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -408,9 +408,9 @@ class TheUnion {
   TheUnion(TheUnion&&) = default;
   TheUnion& operator=(TheUnion&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kV = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_protocols::wire::TheUnion::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -429,7 +429,7 @@ class TheUnion {
   ::test_protocols::wire::TheUnion::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kV = 1,  // 0x1
   };

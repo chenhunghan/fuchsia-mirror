@@ -341,6 +341,54 @@ class ExpandArgsFromDiskTest(unittest.TestCase):
 
 
 class ExpandArgsStaticTest(unittest.TestCase):
+    def test_cpp_link_lib_dirs_and_extra_link_flags_expansion(self) -> None:
+        raw_args = [
+            "exec",
+            "clang++",
+            "@bazel-out/k8-fastbuild/bin/src/shlib.cpp_link.build_flags",
+        ]
+        response_files_map = ResponseFileMap(
+            {
+                "bazel-out/k8-fastbuild/bin/src/shlib.cpp_link.build_flags": (
+                    ResponseFileTarget(
+                        "@@//src:shlib.final_build_flags", "cpp_link"
+                    )
+                ),
+            }
+        )
+        build_args_map = ResolvedBuildArgsMap(
+            {
+                "@@//src:shlib.final_build_flags": ResolvedBuildArgsFlags.from_json(
+                    {
+                        "label": "@@//src:shlib.final_build_flags",
+                        "lib_dirs": ["third_party/foo/lib"],
+                        "ldflags": ["-Wl,--icf=all"],
+                        "extra_cpp_link_flags": [
+                            "bazel-out/k8-fastbuild/bin/libdep.a",
+                            "-Wl,-z,defs",
+                        ],
+                    }
+                ),
+            }
+        )
+
+        result = bazel_build_args.expand_args_with_build_args_map(
+            raw_args, {}, response_files_map, build_args_map
+        )
+
+        self.assertSequenceEqual(
+            result.expanded_args,
+            (
+                "exec",
+                "clang++",
+                "-Lthird_party/foo/lib",
+                "-Wl,--icf=all",
+                "bazel-out/k8-fastbuild/bin/libdep.a",
+                "-Wl,-z,defs",
+            ),
+        )
+        self.assertSequenceEqual(result.warnings, ())
+
     def test_static_expansion(self) -> None:
         raw_args = [
             "exec",

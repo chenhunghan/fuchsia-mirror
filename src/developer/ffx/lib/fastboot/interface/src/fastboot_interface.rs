@@ -66,6 +66,21 @@ pub trait Fastboot: Send {
     /// On success returns the OKAY response, and all INFO responses.
     fn oem<'a>(&'a mut self, command: &'a str) -> BoxFuture<'a, Result<(), FastbootError>>;
 
+    /// Sends an OEM command with an explicit response timeout.
+    fn oem_with_timeout<'a>(
+        &'a mut self,
+        command: &'a str,
+        _timeout: Duration,
+    ) -> BoxFuture<'a, Result<(), FastbootError>> {
+        self.oem(command)
+    }
+
+    /// Returns whether automatic GBL background storage tasks should be enabled when flashing over
+    /// this interface.
+    fn supports_gbl_async_tasks(&self) -> bool {
+        false
+    }
+
     fn stream<'a>(
         &'a mut self,
         partition_name: &'a str,
@@ -154,6 +169,18 @@ impl<F: Fastboot + ?Sized> Fastboot for Box<F> {
 
     fn oem<'a>(&'a mut self, command: &'a str) -> BoxFuture<'a, Result<(), FastbootError>> {
         (**self).oem(command)
+    }
+
+    fn oem_with_timeout<'a>(
+        &'a mut self,
+        command: &'a str,
+        timeout: Duration,
+    ) -> BoxFuture<'a, Result<(), FastbootError>> {
+        (**self).oem_with_timeout(command, timeout)
+    }
+
+    fn supports_gbl_async_tasks(&self) -> bool {
+        (**self).supports_gbl_async_tasks()
     }
 
     fn stream<'a>(
@@ -246,6 +273,18 @@ impl<F: Fastboot + ?Sized> Fastboot for &mut F {
 
     fn oem<'a>(&'a mut self, command: &'a str) -> BoxFuture<'a, Result<(), FastbootError>> {
         (**self).oem(command)
+    }
+
+    fn oem_with_timeout<'a>(
+        &'a mut self,
+        command: &'a str,
+        timeout: Duration,
+    ) -> BoxFuture<'a, Result<(), FastbootError>> {
+        (**self).oem_with_timeout(command, timeout)
+    }
+
+    fn supports_gbl_async_tasks(&self) -> bool {
+        (**self).supports_gbl_async_tasks()
     }
 
     fn stream<'a>(

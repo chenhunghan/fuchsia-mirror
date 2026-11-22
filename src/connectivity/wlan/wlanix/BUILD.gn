@@ -38,6 +38,7 @@ fidl("fuchsia.wlan.wlanix") {
     "//vendor/google/*",
   ]
   public_deps = [
+    "//sdk/fidl/fuchsia.power.system",
     "//sdk/fidl/fuchsia.wlan.ieee80211",
     "//sdk/fidl/fuchsia.wlan.stats",
     "//zircon/vdso/zx",

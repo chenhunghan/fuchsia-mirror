@@ -4,7 +4,6 @@
 
 use anyhow::{Error, format_err};
 use assert_matches::assert_matches;
-use async_helpers::hanging_get::asynchronous as hanging_get;
 use diagnostics_assertions::assert_data_tree;
 use fidl_fuchsia_bluetooth::Appearance;
 use fidl_fuchsia_bluetooth_host::{BondingDelegateRequest, HostRequest};
@@ -18,13 +17,14 @@ use futures::future::join;
 use futures::stream::TryStreamExt;
 use futures::{FutureExt, StreamExt, TryFutureExt};
 use log::info;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::build_config::{BrEdrConfig, Config};
 use crate::host_device::HostDevice;
 use crate::host_dispatcher::{
     DEFAULT_DEVICE_NAME, HostDispatcher, NameReplace, test as hd_test, try_restore_bonds,
 };
+use crate::services::host_watcher;
 use crate::store::stash::Stash;
 use crate::types;
 
@@ -52,26 +52,12 @@ async fn on_device_changed_inspect_state() {
     let inspector = inspect::Inspector::default();
     let system_inspect = inspector.root().create_child("system");
     let (gas_channel_sender, _generic_access_req_stream) = mpsc::channel(0);
-    let watch_peers_broker = hanging_get::HangingGetBroker::new(
-        HashMap::new(),
-        |_, _| true,
-        hanging_get::DEFAULT_CHANNEL_SIZE,
-    );
-    let watch_hosts_broker = hanging_get::HangingGetBroker::new(
-        Vec::new(),
-        |_, _| true,
-        hanging_get::DEFAULT_CHANNEL_SIZE,
-    );
     let dispatcher = HostDispatcher::new(
         Appearance::Display,
         Default::default(),
         stash,
         system_inspect,
         gas_channel_sender,
-        watch_peers_broker.new_publisher(),
-        watch_peers_broker.new_registrar(),
-        watch_hosts_broker.new_publisher(),
-        watch_hosts_broker.new_registrar(),
     );
     let peer_id = PeerId(1);
 
@@ -84,7 +70,7 @@ async fn on_device_changed_inspect_state() {
     });
 
     // add new peer and assert inspect tree is updated
-    dispatcher.on_device_updated(peer(peer_id)).await;
+    dispatcher.on_device_updated(peer(peer_id));
     assert_data_tree!(inspector, root: {
         system: contains {
             peer_count: 1u64,
@@ -98,7 +84,7 @@ async fn on_device_changed_inspect_state() {
     });
 
     // remove peer and assert inspect tree is updated
-    dispatcher.on_device_removed(peer_id).await;
+    dispatcher.on_device_removed(peer_id);
     assert_data_tree!(inspector, root: {
         system: contains {
             peer_count: 0u64,
@@ -121,26 +107,12 @@ fn set_pairing_delegate_inspect_state() {
     let inspector = inspect::Inspector::default();
     let system_inspect = inspector.root().create_child("system");
     let (gas_channel_sender, _generic_access_req_stream) = mpsc::channel(0);
-    let watch_peers_broker = hanging_get::HangingGetBroker::new(
-        HashMap::new(),
-        |_, _| true,
-        hanging_get::DEFAULT_CHANNEL_SIZE,
-    );
-    let watch_hosts_broker = hanging_get::HangingGetBroker::new(
-        Vec::new(),
-        |_, _| true,
-        hanging_get::DEFAULT_CHANNEL_SIZE,
-    );
     let dispatcher = HostDispatcher::new(
         Appearance::Display,
         Default::default(),
         stash,
         system_inspect,
         gas_channel_sender,
-        watch_peers_broker.new_publisher(),
-        watch_peers_broker.new_registrar(),
-        watch_hosts_broker.new_publisher(),
-        watch_hosts_broker.new_registrar(),
     );
 
     // Initially, no pairing_delegate node is present under system.
@@ -387,32 +359,12 @@ async fn add_host_device_continues_when_restore_bonds_reports_errors() {
 
 #[fuchsia::test]
 async fn test_notify_host_watcher_of_active_hosts() {
-    let watch_peers_broker = hanging_get::HangingGetBroker::new(
-        HashMap::new(),
-        |_, _| true,
-        hanging_get::DEFAULT_CHANNEL_SIZE,
-    );
-
-    let watch_hosts_broker = hanging_get::HangingGetBroker::new(
-        Vec::new(),
-        crate::host_watcher::observe_hosts,
-        hanging_get::DEFAULT_CHANNEL_SIZE,
-    );
-
-    let host_dispatcher = hd_test::make_test_dispatcher(
-        watch_peers_broker.new_publisher(),
-        watch_peers_broker.new_registrar(),
-        watch_hosts_broker.new_publisher(),
-        watch_hosts_broker.new_registrar(),
-    );
-
-    let watchers_fut = join(watch_peers_broker.run(), watch_hosts_broker.run()).map(|_| ());
-    fasync::Task::spawn(watchers_fut).detach();
+    let host_dispatcher = hd_test::make_simple_test_dispatcher();
 
     // Start HostWatcher client/server.
     let (host_watcher_proxy, host_watcher_stream) =
         fidl::endpoints::create_proxy_and_stream::<fidl_fuchsia_bluetooth_sys::HostWatcherMarker>();
-    let host_watcher_fut = crate::host_watcher::run(host_dispatcher.clone(), host_watcher_stream);
+    let host_watcher_fut = host_watcher::run(host_dispatcher.clone(), host_watcher_stream);
     let _host_watcher_task = fasync::Task::spawn(host_watcher_fut);
 
     // New host should be active by default.
@@ -436,7 +388,7 @@ async fn test_notify_host_watcher_of_active_hosts() {
 
     // Add a second host that should start inactive.
     let host_id_1 = HostId(1);
-    let _host_server_1 =
+    let (_host_stream_1, host_device_1, _gatt_server_1, _bonding_1) =
         hd_test::create_and_add_test_host_to_dispatcher(host_id_1, &host_dispatcher)
             .await
             .expect("add test host succeeds");
@@ -472,7 +424,7 @@ async fn test_notify_host_watcher_of_active_hosts() {
     assert_eq!(hosts[1].active, Some(true));
 
     // Removing active host 1 should mark host 0 as active.
-    host_dispatcher.rm_device(&format!("/dev/host{}", host_id_1.0)).await;
+    host_dispatcher.rm_device(host_device_1.path()).await;
     // The future has a timeout so that tests consistently terminate.
     let hosts = host_watcher_proxy
         .watch()

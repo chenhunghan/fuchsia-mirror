@@ -184,7 +184,7 @@ support and enhance the accompanying text in documentation.
 * **Scalability:** Ensure diagrams are scalable and can be zoomed in without
   losing clarity.
 
-### Alt text
+### Alt text {:#alt-text}
 
 Provide concise and informative alternative text descriptions for all diagrams. Alt text should:
 

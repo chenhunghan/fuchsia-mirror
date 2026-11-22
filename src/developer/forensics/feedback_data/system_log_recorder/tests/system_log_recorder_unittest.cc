@@ -8,6 +8,7 @@
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 
+#include <format>
 #include <memory>
 #include <vector>
 
@@ -19,6 +20,7 @@
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/identity_encoder.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/production_encoding.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/reader.h"
+#include "src/developer/forensics/testing/log_message.h"
 #include "src/developer/forensics/testing/stubs/diagnostics_archive.h"
 #include "src/developer/forensics/testing/stubs/diagnostics_batch_iterator.h"
 #include "src/developer/forensics/testing/unit_test_fixture.h"
@@ -27,7 +29,6 @@
 #include "src/lib/files/file.h"
 #include "src/lib/files/path.h"
 #include "src/lib/files/scoped_temp_dir.h"
-#include "src/lib/fxl/strings/string_printf.h"
 
 namespace forensics {
 namespace feedback_data {
@@ -58,27 +59,27 @@ TEST(Encoding, VerifyProductionEncoderDecoderVersion) {
 
 std::string BuildLogMessage(const std::string& message,
                             const zx::duration timestamp_offset = zx::nsec(0)) {
-  constexpr char fmt[] = R"JSON(
+  const zx::time_boot timestamp = kLogMessageBaseTimestamp + timestamp_offset;
+  return std::format(R"JSON(
 [
-  {
-    "metadata": {
-      "timestamp": %ld,
+  {{
+    "metadata": {{
+      "timestamp": {},
       "severity": "INFO",
-      "pid": 7559,
-      "tid": 7687
-    },
-    "payload": {
-      "root": {
-      "message": {
-        "value": "%s"
-        }
-      }
-    }
-  }
+      "pid": {},
+      "tid": {}
+    }},
+    "payload": {{
+      "root": {{
+      "message": {{
+        "value": "{}"
+        }}
+      }}
+    }}
+  }}
 ]
-)JSON";
-
-  return fxl::StringPrintf(fmt, (zx::sec(15604) + timestamp_offset).to_nsecs(), message.c_str());
+)JSON",
+                     timestamp.get(), kLogMessageProcessId, kLogMessageThreadId, message);
 }
 
 using SystemLogRecorderSingleDispatcherTest = UnitTestFixture;
@@ -549,8 +550,8 @@ TEST_F(SystemLogRecorderMultiDispatcherTest, GetCurrentBootLogs) {
   ASSERT_TRUE(response.metadata().has_value());
   ASSERT_TRUE(response.metadata()->first_timestamp().has_value());
   ASSERT_TRUE(response.metadata()->last_timestamp().has_value());
-  EXPECT_EQ(*response.metadata()->first_timestamp(), zx::time_boot(zx::sec(15604).get()));
-  EXPECT_EQ(*response.metadata()->last_timestamp(), zx::time_boot(zx::sec(15604).get()));
+  EXPECT_EQ(*response.metadata()->first_timestamp(), kLogMessageBaseTimestamp);
+  EXPECT_EQ(*response.metadata()->last_timestamp(), kLogMessageBaseTimestamp);
   ASSERT_TRUE(response.metadata()->source().has_value());
   EXPECT_EQ(*response.metadata()->source(), ffi::SystemLogSource::kDisk);
 }
@@ -675,8 +676,8 @@ TEST_F(SystemLogRecorderMultiDispatcherTest, GetCurrentBootLogsFallbackToArchivi
   ASSERT_TRUE(response.metadata().has_value());
   ASSERT_TRUE(response.metadata()->first_timestamp().has_value());
   ASSERT_TRUE(response.metadata()->last_timestamp().has_value());
-  EXPECT_EQ(*response.metadata()->first_timestamp(), zx::time_boot(zx::sec(15604).get()));
-  EXPECT_EQ(*response.metadata()->last_timestamp(), zx::time_boot(zx::sec(15604).get()));
+  EXPECT_EQ(*response.metadata()->first_timestamp(), kLogMessageBaseTimestamp);
+  EXPECT_EQ(*response.metadata()->last_timestamp(), kLogMessageBaseTimestamp);
   ASSERT_TRUE(response.metadata()->source().has_value());
   EXPECT_EQ(*response.metadata()->source(), ffi::SystemLogSource::kStream);
 }
@@ -964,6 +965,43 @@ TEST_F(SystemLogRecorderMultiDispatcherTest, RestartResumesPersistingAfterCacheP
   EXPECT_EQ(result->logs, R"([15604.000][07559][07687][] INFO: MESSAGES MAY BE MISSING
 [15605.000][07559][07687][] INFO: LOG PERSISTENCE STOPPED
 )");
+}
+
+TEST_F(SystemLogRecorderMultiDispatcherTest, EvictsPreviousBootLogsWhenBudgetReached) {
+  std::unique_ptr<async::LoopInterface> write_loop = test_loop().StartNewLoop();
+
+  files::ScopedTempDir temp_dir;
+  const std::string logs_dir = files::JoinPath(temp_dir.path(), "current_logs");
+  const std::string previous_logs_dir = files::JoinPath(temp_dir.path(), "previous_logs");
+  const std::string boot_0_dir = files::JoinPath(previous_logs_dir, "0");
+  ASSERT_TRUE(files::CreateDirectory(boot_0_dir));
+  ASSERT_TRUE(files::WriteFile(files::JoinPath(boot_0_dir, "0"), "prev0"));
+  ASSERT_TRUE(files::WriteFile(files::JoinPath(boot_0_dir, "boot_info.json"), "{}"));
+
+  const zx::duration kWriterPeriod = zx::sec(1);
+  const StorageSize kWriteSize = StorageSize::Kilobytes(1);
+
+  // With max_num_files = 1 and 1 previous-boot file already on disk, starting file 0 in the
+  // current boot evicts the previous-boot log file while keeping boot_info.json.
+  SystemLogRecorder recorder(dispatcher(), write_loop->dispatcher(), services(),
+                             SystemLogRecorder::WriteParameters{
+                                 .period = kWriterPeriod,
+                                 .max_write_size = kWriteSize,
+                                 .logs_dir = logs_dir,
+                                 .previous_logs_dir = previous_logs_dir,
+                                 .max_num_files = 1u,
+                                 .total_log_size = kWriteSize,
+                                 .fallback_buffer_size = kFallbackLogBufferSize,
+                             },
+                             std::make_unique<IdentityRedactor>(inspect::BoolProperty()),
+                             std::make_unique<ProductionEncoder>(),
+                             std::make_unique<ProductionDecoder>());
+
+  RunLoopUntilIdle();
+
+  EXPECT_FALSE(files::IsFile(files::JoinPath(boot_0_dir, "0")));
+  EXPECT_TRUE(files::IsFile(files::JoinPath(boot_0_dir, "boot_info.json")));
+  EXPECT_TRUE(files::IsFile(files::JoinPath(logs_dir, "0")));
 }
 
 }  // namespace

@@ -69,7 +69,6 @@ fx_component(
     name = "fake-netstack",
     testonly = True,
     compiled_manifest = ":fake-netstack-manifest",
-    visibility = ["//src/connectivity/network/tests/benchmarks/socket-loopback:__pkg__"],
     deps = [":fake_netstack_packaged_bin"],
 )
 
@@ -81,8 +80,7 @@ fx_component_manifest(
     manifest = "meta/fake-netstack.cml",
 )
 
-# Used only by the Bazel fx_package target below.
-# @bazel2gn:skip
+# Used only by :fake-netstack-pkg below.
 fx_component(
     name = "component-dropin",
     testonly = True,
@@ -95,4 +93,11 @@ fx_package(
     package_name = "netstack",
     testonly = True,
     components = [":component-dropin"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "fake-netstack",
+    testonly = True,
+    components = [":fake-netstack"],
 )

@@ -4,12 +4,21 @@
 
 import("//tools/fidl/fidlc/testdata/fidl_golden_library.gni")
 
+# LINT.IfChange
 fidl_golden_library("test.aliases") {
   sources = [ "example.test.fidl" ]
   experimental_flags = [ "output_index_json" ]
   public_deps = [ ":test.someotherlibrary" ]
+  excluded_checks = [
+    "invalid-case-for-decl-name",
+    "invalid-copyright-for-platform-source-library",
+    "string-bounds-not-specified",
+    "vector-bounds-not-specified",
+  ]
 }
 
 fidl_golden_library("test.someotherlibrary") {
   sources = [ "someotherlibrary.test.fidl" ]
+  excluded_checks = [ "invalid-copyright-for-platform-source-library" ]
 }
+# LINT.ThenChange(BUILD.bazel)

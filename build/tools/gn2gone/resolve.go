@@ -233,6 +233,18 @@ func stripToolchain(s string) string {
 // iterates over it). Resolving there can only add blockers, never hide one
 // that an importer in the same directory would see.
 func (r *Resolver) Resolve(l *Literal) []Ref {
+	return r.resolve(l, l.Target, l.Attr, true)
+}
+
+// ResolveAs resolves `l` as if it appeared in `target`'s `attr` attribute
+// (so bare directory labels in `deps`, `public_deps`, and `data_deps` resolve
+// to the directory's default target), without recording unattributed dynamic
+// strings.
+func (r *Resolver) ResolveAs(l *Literal, target *Target, attr string) []Ref {
+	return r.resolve(l, target, attr, false)
+}
+
+func (r *Resolver) resolve(l *Literal, target *Target, attr string, recordUnattributed bool) []Ref {
 	s := l.Value
 	if s == "" || strings.ContainsAny(s, " \t") {
 		return nil
@@ -276,7 +288,7 @@ func (r *Resolver) Resolve(l *Literal) []Ref {
 		}
 		switch {
 		case strings.HasPrefix(static, "//"):
-			return r.dynamicPrefix(l, static[2:])
+			return r.dynamicPrefix(l, static[2:], recordUnattributed)
 		case !relativeOK || strings.HasPrefix(static, "/"):
 			// "/..." is a file system path, not a label.
 			return nil
@@ -288,7 +300,7 @@ func (r *Resolver) Resolve(l *Literal) []Ref {
 		}
 		// A relative static start ("sub/$x:tests", "tests/" + name). A string
 		// that starts with the dynamic part ("$x", "$x/foo") can't be placed.
-		return r.dynamicPrefix(l, relativeStatic(srcDir, static))
+		return r.dynamicPrefix(l, relativeStatic(srcDir, static), recordUnattributed)
 	}
 	if !labelChars.MatchString(s) {
 		return nil
@@ -304,7 +316,7 @@ func (r *Resolver) Resolve(l *Literal) []Ref {
 			return nil
 		}
 		if !hasColon {
-			t = bareDirName(l, d)
+			t = bareDirNameAs(l, target, attr, d)
 		}
 		return []Ref{r.ref(l, d, how, t)}
 	case !relativeOK:
@@ -321,7 +333,7 @@ func (r *Resolver) Resolve(l *Literal) []Ref {
 		return nil
 	}
 	if !hasColon {
-		t = bareDirName(l, nd)
+		t = bareDirNameAs(l, target, attr, nd)
 	}
 	// Same-directory labels such as ".:target", "../<this dir>:target" and
 	// deps = [ "." ] are real references; a bare "." elsewhere (e.g.
@@ -338,8 +350,12 @@ func (r *Resolver) Resolve(l *Literal) []Ref {
 // directories that a `foreach` turns into "${dir}:tests" or "$dir:bin", it
 // may stand for any target in the directory, so "" (TierDir) is returned.
 func bareDirName(l *Literal, dir string) string {
-	if l.Target != nil && l.InnerAttr == "" {
-		switch l.Attr {
+	return bareDirNameAs(l, l.Target, l.Attr, dir)
+}
+
+func bareDirNameAs(l *Literal, target *Target, attr, dir string) string {
+	if target != nil && l.InnerAttr == "" {
+		switch attr {
 		case "deps", "public_deps", "data_deps":
 			return path.Base(dir)
 		}
@@ -374,7 +390,7 @@ func relativeStatic(srcDir, static string) string {
 // known. If `static` contains ":", the directory is fully known and only the
 // target name is dynamic. Otherwise the label may name any sentinel directory
 // starting with `static`.
-func (r *Resolver) dynamicPrefix(l *Literal, static string) []Ref {
+func (r *Resolver) dynamicPrefix(l *Literal, static string, recordUnattributed bool) []Ref {
 	if d, _, hasColon := strings.Cut(static, ":"); hasColon {
 		d = strings.TrimSuffix(d, "/")
 		if !r.sentinelDirs[d] {
@@ -384,7 +400,9 @@ func (r *Resolver) dynamicPrefix(l *Literal, static string) []Ref {
 	}
 	dirs := r.dirsUnder(static)
 	if strings.Trim(static, "/") == "" || len(dirs) > maxDynamicDirs {
-		r.unattributed[l] = true
+		if recordUnattributed {
+			r.unattributed[l] = true
+		}
 		return nil
 	}
 	var refs []Ref

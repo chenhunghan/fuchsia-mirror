@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::fuchsia::debug::{create_debug_directory, handle_debug_request};
+use crate::fuchsia::debug::create_debug_directory;
 use crate::fuchsia::errors::map_to_status;
 use crate::fuchsia::layer_pager::LayerPagerImpl;
 use crate::fuchsia::memory_pressure::MemoryPressureMonitor;
@@ -122,14 +122,14 @@ struct RunningState {
 }
 
 enum State {
-    ComponentStarted,
+    Stopped,
     Running(RunningState),
 }
 
 impl State {
     async fn stop(&mut self, outgoing_dir: &vfs::directory::immutable::Simple) {
         if let State::Running(RunningState { fs, volumes, .. }) =
-            std::mem::replace(self, State::ComponentStarted)
+            std::mem::replace(self, State::Stopped)
         {
             info!("Stopping Fxfs runtime; remaining connections will be forcibly closed");
             let _ = outgoing_dir.remove_entry("volumes", /* must_be_directory: */ false);
@@ -143,7 +143,7 @@ impl State {
 impl Component {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(State::ComponentStarted),
+            state: Mutex::new(State::Stopped),
             scope: ExecutionScope::new(),
             export_dir: vfs::directory::immutable::simple(),
         })
@@ -338,10 +338,11 @@ impl Component {
         // TODO(https://fxbug.dev/42063349) Add support for block sizes greater than the page size.
         let page_size = page_size();
         assert!(client.block_size() <= page_size.get() as u32);
-        assert!(page_size == MIN_BLOCK_SIZE);
+        assert!(page_size.get() == MIN_BLOCK_SIZE.get());
 
         let fs = FxFilesystemBuilder::new()
             .fsck_after_every_transaction(options.fsck_after_every_transaction.unwrap_or(false))
+            .fsck_before_open(options.fsck_before_start.unwrap_or(false))
             .read_only(options.read_only.unwrap_or(false))
             .inline_crypto_enabled(options.inline_crypto_enabled.unwrap_or(false))
             .barriers_enabled(options.barriers_enabled.unwrap_or(false))
@@ -437,7 +438,7 @@ impl Component {
     ) -> Result<(), Error> {
         let state = self.state.lock().await;
         let (fs_container, fs) = match *state {
-            State::ComponentStarted => {
+            State::Stopped => {
                 let client = new_block_client(device).await?;
                 let fs_container = FxFilesystemBuilder::new()
                     .read_only(true)
@@ -485,20 +486,20 @@ impl Component {
     }
 
     /// Handles fuchsia.fxfs.Debug requests, providing live debugging internals of the running
-    /// filesystem.
+    /// filesystem.  Requests are only valid once the component is running and are forwarded to
+    /// `VolumesDirectory`, which applies them filesystem-wide.
     async fn handle_debug_requests(&self, mut stream: DebugRequestStream) -> Result<(), Error> {
         while let Some(request) = stream.try_next().await.context("Reading request")? {
-            let state = self.state.lock().await;
-            let (fs, volumes) = match &*state {
-                State::ComponentStarted => {
-                    info!("Debug commands are not valid unless component is started.");
-                    bail!("Component not started");
+            let volumes = match &*self.state.lock().await {
+                State::Stopped => {
+                    info!("Debug commands are not valid unless filesystem is running.");
+                    bail!("Filesystem not running");
                 }
-                State::Running(RunningState { fs, volumes, .. }) => {
-                    (fs.deref().deref().clone(), volumes.clone())
-                }
+                State::Running(RunningState { volumes, .. }) => volumes.clone(),
             };
-            handle_debug_request(fs, volumes, request).await?;
+            // The state lock is not held here so that long-running debug operations (e.g. a forced
+            // compaction) do not block shutdown or other state transitions.
+            volumes.handle_debug_request(request).await.context("Handling debug request")?;
         }
         Ok(())
     }
@@ -511,9 +512,9 @@ impl Component {
         while let Some(request) = stream.try_next().await.context("Reading request")? {
             let state = self.state.lock().await;
             let volumes = match &*state {
-                State::ComponentStarted => {
-                    info!("Profile commands are not valid unless component is started.");
-                    bail!("Component not started");
+                State::Stopped => {
+                    info!("Profile commands are not valid unless filesystem is running.");
+                    bail!("Filesystem not running");
                 }
                 State::Running(RunningState { volumes, .. }) => volumes.clone(),
             };
@@ -654,6 +655,7 @@ mod tests {
     use futures::future::{BoxFuture, FusedFuture, FutureExt};
     use futures::{pin_mut, select};
     use fxfs::filesystem::FxFilesystem;
+    use fxfs::object_store::transaction::{Options, lock_keys};
     use fxfs::object_store::volume::root_volume;
     use fxfs::object_store::{NewChildStoreOptions, StoreOptions};
     use std::pin::Pin;
@@ -937,5 +939,123 @@ mod tests {
             assert_eq!(vol.guid(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
         }
         fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test(threads = 2)]
+    async fn test_start_with_fsck_before_start() {
+        const BLOCK_SIZE: u32 = 512;
+        const BLOCK_COUNT: u64 = 16384;
+        let block_server = Arc::new(
+            VmoBackedServer::new(BLOCK_COUNT, BLOCK_SIZE, &[])
+                .expect("Failed to create VmoBackedServer"),
+        );
+
+        {
+            let fs = FxFilesystem::new_empty(DeviceHolder::new(
+                BlockDevice::new(
+                    new_block_client(block_server.connect())
+                        .await
+                        .expect("Unable to create block client"),
+                    false,
+                )
+                .await
+                .unwrap(),
+            ))
+            .await
+            .expect("FxFilesystem::new_empty failed");
+            fs.close().await.expect("close failed");
+        }
+
+        let (client_end, server_end) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
+        let (lifecycle_client, lifecycle_server) =
+            fidl::endpoints::create_proxy::<LifecycleMarker>();
+
+        let mut component_task = Box::pin(
+            async {
+                Component::new()
+                    .run(server_end.into_channel(), Some(lifecycle_server.into_channel()))
+                    .await
+                    .expect("Failed to run component");
+            }
+            .fuse(),
+        );
+
+        let block_server_clone = block_server.clone();
+        let task = async move {
+            let startup_proxy = connect_to_protocol_at_dir_svc::<StartupMarker>(&client_end)
+                .expect("Unable to connect to Startup protocol");
+            let admin_proxy = connect_to_protocol_at_dir_svc::<AdminMarker>(&client_end)
+                .expect("Unable to connect to Admin protocol");
+
+            // Healthy filesystem succeeds with fsck_before_start.
+            startup_proxy
+                .start(
+                    block_server_clone.connect(),
+                    &StartOptions { fsck_before_start: Some(true), ..Default::default() },
+                )
+                .await
+                .expect("Start failed (FIDL)")
+                .expect("Start with fsck_before_start failed on healthy fs");
+            admin_proxy.shutdown().await.expect("shutdown failed");
+
+            // Inject an extra allocation so fsck fails.
+            {
+                let fs = FxFilesystem::open(DeviceHolder::new(
+                    BlockDevice::new(
+                        new_block_client(block_server_clone.connect())
+                            .await
+                            .expect("Unable to create block client"),
+                        false,
+                    )
+                    .await
+                    .unwrap(),
+                ))
+                .await
+                .expect("FxFilesystem::open failed");
+                let mut transaction = fs
+                    .root_store()
+                    .new_transaction(lock_keys![], Options::default())
+                    .await
+                    .expect("new_transaction failed");
+                let end = fs.block_size().align_down(BLOCK_COUNT * BLOCK_SIZE as u64);
+                fs.allocator()
+                    .mark_allocated(&mut transaction, 4, end - fs.block_size()..end)
+                    .expect("mark_allocated failed");
+                transaction.commit().await.expect("commit failed");
+                fs.close().await.expect("close failed");
+            }
+
+            // Starting with fsck_before_start must fail and leave the component stopped.
+            let status = startup_proxy
+                .start(
+                    block_server_clone.connect(),
+                    &StartOptions { fsck_before_start: Some(true), ..Default::default() },
+                )
+                .await
+                .expect("Start failed (FIDL)")
+                .expect_err("Start with fsck_before_start succeeded on corrupt fs");
+            assert_eq!(zx::Status::err_from_raw(status), zx::Status::INTERNAL);
+
+            // A subsequent Start on the same component instance still works.
+            startup_proxy
+                .start(block_server_clone.connect(), &StartOptions::default())
+                .await
+                .expect("Start failed (FIDL)")
+                .expect("Subsequent Start failed after failed fsck_before_start");
+            let admin_proxy = connect_to_protocol_at_dir_svc::<AdminMarker>(&client_end)
+                .expect("Unable to connect to Admin protocol");
+            admin_proxy.shutdown().await.expect("shutdown failed");
+            drop(lifecycle_client);
+        }
+        .fuse();
+
+        pin_mut!(task);
+        loop {
+            select! {
+                () = component_task => {},
+                () = task => break,
+            }
+        }
+        component_task.await;
     }
 }

@@ -9,8 +9,8 @@
 #include <fidl/fuchsia.hardware.i2c.businfo/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.i2cimpl/cpp/driver/wire.h>
 #include <lib/ddk/device.h>
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/mmio/cpp/mmio.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/zircon-internal/thread_annotations.h>
 #include <lib/zx/event.h>
 #include <lib/zx/interrupt.h>

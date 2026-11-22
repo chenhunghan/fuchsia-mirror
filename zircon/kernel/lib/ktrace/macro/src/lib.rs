@@ -610,7 +610,7 @@ macro_rules! begin_scope_cond {
                     category,
                     $crate::resolve_string!($label),
                     $context,
-                    [$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
+                    || [$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
                 ))
             } else {
                 None
@@ -654,9 +654,13 @@ macro_rules! end_scope {
         crate::ktrace_rs::OptionalKTraceScope::end_with($scope, |scope| {
             if !scope.is_ended() {
                 crate::ktrace_rs::outlined(|| {
-                    scope.end_with_args(&[
-                        $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
-                    ]);
+                    let end_time = crate::ktrace_rs::KTrace::timestamp();
+                    scope.end_at_with_args(
+                        end_time,
+                        &[
+                            $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
+                        ],
+                    );
                 });
             }
         })

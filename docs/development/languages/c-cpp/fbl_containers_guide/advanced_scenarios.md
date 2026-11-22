@@ -270,7 +270,7 @@ zx_status_t ActivateObject(UniqueId id) {
 
 ## Allowing O(1) clearing of containers with `clear_unsafe()` {#clear-unsafe}
 
-As noted in the [Lifecycle checks](#lifecycle-checks) section, containers of
+As noted in the [Lifecycle checks](lifecycle_checks.md) section, containers of
 unmanaged pointers may not destruct with objects still in them, and objects
 cannot destruct while they think that they are still in a container. Either
 behavior is considered to be an error and will trigger an assert in a debug

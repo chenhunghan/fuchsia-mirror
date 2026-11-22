@@ -109,7 +109,7 @@ running on your development host machine, see the following guides:
 * [List running package servers][list-package-servers]
 * [Stop running package servers][stop-package-servers]
 
-## Connecting host and target
+## Connecting host and target {:#connecting-host-and-target}
 
 The [Fuchsia source checkout][fuchsia-source] (`fuchsia.git`) contains the Fuchsia
 package server, a simple HTTP server that serves static files. And a Fuchsia build
@@ -151,7 +151,7 @@ The update agent on a target device remains configured until it is re-flashed.
 The Fuchsia package server attempts to reconfigure the update agent when the
 target device is rebooted.
 
-## Triggering package updates
+## Triggering package updates {:#triggering-package-updates}
 
 In Fuchsia, packages are not "installed" but they are cached on an as-needed
 basis.

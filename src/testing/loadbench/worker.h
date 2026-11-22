@@ -7,12 +7,14 @@
 
 #include <lib/sync/completion.h>
 #include <lib/syslog/cpp/macros.h>
+#include <lib/zx/clock.h>
 #include <lib/zx/profile.h>
 #include <lib/zx/thread.h>
 #include <lib/zx/time.h>
 #include <lib/zx/timer.h>
 #include <zircon/time.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -38,15 +40,24 @@ class Worker {
   Worker& operator=(const Worker&) = delete;
 
   static std::pair<std::thread, std::unique_ptr<Worker>> Create(WorkerConfig config) {
-    std::unique_ptr<Worker> worker{
-        new Worker{std::move(config.actions), config.name, config.group, config.priority}};
+    std::unique_ptr<Worker> worker{new Worker{std::move(config.actions), config.name, config.group,
+                                              config.priority, config.affinity}};
     return {std::thread{&Worker::Run, worker.get()}, std::move(worker)};
   }
 
   // Sleeps the worker for the given duration. Returns early if the termination
-  // flag is set.
+  // flag is set, and otherwise records scheduler wake-to-run latency past the
+  // requested sleep deadline.
   void Sleep(std::chrono::nanoseconds duration_ns) {
-    sync_completion_wait(&terminate_completion_, duration_ns.count());
+    // Wait on the deadline that latency is measured from. A relative wait
+    // computes a second deadline, and preemption between the two would be
+    // counted as wakeup latency.
+    const zx::time expected_wake = zx::deadline_after(zx::duration{duration_ns.count()});
+    const zx_status_t status =
+        sync_completion_wait_deadline(&terminate_completion_, expected_wake.get());
+    if (status == ZX_ERR_TIMED_OUT && !should_terminate()) {
+      RecordWakeupLatency(zx::clock::get_monotonic() - expected_wake);
+    }
   }
 
   // Spins the worker for the given duration. Returns early if the termination
@@ -68,13 +79,63 @@ class Worker {
 
   void Exit() { early_exit_ = true; }
 
+  bool IsTerminating() const { return should_terminate() || early_exit_; }
+
+  void SetExpectedTimerWakeTime(zx_handle_t timer_handle, zx::time expected_wake) {
+    expected_timer_handle_ = timer_handle;
+    expected_timer_wake_ = expected_wake;
+  }
+
+  std::optional<zx::time> TakeExpectedTimerWakeTime(zx_handle_t handle) {
+    if (expected_timer_wake_.has_value() && expected_timer_handle_ == handle) {
+      const zx::time expected = *expected_timer_wake_;
+      expected_timer_wake_.reset();
+      expected_timer_handle_ = ZX_HANDLE_INVALID;
+      return expected;
+    }
+    return std::nullopt;
+  }
+
+  void SetPendingPortWakeTime(zx::time wake_time) { pending_port_wake_ = wake_time; }
+
+  std::optional<zx::time> TakePendingPortWakeTime() {
+    const auto wake = pending_port_wake_;
+    pending_port_wake_.reset();
+    return wake;
+  }
+
+  void RecordWakeupLatency(zx::duration latency) {
+    using std::chrono_literals::operator""ms;
+    using std::chrono_literals::operator""s;
+    const std::chrono::nanoseconds clamped_ns{std::max<zx_duration_t>(0, latency.get())};
+    wakeup_count_++;
+    total_wakeup_latency_ += clamped_ns;
+    max_wakeup_latency_ = std::max(max_wakeup_latency_, clamped_ns);
+    if (clamped_ns >= 100ms) {
+      wakeups_over_100ms_++;
+    }
+    if (clamped_ns >= 1s) {
+      wakeups_over_1s_++;
+    }
+  }
+
   void Dump() {
+    using double_ms = std::chrono::duration<double, std::milli>;
     static std::mutex output_lock;
     std::lock_guard<std::mutex> guard{output_lock};
     std::cout << "Thread " << id_ << ": group=" << group() << " name=" << name() << std::endl;
+    std::cout << "    Completed loops: " << completed_loops() << std::endl;
     std::cout << "    Spin iterations: " << spin_iterations() << std::endl;
     std::cout << "    Total runtime: " << double_seconds{total_runtime()}.count() << " s"
               << std::endl;
+    if (wakeup_count_ > 0) {
+      const double avg_ms =
+          double_ms{total_wakeup_latency_}.count() / static_cast<double>(wakeup_count_);
+      const double max_ms = double_ms{max_wakeup_latency_}.count();
+      std::cout << "    Wakeups: " << wakeup_count_ << " (avg latency: " << avg_ms
+                << " ms, max latency: " << max_ms << " ms, >100ms: " << wakeups_over_100ms_
+                << ", >1s: " << wakeups_over_1s_ << ")" << std::endl;
+    }
   }
 
   static void WaitForAllReady(size_t count) {
@@ -100,33 +161,46 @@ class Worker {
     return total_runtime_end_ - total_runtime_begin_;
   }
   uint64_t spin_iterations() const { return spin_iterations_.load(); }
+  uint64_t completed_loops() const { return completed_loops_; }
+  uint64_t wakeup_count() const { return wakeup_count_; }
+  std::chrono::nanoseconds total_wakeup_latency() const { return total_wakeup_latency_; }
+  std::chrono::nanoseconds max_wakeup_latency() const { return max_wakeup_latency_; }
+  uint64_t wakeups_over_100ms() const { return wakeups_over_100ms_; }
+  uint64_t wakeups_over_1s() const { return wakeups_over_1s_; }
 
   const std::string& name() const { return name_; }
   const std::string& group() const { return group_; }
 
  private:
   Worker(std::vector<std::unique_ptr<Action>> actions, const std::string& name,
-         const std::string& group, WorkerConfig::PriorityType priority)
+         const std::string& group, WorkerConfig::PriorityType priority,
+         std::optional<zx_cpu_set_t> affinity)
       : id_{thread_counter_++},
         actions_{std::move(actions)},
         name_{name},
         group_{group},
-        priority_{priority} {}
+        priority_{priority},
+        affinity_{affinity} {}
 
   void Run() {
     if (std::holds_alternative<int>(priority_)) {
-      auto profile = GetProfile(std::get<int>(priority_));
+      auto profile = GetProfile(std::get<int>(priority_), affinity_);
       const auto status = zx::thread::self()->set_profile(*profile, 0);
       FX_CHECK(status == ZX_OK) << "Failed to set worker " << id_ << " to priority "
                                 << std::get<int>(priority_) << "!";
     } else if (std::holds_alternative<WorkerConfig::DeadlineParams>(priority_)) {
       const auto params = std::get<WorkerConfig::DeadlineParams>(priority_);
-      auto profile = GetProfile(params.capacity, params.deadline, params.period);
+      auto profile =
+          GetProfile(params.capacity, params.deadline, params.period, affinity_, params.critical);
       const auto status = zx::thread::self()->set_profile(*profile, 0);
       FX_CHECK(status == ZX_OK) << "Failed to set worker " << id_
                                 << " to {capacity=" << params.capacity.get()
                                 << ", deadline=" << params.deadline.get()
                                 << ", period=" << params.period.get() << "}!";
+    } else if (affinity_.has_value()) {
+      auto profile = GetProfile(affinity_.value());
+      const auto status = zx::thread::self()->set_profile(*profile, 0);
+      FX_CHECK(status == ZX_OK) << "Failed to set worker " << id_ << " affinity!";
     }
 
     // Setup the actions on this worker.
@@ -149,11 +223,16 @@ class Worker {
     total_runtime_begin_ = std::chrono::nanoseconds{thread_stats.total_runtime};
 
     while (!should_terminate() && !early_exit_) {
+      bool completed_all = true;
       for (auto& action : actions_) {
         if (should_terminate() || early_exit_) {
+          completed_all = false;
           break;
         }
         action->Perform(this);
+      }
+      if (completed_all && !should_terminate() && !early_exit_) {
+        completed_loops_++;
       }
     }
 
@@ -172,9 +251,21 @@ class Worker {
   std::string name_;
   std::string group_;
   WorkerConfig::PriorityType priority_;
+  std::optional<zx_cpu_set_t> affinity_;
 
   bool early_exit_{false};
   std::atomic<uint64_t> spin_iterations_{0};
+  uint64_t completed_loops_{0};
+
+  zx_handle_t expected_timer_handle_{ZX_HANDLE_INVALID};
+  std::optional<zx::time> expected_timer_wake_;
+  std::optional<zx::time> pending_port_wake_;
+
+  uint64_t wakeup_count_{0};
+  std::chrono::nanoseconds total_wakeup_latency_{0};
+  std::chrono::nanoseconds max_wakeup_latency_{0};
+  uint64_t wakeups_over_100ms_{0};
+  uint64_t wakeups_over_1s_{0};
 
   std::chrono::nanoseconds total_runtime_begin_;
   std::chrono::nanoseconds total_runtime_end_;

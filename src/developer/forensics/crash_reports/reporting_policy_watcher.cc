@@ -48,26 +48,36 @@ UserReportingPolicyWatcher::UserReportingPolicyWatcher(
       dispatcher_(dispatcher),
       services_(std::move(services)),
       watch_backoff_(/*initial_delay=*/zx::min(1), /*retry_factor=*/2u, /*max_delay=*/zx::hour(1)) {
-  privacy_settings_.set_error_handler([this](const zx_status_t status) {
-    FX_PLOGS(WARNING, status) << "Lost connection to fuchsia.settings.Privacy";
-    SetPolicy(ReportingPolicy::kUndecided);
-    watch_task_.PostDelayed(dispatcher_, watch_backoff_.GetNext());
-  });
-
   Watch();
 }
 
+void UserReportingPolicyWatcher::on_fidl_error(const fidl::UnbindInfo error) {
+  privacy_settings_ = fidl::Client<fuchsia_settings::Privacy>();
+  FX_PLOGS(WARNING, error.status()) << "Lost connection to fuchsia.settings.Privacy";
+  SetPolicy(ReportingPolicy::kUndecided);
+  watch_task_.PostDelayed(dispatcher_, watch_backoff_.GetNext());
+}
+
 void UserReportingPolicyWatcher::Watch() {
-  if (!privacy_settings_.is_bound()) {
-    services_->Connect(privacy_settings_.NewRequest());
+  if (!privacy_settings_.is_valid()) {
+    auto [client, server] = fidl::Endpoints<fuchsia_settings::Privacy>::Create();
+    services_->Connect(fidl::DiscoverableProtocolName<fuchsia_settings::Privacy>,
+                       server.TakeChannel());
+    privacy_settings_ =
+        fidl::Client<fuchsia_settings::Privacy>(std::move(client), dispatcher_, this);
   }
 
-  privacy_settings_->Watch([this](const fuchsia::settings::PrivacySettings settings) {
+  privacy_settings_->Watch().Then([this](fidl::Result<fuchsia_settings::Privacy::Watch>& result) {
+    // Errors unbind |privacy_settings_|, and on_fidl_error() handles reconnecting.
+    if (result.is_error()) {
+      return;
+    }
+
     watch_backoff_.Reset();
 
-    if (!settings.has_user_data_sharing_consent()) {
+    if (!result->settings().user_data_sharing_consent().has_value()) {
       SetPolicy(ReportingPolicy::kUndecided);
-    } else if (settings.user_data_sharing_consent()) {
+    } else if (*result->settings().user_data_sharing_consent()) {
       SetPolicy(ReportingPolicy::kUpload);
     } else {
       SetPolicy(ReportingPolicy::kDoNotFileAndDelete);

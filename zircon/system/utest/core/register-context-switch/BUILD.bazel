@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/570694755): Preserve GN cflags = [ "-fno-vectorize" ]
+# on riscv64 until bazel2gn can map copts to cflags.
+# @bazel2gn:raw_attribute:if (current_cpu == "riscv64") { cflags = [ "-fno-vectorize" ] }
+fx_cc_library(
+    name = "fpu",
+    testonly = True,
+    srcs = ["fpu_basic.cc"],
+    # Disable auto-vectorization in the case of RISC-V to ensure that FPU
+    # instructions are emitted and that we are indeed indirectly testing the
+    # context switching of FPU state. For other architectures, FPU and vector
+    # state coincide, so auto-vectorization is okay and still results in the
+    # intended logic being exercised.
+    # @bazel2gn:skip
+    copts = select({
+        "@platforms//cpu:riscv64": ["-fno-vectorize"],
+        "//conditions:default": [],
+    }),
+    implementation_deps = ["//zircon/system/ulib/zxtest"],
+    visibility = ["//visibility:private"],
+    alwayslink = True,
+)
+
+# Note: x86_64-only target; x86-segments.cc unconditionally uses x86 CPUID and
+# segment register intrinsics (<cpuid.h>, <x86intrin.h>).
+fx_cc_library(
+    name = "x86-segments",
+    testonly = True,
+    srcs = ["x86-segments.cc"],
+    implementation_deps = [
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest:zxtest-streams",
+    ],
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+    visibility = ["//visibility:private"],
+    alwayslink = True,
+)

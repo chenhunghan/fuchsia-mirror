@@ -15,10 +15,7 @@ arm64_hardware_envs = [
   vim3_env,
 ]
 
-x64_hardware_envs = [
-  nuc7_env,
-  nuc11_env,
-]
+x64_hardware_envs = [ nuc11_env ]
 
 hardware_envs = arm64_hardware_envs + x64_hardware_envs
 

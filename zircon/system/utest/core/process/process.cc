@@ -70,6 +70,20 @@ TEST(ProcessTest, EmptyNameSucceeds) {
   ASSERT_OK(zx_handle_close(proc));
 }
 
+TEST(ProcessTest, NullNameFails) {
+  zx_handle_t proc = ZX_HANDLE_INVALID;
+  zx_handle_t vmar = ZX_HANDLE_INVALID;
+  // Zero-length copy skips reading user memory, so an explicit null check is required.
+  EXPECT_EQ(zx_process_create(zx_job_default(), nullptr, 0, 0, &proc, &vmar), ZX_ERR_INVALID_ARGS);
+  EXPECT_EQ(proc, ZX_HANDLE_INVALID);
+  EXPECT_EQ(vmar, ZX_HANDLE_INVALID);
+
+  // Also cover a non-zero length, which faults when copying from address 0.
+  EXPECT_EQ(zx_process_create(zx_job_default(), nullptr, 4, 0, &proc, &vmar), ZX_ERR_INVALID_ARGS);
+  EXPECT_EQ(proc, ZX_HANDLE_INVALID);
+  EXPECT_EQ(vmar, ZX_HANDLE_INVALID);
+}
+
 TEST(ProcessTest, GetRuntimeNoPermission) {
   zx::process proc;
   zx::vmar vmar;
@@ -146,6 +160,48 @@ TEST(ProcessTest, ProcessStartNoHandle) {
   }
 
   zx_handle_close(proc);
+}
+
+TEST(ProcessTest, ProcessStartBadArgHandleFails) {
+  zx::process proc;
+  zx::vmar vmar;
+  zx::thread thread;
+
+  constexpr const char kTestName[] = "test-bad-arg-handle";
+  ASSERT_OK(zx::process::create(*zx::job::default_job(), kTestName, sizeof(kTestName) - 1, 0, &proc,
+                                &vmar));
+  ASSERT_OK(zx::thread::create(proc, kTestName, sizeof(kTestName) - 1, 0u, &thread));
+
+  uintptr_t entry = 0;
+  ASSERT_OK(mini_process_load_vdso(proc.get(), vmar.get(), nullptr, &entry));
+  uintptr_t stack_base = 0;
+  uintptr_t sp = 0;
+  ASSERT_OK(mini_process_load_stack(vmar.get(), false, &stack_base, &sp));
+  vmar.reset();
+
+  zx::event event;
+  ASSERT_OK(zx::event::create(0u, &event));
+  const zx_handle_t bad_handle = event.get();
+  ASSERT_NE(bad_handle, ZX_HANDLE_INVALID);
+  event.reset();
+
+  EXPECT_EQ(zx_process_start(proc.get(), thread.get(), entry, sp, bad_handle, 0),
+            ZX_ERR_BAD_HANDLE);
+
+  zx_info_process_t info{};
+  ASSERT_OK(proc.get_info(ZX_INFO_PROCESS, &info, sizeof(info), nullptr, nullptr));
+  EXPECT_FALSE(info.flags & ZX_INFO_PROCESS_FLAG_STARTED);
+  EXPECT_FALSE(info.flags & ZX_INFO_PROCESS_FLAG_EXITED);
+
+  // Since starting failed before mutating the process, starting it with
+  // ZX_HANDLE_INVALID must still succeed.
+  EXPECT_OK(zx_process_start(proc.get(), thread.get(), entry, sp, ZX_HANDLE_INVALID, 0));
+  thread.reset();
+
+  zx_signals_t signals = 0;
+  EXPECT_OK(
+      zx_object_wait_one(proc.get(), ZX_TASK_TERMINATED, zx_deadline_after(ZX_SEC(1)), &signals));
+  EXPECT_EQ(signals, ZX_TASK_TERMINATED);
 }
 
 TEST(ProcessTest, ProcessStartNonUserspaceEntry) {

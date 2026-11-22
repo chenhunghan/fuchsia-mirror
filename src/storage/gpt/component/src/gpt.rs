@@ -585,7 +585,7 @@ impl GptManager {
             let parent_mapping_vmo = zx::Vmo::create(mapping::MAPPING_VMO_SIZE).unwrap();
             let sender = vmo_fifo::AsyncSender::<mapping::RawMappingCommand>::new(
                 parent_mapping_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-                1024,
+                vmo_fifo::Alignment::SIZE_1KIB,
                 mapping::PENDING_COMMANDS_CAPACITY,
             )
             .unwrap();

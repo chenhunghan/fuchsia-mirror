@@ -61,12 +61,9 @@ void Endpoint::Connect(async_dispatcher_t* dispatcher,
   if (state) {
     fbl::AutoLock _(&binding_lock_);
     binding_refs_.push_back(std::move(state));
-  } else if (hci_->GetDeviceState()) {
-    auto dev_state = hci_->GetDeviceState()[device_id_];
-    if (dev_state) {
-      fbl::AutoLock _(&binding_lock_);
-      binding_refs_.push_back(std::move(dev_state));
-    }
+  } else if (auto dev_state = hci_->GetDeviceState(device_id_)) {
+    fbl::AutoLock _(&binding_lock_);
+    binding_refs_.push_back(std::move(dev_state));
   }
   usb::EndpointServer::Connect(dispatcher, std::move(server_end));
 }
@@ -114,7 +111,7 @@ void Endpoint::QueueRequests(QueueRequestsRequest& request,
     }
     return;
   }
-  auto state = hci_->GetDeviceState() ? hci_->GetDeviceState()[device_id_] : nullptr;
+  auto state = hci_->GetDeviceState(device_id_);
   if (!state) {
     for (auto& req : request.req()) {
       RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, usb::FidlRequest{std::move(req)});
@@ -124,13 +121,13 @@ void Endpoint::QueueRequests(QueueRequestsRequest& request,
   for (auto& req : request.req()) {
     QueueRequest(usb::FidlRequest{std::move(req)});
   }
-  if (!hci_->Running() || !hci_->GetDeviceState() || !hci_->GetDeviceState()[device_id_]) {
+  if (!hci_->Running() || !hci_->GetDeviceState(device_id_)) {
     return;
   }
   uint8_t slot = 0;
   {
     fbl::AutoLock _(&state->transaction_lock());
-    if (state->IsDisconnecting() || !state->GetSlot()) {
+    if (!hci_->Running() || state->IsDisconnecting() || !state->GetSlot()) {
       return;
     }
     slot = state->GetSlot();
@@ -144,7 +141,7 @@ void Endpoint::CancelAll(CancelAllCompleter::Sync& completer) {
     completer.Reply(fit::as_error(ZX_ERR_BAD_STATE));
     return;
   }
-  auto state = hci_->GetDeviceState() ? hci_->GetDeviceState()[device_id_] : nullptr;
+  auto state = hci_->GetDeviceState(device_id_);
   if (!state) {
     completer.Reply(fit::as_error(ZX_ERR_IO_NOT_PRESENT));
     return;
@@ -169,7 +166,7 @@ void Endpoint::QueueRequest(usb::RequestVariant request) {
     RequestComplete(ZX_ERR_BAD_STATE, 0, std::move(request));
     return;
   }
-  auto state = hci_->GetDeviceState() ? hci_->GetDeviceState()[device_id_] : nullptr;
+  auto state = hci_->GetDeviceState(device_id_);
   if (!state) {
     RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(request));
     return;
@@ -187,6 +184,9 @@ void Endpoint::QueueRequest(usb::RequestVariant request) {
 
 zx_status_t Endpoint::LockedQueue::QueueRequestLocked(Endpoint& ep, DeviceState& state,
                                                       std::optional<usb::RequestVariant>& request) {
+  if (!ep.hci_->Running()) {
+    return ZX_ERR_BAD_STATE;
+  }
   if (!state.GetSlot() || state.IsDisconnecting()) {
     return ZX_ERR_IO_NOT_PRESENT;
   }
@@ -375,28 +375,26 @@ zx_status_t Endpoint::ControlRequestDataPhase(UsbRequestState* state) {
 }
 
 void Endpoint::ControlRequestSetupPhase(UsbRequestState* state) {
-  // Setup phase (4.11.2.2)
-  auto bm_request_type =
-      std::holds_alternative<Request>(*state->context->request)
-          ? std::get<Request>(*state->context->request).request()->setup.bm_request_type
-          : std::get<usb::FidlRequest>(*state->context->request)
-                ->information()
-                ->control()
-                ->setup()
-                ->bm_request_type();
-  const auto& setup = std::holds_alternative<Request>(*state->context->request)
-                          ? std::get<Request>(*state->context->request).request()->setup
-                          : ToBanjo(*std::get<usb::FidlRequest>(*state->context->request)
-                                         ->information()
-                                         ->control()
-                                         ->setup());
+  // Per USB 2.0 Sections 8.5.3 and 9.3 (Table 9-2) and Intel xHCI 1.2 Section 4.11.2.2
+  // (Table 4-7) and Section 6.4.1.2.1 (Table 6-26), control transfers with no Data stage
+  // (wLength == 0, so state->first_trb == nullptr) must set Setup Stage TRB Transfer Type (TRT)
+  // to 0 (No Data Stage) rather than OUT (2) or IN (3). See:
+  // https://www.usb.org/document-library/usb-20-specification
+  // https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf
+  const usb_setup_t setup = std::holds_alternative<Request>(*state->context->request)
+                                ? std::get<Request>(*state->context->request).request()->setup
+                                : ToBanjo(*std::get<usb::FidlRequest>(*state->context->request)
+                                               ->information()
+                                               ->control()
+                                               ->setup());
   memcpy(&state->setup->ptr, &setup, sizeof(setup));
   Setup* setup_trb = reinterpret_cast<Setup*>(state->setup);
-  setup_trb->set_INTERRUPTER(state->interrupter)
-      .set_length(8)
-      .set_IDT(1)
-      .set_TRT(usb_request_is_in(bm_request_type) ? Setup::IN : Setup::OUT);
-  hw_mb();
+  uint32_t trt = Setup::NoDataStage;
+  if (state->first_trb != nullptr) {
+    trt = usb_request_is_in(setup.bm_request_type) ? Setup::IN : Setup::OUT;
+  }
+  setup_trb->set_INTERRUPTER(state->interrupter).set_length(8).set_IDT(1).set_TRT(trt);
+  DataMemoryBarrier();
 }
 
 void Endpoint::ControlRequestCommit(UsbRequestState* state) {
@@ -692,7 +690,7 @@ zx_status_t Endpoint::ContinueNormalTransaction(UsbRequestState* state) {
 }
 
 void Endpoint::CommitNormalTransaction(UsbRequestState* state) {
-  hw_mb();
+  DataMemoryBarrier();
   // Start the transaction!
   if (!hci_->HasCoherentCache()) {
     if (std::holds_alternative<Request>(*state->context->request)) {
@@ -718,7 +716,7 @@ void Endpoint::CommitNormalTransaction(UsbRequestState* state) {
     }
     zx_cache_flush(state->info.trbs.data(), state->info.trbs.size_bytes(), ZX_CACHE_FLUSH_DATA);
   }
-  hw_mb();
+  DataMemoryBarrier();
   Control::FromTRB(state->first_trb).set_Cycle(state->first_cycle).ToTrb(state->first_trb);
 
   transfer_ring_.CommitTransaction(state->transaction);

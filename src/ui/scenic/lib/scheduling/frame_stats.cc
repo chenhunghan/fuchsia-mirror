@@ -159,18 +159,18 @@ void FrameStats::LogFrameTimes() {
   if (!cobalt_dropped_frame_times_histogram_.empty()) {
     metrics_logger_->LogLatchToActualPresentation(
         CobaltFrameStatus::Dropped,
-        CreateMetricsBucketsFromHistogram(cobalt_on_time_frame_times_histogram_));
+        CreateMetricsBucketsFromHistogram(cobalt_dropped_frame_times_histogram_));
     cobalt_dropped_frame_times_histogram_.clear();
   }
   if (!cobalt_delayed_frame_times_histogram_.empty()) {
     metrics_logger_->LogLatchToActualPresentation(
         CobaltFrameStatus::Delayed,
-        CreateMetricsBucketsFromHistogram(cobalt_on_time_frame_times_histogram_));
+        CreateMetricsBucketsFromHistogram(cobalt_delayed_frame_times_histogram_));
     cobalt_delayed_frame_times_histogram_.clear();
   }
   if (!cobalt_render_times_histogram_.empty()) {
-    metrics_logger_->LogLatchToActualPresentation(
-        std::nullopt, CreateMetricsBucketsFromHistogram(cobalt_on_time_frame_times_histogram_));
+    metrics_logger_->LogRenderTime(
+        CreateMetricsBucketsFromHistogram(cobalt_render_times_histogram_));
     cobalt_render_times_histogram_.clear();
   }
   cobalt_logging_task_.PostDelayed(async_get_default_dispatcher(), kCobaltDataCollectionInterval);

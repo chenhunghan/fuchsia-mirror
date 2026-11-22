@@ -339,8 +339,6 @@ the same time:
 - `inspect(rename = "foo")`: Use a different name. By default, the field name
   is used.
 
-[deref coercion]:
-https://doc.rust-lang.org/1.27.2/book/second-edition/ch15-02-deref.html
+[deref coercion]: https://doc.rust-lang.org/1.27.2/book/second-edition/ch15-02-deref.html
 
-[serde-field-attrs]:
-https://serde.rs/field-attrs.html
+[serde-field-attrs]: https://serde.rs/field-attrs.html

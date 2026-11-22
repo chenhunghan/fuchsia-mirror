@@ -52,7 +52,7 @@ fuchsia_microbenchmarks can be run the following ways:
     tests][running-perf-tests] and use this command:
 
     ```
-    fx test --e2e fuchsia_microbenchmarks_test
+    fx test --e2e --outdir="out/test_out" --timestamp-artifacts fuchsia_microbenchmarks_test
     ```
 
     This will take some time because it runs the fuchsia_microbenchmarks process multiple times.

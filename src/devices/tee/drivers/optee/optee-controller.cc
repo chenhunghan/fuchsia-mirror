@@ -53,7 +53,7 @@ static bool IsOpteeApiRevisionSupported(const tee_smc::TrustedOsCallRevisionResu
          static_cast<int32_t>(returned_rev.minor) >= static_cast<int32_t>(kOpteeApiRevisionMinor);
 }
 
-void OpteeControllerBase::WaitQueueWait(const uint64_t key) {
+bool OpteeControllerBase::WaitQueueWait(const uint64_t key) {
   std::shared_ptr<WaitCtx> wait_ctx;
   {
     fbl::AutoLock wq_lock(&wq_lock_);
@@ -65,7 +65,13 @@ void OpteeControllerBase::WaitQueueWait(const uint64_t key) {
       if (it->second.waiters.empty()) {
         wait_queue_.erase(it);
       }
-      return;
+      return true;
+    }
+
+    if (!ShouldBlockOnWaitQueue()) {
+      LOG(WARNING, "Rejecting wait queue sleep during single-threaded teardown (key: %" PRIu64 ")",
+          key);
+      return false;
     }
 
     // Allocate a new WaitCtx for this waiter. It is managed by shared_ptr to prevent
@@ -80,6 +86,7 @@ void OpteeControllerBase::WaitQueueWait(const uint64_t key) {
   // Block the thread until signaled. The lock is released here to allow other threads
   // to run concurrent wait/signal operations.
   wait_ctx->Wait();
+  return true;
 }
 
 void OpteeControllerBase::WaitQueueSignal(const uint64_t key) {
@@ -107,7 +114,10 @@ void OpteeControllerBase::WaitQueueSignal(const uint64_t key) {
   }
 }
 
-size_t OpteeControllerBase::WaitQueueSize() const { return wait_queue_.size(); }
+size_t OpteeControllerBase::WaitQueueSize() const {
+  fbl::AutoLock wq_lock(&wq_lock_);
+  return wait_queue_.size();
+}
 
 std::list<WaitCtx>::iterator OpteeControllerBase::CommandQueueInit() {
   std::list<WaitCtx>::iterator it;
@@ -120,21 +130,30 @@ std::list<WaitCtx>::iterator OpteeControllerBase::CommandQueueInit() {
   return it;
 }
 
-void OpteeControllerBase::CommandQueueWait(std::list<WaitCtx>::iterator& el) {
+bool OpteeControllerBase::CommandQueueWait(std::list<WaitCtx>::iterator& el,
+                                           bool abort_if_no_active_commands) {
   WaitCtx* ctx;
-  cq_lock_.Acquire();
-  ctx = &*el;
-  command_queue_wait_.push_back(ctx);
-  cq_lock_.Release();
+  {
+    fbl::AutoLock cq_lock(&cq_lock_);
+    ctx = &*el;
+    if (!ctx->Signaled() && abort_if_no_active_commands &&
+        command_queue_.size() <= command_queue_wait_.size() + 1) {
+      // No other command is actively running in the TEE to signal us during shutdown.
+      return false;
+    }
+    command_queue_wait_.push_back(ctx);
+  }
 
   ctx->Wait();
 
-  cq_lock_.Acquire();
-  // remove our WaitCtx if it is still in wait queue.
-  // This may happened if CommandQueueWait was called after the the WaitCtx was actually signaled
-  // (race between wait and signaled threads).
-  command_queue_wait_.remove(ctx);
-  cq_lock_.Release();
+  {
+    fbl::AutoLock cq_lock(&cq_lock_);
+    // remove our WaitCtx if it is still in wait queue.
+    // This may happened if CommandQueueWait was called after the the WaitCtx was actually signaled
+    // (race between wait and signaled threads).
+    command_queue_wait_.remove(ctx);
+  }
+  return true;
 }
 
 void OpteeControllerBase::CommandQueueSignal(const std::list<WaitCtx>::iterator& el) {
@@ -162,14 +181,57 @@ void OpteeControllerBase::CommandQueueSignal(const std::list<WaitCtx>::iterator&
   }
 }
 
-size_t OpteeControllerBase::CommandQueueSize() const { return command_queue_.size(); }
-size_t OpteeControllerBase::CommandQueueWaitSize() const { return command_queue_wait_.size(); }
-
-OpteeController::~OpteeController() {
-  loop_.Quit();
-  loop_.JoinThreads();
-  loop_.Shutdown();
+size_t OpteeControllerBase::CommandQueueSize() const {
+  fbl::AutoLock cq_lock(&cq_lock_);
+  return command_queue_.size();
 }
+size_t OpteeControllerBase::CommandQueueWaitSize() const {
+  fbl::AutoLock cq_lock(&cq_lock_);
+  return command_queue_wait_.size();
+}
+
+bool OpteeController::IsShuttingDown() const {
+  fbl::AutoLock lock(&client_binding_lock_);
+  return is_shutting_down_;
+}
+
+void OpteeController::ShutdownLoops() {
+  {
+    fbl::AutoLock lock(&client_binding_lock_);
+    is_shutting_down_ = true;
+  }
+
+  // Drain all dispatch loops in three phases:
+  // 1. Signal every loop to stop picking up new FIDL messages.
+  // 2. Join all worker threads across both default and custom pools while peer threads can still
+  //    complete in-flight SMCs and wake any concurrent CommandQueue/WaitQueue waiters. We must
+  //    wait for in-flight TEE calls to finish before unmapping or unpinning shared memory because
+  //    the secure world may still be accessing those physical pages. Known limitation: if a thread
+  //    is stuck in a long-running TA command or asleep on a wait queue whose wake-up depended on a
+  //    later client request (which is no longer dispatched after Quit()), JoinThreads() will block;
+  //    on reboot/shutdown this is bounded by driver_manager's ~45s shutdown timeout before SoC
+  //    reset, whereas live driver unbind has no timeout backstop.
+  // 3. Call Shutdown() once all worker threads have exited so remaining OpteeClient bindings are
+  //    destroyed sequentially on the caller thread with no concurrent TEE contention.
+  loop_.Quit();
+  for (auto& loop : custom_loops_) {
+    loop.Quit();
+  }
+
+  loop_.JoinThreads();
+  for (auto& loop : custom_loops_) {
+    loop.JoinThreads();
+  }
+
+  in_single_threaded_teardown_.store(true, std::memory_order_release);
+
+  loop_.Shutdown();
+  for (auto& loop : custom_loops_) {
+    loop.Shutdown();
+  }
+}
+
+OpteeController::~OpteeController() { ShutdownLoops(); }
 
 zx_status_t OpteeController::ValidateApiUid() const {
   static const zx_smc_parameters_t kGetApiFuncCall =
@@ -611,8 +673,12 @@ zx_status_t OpteeController::Bind() {
 }
 
 void OpteeController::DdkSuspend(ddk::SuspendTxn txn) {
-  loop_.Quit();
-  loop_.JoinThreads();
+  ShutdownLoops();
+  // TODO(https://fxbug.dev/525183351): If OpteeClient::CloseSession fails or aborts on a rejected
+  // wait-queue sleep during teardown, the secure world thread is left parked or may still retain
+  // pointers to message/shared-memory buffers that we then free and unpin (harmless on reboot
+  // where the SoC resets after suspend, but relevant if the driver is unbound and rebound without
+  // rebooting). Consider keeping pinned_mmio_ pinned or quarantined in that case.
   shared_memory_manager_ = nullptr;
   pinned_mmio_.reset();  // Resetting the std::optional container will call the MmioPinnedBuffer
                          // dtor which will call unpin.
@@ -620,6 +686,7 @@ void OpteeController::DdkSuspend(ddk::SuspendTxn txn) {
 }
 
 void OpteeController::DdkUnbind(ddk::UnbindTxn txn) {
+  ShutdownLoops();
   // Initiate the removal of this device and all of its children.
   txn.Reply();
 }
@@ -633,6 +700,12 @@ void OpteeController::ConnectToDeviceInfo(
     ConnectToDeviceInfoRequestView request,
     [[maybe_unused]] ConnectToDeviceInfoCompleter::Sync& _completer) {
   ZX_DEBUG_ASSERT(request->device_info_request.is_valid());
+
+  fbl::AutoLock lock(&client_binding_lock_);
+  if (is_shutting_down_) {
+    request->device_info_request.Close(ZX_ERR_UNAVAILABLE);
+    return;
+  }
 
   fidl::BindServer(loop_.dispatcher(), std::move(request->device_info_request), this);
 }
@@ -651,9 +724,20 @@ zx_status_t OpteeController::ConnectToApplicationInternal(
   ZX_DEBUG_ASSERT(application_request.is_valid());
   LOG(DEBUG, "Request to %s TA", application_uuid.ToString().c_str());
 
+  fbl::AutoLock lock(&client_binding_lock_);
+  // ShutdownLoops() sets `is_shutting_down_` under `client_binding_lock_` before DdkSuspend()
+  // clears `shared_memory_manager_`, so checking `is_shutting_down_` first guarantees
+  // `shared_memory_manager_` is still alive without holding `client_binding_lock_` in DdkSuspend().
+  if (is_shutting_down_) {
+    application_request.Close(ZX_ERR_UNAVAILABLE);
+    return ZX_ERR_UNAVAILABLE;
+  }
+  ZX_DEBUG_ASSERT(shared_memory_manager_ != nullptr);
+
   async_dispatcher_t* dispatcher = GetDispatcherForTa(application_uuid);
   if (dispatcher == nullptr) {
     LOG(ERROR, "Failed to get dispatcher for %s TA.", application_uuid.ToString().c_str());
+    application_request.Close(ZX_ERR_INTERNAL);
     return ZX_ERR_INTERNAL;
   }
 
@@ -716,9 +800,19 @@ OpteeController::CallResult OpteeController::CallWithMessage(const optee::Messag
     }
 
     if (result.response.status == kReturnEThreadLimit) {
-      CommandQueueWait(cur);
+      if (!CommandQueueWait(cur, IsShuttingDown())) {
+        LOG(WARNING, "Aborting SMC wait on EThreadLimit during shutdown with no active peers");
+        call_result.return_code = result.response.status;
+        break;
+      }
     } else if (optee::IsReturnRpc(result.response.status)) {
-      rpc_handler(result.rpc_args, &func_call.rpc_result);
+      zx_status_t rpc_status = rpc_handler(result.rpc_args, &func_call.rpc_result);
+      if (rpc_status == ZX_ERR_CANCELED && !ShouldBlockOnWaitQueue()) {
+        LOG(WARNING,
+            "Aborting SMC call after RPC handler returned ZX_ERR_CANCELED during single-threaded "
+            "teardown");
+        break;
+      }
     } else {
       call_result.return_code = result.response.status;
       break;

@@ -21,8 +21,27 @@ impl Container {
         Ok((Self { buffer_addr, vmo_size: size }, vmo))
     }
 
-    pub fn read_only(vmo: &zx::Vmo) -> Result<Self, zx::Status> {
-        let vmo_size = std::cmp::min(vmo.get_size()?, constants::MAX_VMO_SIZE as u64) as usize;
+    /// Maps `vmo` read-only into the root VMAR, optionally clamping the mapped length to
+    /// `max_size`.
+    ///
+    /// On Fuchsia, `max_size` (when `Some`) must be a non-zero multiple of
+    /// [`constants::PAGE_SIZE_BYTES`]; returns `Err(zx::Status::INVALID_ARGS)` otherwise rather
+    /// than implicitly rounding up or down, because `zx_vmar_unmap` in [`Container::drop`] requires
+    /// a non-zero page-aligned length.
+    pub fn read_only_with_max_size(
+        vmo: &zx::Vmo,
+        max_size: Option<usize>,
+    ) -> Result<Self, zx::Status> {
+        let raw_size = vmo.get_size()? as usize;
+        let vmo_size = match max_size {
+            Some(max_size) => {
+                if max_size == 0 || !max_size.is_multiple_of(constants::PAGE_SIZE_BYTES) {
+                    return Err(zx::Status::INVALID_ARGS);
+                }
+                std::cmp::min(raw_size, max_size)
+            }
+            None => raw_size,
+        };
         let flags = zx::VmarFlags::PERM_READ | zx::VmarFlags::REQUIRE_NON_RESIZABLE;
         let buffer_addr = Self::map_vmo(vmo, vmo_size, flags)?;
         Ok(Self { buffer_addr, vmo_size })

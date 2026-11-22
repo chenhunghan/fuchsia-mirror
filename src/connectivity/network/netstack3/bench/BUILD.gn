@@ -105,8 +105,4 @@ fuchsia_unittest_package("netstack3-benchmarks-test") {
   package_name = "netstack3-benchmarks-test-gn"
   component_name = "netstack3-benchmarks-test"
   deps = [ ":netstack3-benchmarks_test" ]
-  visibility = [
-    ":*",
-    "//src/connectivity/network:*",
-  ]
 }

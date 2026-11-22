@@ -4,19 +4,17 @@
 
 """Tests for the platform Bazel C++ rules and macros."""
 
-load(
-    "//build/bazel/rules:zx_library.bzl",
-    "cc_shared_library_zx",
-    "cc_source_library_zx",
-    "cc_static_library_zx",
-)
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library_zx.bzl", "fx_cc_shared_library_zx")
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
+load("//build/bazel/rules/cc:fx_cc_static_library_zx.bzl", "fx_cc_static_library_zx")
 
 package(default_applicable_licenses = ["//:license"])
 
 # Each library uses `deps`, including a ":headers" target that the macros
 # rewrite, and `implementation_deps`.
 
-cc_shared_library_zx(
+fx_cc_shared_library_zx(
     name = "test_shared_library_zx",
     srcs = ["zx_lib.cc"],
     hdrs = ["include/zx_lib/public.h"],
@@ -26,7 +24,7 @@ cc_shared_library_zx(
 )
 
 # A shared library that links the C++ standard library statically.
-cc_shared_library_zx(
+fx_cc_shared_library_zx(
     name = "test_shared_library_static_libcxx_zx",
     srcs = ["zx_lib.cc"],
     hdrs = ["include/zx_lib/public.h"],
@@ -36,7 +34,7 @@ cc_shared_library_zx(
     deps = ["//sdk/lib/fit:headers"],
 )
 
-cc_source_library_zx(
+fx_cc_source_library_zx(
     name = "test_source_library_zx",
     srcs = ["zx_lib.cc"],
     hdrs = ["include/zx_lib/public.h"],
@@ -45,7 +43,7 @@ cc_source_library_zx(
     deps = ["//sdk/lib/fit:headers"],
 )
 
-cc_static_library_zx(
+fx_cc_static_library_zx(
     name = "test_static_library_zx",
     srcs = ["zx_lib.cc"],
     hdrs = ["include/zx_lib/public.h"],
@@ -54,10 +52,23 @@ cc_static_library_zx(
     deps = ["//sdk/lib/fit:headers"],
 )
 
+fx_cc_shared_library(
+    name = "test_empty_shared_library",
+    shared_lib_name = "libtest_empty_shared.so",
+)
+
+fx_cc_shared_library(
+    name = "test_empty_deps_shared_library",
+    shared_lib_name = "libtest_empty_deps_shared.so",
+    deps = [],
+)
+
 filegroup(
     name = "build_only_tests",
     testonly = True,
     srcs = [
+        ":test_empty_deps_shared_library",
+        ":test_empty_shared_library",
         ":test_shared_library_static_libcxx_zx",
         ":test_shared_library_zx",
         ":test_source_library_zx",

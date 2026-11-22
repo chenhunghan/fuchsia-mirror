@@ -1,0 +1,111 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":cpp_crasher_tests"],
+    visibility = ["//src/developer:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/570694755): Preserve GN cflags = [ "-fstack-protector-all" ]
+# until bazel2gn can map copts to cflags.
+# @bazel2gn:raw_attribute:cflags = [ "-fstack-protector-all" ]
+fx_cc_binary(
+    name = "crasher_exe",
+    srcs = [
+        "cpp_specific.cc",
+        "crasher.c",
+    ],
+    # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
+    # rather than builders.
+    build_flags = ["//build/cpp:fidl-wire-deprecated-mutable-tables"],
+    # TODO(https://fxbug.dev/570694755): bazel2gn maps copts to GN
+    # configs += [...]; cflags is emitted via raw_attribute above.
+    # @bazel2gn:skip
+    copts = ["-fstack-protector-all"],
+    # GN uses the //build/config:all_source config to define _ALL_SOURCE.
+    defines = ["_ALL_SOURCE"],
+    gn_output_name = "crasher",
+    # In GN, crasher_exe is not wrapped in if (is_fuchsia), as GN only
+    # instantiates it from Fuchsia-only targets; Bazel builds //...:all on host.
+    # @bazel2gn:skip
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//sdk/lib/syslog/cpp",
+        "//src/zircon/lib/zircon",
+    ],
+)
+
+fx_packaged_binary(
+    name = "crasher_exe_packaged",
+    binary = ":crasher_exe",
+    binary_name = "crasher",
+)
+
+fx_component_manifest(
+    name = "cpp_crasher_manifest",
+    component_name = "cpp_crasher",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/crasher.cml",
+)
+
+fx_component(
+    name = "cpp_crasher",
+    compiled_manifest = ":cpp_crasher_manifest",
+    visibility = ["//src/developer/forensics/crasher:__pkg__"],
+    deps = [":crasher_exe_packaged"],
+)
+
+fx_cc_test_binary(
+    name = "crasher_test",
+    srcs = ["crasher_test.cc"],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_component(
+    name = "cpp_crasher_test",
+    binary = ":crasher_test",
+)
+
+# Needs reviewer attention (bazel2gn skip): In GN, `:cpp_crasher_test` is packaged by `//src/developer/forensics/crasher:crasher_test` and referenced via `get_target_outputs()` by `fuchsia_test("tests")` above the sentinel.
+# @bazel2gn:skip
+fx_package(
+    name = "cpp_crasher_tests_package",
+    package_name = "cpp-crasher-tests",
+    test_components = [":cpp_crasher_test"],
+)
+
+fx_test(
+    name = "cpp_crasher_tests",
+    # don't run it on any bots
+    build_only = True,
+    package = ":cpp_crasher_tests_package",
+)

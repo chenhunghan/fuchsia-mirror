@@ -27,6 +27,9 @@ class KeyValue final {
   Value value_;
 };
 
+template <typename Key, typename Value>
+KeyValue(Key, Value) -> KeyValue<Key, Value>;
+
 // Opaque structure representing the backend encode state.
 // This structure only has meaning to the backend and application code shouldn't
 // touch these values.

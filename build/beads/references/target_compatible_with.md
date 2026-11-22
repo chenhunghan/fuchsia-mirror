@@ -21,7 +21,7 @@ These are often but not always guarded by `is_host` conditions or asserts in the
    ```
 
 Do NOT use the following when migrating targets.
-In general, these should very rarely be used and only by members of the Build team.
+In general, these should very rarely be used and only by members of `//build/bazel/BAZEL_OWNERS`.
 ```bazel
 load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 ```

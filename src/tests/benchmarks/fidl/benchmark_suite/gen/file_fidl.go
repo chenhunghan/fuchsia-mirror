@@ -57,7 +57,12 @@ func genFidlFile(filepath string, fidl config.FidlFile) error {
 		if len(definition.Denylist) != 0 {
 			strs := make([]string, len(definition.Denylist))
 			for i, binding := range definition.Denylist {
-				strs[i] = string(binding)
+				if binding == config.CPPWire {
+					// fidlgen_cpp still filters @bindings_denylist on "llcpp".
+					strs[i] = "llcpp"
+				} else {
+					strs[i] = string(binding)
+				}
 			}
 			attribute := "@bindings_denylist(\"" + strings.Join(strs, ", ") + "\")"
 			body = attribute + body

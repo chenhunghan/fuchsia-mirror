@@ -35,6 +35,5 @@ wrap_host_rust_test(
 
 fx_unittest_package(
     name = "replace-with-test",
-    package_name = "replace-with-test",
     unit_tests = [":replace-with_lib_test"],
 )

@@ -25,11 +25,7 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() {
-  EXPECT_THAT(mknod("/dev/loop-control", S_IFCHR | 0600, makedev(10, 237)),
-              testing::AnyOf(SyscallSucceeds(), SyscallFailsWithErrno(EEXIST)));
-  return "sysfs_policy";
-}
+extern std::string GetTestPolicyName() { return "sysfs_policy"; }
 
 namespace {
 
@@ -94,6 +90,12 @@ struct SysFsTestParam {
 class SysFsTest : public IsolatedMountNamespaceTest,
                   public testing::WithParamInterface<SysFsTestParam> {
  protected:
+  static void SetUpTestSuite() {
+    IsolatedMountNamespaceTest::SetUpTestSuite();
+    ASSERT_THAT(EnsureDeviceNode("/dev/loop-control", S_IFCHR | 0600, makedev(10, 237)),
+                SyscallResultIsOk());
+  }
+
   void SetUp() override {
     IsolatedMountNamespaceTest::SetUp();
 
@@ -117,13 +119,9 @@ class SysFsTest : public IsolatedMountNamespaceTest,
     loop_minor_ = minor;
     device_path_ = root_path + "/devices/virtual/block/loop" + std::to_string(loop_minor_);
 
-    // devtmpfs creates the device node automatically; create it if the environment lacks one.
     dev_node_path_ = "/dev/loop" + std::to_string(loop_minor_);
-    if (mknod(dev_node_path_.c_str(), S_IFBLK | 0600, makedev(kLoopMajor, loop_minor_)) == 0) {
-      created_dev_node_ = true;
-    } else {
-      ASSERT_EQ(errno, EEXIST) << strerror(errno);
-    }
+    ASSERT_THAT(EnsureDeviceNode(dev_node_path_, S_IFBLK | 0600, makedev(kLoopMajor, loop_minor_)),
+                SyscallResultIsOk());
     loop_fd_ = fbl::unique_fd(open(dev_node_path_.c_str(), O_RDWR));
     ASSERT_TRUE(loop_fd_.is_valid()) << strerror(errno);
 
@@ -140,7 +138,7 @@ class SysFsTest : public IsolatedMountNamespaceTest,
       EXPECT_THAT(ioctl(loop_fd_.get(), LOOP_CLR_FD, 0), SyscallSucceeds());
     }
     loop_fd_.reset();
-    if (created_dev_node_) {
+    if (!dev_node_path_.empty()) {
       EXPECT_THAT(unlink(dev_node_path_.c_str()), SyscallSucceeds());
     }
     if (loop_minor_ >= 0) {
@@ -169,7 +167,6 @@ class SysFsTest : public IsolatedMountNamespaceTest,
   std::string dev_node_path_;
   // Minor number of the loop device created by `SetUp`, or -1 if none was created.
   int loop_minor_ = -1;
-  bool created_dev_node_ = false;
   bool backing_attached_ = false;
 };
 

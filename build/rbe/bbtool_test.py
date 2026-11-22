@@ -10,9 +10,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-import bbtool
-import cas
-import cl_utils
+from build.rbe import bbtool, cas, cl_utils
 
 
 class MainArgParserTests(unittest.TestCase):

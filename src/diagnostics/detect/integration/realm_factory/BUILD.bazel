@@ -1,0 +1,83 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = [
+        "src/main.rs",
+        "src/realm_events.rs",
+        "src/realm_factory.rs",
+        "src/realm_options.rs",
+    ],
+    binary_name = "diagnostics_detect_realm_factory_bin",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
+    tags = ["manual"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
+        "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/rust/zx",
+        "//src/diagnostics/detect/integration/realm_factory/fidl/test.detect.factory:fidl_rust",
+        "//src/lib/diagnostics/testing/fake-archive-accessor",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/component-events",
+        "//src/testing/realm_proxy",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "diagnostics_detect_realm_factory_bin",
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    testonly = True,
+    component_name = "realm_factory",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/realm_factory.cml",
+    visibility = ["//visibility:private"],
+)
+
+fx_component(
+    name = "component",
+    testonly = True,
+    compiled_manifest = ":component_manifest",
+    visibility = ["//visibility:private"],
+    deps = [":bin_packaged"],
+)

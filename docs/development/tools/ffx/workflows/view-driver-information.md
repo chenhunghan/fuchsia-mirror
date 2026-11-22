@@ -611,10 +611,10 @@ $ ffx driver disable fuchsia-pkg://fuchsia.com/my_example#meta/my_driver.cm
 [flash-a-device]: /docs/development/tools/ffx/workflows/flash-a-device.md
 [fuchsia-emulator]: /docs/development/tools/ffx/workflows/start-the-fuchsia-emulator.md
 [ssh-connection]: /docs/development/tools/ffx/workflows/create-ssh-keys-for-devices.md
-[ffx-target-show]: /docs/development/tools/ffx/workflows/view-device-information.md#get_detailed_information_from_a_device
+[ffx-target-show]: /docs/development/tools/ffx/workflows/view-device-information.md#get-detailed-information-from-a-device
 [dfv2]: /docs/concepts/drivers/driver_framework.md
 [device-nodes]: /docs/concepts/drivers/drivers_and_nodes.md
-[node-topology]: /docs/concepts/drivers/drivers_and_nodes.md#node_topology
-[driver-host]: /docs/concepts/drivers/driver_framework.md#driver_host
+[node-topology]: /docs/concepts/drivers/drivers_and_nodes.md#node-topology
+[driver-host]: /docs/concepts/drivers/driver_framework.md#driver-host
 [dot]: https://www.mankier.com/1/dot
 [graphviz]: https://dreampuf.github.io/GraphvizOnline/#digraph

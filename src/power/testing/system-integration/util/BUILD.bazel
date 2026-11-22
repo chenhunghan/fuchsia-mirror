@@ -1,0 +1,38 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "util",
+    srcs = ["test_util.cc"],
+    hdrs = ["test_util.h"],
+    implementation_deps = ["//sdk/lib/component/incoming/cpp"],
+    # Uses Fuchsia-specific FIDL and async/diagnostics headers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/power/testing/system-integration/dispatcher-power:__pkg__",
+        "//src/power/testing/system-integration/example:__pkg__",
+        "//src/power/testing/system-integration/msd-arm-mali:__pkg__",
+        "//src/power/testing/system-integration/storage:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_cpp",
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_cpp",
+        "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_cpp",
+        "//sdk/fidl/fuchsia.hardware.power.suspend:fuchsia.hardware.power.suspend_cpp",
+        "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker_cpp",
+        "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_cpp",
+        "//sdk/lib/async-loop-testing/cpp",
+        "//sdk/lib/async_patterns/cpp",
+        "//sdk/lib/diagnostics/reader/cpp:archive_reader",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main_no_testonly",
+        "//src/power/system-activity-governor/fake/fidl:test.sagcontrol_cpp",
+        "//src/power/testing/fake-suspend:test.suspendcontrol_cpp",
+    ],
+    alwayslink = True,
+)

@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use dma_buffer::{ContiguousBuffer, PagedBuffer, PhysIter};
+use dma_buffer::{
+    ContiguousBuffer, DmaU64, PagedBuffer, PhysIter, SharedContiguousBuffer, SharedPagedBuffer,
+};
 use log::warn;
 use sdmmc_spec::{
     CQHCI_TASK_DESCRIPTOR_LIST_DCMD_SLOT, CommandQueueTDLDirectCmdEntry, CommandQueueTDLEntry,
@@ -22,8 +24,8 @@ fn round_down(value: u64, modulus: u64) -> u64 {
 /// state of the Task Descriptor List and other transfer descriptors, and interacts with the CQE via
 /// registers to submit tasks.
 pub struct TransferManager {
-    tdl_buffer: ContiguousBuffer,
-    extra_descriptors_buffer: PagedBuffer,
+    tdl_buffer: SharedContiguousBuffer<DmaU64>,
+    extra_descriptors_buffer: SharedPagedBuffer<DmaU64>,
     bti: zx::Bti,
     minimum_contiguity: u64,
     max_transfer_blocks: u32,
@@ -61,7 +63,13 @@ impl TransferManager {
         let (extra_descriptor_size, max_transfer_blocks) = Self::extra_descriptors_dimensions();
         assert!(extra_descriptors_buffer.size() >= extra_descriptor_size);
         let minimum_contiguity = bti.info().expect("Failed to get BTI info").minimum_contiguity;
-        Self { tdl_buffer, extra_descriptors_buffer, bti, minimum_contiguity, max_transfer_blocks }
+        Self {
+            tdl_buffer: tdl_buffer.into_shared(),
+            extra_descriptors_buffer: extra_descriptors_buffer.into_shared(),
+            bti,
+            minimum_contiguity,
+            max_transfer_blocks,
+        }
     }
 
     pub fn minimum_contiguity(&self) -> u64 {
@@ -318,25 +326,22 @@ impl TransferManager {
             .unwrap() // Unwrap OK, we already checked `block_count` is valid in the caller
         } else {
             let base_index = slot * max_descriptors;
+            let write_desc = |idx: usize, (addr, len): (zx_paddr_t, usize), end: bool| {
+                // Unwrap is OK since PhysIter ensured that the ranges are not too big and
+                // `base_index + idx` stays within `extra_descriptors_buffer`.
+                let length = TransferBytes::try_from(len).unwrap();
+                let desc = CommandQueueTransferDescriptor::transfer(addr as u64, length, end);
+                self.extra_descriptors_buffer.write_at(base_index + idx, &desc).unwrap();
+            };
             let mut i = 0;
             let mut region = (first_addr, first_len);
-            while let Some(next) = contig_regions.next() {
+            for next in contig_regions {
                 debug_assert!(i < max_descriptors);
-                // Unwrap is OK since PhysIter ensured that the ranges are not too big.
-                let length = TransferBytes::try_from(region.1).unwrap();
-                self.extra_descriptors_buffer.write_element(
-                    base_index + i,
-                    &CommandQueueTransferDescriptor::transfer(region.0 as u64, length, false),
-                );
+                write_desc(i, region, false);
                 i += 1;
                 region = next;
             }
-            // Unwrap is OK since PhysIter ensured that the ranges are not too big.
-            let length = TransferBytes::try_from(region.1).unwrap();
-            self.extra_descriptors_buffer.write_element(
-                base_index + i,
-                &CommandQueueTransferDescriptor::transfer(region.0 as u64, length, true),
-            );
+            write_desc(i, region, true);
             let num_descriptors = i + 1;
             self.extra_descriptors_buffer.cache_flush(
                 offset,
@@ -363,7 +368,9 @@ impl TransferManager {
         tdl_slot: u8,
         tdl_entry: T,
     ) -> Result<(), zx::Status> {
-        self.tdl_buffer.write_struct(tdl_slot as usize * std::mem::size_of::<T>(), &tdl_entry)
+        let slot = usize::from(tdl_slot);
+        self.tdl_buffer.write_at(slot, &tdl_entry)?;
+        self.tdl_buffer.cache_flush(slot * std::mem::size_of::<T>(), std::mem::size_of::<T>())
     }
 }
 

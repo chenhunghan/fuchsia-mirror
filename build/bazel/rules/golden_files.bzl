@@ -89,13 +89,9 @@ def _verify_golden_files_impl(ctx):
 
             # Format the golden file if required.
             if ctx.file.formatter_executable:
-                # TODO(https://fxbug.dev/427998443): Validate formatter support.
-                fail("Formatter support has not been validated. Test before using.")
-
-                # buildifier: disable=unreachable
                 apply_formatter = True
                 if ctx.attr.formatter_extensions:
-                    golden_ext_with_dot = paths.split_extension(golden_file.path)
+                    _, golden_ext_with_dot = paths.split_extension(golden_file.path)
                     golden_ext = golden_ext_with_dot[1:] if golden_ext_with_dot and golden_ext_with_dot.startswith(".") else golden_ext_with_dot
                     if golden_ext not in ctx.attr.formatter_extensions:
                         apply_formatter = False
@@ -115,13 +111,12 @@ def _verify_golden_files_impl(ctx):
                     format_args.add(golden_file.path)
                     format_args.add(formatted_golden_output.path)
                     format_args.add(ctx.executable.formatter_executable.path)
-                    if ctx.attr.formatter_args:
-                        format_args.add_all(ctx.attr.formatter_args)
+                    for arg in ctx.attr.formatter_args:
+                        format_args.add(
+                            ctx.expand_location(arg, targets = ctx.attr.formatter_inputs),
+                        )
 
-                    format_action_inputs = [
-                        golden_file,
-                        ctx.files.formatter_executable,
-                    ]
+                    format_action_inputs = [golden_file] + ctx.files.formatter_executable
                     if ctx.files.formatter_inputs:
                         format_action_inputs += ctx.files.formatter_inputs
 

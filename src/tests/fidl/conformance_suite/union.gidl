@@ -101,8 +101,8 @@ success("FlexibleUnionUnknownValueStored") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of FlexibleUnionUnknownValue
     // decode_success and encode_failure tests.
     bindings_allowlist = [dart],
-    value = TestFlexibleXUnionInStruct{
-        xu: SampleXUnion{
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
             1234: {
                 // padding must be included in the raw bytes
                 bytes = [repeat(0xab):20, padding:4],
@@ -121,8 +121,8 @@ success("FlexibleUnionUnknownValueStored") {
 decode_success("FlexibleUnionUnknownValue") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
     bindings_allowlist = [rust, rust_codec, rust_next],
-    value = TestFlexibleXUnionInStruct{
-        xu: SampleXUnion{
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
             1234: null,
         },
     },
@@ -138,9 +138,9 @@ decode_success("FlexibleUnionUnknownValue") {
 encode_failure("FlexibleUnionUnknownValue") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
     bindings_allowlist = [rust],
-    value = TestFlexibleXUnionInStruct{
+    value = TestFlexibleUnionInStruct{
         xu: decode({
-            type = SampleXUnion,
+            type = SampleUnion,
             bytes = {
                 v2 = [
                     num(1234):8, // unknown ordinal
@@ -157,8 +157,8 @@ success("FlexibleResourceUnionUnknownValueStored") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of
     // FlexibleResourceUnionUnknownValue decode_success and encode_failure tests.
     bindings_allowlist = [dart],
-    value = TestFlexibleResourceXUnionInStruct{
-        xu: SampleResourceXUnion{
+    value = TestFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
             1234: {
                 // padding must be included in the raw bytes
                 bytes = [repeat(0xab):20, padding:4],
@@ -177,8 +177,8 @@ success("FlexibleResourceUnionUnknownValueStored") {
 decode_success("FlexibleResourceUnionUnknownValue") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
     bindings_allowlist = [rust, rust_codec, rust_next],
-    value = TestFlexibleResourceXUnionInStruct{
-        xu: SampleResourceXUnion{
+    value = TestFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
             1234: null,
         },
     },
@@ -194,9 +194,9 @@ decode_success("FlexibleResourceUnionUnknownValue") {
 encode_failure("FlexibleResourceUnionUnknownValue") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
     bindings_allowlist = [rust],
-    value = TestFlexibleResourceXUnionInStruct{
+    value = TestFlexibleResourceUnionInStruct{
         xu: decode({
-            type = SampleResourceXUnion,
+            type = SampleResourceUnion,
             bytes = {
                 v2 = [
                     num(1234):8, // unknown ordinal
@@ -220,8 +220,8 @@ success("FlexibleResourceUnionUnknownValueWithHandlesStored") {
         #2 = channel(),
         #3 = channel(),
     },
-    value = TestFlexibleResourceXUnionInStruct{
-        xu: SampleResourceXUnion{
+    value = TestFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
             1234: {
                 // padding must be included in the raw bytes
                 bytes = [repeat(0xab):20, padding:4],
@@ -252,8 +252,8 @@ decode_success("FlexibleResourceUnionUnknownValueWithHandles") {
         #2 = channel(),
         #3 = channel(),
     },
-    value = TestFlexibleResourceXUnionInStruct{
-        xu: SampleResourceXUnion{
+    value = TestFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
             1234: null,
         },
     },
@@ -280,9 +280,9 @@ encode_failure("FlexibleResourceUnionUnknownValueWithHandles") {
         #2 = channel(),
         #3 = channel(),
     },
-    value = TestFlexibleResourceXUnionInStruct{
+    value = TestFlexibleResourceUnionInStruct{
         xu: decode({
-            type = SampleResourceXUnion,
+            type = SampleResourceUnion,
             bytes = {
                 v2 = [
                     num(1234):8, // unknown ordinal
@@ -301,7 +301,7 @@ encode_failure("FlexibleResourceUnionUnknownValueWithHandles") {
 }
 
 decode_failure("StrictUnionUnknownValue") {
-    type = TestStrictXUnionInStruct,
+    type = TestStrictUnionInStruct,
     bytes = {
         v2 = [
             num(1234):8, // unknown ordinal
@@ -319,7 +319,7 @@ decode_failure("StrictUnionUnknownValueWithHandles") {
         #2 = channel(),
         #3 = channel(),
     },
-    type = TestStrictXUnionInStruct,
+    type = TestStrictUnionInStruct,
     bytes = {
         v2 = [
             num(1234):8, // unknown ordinal
@@ -345,7 +345,7 @@ decode_failure("FlexibleUnionUnknownValueWithHandles") {
         #2 = channel(),
         #3 = channel(),
     },
-    type = TestFlexibleXUnionInStruct,
+    type = TestFlexibleUnionInStruct,
     bytes = {
         v2 = [
             num(1234):8, // unknown ordinal
@@ -370,8 +370,8 @@ decode_success("FlexibleUnionUnknownValueWithHandlesCloseHandles") {
         #2 = channel(),
         #3 = channel(),
     },
-    value = TestFlexibleXUnionInStruct{
-        xu: SampleXUnion{
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
             1234: null,
         },
     },
@@ -392,8 +392,8 @@ decode_success("FlexibleUnionUnknownValueWithHandlesCloseHandles") {
 encode_failure("StrictUnionUnknownValue") {
     // Currently no bindings allow constructing a strict union with an unknown variant
     bindings_allowlist = [],
-    value = TestStrictXUnionInStruct{
-        xu: SampleStrictXUnion{
+    value = TestStrictUnionInStruct{
+        xu: SampleStrictUnion{
             1234: {
                 // padding must be included in the raw bytes
                 bytes = [repeat(0xab):20, padding:4],
@@ -404,7 +404,7 @@ encode_failure("StrictUnionUnknownValue") {
 }
 
 decode_failure("FlexibleValueUnionUnknownBytesNonMultipleOf8") {
-    type = TestFlexibleXUnionInStruct,
+    type = TestFlexibleUnionInStruct,
     bytes = {
         v2 = [
             num(123):8, // ordinal (unknown)
@@ -416,7 +416,7 @@ decode_failure("FlexibleValueUnionUnknownBytesNonMultipleOf8") {
 }
 
 decode_failure("FlexibleResourceUnionUnknownBytesNonMultipleOf8") {
-    type = TestFlexibleResourceXUnionInStruct,
+    type = TestFlexibleResourceUnionInStruct,
     bytes = {
         v2 = [
             num(123):8, // ordinal (unknown)
@@ -619,8 +619,8 @@ encode_failure("RequiredFlexibleValueUnionZeroOrdinalNoPayloadOld") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of
     // RequiredFlexibleValueUnionZeroOrdinalNoPayload.
     bindings_allowlist = [dart],
-    value = TestFlexibleXUnionInStruct{
-        xu: SampleXUnion{
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
             0: {
                 bytes = [],
             },
@@ -632,8 +632,8 @@ encode_failure("RequiredFlexibleValueUnionZeroOrdinalNoPayloadOld") {
 encode_failure("RequiredFlexibleValueUnionZeroOrdinalNoPayload") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
     bindings_allowlist = [rust, rust_codec],
-    value = TestFlexibleXUnionInStruct{
-        xu: SampleXUnion{
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
             0: null,
         },
     },
@@ -644,8 +644,8 @@ encode_failure("RequiredFlexibleValueUnionZeroOrdinalWithPayload") {
     // TODO(https://fxbug.dev/42166276): Remove this test once no binding stores unknown
     // data (it's only expressible when you can store unknown data).
     bindings_allowlist = [dart],
-    value = TestFlexibleXUnionInStruct{
-        xu: SampleXUnion{
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
             0: {
                 bytes = [repeat(0xab):20, padding:4],
             },
@@ -658,8 +658,8 @@ encode_failure("RequiredFlexibleResourceUnionZeroOrdinalNoPayloadOld") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of
     // RequiredFlexibleResourceUnionZeroOrdinalNoPayload.
     bindings_allowlist = [dart],
-    value = TestFlexibleResourceXUnionInStruct{
-        xu: SampleResourceXUnion{
+    value = TestFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
             0: {
                 bytes = [],
             },
@@ -671,8 +671,8 @@ encode_failure("RequiredFlexibleResourceUnionZeroOrdinalNoPayloadOld") {
 encode_failure("RequiredFlexibleResourceUnionZeroOrdinalNoPayload") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
     bindings_allowlist = [rust, rust_codec],
-    value = TestFlexibleResourceXUnionInStruct{
-        xu: SampleResourceXUnion{
+    value = TestFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
             0: null,
         },
     },
@@ -683,8 +683,8 @@ encode_failure("RequiredFlexibleResourceUnionZeroOrdinalWithPayload") {
     // TODO(https://fxbug.dev/42166276): Remove this test once no binding stores unknown
     // data (it's only expressible when you can store unknown data).
     bindings_allowlist = [dart],
-    value = TestFlexibleResourceXUnionInStruct{
-        xu: SampleResourceXUnion{
+    value = TestFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
             0: {
                 bytes = [repeat(0xab):20, padding:4],
             },
@@ -697,8 +697,8 @@ encode_failure("OptionalFlexibleValueUnionZeroOrdinalWithPayload") {
     // TODO(https://fxbug.dev/42166276): Remove this test once no binding stores unknown
     // data (it's only expressible when you can store unknown data).
     bindings_allowlist = [dart],
-    value = TestOptionalFlexibleXUnionInStruct{
-        xu: SampleXUnion{
+    value = TestOptionalFlexibleUnionInStruct{
+        xu: SampleUnion{
             0: {
                 bytes = [repeat(0xab):20, padding:4],
             },
@@ -711,8 +711,8 @@ encode_failure("OptionalFlexibleResourceUnionZeroOrdinalWithPayload") {
     // TODO(https://fxbug.dev/42166276): Remove this test once no binding stores unknown
     // data (it's only expressible when you can store unknown data).
     bindings_allowlist = [dart],
-    value = TestOptionalFlexibleResourceXUnionInStruct{
-        xu: SampleResourceXUnion{
+    value = TestOptionalFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
             0: {
                 bytes = [repeat(0xab):20, padding:4],
             },
@@ -723,7 +723,7 @@ encode_failure("OptionalFlexibleResourceUnionZeroOrdinalWithPayload") {
 
 decode_failure("RequiredStrictValueUnionZeroOrdinalNoPayload") {
     bindings_denylist = [rust_next],
-    type = TestStrictXUnionInStruct,
+    type = TestStrictUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -735,7 +735,7 @@ decode_failure("RequiredStrictValueUnionZeroOrdinalNoPayload") {
 
 decode_failure("RequiredStrictValueUnionZeroOrdinalWithPayload") {
     bindings_denylist = [rust_next],
-    type = TestStrictXUnionInStruct,
+    type = TestStrictUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -748,7 +748,7 @@ decode_failure("RequiredStrictValueUnionZeroOrdinalWithPayload") {
 
 decode_failure("RequiredStrictResourceUnionZeroOrdinalNoPayload") {
     bindings_denylist = [rust_next],
-    type = TestStrictResourceXUnionInStruct,
+    type = TestStrictResourceUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -760,7 +760,7 @@ decode_failure("RequiredStrictResourceUnionZeroOrdinalNoPayload") {
 
 decode_failure("RequiredStrictResourceUnionZeroOrdinalWithPayload") {
     bindings_denylist = [rust_next],
-    type = TestStrictResourceXUnionInStruct,
+    type = TestStrictResourceUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -773,7 +773,7 @@ decode_failure("RequiredStrictResourceUnionZeroOrdinalWithPayload") {
 
 decode_failure("RequiredFlexibleValueUnionZeroOrdinalNoPayload") {
     bindings_denylist = [rust_next],
-    type = TestFlexibleXUnionInStruct,
+    type = TestFlexibleUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -786,7 +786,7 @@ decode_failure("RequiredFlexibleValueUnionZeroOrdinalNoPayload") {
 decode_failure("RequiredFlexibleValueUnionZeroOrdinalWithPayload") {
     // unsafe precondition(s) violated: hint::unreachable_unchecked must never be reached
     bindings_denylist = [rust_next],
-    type = TestFlexibleXUnionInStruct,
+    type = TestFlexibleUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -799,7 +799,7 @@ decode_failure("RequiredFlexibleValueUnionZeroOrdinalWithPayload") {
 
 decode_failure("RequiredFlexibleResourceUnionZeroOrdinalNoPayload") {
     bindings_denylist = [rust_next],
-    type = TestFlexibleResourceXUnionInStruct,
+    type = TestFlexibleResourceUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -812,7 +812,7 @@ decode_failure("RequiredFlexibleResourceUnionZeroOrdinalNoPayload") {
 decode_failure("RequiredFlexibleResourceUnionZeroOrdinalWithPayload") {
     // unsafe precondition(s) violated: hint::unreachable_unchecked must never be reached
     bindings_denylist = [rust_next],
-    type = TestFlexibleResourceXUnionInStruct,
+    type = TestFlexibleResourceUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -824,7 +824,7 @@ decode_failure("RequiredFlexibleResourceUnionZeroOrdinalWithPayload") {
 }
 
 success("OptionalStrictValueUnionZeroOrdinalNoPayload") {
-    value = TestOptionalStrictXUnionInStruct{
+    value = TestOptionalStrictUnionInStruct{
         xu: null,
     },
     bytes = {
@@ -836,7 +836,7 @@ success("OptionalStrictValueUnionZeroOrdinalNoPayload") {
 }
 
 decode_failure("OptionalStrictValueUnionZeroOrdinalWithPayload") {
-    type = TestOptionalStrictXUnionInStruct,
+    type = TestOptionalStrictUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -848,7 +848,7 @@ decode_failure("OptionalStrictValueUnionZeroOrdinalWithPayload") {
 }
 
 success("OptionalStrictResourceUnionZeroOrdinalNoPayload") {
-    value = TestOptionalStrictResourceXUnionInStruct{
+    value = TestOptionalStrictResourceUnionInStruct{
         xu: null,
     },
     bytes = {
@@ -860,7 +860,7 @@ success("OptionalStrictResourceUnionZeroOrdinalNoPayload") {
 }
 
 decode_failure("OptionalStrictResourceUnionZeroOrdinalWithPayload") {
-    type = TestOptionalStrictResourceXUnionInStruct,
+    type = TestOptionalStrictResourceUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -872,7 +872,7 @@ decode_failure("OptionalStrictResourceUnionZeroOrdinalWithPayload") {
 }
 
 success("OptionalFlexibleValueUnionZeroOrdinalNoPayload") {
-    value = TestOptionalFlexibleXUnionInStruct{
+    value = TestOptionalFlexibleUnionInStruct{
         xu: null,
     },
     bytes = {
@@ -884,7 +884,7 @@ success("OptionalFlexibleValueUnionZeroOrdinalNoPayload") {
 }
 
 decode_failure("OptionalFlexibleValueUnionZeroOrdinalWithPayload") {
-    type = TestOptionalFlexibleXUnionInStruct,
+    type = TestOptionalFlexibleUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -896,7 +896,7 @@ decode_failure("OptionalFlexibleValueUnionZeroOrdinalWithPayload") {
 }
 
 success("OptionalFlexibleResourceUnionZeroOrdinalNoPayload") {
-    value = TestOptionalFlexibleResourceXUnionInStruct{
+    value = TestOptionalFlexibleResourceUnionInStruct{
         xu: null,
     },
     bytes = {
@@ -908,7 +908,7 @@ success("OptionalFlexibleResourceUnionZeroOrdinalNoPayload") {
 }
 
 decode_failure("OptionalFlexibleResourceUnionZeroOrdinalWithPayload") {
-    type = TestOptionalFlexibleResourceXUnionInStruct,
+    type = TestOptionalFlexibleResourceUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -920,33 +920,33 @@ decode_failure("OptionalFlexibleResourceUnionZeroOrdinalWithPayload") {
 }
 
 encode_failure("RequiredStrictValueUnionDefaultInitialized") {
-    bindings_allowlist = [llcpp, hlcpp, rust_codec],
-    value = TestStrictXUnionInStruct{
-        xu: SampleStrictXUnion{},
+    bindings_allowlist = [cpp_wire, hlcpp, rust_codec],
+    value = TestStrictUnionInStruct{
+        xu: SampleStrictUnion{},
     },
     err = UNION_FIELD_NOT_SET,
 }
 
 encode_failure("RequiredStrictResourceUnionDefaultInitialized") {
-    bindings_allowlist = [llcpp, hlcpp, rust_codec],
-    value = TestStrictResourceXUnionInStruct{
-        xu: SampleStrictResourceXUnion{},
+    bindings_allowlist = [cpp_wire, hlcpp, rust_codec],
+    value = TestStrictResourceUnionInStruct{
+        xu: SampleStrictResourceUnion{},
     },
     err = UNION_FIELD_NOT_SET,
 }
 
 encode_failure("RequiredFlexibleValueUnionDefaultInitialized") {
-    bindings_allowlist = [llcpp, hlcpp, rust_codec],
-    value = TestFlexibleXUnionInStruct{
-        xu: SampleXUnion{},
+    bindings_allowlist = [cpp_wire, hlcpp, rust_codec],
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{},
     },
     err = UNION_FIELD_NOT_SET,
 }
 
 encode_failure("RequiredFlexibleResourceUnionDefaultInitialized") {
-    bindings_allowlist = [llcpp, hlcpp, rust_codec],
-    value = TestFlexibleResourceXUnionInStruct{
-        xu: SampleResourceXUnion{},
+    bindings_allowlist = [cpp_wire, hlcpp, rust_codec],
+    value = TestFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{},
     },
     err = UNION_FIELD_NOT_SET,
 }
@@ -954,8 +954,8 @@ encode_failure("RequiredFlexibleResourceUnionDefaultInitialized") {
 encode_failure("OptionalStrictValueUnionDefaultInitialized") {
     // TODO(https://fxbug.dev/42158133): Enable in HLCPP and LLCPP.
     bindings_allowlist = [],
-    value = TestOptionalStrictXUnionInStruct{
-        xu: SampleStrictXUnion{},
+    value = TestOptionalStrictUnionInStruct{
+        xu: SampleStrictUnion{},
     },
     err = UNION_FIELD_NOT_SET,
 }
@@ -963,8 +963,8 @@ encode_failure("OptionalStrictValueUnionDefaultInitialized") {
 encode_failure("OptionalStrictResourceUnionDefaultInitialized") {
     // TODO(https://fxbug.dev/42158133): Enable in HLCPP and LLCPP.
     bindings_allowlist = [],
-    value = TestOptionalStrictResourceXUnionInStruct{
-        xu: SampleStrictResourceXUnion{},
+    value = TestOptionalStrictResourceUnionInStruct{
+        xu: SampleStrictResourceUnion{},
     },
     err = UNION_FIELD_NOT_SET,
 }
@@ -972,8 +972,8 @@ encode_failure("OptionalStrictResourceUnionDefaultInitialized") {
 encode_failure("OptionalFlexibleValueUnionDefaultInitialized") {
     // TODO(https://fxbug.dev/42158133): Enable in HLCPP, LLCPP.
     bindings_allowlist = [],
-    value = TestOptionalFlexibleXUnionInStruct{
-        xu: SampleXUnion{},
+    value = TestOptionalFlexibleUnionInStruct{
+        xu: SampleUnion{},
     },
     err = UNION_FIELD_NOT_SET,
 }
@@ -981,8 +981,8 @@ encode_failure("OptionalFlexibleValueUnionDefaultInitialized") {
 encode_failure("OptionalFlexibleResourceUnionDefaultInitialized") {
     // TODO(https://fxbug.dev/42158133): Enable in HLCPP, LLCPP.
     bindings_allowlist = [],
-    value = TestOptionalFlexibleResourceXUnionInStruct{
-        xu: SampleResourceXUnion{},
+    value = TestOptionalFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{},
     },
     err = UNION_FIELD_NOT_SET,
 }
@@ -1111,7 +1111,7 @@ decode_success("EmptyFlexibleUnionDecodesUnknownLargeValue") {
 }
 
 decode_failure("StrictUnionUnknownValueInline") {
-    type = TestStrictXUnionInStruct,
+    type = TestStrictUnionInStruct,
     bytes = {
         v2 = [
             num(1234):8, // unknown ordinal
@@ -1124,7 +1124,7 @@ decode_failure("StrictUnionUnknownValueInline") {
 decode_failure("OptionalStrictUnionUnknownValueOutOfLine") {
     // TODO(https://fxbug.dev/579582163): Reject unknown ordinals in optional strict unions in rust_next.
     bindings_denylist = [rust_next],
-    type = TestOptionalStrictXUnionInStruct,
+    type = TestOptionalStrictUnionInStruct,
     bytes = {
         v2 = [
             num(1234):8, // unknown ordinal
@@ -1138,7 +1138,7 @@ decode_failure("OptionalStrictUnionUnknownValueOutOfLine") {
 decode_failure("OptionalStrictUnionUnknownValueInline") {
     // TODO(https://fxbug.dev/579582163): Reject unknown ordinals in optional strict unions in rust_next.
     bindings_denylist = [rust_next],
-    type = TestOptionalStrictXUnionInStruct,
+    type = TestOptionalStrictUnionInStruct,
     bytes = {
         v2 = [
             num(1234):8, // unknown ordinal
@@ -1151,7 +1151,7 @@ decode_failure("OptionalStrictUnionUnknownValueInline") {
 decode_failure("RequiredStrictValueUnionZeroOrdinalWithInlinePayload") {
     // TODO(https://fxbug.dev/579582163): Return UNION_FIELD_NOT_SET for zero ordinal in strict unions in rust_next.
     bindings_denylist = [rust_next],
-    type = TestStrictXUnionInStruct,
+    type = TestStrictUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -1164,7 +1164,7 @@ decode_failure("RequiredStrictValueUnionZeroOrdinalWithInlinePayload") {
 decode_failure("RequiredFlexibleValueUnionZeroOrdinalWithInlinePayload") {
     // TODO(https://fxbug.dev/579582163): Reject ordinal 0 with payload in required flexible unions in rust_next.
     bindings_denylist = [rust_next],
-    type = TestFlexibleXUnionInStruct,
+    type = TestFlexibleUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -1175,7 +1175,7 @@ decode_failure("RequiredFlexibleValueUnionZeroOrdinalWithInlinePayload") {
 }
 
 decode_failure("OptionalStrictValueUnionZeroOrdinalWithInlinePayload") {
-    type = TestOptionalStrictXUnionInStruct,
+    type = TestOptionalStrictUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -1186,7 +1186,7 @@ decode_failure("OptionalStrictValueUnionZeroOrdinalWithInlinePayload") {
 }
 
 decode_failure("OptionalFlexibleValueUnionZeroOrdinalWithInlinePayload") {
-    type = TestOptionalFlexibleXUnionInStruct,
+    type = TestOptionalFlexibleUnionInStruct,
     bytes = {
         v2 = [
             num(0):8, // zero ordinal
@@ -1199,7 +1199,7 @@ decode_failure("OptionalFlexibleValueUnionZeroOrdinalWithInlinePayload") {
 decode_failure("RequiredStrictUnionKnownOrdinalAbsentEnvelope") {
     // TODO(https://fxbug.dev/579582163): Reject absent envelope with non-zero ordinal in rust_next.
     bindings_denylist = [rust_next],
-    type = TestStrictXUnionInStruct,
+    type = TestStrictUnionInStruct,
     bytes = {
         v2 = [
             num(1):8, // known ordinal
@@ -1213,7 +1213,7 @@ decode_failure("OptionalStrictUnionKnownOrdinalAbsentEnvelope") {
     // TODO(https://fxbug.dev/579581713): Reject absent envelope with non-zero ordinal in rust_codec.
     // TODO(https://fxbug.dev/579582163): Reject absent envelope with non-zero ordinal in rust_next.
     bindings_denylist = [rust_codec, rust_next],
-    type = TestOptionalStrictXUnionInStruct,
+    type = TestOptionalStrictUnionInStruct,
     bytes = {
         v2 = [
             num(1):8, // known ordinal
@@ -1226,7 +1226,7 @@ decode_failure("OptionalStrictUnionKnownOrdinalAbsentEnvelope") {
 decode_failure("RequiredFlexibleUnionKnownOrdinalAbsentEnvelope") {
     // TODO(https://fxbug.dev/579582163): Reject absent envelope with non-zero ordinal in rust_next.
     bindings_denylist = [rust_next],
-    type = TestFlexibleXUnionInStruct,
+    type = TestFlexibleUnionInStruct,
     bytes = {
         v2 = [
             num(1):8, // known ordinal
@@ -1240,7 +1240,7 @@ decode_failure("OptionalFlexibleUnionKnownOrdinalAbsentEnvelope") {
     // TODO(https://fxbug.dev/579581713): Reject absent envelope with non-zero ordinal in rust_codec.
     // TODO(https://fxbug.dev/579582163): Reject absent envelope with non-zero ordinal in rust_next.
     bindings_denylist = [rust_codec, rust_next],
-    type = TestOptionalFlexibleXUnionInStruct,
+    type = TestOptionalFlexibleUnionInStruct,
     bytes = {
         v2 = [
             num(1):8, // known ordinal
@@ -1251,11 +1251,11 @@ decode_failure("OptionalFlexibleUnionKnownOrdinalAbsentEnvelope") {
 }
 
 decode_failure("RequiredFlexibleUnionUnknownOrdinalAbsentEnvelope") {
-    // TODO(https://fxbug.dev/579581622): Reject absent envelope on unknown union ordinal in llcpp.
+    // TODO(https://fxbug.dev/579581622): Reject absent envelope on unknown union ordinal in cpp_wire.
     // TODO(https://fxbug.dev/579581713): Reject absent envelope with non-zero ordinal in rust_codec.
     // TODO(https://fxbug.dev/579582163): Reject absent envelope with non-zero ordinal in rust_next.
-    bindings_denylist = [llcpp, rust_codec, rust_next],
-    type = TestFlexibleXUnionInStruct,
+    bindings_denylist = [cpp_wire, rust_codec, rust_next],
+    type = TestFlexibleUnionInStruct,
     bytes = {
         v2 = [
             num(1234):8, // unknown ordinal
@@ -1266,11 +1266,11 @@ decode_failure("RequiredFlexibleUnionUnknownOrdinalAbsentEnvelope") {
 }
 
 decode_failure("OptionalFlexibleUnionUnknownOrdinalAbsentEnvelope") {
-    // TODO(https://fxbug.dev/579581622): Reject absent envelope on unknown union ordinal in llcpp.
+    // TODO(https://fxbug.dev/579581622): Reject absent envelope on unknown union ordinal in cpp_wire.
     // TODO(https://fxbug.dev/579581713): Reject absent envelope with non-zero ordinal in rust_codec.
     // TODO(https://fxbug.dev/579582163): Reject absent envelope with non-zero ordinal in rust_next.
-    bindings_denylist = [llcpp, rust_codec, rust_next],
-    type = TestOptionalFlexibleXUnionInStruct,
+    bindings_denylist = [cpp_wire, rust_codec, rust_next],
+    type = TestOptionalFlexibleUnionInStruct,
     bytes = {
         v2 = [
             num(1234):8, // unknown ordinal
@@ -1313,10 +1313,10 @@ decode_failure("UnionKnownInlineHandleZeroHandlesInEnvelope") {
 }
 
 decode_failure("UnionUnknownInlineEnvelopeMoreThanOneHandle") {
-    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and llcpp.
+    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and cpp_wire.
     // TODO(https://fxbug.dev/579582741): Validate unknown envelope byte/handle count in rust and rust_codec.
     // TODO(https://fxbug.dev/579582163): Validate unknown envelope byte/handle count in rust_next.
-    bindings_denylist = [cpp, hlcpp, llcpp, rust, rust_codec, rust_next],
+    bindings_denylist = [cpp, hlcpp, cpp_wire, rust, rust_codec, rust_next],
     handle_defs = {
         #0 = event(),
         #1 = event(),
@@ -1335,10 +1335,10 @@ decode_failure("UnionUnknownInlineEnvelopeMoreThanOneHandle") {
 }
 
 decode_failure("UnionUnknownOutOfLineEnvelopeZeroBytesWithHandle") {
-    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and llcpp.
+    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and cpp_wire.
     // TODO(https://fxbug.dev/579582741): Validate unknown envelope byte/handle count in rust and rust_codec.
     // TODO(https://fxbug.dev/579582163): Validate unknown envelope byte/handle count in rust_next.
-    bindings_denylist = [cpp, hlcpp, llcpp, rust, rust_codec, rust_next],
+    bindings_denylist = [cpp, hlcpp, cpp_wire, rust, rust_codec, rust_next],
     handle_defs = {
         #0 = event(),
     },
@@ -1356,10 +1356,10 @@ decode_failure("UnionUnknownOutOfLineEnvelopeZeroBytesWithHandle") {
 }
 
 decode_failure("UnionUnknownOutOfLineEnvelopeMoreHandlesThanFitInBytes") {
-    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and llcpp.
+    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and cpp_wire.
     // TODO(https://fxbug.dev/579582741): Validate unknown envelope byte/handle count in rust and rust_codec.
     // TODO(https://fxbug.dev/579582163): Validate unknown envelope byte/handle count in rust_next.
-    bindings_denylist = [cpp, hlcpp, llcpp, rust, rust_codec, rust_next],
+    bindings_denylist = [cpp, hlcpp, cpp_wire, rust, rust_codec, rust_next],
     handle_defs = {
         #0 = event(),
         #1 = event(),
@@ -1393,8 +1393,8 @@ decode_failure("UnionUnknownEnvelopeBadInlineMarker") {
 decode_success("FlexibleUnionUnknown64BitOrdinal") {
     // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
     bindings_allowlist = [cpp, rust, rust_codec, rust_next],
-    value = TestFlexibleXUnionInStruct{
-        xu: SampleXUnion{
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
             0x100000001: null,
         },
     },
@@ -1405,4 +1405,1481 @@ decode_success("FlexibleUnionUnknown64BitOrdinal") {
             repeat(0xab):8, // unknown bytes
         ],
     },
+}
+
+decode_success("FlexibleValueUnionUnknownInline") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8, // unknown ordinal
+            num(42):4, num(0):2, num(1):2, // inlined envelope
+        ],
+    },
+}
+
+encode_failure("FlexibleValueUnionUnknownInline") {
+    // TODO(https://fxbug.dev/42067496): Implement the decode function in all backends.
+    bindings_allowlist = [rust],
+    value = TestFlexibleUnionInStruct{
+        xu: decode({
+            type = SampleUnion,
+            bytes = {
+                v2 = [
+                    num(1234):8,
+                    num(42):4, num(0):2, num(1):2,
+                ],
+            },
+        }),
+    },
+    err = FLEXIBLE_UNION_UNKNOWN_FIELD,
+}
+
+// An inline unknown envelope with all-zero payload bytes (e.g. uint32(0) or
+// EmptyStruct{}) is present because the inline bit is 1.
+decode_success("FlexibleValueUnionUnknownInlineZeroValue") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(0):4, num(0):2, num(1):2,
+        ],
+    },
+}
+
+decode_success("FlexibleResourceUnionUnknownInlineZeroValue") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(0):4, num(0):2, num(1):2,
+        ],
+    },
+}
+
+decode_success("FlexibleUnionUnknownInlineAllBytesNonZero") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            0x01, 0xff, 0xfe, 0xfd, num(0):2, num(1):2,
+        ],
+    },
+}
+
+decode_success("FlexibleUnionUnknownOutOfLineAllOnesPayload") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(16):4, num(0):2, num(0):2,
+            repeat(0xff):16,
+        ],
+    },
+}
+
+// Tests closing a handle inside an inlined unknown envelope on a flexible *value* union.
+decode_success("FlexibleValueUnionUnknownInlineHandleClosed") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+    },
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            repeat(0xff):4, num(1):2, num(1):2,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+}
+
+decode_success("FlexibleResourceUnionUnknownHandlesWithReducedAndEmptyRightsClosed") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(rights: transfer),
+        #1 = channel(rights: none),
+    },
+    value = TestFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(8):4, num(2):2, num(0):2,
+            repeat(0xff):8,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+}
+
+// ================= OPTIONAL FLEXIBLE UNION UNKNOWN TESTS =================
+
+decode_success("OptionalFlexibleValueUnionUnknownInline") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestOptionalFlexibleUnionInStruct{
+        xu: SampleUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(0):4, num(0):2, num(1):2, // zero-valued inline envelope
+        ],
+    },
+}
+
+decode_success("OptionalFlexibleValueUnionUnknownOutOfLine") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestOptionalFlexibleUnionInStruct{
+        xu: SampleUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(16):4, num(0):2, num(0):2,
+            repeat(0xab):16,
+        ],
+    },
+}
+
+decode_success("OptionalFlexibleValueUnionUnknownInlineHandleClosed") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+    },
+    value = TestOptionalFlexibleUnionInStruct{
+        xu: SampleUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            repeat(0xff):4, num(1):2, num(1):2,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+}
+
+decode_success("OptionalFlexibleValueUnionUnknownOutOfLineHandlesClosed") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    value = TestOptionalFlexibleUnionInStruct{
+        xu: SampleUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(8):4, num(2):2, num(0):2,
+            repeat(0xff):8,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+}
+
+decode_success("OptionalFlexibleResourceUnionUnknownInlineWithHandle") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+    },
+    value = TestOptionalFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            repeat(0xff):4, num(1):2, num(1):2,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+}
+
+decode_success("OptionalFlexibleResourceUnionUnknownOutOfLineWithHandles") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    value = TestOptionalFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
+            1234: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(16):4, num(2):2, num(0):2,
+            repeat(0xff):8, repeat(0xab):8,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+}
+
+encode_failure("OptionalFlexibleValueUnionUnknownReencode") {
+    // TODO(https://fxbug.dev/42067496): Implement the decode function in all backends.
+    bindings_allowlist = [rust],
+    value = decode({
+        type = TestOptionalFlexibleUnionInStruct,
+        bytes = {
+            v2 = [
+                num(1234):8,
+                num(8):4, num(0):2, num(0):2,
+                repeat(0xab):8,
+            ],
+        },
+    }),
+    err = FLEXIBLE_UNION_UNKNOWN_FIELD,
+}
+
+encode_failure("OptionalFlexibleResourceUnionUnknownReencode") {
+    // TODO(https://fxbug.dev/42067496): Implement the decode function in all backends.
+    bindings_allowlist = [rust],
+    handle_defs = {
+        #0 = event(),
+    },
+    value = decode({
+        type = TestOptionalFlexibleResourceUnionInStruct,
+        bytes = {
+            v2 = [
+                num(1234):8,
+                repeat(0xff):4, num(1):2, num(1):2,
+            ],
+        },
+        handles = {
+            v2 = [#0],
+        },
+    }),
+    err = FLEXIBLE_UNION_UNKNOWN_FIELD,
+}
+
+// ============ EMPTY & INLINE-ONLY FLEXIBLE UNION UNKNOWN TESTS ============
+
+decode_success("EmptyFlexibleUnionUnknownInlineWithHandle") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+    },
+    value = StructOfEmptyFlexibleUnion{
+        empty: EmptyFlexibleUnion{
+            1: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):4, num(1):2, num(1):2,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+}
+
+decode_success("EmptyFlexibleUnionUnknownOutOfLineWithHandles") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    value = StructOfEmptyFlexibleUnion{
+        empty: EmptyFlexibleUnion{
+            1: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+            num(8):4, num(2):2, num(0):2,
+            repeat(0xff):8,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+}
+
+decode_success("EmptyFlexibleResourceUnionUnknownInline") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = StructOfEmptyFlexibleResourceUnion{
+        empty: EmptyFlexibleResourceUnion{
+            1: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+            num(0):4, num(0):2, num(1):2,
+        ],
+    },
+}
+
+decode_success("EmptyFlexibleResourceUnionUnknownInlineWithHandle") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+    },
+    value = StructOfEmptyFlexibleResourceUnion{
+        empty: EmptyFlexibleResourceUnion{
+            1: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):4, num(1):2, num(1):2,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+}
+
+decode_success("EmptyFlexibleResourceUnionUnknownOutOfLineWithHandles") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    value = StructOfEmptyFlexibleResourceUnion{
+        empty: EmptyFlexibleResourceUnion{
+            1: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+            num(8):4, num(2):2, num(0):2,
+            repeat(0xff):8,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+}
+
+decode_success("OptionalEmptyFlexibleResourceUnionUnknownOutOfLineWithHandle") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+    },
+    value = StructOfOptionalEmptyFlexibleResourceUnion{
+        empty: EmptyFlexibleResourceUnion{
+            7: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(7):8,
+            num(8):4, num(1):2, num(0):2,
+            repeat(0xff):4, padding:4,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+}
+
+// Exercises zero-member resource union unknown envelope decoding across ALL
+// bindings (including cpp_wire and hlcpp) by triggering a later decode failure.
+decode_failure("EmptyFlexibleResourceUnionUnknownHandleBeforeInvalidBool") {
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    type = EmptyFlexibleResourceUnionThenHandle,
+    bytes = {
+        v2 = [
+            num(1):8,
+            num(8):4, num(1):2, num(0):2, // u: unknown OOL 8B + #0
+            0x02, padding:3, // valid: invalid boolean
+            repeat(0xff):4, // after: #1
+            repeat(0xff):4, padding:4, // u payload
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+    err = INVALID_BOOLEAN,
+}
+
+decode_success("EmptyFlexibleResourceUnionUnknownHandleThenKnownHandle") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    value = EmptyFlexibleResourceUnionThenHandle{
+        u: EmptyFlexibleResourceUnion{
+            1: null,
+        },
+        valid: true,
+        after: #1,
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+            num(8):4, num(1):2, num(0):2, // u: unknown OOL 8B + #0
+            0x01, padding:3, // valid = true
+            repeat(0xff):4, // after: #1
+            repeat(0xff):4, padding:4, // u payload
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+}
+
+//Unknown handles #0 and #1 are valid channels, while #2 (meant for `after:
+// handle:CHANNEL`) is an event. Decoders must close #0 and #1 without checking
+// handle subtype and advance the handle cursor to #2, failing with
+// INCORRECT_HANDLE_TYPE (and closing #2 as well).
+decode_failure("EmptyFlexibleResourceUnionUnknownHandlesThenWrongHandleType") {
+    // TODO(https://fxbug.dev/579572148): Validate handle subtype in rust_codec.
+    bindings_allowlist = [cpp_wire, hlcpp, cpp, rust, dart],
+    handle_defs = {
+        #0 = channel(),
+        #1 = channel(),
+        #2 = event(),
+    },
+    type = EmptyFlexibleResourceUnionThenHandle,
+    bytes = {
+        v2 = [
+            num(1):8,
+            num(8):4, num(2):2, num(0):2, // u: unknown OOL 8B + #0, #1
+            0x01, padding:3, // valid = true
+            repeat(0xff):4, // after: #2 (wrong subtype: event instead of channel)
+            repeat(0xff):8, // u payload
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2],
+    },
+    err = INCORRECT_HANDLE_TYPE,
+}
+
+decode_failure("EmptyFlexibleResourceUnionUnknownBadOutlinedFlags") {
+    type = StructOfEmptyFlexibleResourceUnion,
+    bytes = {
+        v2 = [
+            num(1):8,
+            num(8):4, num(0):2, 0x02, 0x00,
+            repeat(0):8,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+// InlineOnlyFlexibleUnion has only a 4-byte inline member statically, but as a
+// flexible union it must still decode unknown out-of-line envelopes and handles.
+decode_success("InlineOnlyFlexibleUnionUnknownOutOfLine") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = StructOfInlineOnlyFlexibleUnion{
+        u: InlineOnlyFlexibleUnion{
+            99: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(99):8,
+            num(16):4, num(0):2, num(0):2,
+            repeat(0xcd):16,
+        ],
+    },
+}
+
+decode_success("InlineOnlyFlexibleUnionUnknownOutOfLineWithHandles") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    value = StructOfInlineOnlyFlexibleUnion{
+        u: InlineOnlyFlexibleUnion{
+            99: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(99):8,
+            num(8):4, num(2):2, num(0):2,
+            repeat(0xff):8,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+}
+
+// ================== UNION BOUNDARY ORDINAL UNKNOWN TESTS ==================
+
+decode_success("FlexibleUnionUnknownOrdinalInt32Max") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
+            0x7fffffff: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(0x7fffffff):8,
+            num(1):4, num(0):2, num(1):2,
+        ],
+    },
+}
+
+decode_success("FlexibleUnionUnknownOrdinalSignBit32") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
+            0x80000000: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(0x80000000):8,
+            num(1):4, num(0):2, num(1):2,
+        ],
+    },
+}
+
+// 0xffffffff equals UINT32_MAX, which several C++ bindings use internally as
+// Tag::kUnknown / Tag::Invalid. On the wire it is a valid unknown 64-bit ordinal.
+decode_success("FlexibleUnionUnknownOrdinalUint32Max") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
+            0xffffffff: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(0xffffffff):8,
+            num(8):4, num(0):2, num(0):2,
+            repeat(0xab):8,
+        ],
+    },
+}
+
+decode_success("OptionalFlexibleUnionUnknownOrdinalUint32Max") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestOptionalFlexibleUnionInStruct{
+        xu: SampleUnion{
+            0xffffffff: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(0xffffffff):8,
+            num(42):4, num(0):2, num(1):2,
+        ],
+    },
+}
+
+decode_success("FlexibleResourceUnionUnknownOrdinalInt64Max") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+    },
+    value = TestFlexibleResourceUnionInStruct{
+        xu: SampleResourceUnion{
+            0x7fffffffffffffff: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(0x7fffffffffffffff):8,
+            num(8):4, num(1):2, num(0):2,
+            repeat(0xff):4, padding:4,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+}
+
+// Exercises ordinal 0xffffffffffffffff (UINT64_MAX, which is FIDL_ALLOC_PRESENT
+// and exceeds signed int64) on a flexible union across ALL bindings by failing
+// on a subsequent struct field.
+decode_failure("FlexibleUnionOrdinalUint64MaxBeforeInvalidBool") {
+    type = FlexibleValueUnionThenBool,
+    bytes = {
+        v2 = [
+            num(0xffffffffffffffff):8,
+            num(8):4, num(0):2, num(0):2,
+            0x02, padding:7, // invalid bool
+            repeat(0xab):8, // xu payload
+        ],
+    },
+    err = INVALID_BOOLEAN,
+}
+
+// Uses ordinal 0x100000001 with the exact inline payload of known ordinal 1
+// (`u: uint32 = 42`), catching any decoder that truncates 64-bit ordinals to u32.
+decode_success("FlexibleUnionUnknown64BitOrdinalSameLow32AsKnown") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
+            0x100000001: null,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(0x100000001):8,
+            num(42):4, num(0):2, num(1):2,
+        ],
+    },
+}
+
+// Exercises ordinal 0xffffffff in flexible union decoding across ALL bindings
+// (including cpp_wire and hlcpp) by failing on a subsequent struct field.
+decode_failure("FlexibleUnionOrdinalUint32MaxBeforeInvalidBool") {
+    type = FlexibleValueUnionThenBool,
+    bytes = {
+        v2 = [
+            num(0xffffffff):8,
+            num(8):4, num(0):2, num(0):2,
+            0x02, padding:7, // invalid bool
+            repeat(0xab):8, // xu payload
+        ],
+    },
+    err = INVALID_BOOLEAN,
+}
+
+decode_failure("StrictUnionUnknown64BitOrdinalSameLow32AsKnown") {
+    type = TestStrictUnionInStruct,
+    bytes = {
+        v2 = [
+            num(0x100000001):8, // low 32 bits match known ordinal 1
+            num(42):4, num(0):2, num(1):2,
+        ],
+    },
+    err = STRICT_UNION_UNKNOWN_FIELD,
+}
+
+decode_failure("StrictUnionUnknownOrdinalUint32Max") {
+    type = TestStrictUnionInStruct,
+    bytes = {
+        v2 = [
+            num(0xffffffff):8,
+            num(42):4, num(0):2, num(1):2,
+        ],
+    },
+    err = STRICT_UNION_UNKNOWN_FIELD,
+}
+
+decode_failure("StrictUnionUnknownOrdinalUint64Max") {
+    type = TestStrictUnionInStruct,
+    bytes = {
+        v2 = [
+            num(0xffffffffffffffff):8,
+            num(8):4, num(0):2, num(0):2,
+            repeat(0xab):8,
+        ],
+    },
+    err = STRICT_UNION_UNKNOWN_FIELD,
+}
+
+decode_failure("OptionalStrictValueUnionUnknownOutOfLine") {
+    // TODO(https://fxbug.dev/579582163): Reject unknown ordinals in optional strict unions in rust_next (currently hits unreachable_unchecked).
+    bindings_denylist = [rust_next],
+    type = TestOptionalStrictUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(8):4, num(0):2, num(0):2,
+            repeat(0xab):8,
+        ],
+    },
+    err = STRICT_UNION_UNKNOWN_FIELD,
+}
+
+decode_failure("OptionalStrictValueUnionUnknownInline") {
+    // TODO(https://fxbug.dev/579582163): Reject unknown ordinals in optional strict unions in rust_next (currently hits unreachable_unchecked).
+    bindings_denylist = [rust_next],
+    type = TestOptionalStrictUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(42):4, num(0):2, num(1):2,
+        ],
+    },
+    err = STRICT_UNION_UNKNOWN_FIELD,
+}
+
+decode_failure("OptionalStrictResourceUnionUnknownInlineWithHandle") {
+    // TODO(https://fxbug.dev/579582163): Reject unknown ordinals in optional strict unions in rust_next (currently hits unreachable_unchecked).
+    bindings_denylist = [rust_next],
+    handle_defs = {
+        #0 = event(),
+    },
+    type = TestOptionalStrictResourceUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            repeat(0xff):4, num(1):2, num(1):2,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = STRICT_UNION_UNKNOWN_FIELD,
+}
+
+decode_failure("OptionalStrictResourceUnionUnknownValueWithHandles") {
+    // TODO(https://fxbug.dev/579582163): Reject unknown ordinals in optional strict unions in rust_next (currently hits unreachable_unchecked).
+    bindings_denylist = [rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    type = TestOptionalStrictResourceUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(8):4, num(2):2, num(0):2,
+            repeat(0xff):8,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+    err = STRICT_UNION_UNKNOWN_FIELD,
+}
+
+// ============= ZERO ORDINAL WITH NON-ZERO ENVELOPE EDGE CASES =============
+
+decode_failure("RequiredFlexibleValueUnionZeroOrdinalWithZeroInlineFlagOnly") {
+    // TODO(https://fxbug.dev/579582163): Reject zero ordinal in required flexible unions in rust_next.
+    bindings_denylist = [rust_next],
+    type = TestFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(0):8,
+            num(0):4, num(0):2, num(1):2, // non-zero only in inline bit
+        ],
+    },
+    err = UNION_FIELD_NOT_SET,
+}
+
+decode_failure("OptionalFlexibleValueUnionZeroOrdinalWithZeroInlineFlagOnly") {
+    type = TestOptionalFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(0):8,
+            num(0):4, num(0):2, num(1):2, // non-zero only in inline bit
+        ],
+    },
+    err = UNION_FIELD_NOT_SET,
+}
+
+decode_failure("OptionalStrictValueUnionZeroOrdinalWithZeroInlineFlagOnly") {
+    type = TestOptionalStrictUnionInStruct,
+    bytes = {
+        v2 = [
+            num(0):8,
+            num(0):4, num(0):2, num(1):2, // non-zero only in inline bit
+        ],
+    },
+    err = UNION_FIELD_NOT_SET,
+}
+
+decode_failure("OptionalFlexibleValueUnionZeroOrdinalWithByteCountOnly") {
+    type = TestOptionalFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(0):8,
+            num(8):4, num(0):2, num(0):2, // non-zero only in num_bytes
+            repeat(0xab):8,
+        ],
+    },
+    err = UNION_FIELD_NOT_SET,
+}
+
+decode_failure("OptionalFlexibleResourceUnionZeroOrdinalWithHandleCountOnly") {
+    handle_defs = {
+        #0 = event(),
+    },
+    type = TestOptionalFlexibleResourceUnionInStruct,
+    bytes = {
+        v2 = [
+            num(0):8,
+            num(0):4, num(1):2, num(0):2, // non-zero only in num_handles
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = UNION_FIELD_NOT_SET,
+}
+
+decode_failure("OptionalFlexibleResourceUnionZeroOrdinalWithInlineHandle") {
+    handle_defs = {
+        #0 = event(),
+    },
+    type = TestOptionalFlexibleResourceUnionInStruct,
+    bytes = {
+        v2 = [
+            num(0):8,
+            repeat(0xff):4, num(1):2, num(1):2,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = UNION_FIELD_NOT_SET,
+}
+
+decode_failure("RequiredFlexibleResourceUnionZeroOrdinalWithHandles") {
+    // TODO(https://fxbug.dev/579582163): Reject zero ordinal in required flexible unions in rust_next.
+    bindings_denylist = [rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    type = TestFlexibleResourceUnionInStruct,
+    bytes = {
+        v2 = [
+            num(0):8,
+            num(8):4, num(2):2, num(0):2,
+            repeat(0xff):8,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+    err = UNION_FIELD_NOT_SET,
+}
+
+// ======== MALFORMED UNKNOWN UNION ENVELOPES & BOUNDS / OVERFLOW ===========
+
+decode_failure("UnionUnknownEnvelopeBadInlineMarkerLowerByte") {
+    type = EnvelopeInliningTestUnionStruct,
+    bytes = {
+        v2 = [
+            num(10):8,
+            num(100):4, num(0):2, 0xff, 0x00,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+decode_failure("UnionUnknownEnvelopeBadInlineMarkerBit1Set") {
+    type = EnvelopeInliningTestUnionStruct,
+    bytes = {
+        v2 = [
+            num(10):8,
+            num(100):4, num(0):2, 0x03, 0x00,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+decode_failure("UnionUnknownOutOfLineEnvelopeBadFlagsBit1") {
+    type = EnvelopeInliningTestUnionStruct,
+    bytes = {
+        v2 = [
+            num(10):8,
+            num(8):4, num(0):2, 0x02, 0x00,
+            repeat(0):8,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+decode_failure("UnionUnknownOutOfLineEnvelopeBadFlagsAllExceptInlineBit") {
+    type = EnvelopeInliningTestUnionStruct,
+    bytes = {
+        v2 = [
+            num(10):8,
+            num(8):4, num(0):2, 0xfe, 0xff,
+            repeat(0):8,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+// Envelope is non-zero solely in bit 15 of flags (num_bytes == 0, num_handles == 0,
+// inline bit 0 unset). Must fail with INVALID_INLINE_MARKER_IN_ENVELOPE rather
+// than NON_NULLABLE_TYPE_WITH_NULL_VALUE or succeeding.
+decode_failure("UnionUnknownEnvelopeOnlyHighFlagBitSet") {
+    type = TestFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(0):4, num(0):2, 0x00, 0x80,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+decode_failure("OptionalFlexibleUnionUnknownEnvelopeOnlyHighFlagBitSet") {
+    type = TestOptionalFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(0):4, num(0):2, 0x00, 0x80,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+decode_failure("UnionUnknownOutOfLineEnvelopeFourBytes") {
+    type = TestFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(4):4, num(0):2, num(0):2,
+            repeat(0):8,
+        ],
+    },
+    err = INVALID_NUM_BYTES_IN_ENVELOPE,
+}
+
+decode_failure("OptionalFlexibleUnionUnknownBytesNonMultipleOf8") {
+    type = TestOptionalFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(12):4, num(0):2, num(0):2,
+            repeat(0xab):12, padding:4,
+        ],
+    },
+    err = INVALID_NUM_BYTES_IN_ENVELOPE,
+}
+
+decode_failure("UnionUnknownOutOfLineEnvelopeBytesExceedMessageLengthPartial") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_BYTES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    type = EnvelopeInliningTestUnionStruct,
+    bytes = {
+        v2 = [
+            num(100):8,
+            num(16):4, num(0):2, num(0):2,
+            repeat(0xab):8,
+        ],
+    },
+    err = ENVELOPE_BYTES_EXCEED_MESSAGE_LENGTH,
+}
+
+decode_failure("OptionalFlexibleUnionUnknownBytesExceedMessageLength") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_BYTES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    type = TestOptionalFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(8):4, num(0):2, num(0):2,
+        ],
+    },
+    err = ENVELOPE_BYTES_EXCEED_MESSAGE_LENGTH,
+}
+
+// Primary struct is 16 bytes; num_bytes = 0xfffffff8 is 8-byte aligned and wraps
+// 16 + 0xfffffff8 in 32-bit arithmetic to 8 <= 24 (total buffer size).
+decode_failure("UnionUnknownOutOfLineEnvelopeBytesUint32Overflow") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_BYTES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    type = TestFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(0xfffffff8):4, num(0):2, num(0):2,
+            repeat(0):8,
+        ],
+    },
+    err = ENVELOPE_BYTES_EXCEED_MESSAGE_LENGTH,
+}
+
+// Valid inline handle envelope header (repeat(0xff):4, num_handles=1, flags=1)
+// cleanly testing missing handle without conflating 0-byte out-of-line envelopes.
+decode_failure("UnionUnknownInlineEnvelopeHandleExceedsMessageLength") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_HANDLES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    type = EnvelopeInliningTestUnionStruct,
+    bytes = {
+        v2 = [
+            num(100):8,
+            repeat(0xff):4, num(1):2, num(1):2,
+        ],
+    },
+    err = ENVELOPE_HANDLES_EXCEED_MESSAGE_LENGTH,
+}
+
+decode_failure("UnionUnknownOutOfLineEnvelopeHandlesExceedMessageLengthClosesPartial") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_HANDLES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    handle_defs = {
+        #0 = event(),
+    },
+    type = EnvelopeInliningTestUnionStruct,
+    bytes = {
+        v2 = [
+            num(100):8,
+            num(8):4, num(2):2, num(0):2,
+            repeat(0xff):8,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = ENVELOPE_HANDLES_EXCEED_MESSAGE_LENGTH,
+}
+
+decode_failure("UnionUnknownInlineEnvelopeTooManyBytesInMessage") {
+    type = TestFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(42):4, num(0):2, num(1):2,
+            repeat(0):8,
+        ],
+    },
+    err = TOO_MANY_BYTES_IN_MESSAGE,
+}
+
+decode_failure("UnionUnknownOutOfLineEnvelopeTooManyBytesInMessage") {
+    type = TestFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(1234):8,
+            num(8):4, num(0):2, num(0):2,
+            repeat(0xab):8,
+            repeat(0):8,
+        ],
+    },
+    err = TOO_MANY_BYTES_IN_MESSAGE,
+}
+
+decode_failure("UnionUnknownInlineEnvelopeTooManyHandlesInMessage") {
+    handle_defs = {
+        #0 = event(),
+    },
+    type = EnvelopeInliningTestUnionStruct,
+    bytes = {
+        v2 = [
+            num(100):8,
+            num(42):4, num(0):2, num(1):2,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = TOO_MANY_HANDLES_IN_MESSAGE,
+}
+
+decode_failure("UnionUnknownOutOfLineEnvelopeTooManyHandlesInMessage") {
+    handle_defs = {
+        #0 = event(),
+        #1 = event(),
+    },
+    type = EnvelopeInliningTestUnionStruct,
+    bytes = {
+        v2 = [
+            num(100):8,
+            num(8):4, num(1):2, num(0):2,
+            repeat(0xff):4, padding:4,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+    err = TOO_MANY_HANDLES_IN_MESSAGE,
+}
+
+// ======== TRAVERSAL ORDER (SANDWICH STRUCTS & VECTORS) WITH UNIONS ========
+
+decode_success("FlexibleValueUnionSandwichUnknownInlineWithHandle") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+        #2 = channel(),
+    },
+    value = FlexibleValueUnionSandwich{
+        before: #0,
+        s_before: "hi",
+        xu: SampleUnion{
+            99: null,
+        },
+        s_after: "bye",
+        after: #2,
+    },
+    bytes = {
+        v2 = [
+            // primary struct (64 bytes)
+            repeat(0xff):4, padding:4, // before (#0)
+            num(2):8, repeat(0xff):8, // s_before ("hi")
+            num(99):8, repeat(0xff):4, num(1):2, num(1):2, // xu (unknown inline + #1)
+            num(3):8, repeat(0xff):8, // s_after ("bye")
+            repeat(0xff):4, padding:4, // after (#2)
+            // secondary objects
+            'h', 'i', padding:6,
+            'b', 'y', 'e', padding:5,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2],
+    },
+}
+
+decode_success("FlexibleValueUnionSandwichUnknownOutOfLineWithHandles") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = event(),
+        #2 = channel(),
+        #3 = channel(),
+    },
+    value = FlexibleValueUnionSandwich{
+        before: #0,
+        s_before: "alpha",
+        xu: SampleUnion{
+            99: null,
+        },
+        s_after: "omega",
+        after: #3,
+    },
+    bytes = {
+        v2 = [
+            // primary struct (64 bytes)
+            repeat(0xff):4, padding:4, // before (#0)
+            num(5):8, repeat(0xff):8, // s_before ("alpha")
+            num(99):8, num(16):4, num(2):2, num(0):2, // xu (unknown OOL 16B + #1, #2)
+            num(5):8, repeat(0xff):8, // s_after ("omega")
+            repeat(0xff):4, padding:4, // after (#3)
+            // secondary objects in depth-first order
+            'a', 'l', 'p', 'h', 'a', padding:3,
+            repeat(0xff):8, repeat(0xab):8,
+            'o', 'm', 'e', 'g', 'a', padding:3,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2, #3],
+    },
+}
+
+decode_success("FlexibleResourceUnionSandwichUnknownOutOfLineWithHandles") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = event(),
+        #2 = channel(),
+        #3 = channel(),
+    },
+    value = FlexibleResourceUnionSandwich{
+        before: #0,
+        s_before: "alpha",
+        xu: SampleResourceUnion{
+            99: null,
+        },
+        s_after: "omega",
+        after: #3,
+    },
+    bytes = {
+        v2 = [
+            repeat(0xff):4, padding:4, // before (#0)
+            num(5):8, repeat(0xff):8, // s_before ("alpha")
+            num(99):8, num(16):4, num(2):2, num(0):2, // xu (unknown OOL 16B + #1, #2)
+            num(5):8, repeat(0xff):8, // s_after ("omega")
+            repeat(0xff):4, padding:4, // after (#3)
+            'a', 'l', 'p', 'h', 'a', padding:3,
+            repeat(0xff):8, repeat(0xab):8,
+            'o', 'm', 'e', 'g', 'a', padding:3,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2, #3],
+    },
+}
+
+decode_success("VectorOfFlexibleResourceUnionMixedKnownAndUnknown") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = event(),
+        #2 = channel(),
+    },
+    value = VectorOfFlexibleResourceUnionStruct{
+        v: [
+            SampleResourceUnion{
+                u: 10,
+            },
+            SampleResourceUnion{
+                77: null,
+            },
+            SampleResourceUnion{
+                88: null,
+            },
+            SampleResourceUnion{
+                st: SimpleTable{
+                    x: 99,
+                },
+            },
+        ],
+    },
+    bytes = {
+        v2 = [
+            // primary: vector header (count = 4)
+            num(4):8, repeat(0xff):8,
+            // secondary 1: 4 union headers (64 bytes)
+            num(1):8, num(10):4, num(0):2, num(1):2, // [0]: known inline u=10
+            num(77):8, repeat(0xff):4, num(1):2, num(1):2, // [1]: unknown inline + #0
+            num(88):8, num(16):4, num(2):2, num(0):2, // [2]: unknown OOL 16B + #1, #2
+            num(3):8, num(32):4, num(0):2, num(0):2, // [3]: known OOL SimpleTable (32B)
+            // secondary 2: [2] unknown OOL 16B
+            repeat(0xff):8, repeat(0xcd):8,
+            // secondary 3: [3] SimpleTable{ x: 99 } (16B header + 8B env + 8B int64)
+            num(1):8, repeat(0xff):8,
+            num(8):4, num(0):2, num(0):2,
+            num(99):8,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2],
+    },
+}
+
+// Exercises flexible value union unknown OOL byte advancement and handle closing
+// across ALL bindings (including cpp_wire and hlcpp): xu's 8 unknown bytes are
+// valid ASCII, followed by invalid UTF-8 for s_after. If xu fails to advance the
+// OOL cursor by 8 bytes, s_after reads valid ASCII and misses STRING_NOT_UTF8;
+// if handle cleanup double-closes #1 or leaks #0/#2, handle checks fail.
+decode_failure("FlexibleValueUnionSandwichUnknownHandleThenInvalidUtf8") {
+    handle_defs = {
+        #0 = event(),
+        #1 = event(),
+        #2 = channel(),
+    },
+    type = FlexibleValueUnionSandwich,
+    bytes = {
+        v2 = [
+            repeat(0xff):4, padding:4, // before (#0)
+            num(2):8, repeat(0xff):8, // s_before ("ok")
+            num(99):8, num(8):4, num(1):2, num(0):2, // xu (unknown OOL 8B + #1)
+            num(2):8, repeat(0xff):8, // s_after (invalid UTF-8)
+            repeat(0xff):4, padding:4, // after (#2)
+            'o', 'k', padding:6, // s_before payload
+            'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', // xu unknown OOL payload (valid ASCII)
+            0xff, 0xff, padding:6, // s_after payload (invalid UTF-8)
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2],
+    },
+    err = STRING_NOT_UTF8,
+}
+
+// Known union variant `st` (a value table) containing both a known field (`x`)
+// and unknown inline and out-of-line envelopes carrying handles. The outer
+// union envelope on a value union must account for all nested unknown bytes and
+// handles, and decoders must drop both handles cleanly.
+decode_success("UnionKnownTableVariantWithInnerUnknownEnvelopesAndHandles") {
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    value = TestFlexibleUnionInStruct{
+        xu: SampleUnion{
+            st: SimpleTable{
+                x: 42,
+            },
+        },
+    },
+    bytes = {
+        v2 = [
+            num(3):8, // ord 3: st (SimpleTable)
+            num(56):4, num(2):2, num(0):2, // 16B hdr + 24B envs + 8B x + 8B unk = 56B, 2 handles
+            num(3):8, repeat(0xff):8, // SimpleTable header (max_ordinal = 3)
+            num(8):4, num(0):2, num(0):2, // ord 1 (known x): 8B OOL
+            repeat(0xff):4, num(1):2, num(1):2, // ord 2 (unknown): inline + #0
+            num(8):4, num(1):2, num(0):2, // ord 3 (unknown): 8B OOL + #1
+            num(42):8, // ord 1 payload (x = 42)
+            repeat(0xff):4, repeat(0xab):4, // ord 3 unknown OOL payload
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+}
+
+// Outer known union envelope overclaims 48 bytes while inner SimpleTable with
+// an unknown OOL envelope only consumes 40 bytes.
+decode_failure("UnionOuterEnvelopeByteMismatchOnInnerTableUnknownEnvelope") {
+    // TODO(https://fxbug.dev/579582163): Validate envelope byte count in rust_next.
+    bindings_denylist = [rust_next],
+    type = TestFlexibleUnionInStruct,
+    bytes = {
+        v2 = [
+            num(3):8, // ord 3: st
+            num(48):4, num(0):2, num(0):2, // claims 48 bytes instead of 40
+            num(2):8, repeat(0xff):8, // SimpleTable header (16B)
+            repeat(0x00):8, // ord 1: absent (8B)
+            num(8):4, num(0):2, num(0):2, // ord 2 (unknown): 8B OOL (8B)
+            repeat(0xab):8, // ord 2 unknown payload (8B -> 40B total)
+            num(0):8, // trailing bytes matching claimed 48
+        ],
+    },
+    err = INVALID_NUM_BYTES_IN_ENVELOPE,
+}
+
+// Flexible value union (`SampleUnion`) receiving 2 unknown channel handles
+// before a known `handle:CHANNEL` field given an event (#2); proves C++ and
+// Rust decoders skip subtype validation on unknown handles in value unions and
+// advance the handle cursor past all of them.
+decode_failure("FlexibleValueUnionUnknownHandlesThenWrongHandleType") {
+    // TODO(https://fxbug.dev/579572148): Validate handle subtype in rust_codec.
+    bindings_allowlist = [cpp_wire, hlcpp, cpp, rust, dart],
+    handle_defs = {
+        #0 = channel(),
+        #1 = channel(),
+        #2 = event(),
+    },
+    type = FlexibleValueUnionThenResourceHandle,
+    bytes = {
+        v2 = [
+            num(99):8,
+            num(8):4, num(2):2, num(0):2, // xu: unknown OOL 8B + #0, #1
+            repeat(0xff):4, padding:4, // after: #2 (event instead of channel)
+            repeat(0xff):8, // xu payload
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2],
+    },
+    err = INCORRECT_HANDLE_TYPE,
+}
+
+// Outer known union envelope claims 0 handles while an unknown inline envelope
+// inside SimpleTable consumes 1 handle.
+decode_failure("UnionOuterEnvelopeHandleUnderclaimOnInnerTableUnknownHandle") {
+    handle_defs = {
+        #0 = event(),
+    },
+    type = TestFlexibleResourceUnionInStruct,
+    bytes = {
+        v2 = [
+            num(3):8, // ord 3: st
+            num(32):4, num(0):2, num(0):2, // claims 0 handles instead of 1
+            num(2):8, repeat(0xff):8, // SimpleTable header (16B)
+            repeat(0x00):8, // ord 1: absent
+            repeat(0xff):4, num(1):2, num(1):2, // ord 2 (unknown): inline + #0
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = INVALID_NUM_HANDLES_IN_ENVELOPE,
+}
+
+// Outer known union envelope claims 2 handles while an unknown inline envelope
+// inside SimpleTable only consumes 1 handle; both #0 and unconsumed #1 must be closed.
+decode_failure("UnionOuterEnvelopeHandleOverclaimOnInnerTableUnknownHandle") {
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    type = TestFlexibleResourceUnionInStruct,
+    bytes = {
+        v2 = [
+            num(3):8, // ord 3: st
+            num(32):4, num(2):2, num(0):2, // claims 2 handles instead of 1
+            num(2):8, repeat(0xff):8, // SimpleTable header (16B)
+            repeat(0x00):8, // ord 1: absent
+            repeat(0xff):4, num(1):2, num(1):2, // ord 2 (unknown): inline + #0
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+    err = INVALID_NUM_HANDLES_IN_ENVELOPE,
 }

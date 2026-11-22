@@ -87,7 +87,7 @@ bool TraceeV2::Initialize(std::vector<std::string> categories, size_t buffer_siz
     return false;
   }
 
-  buffer_ = std::move(*shared_buffer);
+  buffer_ = std::make_shared<SharedBuffer>(std::move(*shared_buffer));
 
   TransitionToState(State::kInitialized);
   return true;

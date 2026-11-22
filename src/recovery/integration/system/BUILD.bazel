@@ -1,0 +1,88 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":recovery_integration_test"],
+    visibility = ["//src/recovery:__pkg__"],
+)
+
+rustc_test(
+    name = "recovery_integration_test_bin",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "recovery_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":recovery_integration_test_bin",
+    binary_name = "recovery_integration_test",
+)
+
+fx_component_manifest(
+    name = "recovery_integration_test_manifest",
+    testonly = True,
+    component_name = "recovery_integration_test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/recovery_integration_test.cml",
+)
+
+fx_test_component(
+    name = "recovery_integration_test_component",
+    compiled_manifest = ":recovery_integration_test_manifest",
+    deps = [":recovery_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "recovery_integration_test_package",
+    package_name = "recovery_integration_test",
+    testonly = True,
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/recovery/system:component_fdr",
+    ],
+    test_components = [":recovery_integration_test_component"],
+)
+
+fx_test(
+    name = "recovery_integration_test",
+    environments = [
+        "//build/testing/environments:nuc11_env",
+    ],
+    package = ":recovery_integration_test_package",
+)

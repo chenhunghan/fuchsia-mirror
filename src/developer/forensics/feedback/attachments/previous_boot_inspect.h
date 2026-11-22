@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_ATTACHMENTS_PREVIOUS_BOOT_INSPECT_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_ATTACHMENTS_PREVIOUS_BOOT_INSPECT_H_
 
-#include <fuchsia/diagnostics/persistence/cpp/fidl.h>
+#include <fidl/fuchsia.diagnostics.persistence/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fit/function.h>
 #include <lib/fpromise/promise.h>
@@ -27,7 +27,9 @@ namespace forensics::feedback {
 
 // Collects the Inspect data from the previous boot via
 // fuchsia.diagnostics.persistence.PreviousBootDataProvider and caches it in a file on disk.
-class PreviousBootInspect : public AttachmentProvider {
+class PreviousBootInspect
+    : public AttachmentProvider,
+      public fidl::AsyncEventHandler<fuchsia_diagnostics_persistence::PreviousBootDataProvider> {
  public:
   PreviousBootInspect(async_dispatcher_t* dispatcher,
                       std::shared_ptr<sys::ServiceDirectory> services,
@@ -42,19 +44,26 @@ class PreviousBootInspect : public AttachmentProvider {
   // already completed.
   void ForceCompletion(uint64_t ticket, Error error) override;
 
+  void on_fidl_error(fidl::UnbindInfo error) override;
+
+  void handle_unknown_event(
+      fidl::UnknownEventMetadata<fuchsia_diagnostics_persistence::PreviousBootDataProvider>
+          metadata) override;
+
  private:
-  void WatchPreviousBootData(async_dispatcher_t* dispatcher,
-                             std::shared_ptr<sys::ServiceDirectory> services);
-  void OnDataReceived(fuchsia::diagnostics::persistence::PreviousBootData data);
+  void WatchPreviousBootData();
+  void OnDataReceived(fuchsia_diagnostics_persistence::PreviousBootData data);
   void OnError();
 
   AttachmentData ReadAttachmentData() const;
 
+  async_dispatcher_t* dispatcher_;
+  std::shared_ptr<sys::ServiceDirectory> services_;
   std::unique_ptr<backoff::Backoff> backoff_;
   RedactorBase* redactor_;
   std::string path_;
 
-  fuchsia::diagnostics::persistence::PreviousBootDataProviderPtr data_provider_;
+  fidl::Client<fuchsia_diagnostics_persistence::PreviousBootDataProvider> data_provider_;
 
   std::optional<Error> error_;
   std::map<uint64_t, ::fit::callback<void(AttachmentData)>> completers_;

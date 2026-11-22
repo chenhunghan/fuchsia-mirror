@@ -39,10 +39,15 @@ package(
 
 fuchsia_board_input_bundle(
     name = "main_bundle",
-    bootfs_driver_packages = [
-        "//src/devices/board/drivers/qemu-arm64:package",
-    ],
     power_manager_config = "//src/power/power-manager/node_config:base_node_config.json5",
+    version = build_info_version,
+)
+
+fuchsia_board_input_bundle(
+    name = "virt_drivers",
+    bootfs_driver_packages = [
+        "//src/devices/board/drivers/virt:package",
+    ],
     version = build_info_version,
 )
 
@@ -64,7 +69,7 @@ fuchsia_board_configuration(
         "//boards/emulation/virtio",
     ] + select({
         "//build/bazel/platforms:is_fuchsia_x64": [":x64_drivers"],
-        "//conditions:default": [],
+        "//conditions:default": [":virt_drivers"],
     }),
     board_name = "guest-board",
     partitions_configuration = "//build/bazel/assembly/partitions_configurations:default",

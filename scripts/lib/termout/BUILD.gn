@@ -58,11 +58,13 @@ if (is_host) {
       "__init__.py",
       "termout.py",
     ]
+    imports = [ ".." ]
     visibility = [
       ":*",
       "//scripts/fxtest/python:*",
       "//tools/devshell/python/system-status:*",
     ]
     deps = [ "//third_party/colorama" ]
+    enable_mypy = false
   }
 }

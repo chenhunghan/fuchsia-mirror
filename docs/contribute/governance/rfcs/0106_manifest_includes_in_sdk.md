@@ -438,7 +438,7 @@ The `cmc include` command is inspired by the `cpp` command, which runs the C
 preprocessor on a given file and prints the postprocessed result. See:
 [`man cpp`][man-cpp].
 
-[api-review]: /docs/contribute/governance/api_council.md#api_review
+[api-review]: /docs/contribute/governance/api_council.md#api-review
 [clang-i-dir]: https://clang.llvm.org/docs/ClangCommandLineReference.html#cmdoption-clang-i-dir
 [cmc]: https://fuchsia.dev/reference/tools/sdk/cmc.md
 [component-manifests]: /docs/concepts/components/v2/component_manifests.md
@@ -446,7 +446,7 @@ preprocessor on a given file and prints the postprocessed result. See:
 [cpp-logging]: /docs/development/languages/c-cpp/logging.md
 [cs-shards]: https://cs.opensource.google/search?q=file:%5C.shard.cm&sq=&ss=fuchsia
 [directory-capabilities]: /docs/concepts/components/v2/capabilities/directory.md
-[elf-runner-streams]: /docs/concepts/components/v2/elf_runner.md#forwarding_stdout_and_stderr_streams
+[elf-runner-streams]: /docs/concepts/components/v2/elf_runner.md#forwarding-stdout-and-stderr-streams
 [fuchsia-build-system]: /docs/development/build/overview.md
 [fx-cmc]: https://fuchsia.dev/reference/tools/fx/cmd/cmc
 [fxb-77007]: https://bugs.fuchsia.dev/p/fuchsia/issues/detail?id=77007
@@ -456,11 +456,11 @@ preprocessor on a given file and prints the postprocessed result. See:
 [idk-layout]: /docs/development/idk/layout.md
 [inspect-discovery-hosting]: /docs/reference/diagnostics/inspect/tree.md
 [man-cpp]: https://man7.org/linux/man-pages/man1/cpp.1.html
-[manifests-include]: /docs/concepts/components/v2/component_manifests.md#include
+[manifests-include]: /docs/concepts/components/v2/component_manifests.md
 [protocol-capabilities]: /docs/concepts/components/v2/capabilities/protocol.md
 [rfc-0002]: /docs/contribute/governance/rfcs/0002_platform_versioning.md
 [rfc-0083]: /docs/contribute/governance/rfcs/0083_fidl_versioning.md
 [rfc-0089]: /docs/contribute/governance/rfcs/0089_core_realm_variations.md
 [test-manager-common-shard]: /src/sys/test_manager/meta/common.shard.cml
-[trf-inventory]: /docs/development/testing/components/test_runner_framework.md#inventory_of_test_runners
-[vulkan-runtime-deps]: /docs/development/graphics/magma/concepts/vulkan.md#runtime_dependencies
+[trf-inventory]: /docs/development/testing/components/test_runner_framework.md#inventory-of-test-runners
+[vulkan-runtime-deps]: /docs/development/graphics/magma/concepts/vulkan.md#runtime-dependencies

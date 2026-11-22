@@ -11,6 +11,7 @@
 #include <lib/ld/decoded-module-in-memory.h>
 #include <lib/ld/load-module.h>
 
+#include <algorithm>
 #include <ranges>
 
 #include "concat-view.h"
@@ -138,14 +139,11 @@ class LinkingSession : public LinkingSessionBase {
           }
         }
         // Create and enqueue a module for each dependency, skipping
-        // dependencies that have already been enqueued. The (parent) module
-        // that was just loaded will also store a reference to its dependencies'
-        // RuntimeModules in its direct_deps list.
+        // dependencies that have already been loaded or enqueued. The (parent)
+        // module that was just loaded will also store a reference to its
+        // dependencies' RuntimeModules in its direct_deps list.
         auto enqueue_dep = [this, &diag, &parent_list = module.runtime_module().direct_deps()](
                                const Soname& name) {
-          if (std::ranges::any_of(session_modules_, name.equal_to())) {
-            return true;
-          }
           if (RuntimeModule* dep = EnqueueModule(diag, name)) {
             return parent_list.push_back(diag, "direct dependency container", dep);
           }
@@ -183,9 +181,13 @@ class LinkingSession : public LinkingSessionBase {
 
   // Create module data structures for `soname` and enqueue the modules onto
   // this LinkingSession's bookkeeping lists. If a module with `soname` has
-  // already been loaded, then a reference to the loaded module is returned
-  // instead.
+  // already been loaded or enqueued in this session, then a reference to that
+  // module is returned instead.
   RuntimeModule* EnqueueModule(Diagnostics& diag, Soname soname) {
+    if (auto it = std::ranges::find_if(session_modules_, soname.equal_to());
+        it != session_modules_.end()) {
+      return &it->runtime_module();
+    }
     auto& known_modules = loaded_modules();
     if (auto it = std::ranges::find_if(known_modules, soname.equal_to());
         it != known_modules.end()) {

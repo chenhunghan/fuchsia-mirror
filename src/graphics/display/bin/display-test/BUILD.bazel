@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    srcs = [
+        "display.cc",
+        "display.h",
+        "image.cc",
+        "image.h",
+        "main.cc",
+        "utils.h",
+        "virtual-layer.cc",
+        "virtual-layer.h",
+    ],
+    gn_output_name = "display-test",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_cpp",
+        "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_cpp",
+        "//sdk/fidl/fuchsia.sysinfo:fuchsia.sysinfo_cpp",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//src/graphics/display/lib/api-types/cpp",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/image-format",
+        "//zircon/system/ulib/sysmem-version",
+        "//zircon/system/ulib/zircon-internal",
+        "//zircon/system/ulib/zx",
+    ],
+)

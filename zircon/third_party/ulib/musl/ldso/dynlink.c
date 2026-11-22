@@ -72,11 +72,11 @@ extern ptrdiff_t _ld_tlsdesc_runtime_undefined_weak_addend(void);
 
 #define KEEP_DSO_VMAR __has_feature(xray_instrument)
 
-// TODO(https://fxbug.dev/42080808): Some ubsan-instrumented functions in the dynlink
-// startup path use too much stack leading to early stackoverflows. In the long
-// run, we'll have a new libc/dynamic linker that can help alleviate this issue,
-// but in the interim, we can selectively disable ubsan instrumentation on
-// select functions to avoid the overflow.
+// TODO(https://fxbug.dev/349433421): Some ubsan-instrumented functions in the
+// dynlink startup path use too much stack leading to early stackoverflows. In
+// the long run, we'll have a new libc/dynamic linker that can help alleviate
+// this issue, but in the interim, we can selectively disable ubsan
+// instrumentation on select functions to avoid the overflow.
 #if defined(__riscv) && __has_feature(undefined_behavior_sanitizer)
 #define NO_UBSAN_RISCV64 __attribute__((no_sanitize("undefined")))
 #else
@@ -712,13 +712,13 @@ LIBC_NO_SAFESTACK NO_ASAN static void assign_module_id(struct dso* dso) {
 // Locate the build ID note just after mapping the segments in.
 // This is called from dls2, so it cannot use any non-static functions.
 //
-// TODO(https://fxbug.dev/42080808): Temporarily disable ubsan on this function but only
-// for riscv64. This function in particular has a large amount of type-mismatch
-// checks added via -fsanitize=null,object-size,alignment. The instrumented code
-// should call __ubsan_handle_type_mismatch_v1 on the failing case, and this
-// funciton takes a pointer to a global with type info. The codegen appears to
-// store all unique type info globals into the stack at the start of the
-// function which leads to the stackoverflow.
+// TODO(https://fxbug.dev/349433421): Temporarily disable ubsan on this function
+// but only for riscv64. This function in particular has a large amount of
+// type-mismatch checks added via -fsanitize=null,object-size,alignment. The
+// instrumented code should call __ubsan_handle_type_mismatch_v1 on the failing
+// case, and this function takes a pointer to a global with type info. The
+// codegen appears to store all unique type info globals into the stack at the
+// start of the function which leads to the stackoverflow.
 LIBC_NO_SAFESTACK NO_ASAN NO_UBSAN_RISCV64 static bool find_buildid_note(struct dso* dso,
                                                                          const Phdr* seg) {
   const char* end = laddr(dso, seg->p_vaddr + seg->p_filesz);
@@ -1300,7 +1300,6 @@ LIBC_NO_SAFESTACK static void trace_load(struct dso* p) {
   // The output is in multiple lines to cope with damn line wrapping.
   // N.B. Programs like the Intel Processor Trace decoder parse this output.
   // Do not change without coordination with consumers.
-  // TODO(https://fxbug.dev/42105346): Switch to official tracing mechanism when ready.
   static int seqno;
   debugmsg("@trace_load: %" PRIu64 ":%da %p %p %p", pid, seqno, p->l_map.l_addr, p->map,
            p->map + p->map_len);
@@ -2015,8 +2014,9 @@ LIBC_NO_SAFESTACK NO_ASAN NO_UBSAN_RISCV64 static dl_start_return_t __dls3(void*
 
   // Do not allow any zero length VLAs allocated on the stack.
   //
-  // TODO(44088) : See this bug for options which might allow us to avoid the
-  // need for variable length arrays of any form at this stage.
+  // TODO(https://fxbug.dev/435585467): See this bug for options which might
+  // allow us to avoid the need for variable length arrays of any form at this
+  // stage.
   if ((nbytes == 0) || (nhandles == 0)) {
     CRASH_WITH_UNIQUE_BACKTRACE();
     _exit(1);

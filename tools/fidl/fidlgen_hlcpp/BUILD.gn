@@ -10,6 +10,7 @@ import("//build/testing/golden_files.gni")
 import("//tools/fidl/fidlc/testdata/info.gni")
 
 if (is_host) {
+  # LINT.IfChange(golden_tests)
   golden_files("fidlgen_hlcpp_golden_tests") {
     testonly = true
 
@@ -42,8 +43,10 @@ if (is_host) {
       }
     }
   }
+  # LINT.ThenChange(golden_tests.bzl:golden_tests)
 }
 
+# LINT.IfChange(goldens)
 group("goldens") {
   testonly = true
 
@@ -60,6 +63,8 @@ group("goldens") {
     }
   }
 }
+
+# LINT.ThenChange(BUILD.bazel:goldens)
 
 group("tests") {
   testonly = true

@@ -12,6 +12,7 @@
 #include <inttypes.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 // The kernel physmap is a region of the kernel where all of useful physical
 // memory is linearly mapped for cheap, ready access: in particular, excluding

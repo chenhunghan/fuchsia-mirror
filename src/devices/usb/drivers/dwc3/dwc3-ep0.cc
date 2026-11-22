@@ -137,7 +137,7 @@ void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
         "(cur_setup: req_type=0x{:02x}, req=0x{:02x}, val=0x{:04x}, idx=0x{:04x}, len={})",
         ep0_.cur_setup.bm_request_type, ep0_.cur_setup.b_request, ep0_.cur_setup.w_value,
         ep0_.cur_setup.w_index, ep0_.cur_setup.w_length);
-    Ep0EndAndStall(ep0_.out);
+    Ep0EndAndStall();
     Ep0QueueSetup();
     return;
   }
@@ -148,7 +148,7 @@ void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
         "(cur_setup: req_type=0x{:02x}, req=0x{:02x}, val=0x{:04x}, idx=0x{:04x}, len={})",
         ep0_.cur_setup.bm_request_type, ep0_.cur_setup.b_request, ep0_.cur_setup.w_value,
         ep0_.cur_setup.w_index, ep0_.cur_setup.w_length);
-    Ep0EndAndStall(ep0_.in);
+    Ep0EndAndStall();
     Ep0QueueSetup();
     return;
   }
@@ -156,7 +156,7 @@ void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
     fdf::warn(
         "host/target data direction disagreement in WaitZlpIn: expected EP0 IN ({}), got {}, request=0x{:02x}",
         kEp0In, ep_num, ep0_.cur_setup.b_request);
-    Ep0EndAndStall(ep0_.in);
+    Ep0EndAndStall();
     Ep0QueueSetup();
     return;
   }
@@ -194,7 +194,7 @@ void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
         ep0_.cur_setup = *setup;
       } else {
         fdf::error("ReadStruct failed: {}", setup.status_string());
-        Ep0EndAndStall(ep0_.out);
+        Ep0EndAndStall();
         Ep0QueueSetup();
         break;
       }
@@ -260,7 +260,7 @@ void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
             "[type=0x{:02x} req=0x{:02x} val=0x{:04x} idx=0x{:04x} len={} received={}]",
             ep0_.cur_setup.bm_request_type, ep0_.cur_setup.b_request, ep0_.cur_setup.w_value,
             ep0_.cur_setup.w_index, ep0_.cur_setup.w_length, received));
-        Ep0EndAndStall(ep0_.out);
+        Ep0EndAndStall();
         Ep0QueueSetup();
         break;
       }
@@ -270,7 +270,7 @@ void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
       if (auto status = ep0_.buffer->CacheFlushInvalidate(0, ep0_.buffer->size());
           status.is_error()) {
         fdf::error("CacheFlushInvalidate failed: {}", status);
-        Ep0EndAndStall(ep0_.out);
+        Ep0EndAndStall();
         Ep0QueueSetup();
         break;
       }
@@ -343,7 +343,7 @@ void Dwc3::HandleEp0TransferNotReadyEvent(uint8_t ep_num, uint32_t stage) {
     case Ep0::State::None:
       if ((stage == DEPEVT_XFER_NOT_READY_STAGE_DATA) ||
           (stage == DEPEVT_XFER_NOT_READY_STAGE_STATUS)) {
-        Ep0EndAndStall(ep0_.out);
+        Ep0EndAndStall();
         Ep0QueueSetup();
       }
       break;
@@ -357,35 +357,38 @@ void Dwc3::HandleEp0TransferNotReadyEvent(uint8_t ep_num, uint32_t stage) {
       }
       break;
     case Ep0::State::TwoStage:
-      ZX_ASSERT(stage);  // Must be 1 or 2.
-      if (stage == DEPEVT_XFER_NOT_READY_STAGE_DATA) {
-        Ep0EndAndStall(ep0_.out);
-        Ep0QueueSetup();
-      } else {
-        ep0_.state = Ep0::State::WaitFidl;
-      }
-      break;
+    case Ep0::State::WaitNrdyIn:
+    case Ep0::State::WaitFidl:
     case Ep0::State::WaitHost:
-      ZX_ASSERT(stage);  // Must be 1 or 2.
-      if (stage == DEPEVT_XFER_NOT_READY_STAGE_DATA) {
-        Ep0EndAndStall(ep0_.out);
+      if (stage == DEPEVT_XFER_NOT_READY_STAGE_DATA ||
+          (stage == DEPEVT_XFER_NOT_READY_STAGE_STATUS && ep_num != kEp0In)) {
+        Ep0EndAndStall();
         Ep0QueueSetup();
+      } else if (stage == DEPEVT_XFER_NOT_READY_STAGE_STATUS) {
+        if (ep0_.state == Ep0::State::WaitHost) {
+          Ep0StartStatusIn();
+        } else {
+          ep0_.state = Ep0::State::WaitFidl;
+        }
       } else {
-        EpStartSingleTransfer(ep0_.in, ep0_.shared_fifo, TRB_TRBCTL_STATUS_2, 0, 0);
-        ep0_.state = Ep0::State::Status;
+        fdf::error(
+            "unexpected XferNotReady stage {} on ep{} in state {} "
+            "(cur_setup: req_type=0x{:02x}, req=0x{:02x}, val=0x{:04x}, idx=0x{:04x}, len={})",
+            stage, ep_num, ep0_.state, ep0_.cur_setup.bm_request_type, ep0_.cur_setup.b_request,
+            ep0_.cur_setup.w_value, ep0_.cur_setup.w_index, ep0_.cur_setup.w_length);
       }
       break;
     case Ep0::State::DataOut:
       if ((ep_num == kEp0In) && (stage == DEPEVT_XFER_NOT_READY_STAGE_DATA)) {
         // End transfer and stall if we receive XferNotReady(Data) in the opposite direction.
-        Ep0EndAndStall(ep0_.out);
+        Ep0EndAndStall();
         Ep0QueueSetup();
       }
       break;
     case Ep0::State::DataIn:
       if ((ep_num == kEp0Out) && (stage == DEPEVT_XFER_NOT_READY_STAGE_DATA)) {
         // End transfer and stall if we receive XferNotReady(Data) in the opposite direction.
-        Ep0EndAndStall(ep0_.in);
+        Ep0EndAndStall();
         Ep0QueueSetup();
       }
       break;
@@ -395,16 +398,10 @@ void Dwc3::HandleEp0TransferNotReadyEvent(uint8_t ep_num, uint32_t stage) {
         ep0_.state = Ep0::State::Status;
       }
       break;
-    case Ep0::State::WaitNrdyIn:
-      if (ep_num == kEp0In) {
-        EpStartSingleTransfer(ep0_.in, ep0_.shared_fifo, TRB_TRBCTL_STATUS_3, 0, 0);
-        ep0_.state = Ep0::State::Status;
-      }
-      break;
     case Ep0::State::WaitZlpIn:
       if ((ep_num == kEp0Out) && (stage == DEPEVT_XFER_NOT_READY_STAGE_DATA)) {
         // End transfer and stall if we receive XferNotReady(Data) in the opposite direction.
-        Ep0EndAndStall(ep0_.in);
+        Ep0EndAndStall();
         Ep0QueueSetup();
       }
       break;
@@ -442,9 +439,17 @@ void Dwc3::Ep0CancelTransfers() {
   }
 }
 
-void Dwc3::Ep0EndAndStall(Endpoint& ep) {
+void Dwc3::Ep0EndAndStall() {
   Ep0CancelTransfers();
-  EpSetStall(ep, true);
+  // DWC3 requires EP0 protocol stalls to be issued on physical EP0 (ep0_.out).
+  EpSetStall(ep0_.out, true);
+}
+
+void Dwc3::Ep0StartStatusIn() {
+  const uint32_t trb_control =
+      (ep0_.cur_setup.w_length == 0) ? TRB_TRBCTL_STATUS_2 : TRB_TRBCTL_STATUS_3;
+  EpStartSingleTransfer(ep0_.in, ep0_.shared_fifo, trb_control, 0, 0);
+  ep0_.state = Ep0::State::Status;
 }
 
 void Dwc3::HandleEp0Setup(size_t length) {
@@ -453,7 +458,7 @@ void Dwc3::HandleEp0Setup(size_t length) {
   fdescriptor::wire::UsbSetup setup = ep0_.cur_setup;
 
   auto fail = [this]() {
-    Ep0EndAndStall(ep0_.out);
+    Ep0EndAndStall();
     Ep0QueueSetup();
   };
 
@@ -461,10 +466,18 @@ void Dwc3::HandleEp0Setup(size_t length) {
     // handle some special setup requests in this driver
     switch (setup.b_request) {
       case fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress):
+        if (setup.w_value > 127 || setup.w_index != 0 || setup.w_length != 0) {
+          fail();
+          return;
+        }
         SetDeviceAddress(setup.w_value);
         ep0_.state = Ep0::State::WaitHost;
         return;
       case fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration): {
+        if (setup.w_length != 0) {
+          fail();
+          return;
+        }
         ResetConfiguration();
         const uint64_t setup_gen = ep0_.setup_generation;
         WaitForAllUserEndpointsIdle([this, setup, length, setup_gen](bool idle) {
@@ -509,7 +522,7 @@ void Dwc3::HandleEp0Setup(size_t length) {
 
 void Dwc3::DoControlCall(fdescriptor::wire::UsbSetup setup, size_t length) {
   auto fail = [this]() {
-    Ep0EndAndStall(ep0_.out);
+    Ep0EndAndStall();
     Ep0QueueSetup();
   };
   if (!dci_intf_.is_valid()) {
@@ -591,11 +604,11 @@ void Dwc3::DoControlCall(fdescriptor::wire::UsbSetup setup, size_t length) {
 
         switch (ep0_.state) {
           case Ep0::State::TwoStage:
+          case Ep0::State::WaitNrdyIn:
             ep0_.state = Ep0::State::WaitHost;
             break;
           case Ep0::State::WaitFidl:
-            EpStartSingleTransfer(ep0_.in, ep0_.shared_fifo, TRB_TRBCTL_STATUS_2, 0, 0);
-            ep0_.state = Ep0::State::Status;
+            Ep0StartStatusIn();
             break;
           case Ep0::State::WaitHost:
             // Nonsensical case that should never happen. See state commentary.
@@ -631,7 +644,8 @@ void Dwc3::DoControlCall(fdescriptor::wire::UsbSetup setup, size_t length) {
 
         if (setup.bm_request_type == kStandardDeviceOut &&
             setup.b_request == fdescriptor::StandardRequest::kSetConfiguration) {
-          SetDeviceState(fpolicy::DeviceState::kConfigured);
+          SetDeviceState(setup.w_value == 0 ? fpolicy::DeviceState::kAddress
+                                            : fpolicy::DeviceState::kConfigured);
         }
       });
 }

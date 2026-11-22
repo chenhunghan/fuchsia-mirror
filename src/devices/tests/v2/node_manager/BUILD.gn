@@ -53,7 +53,6 @@ fuchsia_driver_component("root") {
   dml_label = ":root-dml"
   testonly = true
   deps = [ ":root_driver" ]
-  info = "meta/root_info.json"
 }
 
 fuchsia_driver_dml("leaf-dml") {
@@ -88,7 +87,6 @@ fuchsia_driver_component("leaf") {
   dml_label = ":leaf-dml"
   testonly = true
   deps = [ ":leaf_driver" ]
-  info = "meta/leaf_info.json"
 }
 
 rustc_test("bin") {

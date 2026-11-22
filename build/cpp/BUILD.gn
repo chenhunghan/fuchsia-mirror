@@ -197,10 +197,6 @@ config("fidl-wire-deprecated-mutable-tables") {
 
     #------------------
     #------------------
-    "//src/lib/fidl/llcpp/tests/conformance:*",
-
-    #------------------
-    #------------------
     "//src/storage/lib/vfs/cpp",
 
     #------------------
@@ -313,11 +309,11 @@ config("fidl-wire-deprecated-mutable-tables") {
 
     #------------------
     #------------------
-    "//src/tests/benchmarks/fidl/driver_llcpp:*",
+    "//src/tests/benchmarks/fidl/driver_cpp_wire:*",
 
     #------------------
     #------------------
-    "//src/tests/benchmarks/fidl/llcpp:*",
+    "//src/tests/benchmarks/fidl/cpp_wire:*",
 
     #------------------
     #------------------
@@ -407,6 +403,7 @@ if (is_host) {
       ":*",
       "//build/bazel/rules/idk/private:*",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -415,9 +412,11 @@ if (is_host) {
       "__init__.py",
       "verify_runtime_deps.py",
     ]
+    imports = [ ".." ]
     visibility = [
       ":*",
       "//build/sdk/generate_prebuild_idk/*",
     ]
+    enable_mypy = false
   }
 }

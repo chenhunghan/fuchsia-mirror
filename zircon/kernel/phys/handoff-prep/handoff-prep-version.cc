@@ -4,16 +4,16 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-#include <lib/boot-options/boot-options.h>
 #include <lib/elfldltl/constants.h>
 #include <lib/symbolizer-markup/writer.h>
+#include <stdio.h>
 
 #include <ktl/ref.h>
 #include <ktl/string_view.h>
 #include <phys/handoff-prep/handoff-prep.h>
 #include <phys/handoff/boot-constants.h>
-#include <phys/log/log.h>
-#include <phys/symbolize.h>
+#include <phys/output/log.h>
+#include <phys/runtime/symbolize.h>
 
 #include <ktl/enforce.h>
 
@@ -29,15 +29,13 @@ ktl::string_view SanitizeVersion(ktl::string_view version) {
   trim = version.size() - (trim + 1);
   version.remove_prefix(skip);
   version.remove_suffix(trim);
-  if (BootOptions::Get()->phys_verbose) {
-    if (skip + trim == 0) {
-      printf("%s: zx_system_get_version_string (%zu chars): %.*s\n", ProgramName(), version.size(),
-             static_cast<int>(version.size()), version.data());
-    } else {
-      printf("%s: zx_system_get_version_string (%zu chars trimmed from %zu): %.*s\n", ProgramName(),
-             version.size(), version.size() + skip + trim, static_cast<int>(version.size()),
-             version.data());
-    }
+  if (skip + trim == 0) {
+    printf("%s: zx_system_get_version_string (%zu chars): %.*s\n", ProgramName(), version.size(),
+           static_cast<int>(version.size()), version.data());
+  } else {
+    printf("%s: zx_system_get_version_string (%zu chars trimmed from %zu): %.*s\n", ProgramName(),
+           version.size(), version.size() + skip + trim, static_cast<int>(version.size()),
+           version.data());
   }
   return version;
 }
@@ -48,8 +46,7 @@ void HandoffPrep::SetVersionString(ktl::string_view version) {
   version = SanitizeVersion(version);
 
   // The markup writer is convenient for all the logging, in fact.
-  FILE vlogf = gLog->VerboseOnlyFile();  // NOLINT(misc-non-copyable-objects)
-  symbolizer_markup::Writer writer{CallableFile{&vlogf}};
+  symbolizer_markup::Writer writer{CallableFile{stdout}};
 
   // Note where in the whole log the kernel_debug_ident log lines start.  The
   // handoff string will be copied from the saved log once it's all assembled.

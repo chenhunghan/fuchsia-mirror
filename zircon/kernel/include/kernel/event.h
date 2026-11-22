@@ -8,16 +8,32 @@
 #ifndef ZIRCON_KERNEL_INCLUDE_KERNEL_EVENT_H_
 #define ZIRCON_KERNEL_INCLUDE_KERNEL_EVENT_H_
 
+#include <limits.h>
 #include <stdint.h>
 #include <sys/types.h>
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
 #include <fbl/canary.h>
-#include <kernel/event_ffi.h>
-#include <kernel/thread.h>
-#include <kernel/timer.h>
+#include <kernel/deadline.h>
+#include <kernel/wait.h>
 #include <ktl/atomic.h>
+
+class Event;
+
+extern "C" {
+
+// Rust implementations of the Event methods (kernel/event.rs). The C++ methods of the same name
+// are thin forwarders to these and carry the lock annotations; none may be called with a
+// ChainLockTransaction active.
+zx_status_t rust_event_wait_worker(Event* event, const Deadline* deadline,
+                                   Interruptible interruptible);
+void rust_event_signal(Event* event, zx_status_t wait_result);
+zx_status_t rust_event_unsignal(Event* event);
+// ~Event: asserts the magic and resets the fields; the embedded WaitQueue is destroyed by C++.
+void rust_event_destroy_fields(Event* event);
+
+}  // extern "C"
 
 // Rules for Events and AutounsignalEvents:
 // - Events may be signaled from interrupt context *but* preemption must be
@@ -41,7 +57,7 @@ class Event {
  public:
   constexpr explicit Event(bool initial = false) : Event(initial, Flags::NONE) {}
 
-  ~Event() { rust_event_destroy(this); }
+  ~Event() { rust_event_destroy_fields(this); }
 
   Event(const Event&) = delete;
   Event& operator=(const Event&) = delete;
@@ -56,23 +72,16 @@ class Event {
   // ZX_ERR_INTERNAL_INTR_KILLED - thread killed
   // ZX_ERR_INTERNAL_INTR_RETRY - thread is suspended
   // Or the |status| which the caller specified in Event::Signal(status)
-  zx_status_t Wait(const Deadline& deadline) { return WaitWorker(deadline, Interruptible::Yes, 0); }
-
-  // Same as Wait() but gives a mask of signals to ignore. The signal_mask only applies to existing
-  // signals, not future ones that might be signaled while waiting.
-  // The caller must be interruptible.
-  zx_status_t Wait(const Deadline& deadline, uint signal_mask) {
-    return WaitWorker(deadline, Interruptible::Yes, signal_mask);
-  }
+  zx_status_t Wait(const Deadline& deadline) { return WaitWorker(deadline, Interruptible::Yes); }
 
   // No deadline, non interruptible version of Wait().
-  zx_status_t Wait() { return WaitWorker(Deadline::infinite(), Interruptible::No, 0); }
+  zx_status_t Wait() { return WaitWorker(Deadline::infinite(), Interruptible::No); }
 
   // Wait until a zx_instant_mono_t deadline.
   // Interruptible arg allows it to return early with ZX_ERR_INTERNAL_INTR_KILLED if thread
   // is signaled for kill or with ZX_ERR_INTERNAL_INTR_RETRY if the thread is suspended.
   zx_status_t WaitDeadline(zx_instant_mono_t deadline, Interruptible interruptible) {
-    return WaitWorker(Deadline::no_slack(deadline), interruptible, 0);
+    return WaitWorker(Deadline::no_slack(deadline), interruptible);
   }
 
   // Signals an event.
@@ -80,15 +89,10 @@ class Event {
   // All waiting threads are allowed to proceed until such time as Unsignal() is called.
   //
   // |wait_result| is the value to return for Wait(), if the wait was successful.
-  // |queue_to_own| is the OwnedWaitQueue that the first unblocked thread will take ownership of. If
-  // this is not-null, then we will perform an assign-owner operation on the queue. If there is no
-  // thread waiting, then no assign-owner operation will occur.
-  void Signal(zx_status_t wait_result = ZX_OK, OwnedWaitQueue* queue_to_own = nullptr)
-      TA_EXCL(chainlock_transaction_token) {
-    rust_event_signal(this, wait_result, queue_to_own);
+  void Signal(zx_status_t wait_result = ZX_OK) TA_EXCL(chainlock_transaction_token) {
+    rust_event_signal(this, wait_result);
   }
   zx_status_t Unsignal() { return rust_event_unsignal(this); }
-  bool is_signaled() const { return result_.load(ktl::memory_order_relaxed) != kNotSignaled; }
 
  protected:
   enum Flags : uint32_t {
@@ -103,19 +107,18 @@ class Event {
  private:
   friend struct EventLayout;
 
-  zx_status_t WaitWorker(const Deadline& deadline, Interruptible interruptible, uint signal_mask)
+  zx_status_t WaitWorker(const Deadline& deadline, Interruptible interruptible)
       TA_EXCL(chainlock_transaction_token) {
-    return rust_event_wait_worker(this, &deadline, interruptible, signal_mask);
+    return rust_event_wait_worker(this, &deadline, interruptible);
   }
 
-  // The constructors initialize these members (and is_signaled() reads result_); everything else,
-  // including the destructor, is implemented in Rust (kernel/event.rs), which shares this layout
-  // (see event_layout.h).
+  // The constructors initialize these members; everything else, including the destructor, is
+  // implemented in Rust (kernel/event.rs), which shares this layout (see event_layout.h).
   static constexpr uint32_t kMagic = fbl::magic("evnt");
   [[maybe_unused]] uint32_t magic_;
 
   static constexpr zx_status_t kNotSignaled = INT_MAX;
-  ktl::atomic<zx_status_t> result_;
+  [[maybe_unused]] ktl::atomic<zx_status_t> result_;
 
   [[maybe_unused]] Flags flags_;
   WaitQueue wait_;

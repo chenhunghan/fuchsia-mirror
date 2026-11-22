@@ -1,0 +1,52 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["fx"],
+    visibility = ["//tools/devshell/fx_cli:__pkg__"],
+)
+
+exports_files(
+    [
+        "third_party/d3_v3/LICENSE",
+        "third_party/d3_v3/d3.js",
+    ],
+    visibility = ["//:__pkg__"],
+)
+
+exports_files(
+    [
+        "clang/stack_size_estimator/call_graph.py",
+        "clang/stack_size_estimator/graph.py",
+        "clang/stack_size_estimator/stack_estimator.py",
+    ],
+    visibility = ["//scripts/clang/tests/stack_size_estimator:__pkg__"],
+)
+
+exports_files(
+    ["debug/zxdb_cli/schema.json"],
+    visibility = ["//scripts/debug/zxdb_cli/shared:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    testonly = True,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//scripts/clang/tests/stack_size_estimator:host_tests",
+        "//scripts/debug/zxdb_cli/cli:host_tests",
+        "//scripts/debug/zxdb_cli/daemon_manager:host_tests",
+        "//scripts/debug/zxdb_cli/shared:host_tests",
+        "//scripts/disable_ctf_tests:host_tests",
+        "//scripts/fortunes:host_tests",
+        "//scripts/fxtest/python/dataparse:host_tests",
+        "//scripts/shac/tests:host_tests",
+        "//scripts/skill_linter:host_tests",
+        "//scripts/versioning:host_tests",
+    ],
+)

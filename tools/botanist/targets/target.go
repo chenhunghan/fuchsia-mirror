@@ -157,6 +157,16 @@ type FuchsiaTarget interface {
 
 	// GetSharedData returns the path of shared_data directory used by ffx.
 	GetSharedData() string
+
+	// SerialNumber returns the hardware or virtual serial number of the target, if known.
+	SerialNumber() string
+
+	// SetSerialNumber records a runtime-discovered serial number on the target.
+	SetSerialNumber(serial string)
+
+	// SetNodename records a runtime-discovered nodename on a target whose
+	// nodename is not statically configured.
+	SetNodename(nodename string)
 }
 
 // genericFuchsiaTarget is a generic Fuchsia instance.
@@ -170,7 +180,12 @@ type genericFuchsiaTarget struct {
 	// This will be set by CaptureSyslog().
 	stopSyslog func()
 
-	nodename                string
+	// nodename and serialNum can be recorded at runtime via SetNodename and
+	// SetSerialNumber. They are unsynchronized: botanist sets them only while
+	// starting and connecting to targets, before it runs tests.
+	nodename  string
+	serialNum string
+
 	serial                  io.ReadWriteCloser
 	serialSocket            string
 	sshKeys                 []string
@@ -215,12 +230,33 @@ func (t *genericFuchsiaTarget) GetFFX() *FFXInstance {
 
 // GetSharedData returns the path of shared_data directory used by ffx.
 func (t *genericFuchsiaTarget) GetSharedData() string {
+	if t == nil || t.ffx == nil || t.ffx.FFXInstance == nil {
+		return ""
+	}
 	return t.ffx.SharedData()
+}
+
+// SerialNumber returns the serial number recorded on the target, if known.
+func (t *genericFuchsiaTarget) SerialNumber() string {
+	return t.serialNum
+}
+
+// SetSerialNumber records a runtime-discovered serial number on the target.
+func (t *genericFuchsiaTarget) SetSerialNumber(serial string) {
+	t.serialNum = serial
+}
+
+// SetNodename records a runtime-discovered nodename on the target.
+func (t *genericFuchsiaTarget) SetNodename(nodename string) {
+	t.nodename = nodename
 }
 
 // UseFFXExperiment returns whether the provided experiment is enabled.
 // Use to enable experimental ffx features.
 func (t *genericFuchsiaTarget) UseFFXExperiment(experiment botanist.Experiment) bool {
+	if t == nil || t.ffx == nil {
+		return false
+	}
 	return t.ffx.Experiments.Contains(experiment)
 }
 
@@ -959,8 +995,10 @@ type FuchsiaTestbedConfig struct {
 	// Nodename is the Fuchsia nodename of the target.
 	Nodename string `json:"nodename"`
 
-	// FastbootSernum is the fastboot serial number of the target.
-	FastbootSernum string `json:"fastboot_sernum,omitempty"`
+	// DeviceSerial is the serial number of the target: the hardware serial
+	// number for physical devices (e.g. "3676a5a3") or the virtual serial
+	// number assigned by `ffx emu` for emulators (e.g. "EM-0A1B2C3D4").
+	DeviceSerial string `json:"device_serial,omitempty"`
 
 	// IPv4 is the IPv4 address of the target.
 	IPv4 string `json:"ipv4"`
@@ -984,6 +1022,14 @@ type FuchsiaTestbedConfig struct {
 
 	// SharedData is path to shared_data directory
 	SharedData string `json:"shared_data,omitempty"`
+
+	// DeviceUSB is the USB target address (e.g. "usb:cid:<cid>") when
+	// connecting over USB.
+	DeviceUSB string `json:"device_usb,omitempty"`
+
+	// USBSocketPath is the path to the ffx usb-driver socket when
+	// connecting over USB.
+	USBSocketPath string `json:"usb_socket_path,omitempty"`
 }
 
 type targetPDU struct {
@@ -1019,8 +1065,8 @@ func TestbedConfig(t FuchsiaTarget, expectsSSH bool, opts *testbedConfigOptions)
 		Nodename:     t.Nodename(),
 		SerialSocket: t.SerialSocketPath(),
 	}
-	if dev, ok := t.(*Device); ok {
-		cfg.FastbootSernum = dev.config.FastbootSernum
+	if t.UseFFXExperiment(botanist.UseSerialTargetID) {
+		cfg.DeviceSerial = t.SerialNumber()
 	}
 	if opts != nil {
 		cfg.PDU = opts.PDU
@@ -1031,19 +1077,42 @@ func TestbedConfig(t FuchsiaTarget, expectsSSH bool, opts *testbedConfigOptions)
 	}
 
 	cfg.SSHKey = t.SSHKey()
-	if ipv4, err := t.IPv4(); err != nil {
-		return cfg, err
-	} else if ipv4 != nil {
-		cfg.IPv4 = ipv4.String()
-	}
+	if dev, ok := t.(*Device); ok && dev.UseFFXExperiment(botanist.ForceFFXUSB) {
+		if dev.USBAddress() == "" || dev.USBSocketPath() == "" {
+			return cfg, errors.New("missing USB address or socket path for force_ffx_usb target")
+		}
+		cfg.DeviceUSB = dev.USBAddress()
+		cfg.USBSocketPath = dev.USBSocketPath()
+	} else {
+		if ipv4, err := t.IPv4(); err != nil {
+			return cfg, err
+		} else if ipv4 != nil {
+			cfg.IPv4 = ipv4.String()
+		}
 
-	if ipv6, err := t.IPv6(); err != nil {
-		return cfg, err
-	} else if ipv6 != nil {
-		cfg.IPv6 = ipv6.String()
+		if ipv6, err := t.IPv6(); err != nil {
+			return cfg, err
+		} else if ipv6 != nil {
+			cfg.IPv6 = ipv6.String()
+		}
 	}
 
 	cfg.SharedData = t.GetSharedData()
 
 	return cfg, nil
+}
+
+// RegisterTargetAddress upserts t's nodename, serial number, and addr into
+// $SHARED_DATA/targets.json. Targets with no shared_data, no address, or no
+// identifier are skipped: such entries can't be resolved, and an empty
+// address breaks loading the whole registry.
+func RegisterTargetAddress(t FuchsiaTarget, addr string) error {
+	if t.GetSharedData() == "" || addr == "" || (t.Nodename() == "" && t.SerialNumber() == "") {
+		return nil
+	}
+	return t.GetFFX().UpsertRegisteredTarget(ffxutil.RegisteredTarget{
+		Nodename: t.Nodename(),
+		ID:       t.SerialNumber(),
+		Address:  addr,
+	})
 }

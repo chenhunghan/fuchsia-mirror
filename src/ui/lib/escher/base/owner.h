@@ -20,7 +20,14 @@ namespace escher {
 template <typename OwnableT, typename TypeInfoT>
 class Owner {
  public:
-  virtual ~Owner() { FX_DCHECK(ownable_count_.load(std::memory_order_acquire) == 0); }
+  // `Ownable`s hold a raw pointer to their `Owner`, so destroying an `Owner` that still owns
+  // `Ownable`s would leave them to call into freed memory when their ref-count reaches zero or
+  // when they are destroyed. Abort in all build modes rather than allow that use-after-free.
+  virtual ~Owner() {
+    const uint32_t live_ownables = ownable_count_.load(std::memory_order_acquire);
+    FX_CHECK(live_ownables == 0) << "Owner destroyed while " << live_ownables
+                                 << " Ownables still hold a raw pointer to it";
+  }
 
   // Return the number of `Ownable`s currently owned by this owner. Must be
   // zero when the `Owner` is destroyed.

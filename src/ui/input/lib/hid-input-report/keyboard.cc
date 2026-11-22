@@ -38,7 +38,7 @@ void InsertFuchsiaKey3(uint32_t hid_usage, uint32_t hid_key,
   std::optional<fuchsia_input::Key> fuchsia_key3 =
       hid_key_to_fuchsia_key3(hid::USAGE(hid_usage, hid_key));
   if (fuchsia_key3) {
-    // Cast the key enum from HLCPP to LLCPP. We are guaranteed that this will be
+    // Cast the key enum from HLCPP to wire. We are guaranteed that this will be
     // equivalent.
     key_values->insert(static_cast<fuchsia_input::wire::Key>(*fuchsia_key3));
   }
@@ -151,7 +151,7 @@ ParseResult Keyboard::CreateDescriptor(fidl::AnyArena& allocator,
     size_t leds_index = 0;
     fidl::VectorView<fuchsia_input_report::wire::LedType> leds(allocator, num_leds_);
     for (hid::ReportField& field : cpp20::span(led_fields_.data(), num_leds_)) {
-      zx_status_t status = HidLedUsageToLlcppLedType(
+      zx_status_t status = HidLedUsageToWireLedType(
           static_cast<hid::usage::LEDs>(field.attr.usage.usage), &leds[leds_index++]);
       if (status != ZX_OK) {
         return ParseResult::kBadReport;
@@ -204,7 +204,7 @@ ParseResult Keyboard::ParseInputReportInternal(
     auto fuchsia_key_3 =
         hid_key_to_fuchsia_key3(hid::USAGE(hid::usage::Page::kKeyboardKeypad, hid_key));
     if (fuchsia_key_3) {
-      // Cast the key enum from HLCPP to LLCPP. We are guaranteed that this will be equivalent.
+      // Cast the key enum from HLCPP to wire. We are guaranteed that this will be equivalent.
       pressed_keys_3[num_pressed_keys_3++] = static_cast<fuchsia_input::wire::Key>(*fuchsia_key_3);
     }
   }
@@ -242,7 +242,7 @@ ParseResult Keyboard::SetOutputReportInternal(
       hid::ReportField& hid_led = led_fields_[i];
       // Convert the usage to LedType.
       fuchsia_input_report::wire::LedType hid_led_type;
-      zx_status_t status = HidLedUsageToLlcppLedType(
+      zx_status_t status = HidLedUsageToWireLedType(
           static_cast<hid::usage::LEDs>(hid_led.attr.usage.usage), &hid_led_type);
       if (status != ZX_OK) {
         return ParseResult::kBadReport;

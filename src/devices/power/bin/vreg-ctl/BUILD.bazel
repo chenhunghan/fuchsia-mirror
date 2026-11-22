@@ -3,12 +3,24 @@
 # found in the LICENSE file.
 
 load("@rules_fuchsia//fuchsia:assembly.bzl", "fuchsia_prebuilt_package")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "vreg-ctl",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.vreg:fuchsia.hardware.vreg_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:argh",
+    ],
 )
 
+# Kept as a prebuilt package for assembly until the package is migrated to Bazel.
+# @bazel2gn:skip
 fuchsia_prebuilt_package(
     name = "vreg_ctl_pkg",
     archive = "@gn_targets//src/devices/power/bin/vreg-ctl:vreg_ctl_pkg",

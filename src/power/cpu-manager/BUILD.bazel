@@ -1,0 +1,125 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component", "fx_component_manifest")
+load("//build/bazel/rules/components:structured_config.bzl", "fuchsia_structured_config_rust_lib")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "node_config",
+    srcs = ["src/node_config.rs"],
+    build_flags = ["//build/config/rust:bootfs"],
+    crate_name = "cpu_manager_node_config",
+    crate_root = "src/node_config.rs",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:serde_derive"],
+    visibility = ["//vendor/google:__subpackages__"],
+    deps = [
+        "//third_party/rust_crates/vendor:serde",
+    ],
+)
+
+cml_shard(
+    name = "meta/base.shard",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    shard = "meta/base.shard.cml",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "cpu-manager",
+    includes = [":meta/base.shard"],
+    manifest = "meta/cpu-manager.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "cpu-manager-config-lib",
+    cm_label = ":manifest",
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/cpu_control_handler.rs",
+        "src/cpu_device_handler.rs",
+        "src/cpu_manager.rs",
+        "src/cpu_manager_main.rs",
+        "src/cpu_stats_handler.rs",
+        "src/cpu_stats_recorder.rs",
+        "src/domain_controller.rs",
+        "src/error.rs",
+        "src/main.rs",
+        "src/message.rs",
+        "src/node.rs",
+        "src/powercap_watcher.rs",
+        "src/syscall_handler.rs",
+        "src/thermal_watcher.rs",
+        "src/trippoint_watcher.rs",
+        "src/utils.rs",
+        "//src/power/common/lib:common_utils.rs",
+        "//src/power/common/lib:types.rs",
+    ],
+    crate_name = "cpu_manager",
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+        "//third_party/rust_crates/vendor:serde_derive",
+        "//third_party/rust_crates/vendor:strum_macros",
+    ],
+    deps = [
+        ":cpu-manager-config-lib",
+        ":node_config",
+        "//sdk/fidl/fuchsia.hardware.cpu.ctrl:fuchsia.hardware.cpu.ctrl_rust",
+        "//sdk/fidl/fuchsia.hardware.trippoint:fuchsia.hardware.trippoint_rust",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+        "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker_rust",
+        "//sdk/fidl/fuchsia.power.cpu:fuchsia.power.cpu_rust",
+        "//sdk/fidl/fuchsia.power.cpu.manager:fuchsia.power.cpu.manager_rust",
+        "//sdk/fidl/fuchsia.power.powercap:fuchsia.power.powercap_rust",
+        "//sdk/fidl/fuchsia.thermal:fuchsia.thermal_rust",
+        "//sdk/lib/power/state_recorder/rust",
+        "//sdk/rust/zx",
+        "//src/lib/async-utils",
+        "//src/lib/diagnostics/inspect/contrib/rust",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/trace/rust:trace-provider",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:async-lock",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:libm",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:serde_json5",
+        "//third_party/rust_crates/vendor:strum",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fx_packaged_binary(
+    name = "cpu_manager_packaged_bin",
+    binary = ":bin",
+    binary_name = "cpu_manager",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":cpu_manager_packaged_bin"],
+)

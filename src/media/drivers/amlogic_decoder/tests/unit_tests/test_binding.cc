@@ -4,6 +4,8 @@
 
 #include <fidl/fuchsia.hardware.amlogiccanvas/cpp/wire_test_base.h>
 #include <fidl/fuchsia.hardware.clock/cpp/wire_test_base.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
 #include <fidl/fuchsia.sysmem2/cpp/wire_test_base.h>
 #include <lib/async-loop/default.h>
 #include <lib/async_patterns/testing/cpp/dispatcher_bound.h>
@@ -93,7 +95,7 @@ class CodecPacketForTest : public CodecPacket {
 class DummyEvents : public CodecAdapterEvents {
  public:
   void onCoreCodecFailCodec(const char* format, ...) override {}
-  void onCoreCodecFailStream(fuchsia::media::StreamError error) override {}
+  void onCoreCodecFailStream(fuchsia_media::StreamError error) override {}
   void onCoreCodecResetStreamAfterCurrentFrame() override {}
   void onCoreCodecMidStreamOutputConstraintsChange(
       bool buffer_constraints_action_required) override {}
@@ -278,42 +280,52 @@ TEST_F(BindingTest, CodecFactoryAndDecoderLifecycle) {
     }
   };
 
-  fuchsia::mediacodec::CodecFactorySyncPtr factory1;
-  device->device_fidl()->ConnectChannelBoundCodecFactory(factory1.NewRequest().TakeChannel());
+  auto [factory1_client, factory1_server] =
+      fidl::Endpoints<fuchsia_mediacodec::CodecFactory>::Create();
+  device->device_fidl()->ConnectChannelBoundCodecFactory(factory1_server.TakeChannel());
+  fidl::SyncClient<fuchsia_mediacodec::CodecFactory> factory1(std::move(factory1_client));
 
-  fuchsia::mediacodec::CodecFactorySyncPtr factory2;
-  device->device_fidl()->ConnectChannelBoundCodecFactory(factory2.NewRequest().TakeChannel());
+  auto [factory2_client, factory2_server] =
+      fidl::Endpoints<fuchsia_mediacodec::CodecFactory>::Create();
+  device->device_fidl()->ConnectChannelBoundCodecFactory(factory2_server.TakeChannel());
+  fidl::SyncClient<fuchsia_mediacodec::CodecFactory> factory2(std::move(factory2_client));
 
   // Confirm factory2 is bound on the shared FIDL sequence while keeping it open across teardown.
-  fuchsia::mediacodec::CodecFactoryGetDetailedCodecDescriptionsResponse descriptions;
-  ASSERT_EQ(ZX_OK, factory2->GetDetailedCodecDescriptions(&descriptions));
-  EXPECT_FALSE(descriptions.codecs().empty());
+  auto descriptions = factory2->GetDetailedCodecDescriptions();
+  ASSERT_TRUE(descriptions.is_ok()) << descriptions.error_value();
+  ASSERT_TRUE(descriptions->codecs().has_value());
+  EXPECT_FALSE(descriptions->codecs()->empty());
 
   zx::eventpair lifetime_client;
   zx::eventpair lifetime_codec;
   ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &lifetime_client, &lifetime_codec));
-  ASSERT_EQ(ZX_OK, factory1->AttachLifetimeTracking(std::move(lifetime_codec)));
+  ASSERT_TRUE(factory1->AttachLifetimeTracking(std::move(lifetime_codec)).is_ok());
 
-  fuchsia::mediacodec::CreateDecoder_Params params;
-  params.mutable_input_details()->set_mime_type("video/h264");
-  fuchsia::media::StreamProcessorSyncPtr stream_processor;
-  ASSERT_EQ(ZX_OK, factory1->CreateDecoder(std::move(params), stream_processor.NewRequest()));
+  fuchsia_mediacodec::CreateDecoderParams params;
+  params.input_details().emplace().mime_type("video/h264");
+  auto [stream_processor_client, stream_processor_server] =
+      fidl::Endpoints<fuchsia_media::StreamProcessor>::Create();
+  ASSERT_TRUE(
+      factory1->CreateDecoder({std::move(params), std::move(stream_processor_server)}).is_ok());
+  fidl::SyncClient<fuchsia_media::StreamProcessor> stream_processor(
+      std::move(stream_processor_client));
 
   // Wait until CodecImpl is constructed, bound via BindCodecImpl(), and serving StreamProcessor.
-  ASSERT_EQ(ZX_OK, stream_processor->Sync());
+  ASSERT_TRUE(stream_processor->Sync().is_ok());
 
   // Close StreamProcessor and wait for ~CodecImpl (via BindCodecImpl()'s error handler) to drop
   // lifetime_codec.
-  stream_processor.Unbind();
+  stream_processor = {};
   zx_signals_t observed = 0;
   ASSERT_EQ(ZX_OK,
             lifetime_client.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite(), &observed));
 
   // Drain ~CodecImpl's posted ~CodecAdmission task, then close factory1 and drain the
-  // SetErrorHandler() -> PostAfterPreviouslyStartedClosesDone() -> ClosureQueue -> DeleteFactory()
-  // chain before tearing down the device with factory2 still bound.
+  // ServerBinding close handler (installed in Bind()) -> PostAfterPreviouslyStartedClosesDone() ->
+  // ClosureQueue -> SetErrorHandler()'s handler -> DeleteFactory() chain before tearing down the
+  // device with factory2 still bound.
   drain_shared_fidl(1);
-  factory1.Unbind();
+  factory1 = {};
   drain_shared_fidl(3);
 
   device->DdkAsyncRemove();
@@ -350,9 +362,9 @@ TEST_F(BindingTest, H264AdapterAvccParsing) {
       20,   21, 22, 23       // PPS
   };
 
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_mime_type("video/h264");
-  format_details.set_oob_bytes(oob_bytes);
+  auto format_details = std::make_shared<fuchsia_media::FormatDetails>();
+  format_details->mime_type("video/h264");
+  format_details->oob_bytes(oob_bytes);
 
   adapter->CoreCodecInit(format_details);
   adapter->CoreCodecQueueInputFormatDetails(format_details);
@@ -428,9 +440,9 @@ TEST_F(BindingTest, H264AdapterAvccToctouRace) {
       20,   21, 22, 23       // PPS
   };
 
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_mime_type("video/h264");
-  format_details.set_oob_bytes(oob_bytes);
+  auto format_details = std::make_shared<fuchsia_media::FormatDetails>();
+  format_details->mime_type("video/h264");
+  format_details->oob_bytes(oob_bytes);
 
   adapter->CoreCodecInit(format_details);
   adapter->CoreCodecQueueInputFormatDetails(format_details);

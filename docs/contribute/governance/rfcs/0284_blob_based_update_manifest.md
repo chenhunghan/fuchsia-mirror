@@ -106,7 +106,7 @@ manifest directly lists the images and their corresponding blob parameters. The
 then write them to the partition, and discard them, without dealing with
 intermediate packages.
 
-### Manifest Format
+### Manifest format {:#manifest-format}
 
 The `OtaManifest` is a **Protobuf** format. Protobuf offers a compact binary
 format, strict schema enforcement, and forward/backward compatibility.
@@ -388,7 +388,7 @@ blob in the future.
 [RFC-0170]: /docs/contribute/governance/rfcs/0170_remove_binary_images_from_the_update_package.md
 [RFC-0207]: /docs/contribute/governance/rfcs/0207_offline_blob_compression.md
 [update_engine_proto]: https://android.googlesource.com/platform/system/update_engine/+/main/update_metadata.proto
-[`OtaManifest`]: #manifest_format
+[`OtaManifest`]: #manifest-format
 [Fuchsia OTA process]: /docs/concepts/packages/ota.md
 [package]: /docs/concepts/packages/package.md
 [update package]: /docs/concepts/packages/update_pkg.md

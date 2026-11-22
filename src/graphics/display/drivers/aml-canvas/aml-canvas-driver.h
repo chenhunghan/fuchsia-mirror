@@ -14,8 +14,11 @@
 #include <lib/zx/result.h>
 
 #include <memory>
+#include <optional>
+#include <vector>
 
 #include "src/graphics/display/drivers/aml-canvas/aml-canvas.h"
+#include "src/graphics/display/drivers/aml-canvas/aml-canvas_parser.h"
 
 namespace aml_canvas {
 
@@ -56,8 +59,26 @@ class AmlCanvasDriver : public fdf::DriverBase2 {
   zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddChildNode(
       compat::SyncInitializedDeviceServer* compat_server);
 
+  // Returns the canvas consumers from the metadata that DML boards generate, or std::nullopt if
+  // the board doesn't provide it.
+  static zx::result<std::optional<std::vector<aml_canvas_metadata::CanvasConsumer>>>
+  GetDmlConsumers(const fdf::Namespace& incoming);
+
+  // Adds a non-bindable node, named like the child node of `AddChildNode()`, with one child per
+  // consumer. Each child offers the canvas service and carries the consumer's DML global ID as
+  // `fuchsia.ID`, so that each consumer binds to its own child. The non-bindable node keeps the
+  // node's moniker (e.g. `canvas-ff638000.aml-canvas`) the same as with `AddChildNode()`.
+  //
+  // On success, returns a client handle to the NodeController of the non-bindable node.
+  zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AddConsumerNodes(
+      const std::vector<aml_canvas_metadata::CanvasConsumer>& consumers);
+
   compat::SyncInitializedDeviceServer compat_server_;
   fidl::WireSyncClient<fuchsia_driver_framework::NodeController> controller_;
+
+  // Only used with DML board metadata. See `AddConsumerNodes()`.
+  fidl::ClientEnd<fuchsia_driver_framework::Node> consumers_node_;
+  std::vector<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> consumer_controllers_;
 
   std::unique_ptr<AmlCanvas> canvas_;
   inspect::Inspector inspector_;

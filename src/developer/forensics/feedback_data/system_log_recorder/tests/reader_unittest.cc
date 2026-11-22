@@ -30,11 +30,11 @@ namespace feedback_data {
 namespace system_log_recorder {
 namespace {
 
-::fpromise::result<fuchsia::logger::LogMessage, std::string> BuildLogMessage(
+::fpromise::result<fuchsia_logger::LogMessage, std::string> BuildLogMessage(
     const int32_t severity, const std::string& text,
     const zx::duration timestamp_offset = zx::duration(0),
     const std::vector<std::string>& tags = {}) {
-  return ::fpromise::ok(testing::BuildLogMessage(severity, text, timestamp_offset, tags));
+  return ::fpromise::ok(forensics::BuildLogMessage(severity, text, timestamp_offset, tags));
 }
 
 // Only change "X" for one character. i.e. X -> 12 is not allowed.
@@ -153,7 +153,7 @@ TEST(ReaderTest, SortsMessages) {
   LogMessageStore store(StorageSize::Kilobytes(8), StorageSize::Kilobytes(8), &redactor,
                         MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   SystemLogWriter writer(temp_dir.path(), /*max_num_files=*/1u, kTotalLogSize,
-                         std::make_unique<IdentityDecoder>());
+                         std::make_unique<IdentityDecoder>(), /*previous_logs_dir=*/std::nullopt);
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::msec(0))));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 3", zx::msec(3))));
@@ -186,8 +186,8 @@ message
   EXPECT_FALSE(result->is_at_capacity);
   EXPECT_EQ(result->deduplicated_message_count, 7u);
   EXPECT_EQ(result->message_count, 9u);
-  EXPECT_EQ(result->first_timestamp, zx::time_boot(zx::sec(15604).to_nsecs()));
-  EXPECT_EQ(result->last_timestamp, zx::time_boot((zx::sec(15604) + zx::msec(5)).to_nsecs()));
+  EXPECT_EQ(result->first_timestamp, kLogMessageBaseTimestamp);
+  EXPECT_EQ(result->last_timestamp, kLogMessageBaseTimestamp + zx::msec(5));
 }
 
 TEST(ReaderTest, SortsMessagesDifferentTimestampLength) {
@@ -273,7 +273,7 @@ TEST(ReaderTest, SortsMessagesMultipleFiles) {
   LogMessageStore store(kMaxLogLineSize * 4, kMaxLogLineSize * 4, &redactor, MakeIdentityEncoder(),
                         /*ignore_before_timestamp=*/std::nullopt);
   SystemLogWriter writer(temp_dir.path(), /*max_num_files=*/8u, kTotalLogSize,
-                         std::make_unique<IdentityDecoder>());
+                         std::make_unique<IdentityDecoder>(), /*previous_logs_dir=*/std::nullopt);
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::msec(0))));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 3", zx::msec(3))));
@@ -307,8 +307,8 @@ TEST(ReaderTest, SortsMessagesMultipleFiles) {
   EXPECT_FALSE(result->is_at_capacity);
   EXPECT_EQ(result->deduplicated_message_count, 7u);
   EXPECT_EQ(result->message_count, 9u);
-  EXPECT_EQ(result->first_timestamp, zx::time_boot(zx::sec(15604).to_nsecs()));
-  EXPECT_EQ(result->last_timestamp, zx::time_boot((zx::sec(15604) + zx::msec(5)).to_nsecs()));
+  EXPECT_EQ(result->first_timestamp, kLogMessageBaseTimestamp);
+  EXPECT_EQ(result->last_timestamp, kLogMessageBaseTimestamp + zx::msec(5));
 }
 
 TEST(ReaderTest, PreservesSingleLineLog) {
@@ -359,6 +359,44 @@ TEST(ReaderTest, IgnoresNonNumericFiles) {
   EXPECT_TRUE(result->is_at_capacity);
   EXPECT_EQ(result->deduplicated_message_count, 1u);
   EXPECT_EQ(result->message_count, 1u);
+}
+
+TEST(ReaderTest, ApproximateLastTimestampReturnsLatestTimestampInNewestFile) {
+  files::ScopedTempDir temp_dir;
+
+  // The newest file's messages are out of order and an older file has a later timestamp, which
+  // is ignored.
+  EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 0u),
+                               "[00005.000][07559][07687][] INFO: line 0\n"));
+  EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 1u),
+                               "[00003.000][07559][07687][] INFO: line 1\n"
+                               "[00002.000][07559][07687][] INFO: line 2\n"));
+
+  IdentityDecoder decoder;
+  EXPECT_EQ(ApproximateLastTimestamp(temp_dir.path(), &decoder),
+            zx::time_boot(zx::sec(3).to_nsecs()));
+}
+
+TEST(ReaderTest, ApproximateLastTimestampSkipsNewestFileWithoutTimestamp) {
+  files::ScopedTempDir temp_dir;
+
+  EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 0u),
+                               "[00002.000][07559][07687][] INFO: line 0\n"));
+  EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 1u), "!!! NO TIMESTAMP !!!\n"));
+  EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 2u), ""));
+
+  IdentityDecoder decoder;
+  EXPECT_EQ(ApproximateLastTimestamp(temp_dir.path(), &decoder),
+            zx::time_boot(zx::sec(2).to_nsecs()));
+}
+
+TEST(ReaderTest, ApproximateLastTimestampWithoutLogFiles) {
+  files::ScopedTempDir temp_dir;
+
+  IdentityDecoder decoder;
+  EXPECT_EQ(ApproximateLastTimestamp(temp_dir.path(), &decoder), std::nullopt);
+  EXPECT_EQ(ApproximateLastTimestamp(files::JoinPath(temp_dir.path(), "missing"), &decoder),
+            std::nullopt);
 }
 
 }  // namespace

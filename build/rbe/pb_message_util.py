@@ -63,7 +63,7 @@ def _convert_scalar_bq_value(fd: descriptor.FieldDescriptor, value: Any) -> Any:
 
 
 def _convert_bq_value(fd: descriptor.FieldDescriptor, value: Any) -> Any:
-    if fd.label == descriptor.FieldDescriptor.LABEL_REPEATED:
+    if fd.is_repeated:
         return _convert_repeated_bq_value(fd, value)
     else:
         return _convert_scalar_bq_value(fd, value)

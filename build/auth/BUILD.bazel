@@ -9,6 +9,25 @@ load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
 package(default_applicable_licenses = ["//:license"])
 
 py_library(
+    name = "auth_env",
+    srcs = ["auth_env.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//build/bazel/scripts:__pkg__",
+        "//build/rbe:__pkg__",
+        "//build/resultstore:__pkg__",
+        "//build/scripts:__pkg__",
+        "//tools/devshell/fx_cli:__pkg__",
+    ],
+    deps = [
+        ":gcloud",
+        ":gcloud_creds",
+        ":loas",
+        ":select_auth_method",
+    ],
+)
+
+py_library(
     name = "apt",
     srcs = ["apt.py"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
@@ -35,11 +54,29 @@ py_library(
 )
 
 py_library(
+    name = "loas",
+    srcs = ["loas.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//visibility:private"],
+    deps = ["//build/rbe:textpb"],
+)
+
+py_library(
     name = "select_auth_method",
     srcs = ["select_auth_method.py"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//build/scripts:__pkg__"],
-    deps = [":gcloud"],
+    deps = [
+        ":gcloud",
+        ":loas",
+    ],
+)
+
+host_py_test(
+    name = "auth_env_test",
+    srcs = ["auth_env_test.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":auth_env"],
 )
 
 host_py_test(
@@ -68,8 +105,19 @@ host_py_test(
 )
 
 host_py_test(
+    name = "loas_test",
+    srcs = ["loas_test.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":loas"],
+)
+
+host_py_test(
     name = "select_auth_method_test",
     srcs = ["select_auth_method_test.py"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
-    deps = [":select_auth_method"],
+    deps = [
+        ":gcloud",
+        ":loas",
+        ":select_auth_method",
+    ],
 )

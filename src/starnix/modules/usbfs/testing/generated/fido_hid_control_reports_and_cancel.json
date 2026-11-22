@@ -1,0 +1,912 @@
+{
+    "name": "fido_hid_control_reports_and_cancel",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 3,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "interrupt",
+                                "max_packet_size": 64,
+                                "interval": 5
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "interrupt",
+                                "max_packet_size": 64,
+                                "interval": 5
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd1",
+                "mode": "rdwr"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd1"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "claimed": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_script_control",
+                "b_request": 9,
+                "action": {
+                    "reply": []
+                }
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ok": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd1",
+                "bm_request_type": 33,
+                "b_request": 9,
+                "w_value": 512,
+                "w_index": 0,
+                "w_length": 64,
+                "data": [
+                    17,
+                    34,
+                    51,
+                    68,
+                    129,
+                    0,
+                    4,
+                    222,
+                    173,
+                    190,
+                    239,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                ],
+                "timeout_ms": 1000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 64,
+                    "canary_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_script_control",
+                "b_request": 1,
+                "action": {
+                    "reply": [
+                        17,
+                        34,
+                        51,
+                        68,
+                        129,
+                        0,
+                        4,
+                        202,
+                        254,
+                        186,
+                        190,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ok": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd1",
+                "bm_request_type": 161,
+                "b_request": 1,
+                "w_value": 256,
+                "w_index": 0,
+                "w_length": 64,
+                "timeout_ms": 1000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 64,
+                    "data": [
+                        17,
+                        34,
+                        51,
+                        68,
+                        129,
+                        0,
+                        4,
+                        202,
+                        254,
+                        186,
+                        190,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ],
+                    "canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_script_control",
+                "b_request": 3,
+                "action": {
+                    "stall": true
+                }
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ok": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd1",
+                "bm_request_type": 161,
+                "b_request": 3,
+                "w_value": 0,
+                "w_index": 0,
+                "w_length": 1,
+                "timeout_ms": 1000
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EPIPE"
+            }
+        },
+        {
+            "step": {
+                "type": "submit_urb",
+                "fd": "fd1",
+                "urb": "u_wait_touch",
+                "urb_type": "interrupt",
+                "ep": 129,
+                "buffer_len": 64,
+                "usercontext": 12289
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_wait_touch"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb_ndelay",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EAGAIN"
+            }
+        },
+        {
+            "step": {
+                "type": "submit_urb",
+                "fd": "fd1",
+                "urb": "u_cancel_out",
+                "urb_type": "interrupt",
+                "ep": 2,
+                "buffer_len": 64,
+                "data": [
+                    17,
+                    34,
+                    51,
+                    68,
+                    145,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                ],
+                "usercontext": 12290
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_cancel_out"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_pop_out",
+                "ep": 2,
+                "timeout_ms": 1500
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 2,
+                    "bytes_popped": 64,
+                    "data": [
+                        17,
+                        34,
+                        51,
+                        68,
+                        145,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_cancel_out",
+                    "status": "0",
+                    "actual_length": 64,
+                    "usercontext": 12290
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "discard_urb",
+                "fd": "fd1",
+                "urb": "u_wait_touch"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "discarded": "u_wait_touch"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb_ndelay",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_wait_touch",
+                    "status": "-ENOENT",
+                    "actual_length": 0,
+                    "usercontext": 12289
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "inspect_urb",
+                "urb": "u_wait_touch"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_wait_touch",
+                    "status": "-ENOENT",
+                    "actual_length": 0,
+                    "error_count": 0,
+                    "usercontext": 12289,
+                    "data": [],
+                    "canary_intact": true,
+                    "trailing_canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_push_in",
+                "ep": 129,
+                "data": [
+                    17,
+                    34,
+                    51,
+                    68,
+                    144,
+                    0,
+                    4,
+                    0,
+                    170,
+                    187,
+                    204,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                ]
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 129,
+                    "bytes_pushed": 64
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "submit_urb",
+                "fd": "fd1",
+                "urb": "u_retry_in",
+                "urb_type": "interrupt",
+                "ep": 129,
+                "buffer_len": 64,
+                "usercontext": 12291
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_retry_in"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_retry_in",
+                    "status": "0",
+                    "actual_length": 64,
+                    "usercontext": 12291
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "inspect_urb",
+                "urb": "u_retry_in"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_retry_in",
+                    "status": "0",
+                    "actual_length": 64,
+                    "error_count": 0,
+                    "usercontext": 12291,
+                    "data": [
+                        17,
+                        34,
+                        51,
+                        68,
+                        144,
+                        0,
+                        4,
+                        0,
+                        170,
+                        187,
+                        204,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ],
+                    "canary_intact": true,
+                    "trailing_canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "submit_urb",
+                "fd": "fd1",
+                "urb": "u_unplug_in",
+                "urb_type": "interrupt",
+                "ep": 129,
+                "buffer_len": 64,
+                "usercontext": 12292
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_unplug_in"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_disconnect"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "disconnected": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "poll",
+                "fd": "fd1",
+                "timeout_ms": 500
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ready": 1,
+                    "revents": [
+                        "POLLOUT",
+                        "POLLWRNORM",
+                        "POLLERR",
+                        "POLLHUP"
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb_ndelay",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_unplug_in",
+                    "status": "-ESHUTDOWN",
+                    "actual_length": 0,
+                    "usercontext": 12292
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "inspect_urb",
+                "urb": "u_unplug_in"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_unplug_in",
+                    "status": "-ESHUTDOWN",
+                    "actual_length": 0,
+                    "error_count": 0,
+                    "usercontext": 12292,
+                    "data": [],
+                    "canary_intact": true,
+                    "trailing_canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        }
+    ]
+}

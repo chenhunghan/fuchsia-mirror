@@ -10,37 +10,10 @@
 #include <zircon/types.h>
 
 #include <arch/arch_ops.h>
-#include <arch/debugger.h>
-#include <arch/exception.h>
-#include <arch/interrupt.h>
 #include <arch/ops.h>
 #include <kernel/ffi.h>
 #include <kernel/percpu.h>
 #include <kernel/thread.h>
-#if defined(__x86_64__)
-#include <arch/user_copy.h>
-
-static_assert(static_cast<uint8_t>(CopyContext::kBlockingAllowed) == 0);
-static_assert(static_cast<uint8_t>(CopyContext::kBlockingNotAllowed) == 1);
-
-namespace {
-
-FFI_ALWAYS_INLINE zx_status_t capture_faults_result(UserCopyCaptureFaultsResult res,
-                                                    vaddr_t* fault_va, uint* fault_flags) {
-  if (res.status != ZX_OK) {
-    if (res.fault_info.has_value()) {
-      *fault_va = res.fault_info->pf_va;
-      *fault_flags = res.fault_info->pf_flags;
-    } else {
-      *fault_va = 0;
-      *fault_flags = 0;
-    }
-  }
-  return res.status;
-}
-
-}  // namespace
-#endif
 
 // The Rust `arch_rs::InterruptSavedState`, passed across FFI by `cpp_arch_interrupt_save` and
 // `cpp_arch_interrupt_restore`, must match `interrupt_saved_state_t`.
@@ -66,34 +39,13 @@ void cpp_arch_disable_ints();
 void cpp_arch_enable_ints();
 interrupt_saved_state_t cpp_arch_interrupt_save();
 void cpp_arch_interrupt_restore(interrupt_saved_state_t state);
-cpu_num_t cpp_arch_curr_cpu_num();
 uint32_t cpp_arch_max_num_cpus();
-#if defined(__x86_64__)
-zx_status_t cpp_arch_copy_from_user(void* dst, const void* src, size_t len);
-zx_status_t cpp_arch_copy_to_user(void* dst, const void* src, size_t len);
-zx_status_t cpp_arch_copy_from_user_capture_faults(void* dst, const void* src, size_t len,
-                                                   CopyContext context, vaddr_t* fault_va,
-                                                   uint* fault_flags);
-zx_status_t cpp_arch_copy_to_user_capture_faults(void* dst, const void* src, size_t len,
-                                                 CopyContext context, vaddr_t* fault_va,
-                                                 uint* fault_flags);
-#endif
 void* cpp_arch_get_current_thread();
 void cpp_arch_set_current_thread(void* thread);
 void cpp_arch_set_restricted_flag(bool in_restricted);
 bool cpp_with_frame_pointers();
 void cpp_arch_set_blocking_disallowed(bool value);
 __attribute__((returns_nonnull, assume_aligned(alignof(percpu)))) void* cpp_arch_get_curr_percpu();
-uint32_t cpp_arch_vm_features();
-uint32_t cpp_arch_num_spinlocks_held();
-uint32_t cpp_arch_cpu_features();
-uint32_t cpp_arch_cpu_sve_features();
-uint32_t cpp_arch_dcache_line_size();
-uint32_t cpp_arch_icache_line_size();
-#ifndef __riscv
-uint32_t cpp_arch_exception_context_user_synth_code(const arch_exception_context_t* context);
-uint32_t cpp_arch_exception_context_user_synth_data(const arch_exception_context_t* context);
-#endif
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_arch_yield() { arch::Yield(); }
@@ -107,31 +59,7 @@ FFI_ALWAYS_INLINE interrupt_saved_state_t cpp_arch_interrupt_save() {
 FFI_ALWAYS_INLINE void cpp_arch_interrupt_restore(interrupt_saved_state_t state) {
   arch_interrupt_restore(state);
 }
-FFI_ALWAYS_INLINE cpu_num_t cpp_arch_curr_cpu_num() { return arch_curr_cpu_num(); }
 FFI_ALWAYS_INLINE uint32_t cpp_arch_max_num_cpus() { return arch_max_num_cpus(); }
-#if defined(__x86_64__)
-FFI_ALWAYS_INLINE zx_status_t cpp_arch_copy_from_user(void* dst, const void* src, size_t len) {
-  return arch_copy_from_user(dst, src, len);
-}
-FFI_ALWAYS_INLINE zx_status_t cpp_arch_copy_to_user(void* dst, const void* src, size_t len) {
-  return arch_copy_to_user(dst, src, len);
-}
-FFI_ALWAYS_INLINE zx_status_t cpp_arch_copy_from_user_capture_faults(void* dst, const void* src,
-                                                                     size_t len,
-                                                                     CopyContext context,
-                                                                     vaddr_t* fault_va,
-                                                                     uint* fault_flags) {
-  return capture_faults_result(arch_copy_from_user_capture_faults(dst, src, len, context), fault_va,
-                               fault_flags);
-}
-FFI_ALWAYS_INLINE zx_status_t cpp_arch_copy_to_user_capture_faults(void* dst, const void* src,
-                                                                   size_t len, CopyContext context,
-                                                                   vaddr_t* fault_va,
-                                                                   uint* fault_flags) {
-  return capture_faults_result(arch_copy_to_user_capture_faults(dst, src, len, context), fault_va,
-                               fault_flags);
-}
-#endif
 FFI_ALWAYS_INLINE void* cpp_arch_get_current_thread() { return arch_get_current_thread(); }
 FFI_ALWAYS_INLINE void cpp_arch_set_current_thread(void* thread) {
   arch_set_current_thread(static_cast<Thread*>(thread));
@@ -148,21 +76,9 @@ cpp_arch_get_curr_percpu() {
   return arch_get_curr_percpu();
 }
 FFI_ALWAYS_INLINE uint32_t cpp_arch_vm_features() { return arch_vm_features(); }
-FFI_ALWAYS_INLINE uint32_t cpp_arch_num_spinlocks_held() { return arch_num_spinlocks_held(); }
 FFI_ALWAYS_INLINE uint32_t cpp_arch_cpu_features() { return arch_cpu_features(); }
 FFI_ALWAYS_INLINE uint32_t cpp_arch_cpu_sve_features() { return arch_cpu_sve_features(); }
 FFI_ALWAYS_INLINE uint32_t cpp_arch_dcache_line_size() { return arch_dcache_line_size(); }
 FFI_ALWAYS_INLINE uint32_t cpp_arch_icache_line_size() { return arch_icache_line_size(); }
-#ifndef __riscv
-FFI_ALWAYS_INLINE uint32_t
-cpp_arch_exception_context_user_synth_code(const arch_exception_context_t* context) {
-  return context->user_synth_code;
-}
-FFI_ALWAYS_INLINE uint32_t
-cpp_arch_exception_context_user_synth_data(const arch_exception_context_t* context) {
-  return context->user_synth_data;
-}
-#endif
-FFI_ALWAYS_INLINE void cpp_arch_enter_idle_state() { ArchIdlePowerThread::EnterIdleState(); }
 
 }  // extern "C"

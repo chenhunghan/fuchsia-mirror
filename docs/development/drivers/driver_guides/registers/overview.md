@@ -20,7 +20,7 @@ say `0xFFFFFFFF`, then write back to that register `0xFFFFFFFC`.
 
 Read/modify/write operations introduce the potential for data races. The
 classic transaction example "withdraw $10 from a bank account" is
-effectively a read/modify/write operation. See [Data Race](#data-race) in
+effectively a read/modify/write operation. See [Data race](#data-race) in
 the [Examples](#examples) section for a concrete illustration.
 
 When a register is "exclusively owned" by a driver, the driver is expected
@@ -56,7 +56,7 @@ the registers driver is defined by [registers-util.fidl][registers-util.fidl].
 
 ## How to use
 
-Currently the [Reset Registers](#reset-registers) are the only registers
+Currently the [Reset registers](#reset-registers) are the only registers
 that are migrated to use the registers driver. This section will use them
 as an example on how to use the registers driver.
 
@@ -196,9 +196,9 @@ as an example on how to use the registers driver.
 
 1. Enjoy isolated synchronized registers!
 
-## Examples
+## Examples {:#examples}
 
-### Data Race
+### Data race {:#data-race}
 
 Say we have a register that is accessed by both driver A and driver B.
 Now driver A wants to write `b01` to bits 0-1 of the register and driver
@@ -219,7 +219,7 @@ is needed for synchronization between multiple drivers, and may or may not be
 used only for isolation of resources. Note that the following is not a complete
 list of shared registers in the AMLogic SoCs.
 
-#### Reset Registers
+#### Reset registers {:#reset-registers}
 
 AMLogic SoCs have the reset functionality for various hardware units
 concentrated in a few 32-bit registers. This is exemplified by

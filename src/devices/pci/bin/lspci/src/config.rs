@@ -37,9 +37,9 @@ pub struct Type00Config {
 }
 
 impl Type00Config {
-    pub fn new(config: &[u8]) -> Ref<&[u8], Type00Config> {
-        let (config, _) = Ref::from_prefix(config).unwrap();
-        config
+    /// Returns None if |config| is too short to hold a Type 00 header.
+    pub fn new(config: &[u8]) -> Option<Ref<&[u8], Type00Config>> {
+        Ref::from_prefix(config).ok().map(|(config, _)| config)
     }
 }
 
@@ -83,11 +83,13 @@ pub struct Type01Config {
 }
 
 impl Type01Config {
-    pub fn new(config: &[u8]) -> Ref<&[u8], Type01Config> {
-        let (config, _) = Ref::from_prefix(config).unwrap();
-        config
+    /// Returns None if |config| is too short to hold a Type 01 header.
+    pub fn new(config: &[u8]) -> Option<Ref<&[u8], Type01Config>> {
+        Ref::from_prefix(config).ok().map(|(config, _)| config)
     }
 }
+
+const _: () = assert!(std::mem::size_of::<Type00Config>() == std::mem::size_of::<Type01Config>());
 
 // PCI Local Bus Specification v3.0 6.2.2.
 // Bit 7 was valid in v2.1 but in v3.0 is hardwired to 0.

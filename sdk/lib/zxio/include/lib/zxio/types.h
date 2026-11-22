@@ -117,13 +117,13 @@ typedef struct zxio_fsverity_descriptor {
 // Storage for the |zxio_ops_t| implementation.
 // All |zxio_t| implementations must fit within this space.
 typedef struct zxio_private {
-  uint64_t reserved[30];
+  uint64_t reserved[8];
 } zxio_private_t;
 
 // The storage backing a |zxio_t|.
 //
-// NOTE: users of this type should take care that it is possible for some types
-// of ZXIO objects to be self referential and therefore not trivially movable.
+// All implementations of |zxio_t| (and |zxio_storage_t|) must be trivially
+// movable (e.g., safe to move via memcpy and not self-referential).
 typedef struct zxio_storage {
   zxio_t io;
   zxio_private_t reserved;
@@ -147,12 +147,6 @@ typedef uint32_t zxio_object_type_t;
 typedef zx_status_t (*zxio_storage_alloc)(zxio_object_type_t type, zxio_storage_t** out_storage,
                                           void** out_context);
 
-// Prelude sizes for datagram sockets.
-typedef struct zxio_datagram_prelude_size {
-  const size_t tx;
-  const size_t rx;
-} zxio_datagram_prelude_size_t;
-
 // clang-format off
 #define ZXIO_OBJECT_TYPE_NONE                         ((zxio_object_type_t) 0)
 #define ZXIO_OBJECT_TYPE_NODE                         ((zxio_object_type_t) 1)
@@ -167,7 +161,6 @@ typedef struct zxio_datagram_prelude_size {
 #define ZXIO_OBJECT_TYPE_STREAM_SOCKET                ((zxio_object_type_t)10)
 #define ZXIO_OBJECT_TYPE_RAW_SOCKET                   ((zxio_object_type_t)11)
 #define ZXIO_OBJECT_TYPE_PACKET_SOCKET                ((zxio_object_type_t)12)
-#define ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET              ((zxio_object_type_t)13)
 #define ZXIO_OBJECT_TYPE_SYMLINK                      ((zxio_object_type_t)14)
 #define ZXIO_OBJECT_TYPE_TRANSFERABLE                 ((zxio_object_type_t)15)
 // clang-format on

@@ -13,6 +13,8 @@
 #include <lib/zx/time.h>
 #include <lib/zx/timer.h>
 
+#include <atomic>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -122,7 +124,13 @@ class PairObjectBase : public Object {
 
 // Define objects.
 struct EventObject : ObjectBase<EventObject, zx::event> {
-  EventObject(uint32_t options = 0) : Base{options} {}
+  explicit EventObject(uint32_t options = 0)
+      : Base{options}, pending_since_ns{std::make_shared<std::atomic<zx_time_t>>(0)} {}
+
+  // Monotonic timestamp of the earliest unconsumed signal assertion, shared
+  // lock-free between signalers and port waiters so multi-period starvation is
+  // not masked by later periodic signals before the waiter runs.
+  std::shared_ptr<std::atomic<zx_time_t>> pending_since_ns;
 };
 
 struct TimerObject : ObjectBase<TimerObject, zx::timer> {

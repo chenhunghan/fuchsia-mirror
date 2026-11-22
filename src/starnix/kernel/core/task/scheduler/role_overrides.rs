@@ -10,18 +10,117 @@ use bstr::ByteSlice;
 use regex_lite::Regex;
 use starnix_task_command::TaskCommand;
 
-/// Per-container overrides for thread roles.
+/// Task identity specificity layer in the role-override waterfall.
+///
+/// Rules are evaluated from the most specific `(process, thread)` identity to the most general:
+/// 1. `ProcessAndThread`: explicit process and thread command filters.
+/// 2. `Thread`: explicit thread command filter across any process.
+/// 3. `Process`: explicit process command filter across any thread.
+/// 4. `Unidentified`: no process or thread command filter (matched purely by state modifiers).
+#[derive(Debug)]
+enum IdentityLayer {
+    ProcessAndThread { process: Regex, thread: Regex },
+    Thread { thread: Regex },
+    Process { process: Regex },
+    Unidentified,
+}
+
+impl IdentityLayer {
+    fn new(process: Option<Regex>, thread: Option<Regex>) -> Self {
+        match (process, thread) {
+            (Some(process), Some(thread)) => Self::ProcessAndThread { process, thread },
+            (None, Some(thread)) => Self::Thread { thread },
+            (Some(process), None) => Self::Process { process },
+            (None, None) => Self::Unidentified,
+        }
+    }
+
+    /// Returns the waterfall evaluation rank (`1..=4`), where lower ranks have higher precedence.
+    #[inline]
+    fn rank(&self) -> u8 {
+        match self {
+            Self::ProcessAndThread { .. } => 1,
+            Self::Thread { .. } => 2,
+            Self::Process { .. } => 3,
+            Self::Unidentified => 4,
+        }
+    }
+
+    #[inline]
+    fn matches(&self, process_name: &str, thread_name: &str) -> bool {
+        match self {
+            Self::ProcessAndThread { process, thread } => {
+                process.is_match(process_name) && thread.is_match(thread_name)
+            }
+            Self::Thread { thread } => thread.is_match(thread_name),
+            Self::Process { process } => process.is_match(process_name),
+            Self::Unidentified => true,
+        }
+    }
+}
+
+/// Dynamic state predicates that qualify a rule within an [`IdentityLayer`].
+///
+/// Within the same [`IdentityLayer`], rules that constrain `cgroup` are evaluated before rules
+/// that leave `cgroup` unconstrained, and within each of those buckets, rules with additional
+/// state modifiers (`is_leader`, `min_nice`, `max_nice`, `uclamp_min`, `system_mode`) are
+/// evaluated before unqualified baseline rules. If a rule's state modifiers do not match the
+/// task's current runtime state, evaluation falls through to subsequent rules.
+#[derive(Debug, Default)]
+struct StateModifiers {
+    cgroup: Option<Regex>,
+    is_leader: Option<bool>,
+    min_nice: Option<i8>,
+    max_nice: Option<i8>,
+    uclamp_min: Option<(u32, u32)>,
+    system_mode: Option<Regex>,
+}
+
+impl StateModifiers {
+    #[inline]
+    fn has_non_cgroup_modifiers(&self) -> bool {
+        self.is_leader.is_some()
+            || self.min_nice.is_some()
+            || self.max_nice.is_some()
+            || self.uclamp_min.is_some()
+            || self.system_mode.is_some()
+    }
+
+    /// Returns `(is_cgroup_unconstrained, has_no_other_modifiers)` for waterfall sorting, where
+    /// lower values (`false` before `true`) have higher precedence.
+    #[inline]
+    fn specificity_key(&self) -> (bool, bool) {
+        (self.cgroup.is_none(), !self.has_non_cgroup_modifiers())
+    }
+
+    #[inline]
+    fn matches_without_system_mode(
+        &self,
+        cgroup_path: &str,
+        is_leader: bool,
+        nice: i8,
+        uclamp_min: u32,
+    ) -> bool {
+        self.is_leader.is_none_or(|expected| expected == is_leader)
+            && self.uclamp_min.is_none_or(|(min, max)| uclamp_min >= min && uclamp_min <= max)
+            && self.min_nice.is_none_or(|min| nice >= min)
+            && self.max_nice.is_none_or(|max| nice <= max)
+            && self.cgroup.as_ref().is_none_or(|r| r.is_match(cgroup_path))
+    }
+}
+
+#[derive(Debug)]
+struct RoleOverrideRule {
+    identity: IdentityLayer,
+    state: StateModifiers,
+    role_name: String,
+}
+
+/// Per-container overrides for thread roles, ordered by [`IdentityLayer`] and [`StateModifiers`]
+/// precedence.
 #[derive(Debug, Default)]
 pub struct RoleOverrides {
-    process_filter: Vec<Regex>,
-    thread_filter: Vec<Regex>,
-    cgroup_filter: Vec<Option<Regex>>,
-    is_leader_filter: Vec<Option<bool>>,
-    min_nice_filter: Vec<Option<i8>>,
-    max_nice_filter: Vec<Option<i8>>,
-    uclamp_min_ranges: Vec<Option<(u32, u32)>>,
-    system_mode_filter: Vec<Option<Regex>>,
-    role_names: Vec<String>,
+    rules: Vec<RoleOverrideRule>,
 }
 
 impl RoleOverrides {
@@ -36,9 +135,9 @@ impl RoleOverrides {
         if previous_mode == new_mode {
             return false;
         }
-        self.system_mode_filter
+        self.rules
             .iter()
-            .flatten()
+            .filter_map(|rule| rule.state.system_mode.as_ref())
             .any(|filter| filter.is_match(previous_mode) != filter.is_match(new_mode))
     }
 
@@ -48,14 +147,13 @@ impl RoleOverrides {
         &'a self,
         mode: &'a str,
     ) -> impl Iterator<Item = &'a str> + 'a {
-        self.system_mode_filter.iter().zip(self.role_names.iter()).filter_map(
-            move |(filter, role_name)| {
-                filter
-                    .as_ref()
-                    .is_none_or(|regex| regex.is_match(mode))
-                    .then_some(role_name.as_str())
-            },
-        )
+        self.rules.iter().filter_map(move |rule| {
+            rule.state
+                .system_mode
+                .as_ref()
+                .is_none_or(|regex| regex.is_match(mode))
+                .then_some(rule.role_name.as_str())
+        })
     }
 
     /// Get the overridden role name (if any) for provided process, thread, and cgroup names using
@@ -96,17 +194,9 @@ impl RoleOverrides {
         uclamp_min: u32,
         system_mode: &str,
     ) -> (Option<&str>, bool) {
-        debug_assert_eq!(self.process_filter.len(), self.role_names.len());
-        debug_assert_eq!(self.thread_filter.len(), self.role_names.len());
-        debug_assert_eq!(self.cgroup_filter.len(), self.role_names.len());
-        debug_assert_eq!(self.is_leader_filter.len(), self.role_names.len());
-        debug_assert_eq!(self.min_nice_filter.len(), self.role_names.len());
-        debug_assert_eq!(self.max_nice_filter.len(), self.role_names.len());
-        debug_assert_eq!(self.uclamp_min_ranges.len(), self.role_names.len());
-        debug_assert_eq!(self.system_mode_filter.len(), self.role_names.len());
-
-        // NOTE(https://fxbug.dev/483609435): This used to be more elegantly expressed
-        // via use of regex::bytes::RegexSet, but regex_lite doesn't (yet?) offer RegexSet.
+        if self.rules.is_empty() {
+            return (None, false);
+        }
         let Some(process_name) = process_name.as_bytes().to_str().ok() else {
             return (None, false);
         };
@@ -114,23 +204,17 @@ impl RoleOverrides {
             return (None, false);
         };
         let mut is_system_mode_dependent = false;
-        for index in 0..self.process_filter.len() {
-            if self.is_leader_filter[index].is_none_or(|expected| expected == is_leader)
-                && self.uclamp_min_ranges[index]
-                    .is_none_or(|(min, max)| uclamp_min >= min && uclamp_min <= max)
-                && self.min_nice_filter[index].is_none_or(|min| nice >= min)
-                && self.max_nice_filter[index].is_none_or(|max| nice <= max)
-                && self.cgroup_filter[index].as_ref().is_none_or(|r| r.is_match(cgroup_path))
-                && self.process_filter[index].is_match(process_name)
-                && self.thread_filter[index].is_match(thread_name)
+        for rule in &self.rules {
+            if rule.identity.matches(process_name, thread_name)
+                && rule.state.matches_without_system_mode(cgroup_path, is_leader, nice, uclamp_min)
             {
-                if let Some(mode_filter) = self.system_mode_filter[index].as_ref() {
+                if let Some(mode_filter) = rule.state.system_mode.as_ref() {
                     is_system_mode_dependent = true;
                     if mode_filter.is_match(system_mode) {
-                        return (Some(self.role_names[index].as_str()), true);
+                        return (Some(rule.role_name.as_str()), true);
                     }
                 } else {
-                    return (Some(self.role_names[index].as_str()), is_system_mode_dependent);
+                    return (Some(rule.role_name.as_str()), is_system_mode_dependent);
                 }
             }
         }
@@ -138,97 +222,200 @@ impl RoleOverrides {
     }
 }
 
+#[derive(Default)]
+struct RuleSpec {
+    role_name: String,
+    process: Option<String>,
+    thread: Option<String>,
+    cgroup: Option<String>,
+    is_leader: Option<bool>,
+    min_nice: Option<i8>,
+    max_nice: Option<i8>,
+    uclamp_min: Option<(u32, u32)>,
+    system_mode: Option<String>,
+}
+
+/// Fluent builder for configuring a single role override rule.
+pub struct RuleBuilder<'a> {
+    spec: &'a mut RuleSpec,
+}
+
+impl<'a> RuleBuilder<'a> {
+    /// Filter by process command pattern.
+    pub fn process(&mut self, pattern: impl Into<String>) -> &mut Self {
+        self.spec.process = Some(pattern.into());
+        self
+    }
+
+    /// Filter by optional process command pattern.
+    pub fn with_process(&mut self, pattern: Option<impl Into<String>>) -> &mut Self {
+        self.spec.process = pattern.map(Into::into);
+        self
+    }
+
+    /// Filter by thread command pattern.
+    pub fn thread(&mut self, pattern: impl Into<String>) -> &mut Self {
+        self.spec.thread = Some(pattern.into());
+        self
+    }
+
+    /// Filter by optional thread command pattern.
+    pub fn with_thread(&mut self, pattern: Option<impl Into<String>>) -> &mut Self {
+        self.spec.thread = pattern.map(Into::into);
+        self
+    }
+
+    /// Filter by cgroup path pattern.
+    pub fn cgroup(&mut self, pattern: impl Into<String>) -> &mut Self {
+        self.spec.cgroup = Some(pattern.into());
+        self
+    }
+
+    /// Filter by optional cgroup path pattern.
+    pub fn with_cgroup(&mut self, pattern: Option<impl Into<String>>) -> &mut Self {
+        self.spec.cgroup = pattern.map(Into::into);
+        self
+    }
+
+    /// Filter by whether the task is the thread-group leader (`tid == pid`).
+    pub fn is_leader(&mut self, is_leader: bool) -> &mut Self {
+        self.spec.is_leader = Some(is_leader);
+        self
+    }
+
+    /// Filter by optional thread-group leader status.
+    pub fn with_is_leader(&mut self, is_leader: Option<bool>) -> &mut Self {
+        self.spec.is_leader = is_leader;
+        self
+    }
+
+    /// Filter by minimum Linux nice value (`-20..=19`, inclusive).
+    pub fn min_nice(&mut self, min_nice: i8) -> &mut Self {
+        self.spec.min_nice = Some(min_nice);
+        self
+    }
+
+    /// Filter by optional minimum Linux nice value.
+    pub fn with_min_nice(&mut self, min_nice: Option<i8>) -> &mut Self {
+        self.spec.min_nice = min_nice;
+        self
+    }
+
+    /// Filter by maximum Linux nice value (`-20..=19`, inclusive).
+    pub fn max_nice(&mut self, max_nice: i8) -> &mut Self {
+        self.spec.max_nice = Some(max_nice);
+        self
+    }
+
+    /// Filter by optional maximum Linux nice value.
+    pub fn with_max_nice(&mut self, max_nice: Option<i8>) -> &mut Self {
+        self.spec.max_nice = max_nice;
+        self
+    }
+
+    /// Filter by inclusive `[min, max]` range (`0..=1024`) for `uclamp.min`.
+    pub fn uclamp_min(&mut self, range: (u32, u32)) -> &mut Self {
+        self.spec.uclamp_min = Some(range);
+        self
+    }
+
+    /// Filter by optional inclusive `[min, max]` range for `uclamp.min`.
+    pub fn with_uclamp_min(&mut self, range: Option<(u32, u32)>) -> &mut Self {
+        self.spec.uclamp_min = range;
+        self
+    }
+
+    /// Filter by active system power mode pattern.
+    pub fn system_mode(&mut self, pattern: impl Into<String>) -> &mut Self {
+        self.spec.system_mode = Some(pattern.into());
+        self
+    }
+
+    /// Filter by optional active system power mode pattern.
+    pub fn with_system_mode(&mut self, pattern: Option<impl Into<String>>) -> &mut Self {
+        self.spec.system_mode = pattern.map(Into::into);
+        self
+    }
+}
+
+fn compile_identity_regex(pattern: Option<&str>) -> Result<Option<Regex>, regex_lite::Error> {
+    // Treat legacy catch-all patterns as unconstrained (`None`) so manifests that still specify
+    // required `".+"` / `".*"` strings sort into the intended lower `IdentityLayer` during
+    // cross-repository rolls.
+    match pattern {
+        None | Some(".*" | ".+" | "^.*$" | "^.+$") => Ok(None),
+        Some(pattern) => Regex::new(pattern).map(Some),
+    }
+}
+
 /// Builder for `RoleOverrides`.
 #[derive(Default)]
 pub struct RoleOverridesBuilder {
-    process_patterns: Vec<String>,
-    thread_patterns: Vec<String>,
-    cgroup_patterns: Vec<Option<String>>,
-    is_leader_filters: Vec<Option<bool>>,
-    min_nice_filters: Vec<Option<i8>>,
-    max_nice_filters: Vec<Option<i8>>,
-    uclamp_min_ranges: Vec<Option<(u32, u32)>>,
-    system_mode_patterns: Vec<Option<String>>,
-    role_names: Vec<String>,
+    rules: Vec<RuleSpec>,
 }
 
 impl RoleOverridesBuilder {
-    /// Add a new override to the configuration.
-    pub fn add(
-        &mut self,
-        process: impl Into<String>,
-        thread: impl Into<String>,
-        cgroup: Option<String>,
-        role_name: impl Into<String>,
-    ) {
-        self.add_with_filters(process, thread, cgroup, None, None, None, None, None, role_name);
+    /// Begin adding a new role override rule for `role_name`.
+    pub fn add(&mut self, role_name: impl Into<String>) -> RuleBuilder<'_> {
+        self.rules.push(RuleSpec { role_name: role_name.into(), ..Default::default() });
+        RuleBuilder { spec: self.rules.last_mut().unwrap() }
     }
 
-    /// Add a new override with optional thread-group leader, nice range, `uclamp_min` range, and
-    /// `system_mode` filters.
-    pub fn add_with_filters(
-        &mut self,
-        process: impl Into<String>,
-        thread: impl Into<String>,
-        cgroup: Option<String>,
-        is_leader: Option<bool>,
-        min_nice: Option<i8>,
-        max_nice: Option<i8>,
-        uclamp_min_range: Option<(u32, u32)>,
-        system_mode: Option<String>,
-        role_name: impl Into<String>,
-    ) {
-        self.process_patterns.push(process.into());
-        self.thread_patterns.push(thread.into());
-        self.cgroup_patterns.push(cgroup);
-        self.is_leader_filters.push(is_leader);
-        self.min_nice_filters.push(min_nice);
-        self.max_nice_filters.push(max_nice);
-        self.uclamp_min_ranges.push(uclamp_min_range);
-        self.system_mode_patterns.push(system_mode);
-        self.role_names.push(role_name.into());
-    }
-
-    /// Compile all of the provided regular expressions and return a `RoleOverrides`.
+    /// Compile all of the provided regular expressions and return a `RoleOverrides` sorted by
+    /// waterfall specificity.
     pub fn build(self) -> Result<RoleOverrides, Error> {
-        let cgroup_filter = self
-            .cgroup_patterns
-            .into_iter()
-            .map(|opt| opt.map(|p| Regex::new(p.as_str())).transpose())
-            .collect::<Result<Vec<Option<Regex>>, regex_lite::Error>>()?;
+        const MIN_NICE: i8 = -20;
+        const MAX_NICE: i8 = 19;
 
-        for &(min, max) in self.uclamp_min_ranges.iter().flatten() {
-            ensure!(
-                min <= max && max <= SCHED_CAPACITY_SCALE,
-                "uclamp_min range [{min}, {max}] must satisfy min <= max <= {SCHED_CAPACITY_SCALE}"
-            );
+        let mut rules = Vec::with_capacity(self.rules.len());
+        for spec in self.rules {
+            if let Some(min_nice) = spec.min_nice {
+                ensure!(
+                    (MIN_NICE..=MAX_NICE).contains(&min_nice),
+                    "min_nice={min_nice} outside valid Linux range [{MIN_NICE}, {MAX_NICE}]"
+                );
+            }
+            if let Some(max_nice) = spec.max_nice {
+                ensure!(
+                    (MIN_NICE..=MAX_NICE).contains(&max_nice),
+                    "max_nice={max_nice} outside valid Linux range [{MIN_NICE}, {MAX_NICE}]"
+                );
+            }
+            if let (Some(min_nice), Some(max_nice)) = (spec.min_nice, spec.max_nice) {
+                ensure!(
+                    min_nice <= max_nice,
+                    "nice range [{min_nice}, {max_nice}] must satisfy min_nice <= max_nice"
+                );
+            }
+            if let Some((min, max)) = spec.uclamp_min {
+                ensure!(
+                    min <= max && max <= SCHED_CAPACITY_SCALE,
+                    "uclamp_min range [{min}, {max}] must satisfy min <= max <= {SCHED_CAPACITY_SCALE}"
+                );
+            }
+            let process = compile_identity_regex(spec.process.as_deref())?;
+            let thread = compile_identity_regex(spec.thread.as_deref())?;
+            let cgroup = spec.cgroup.as_deref().map(Regex::new).transpose()?;
+            let system_mode = spec.system_mode.as_deref().map(Regex::new).transpose()?;
+
+            let identity = IdentityLayer::new(process, thread);
+            let state = StateModifiers {
+                cgroup,
+                is_leader: spec.is_leader,
+                min_nice: spec.min_nice,
+                max_nice: spec.max_nice,
+                uclamp_min: spec.uclamp_min,
+                system_mode,
+            };
+            rules.push(RoleOverrideRule { identity, state, role_name: spec.role_name });
         }
 
-        let system_mode_filter = self
-            .system_mode_patterns
-            .into_iter()
-            .map(|opt| opt.map(|p| Regex::new(p.as_str())).transpose())
-            .collect::<Result<Vec<Option<Regex>>, regex_lite::Error>>()?;
+        // Stable sort by identity layer first, then cgroup-constrained rules before cgroup-agnostic
+        // rules, then state-modified rules before baseline rules, preserving declaration order
+        // within each bucket.
+        rules.sort_by_key(|rule| (rule.identity.rank(), rule.state.specificity_key()));
 
-        Ok(RoleOverrides {
-            process_filter: self
-                .process_patterns
-                .into_iter()
-                .map(|pattern| Regex::new(pattern.as_str()))
-                .collect::<Result<Vec<Regex>, regex_lite::Error>>()?,
-            thread_filter: self
-                .thread_patterns
-                .into_iter()
-                .map(|pattern| Regex::new(pattern.as_str()))
-                .collect::<Result<Vec<Regex>, regex_lite::Error>>()?,
-            cgroup_filter,
-            is_leader_filter: self.is_leader_filters,
-            min_nice_filter: self.min_nice_filters,
-            max_nice_filter: self.max_nice_filters,
-            uclamp_min_ranges: self.uclamp_min_ranges,
-            system_mode_filter,
-            role_names: self.role_names,
-        })
+        Ok(RoleOverrides { rules })
     }
 }
 
@@ -252,7 +439,7 @@ mod tests {
     #[fuchsia::test]
     fn single_pattern() {
         let mut builder = RoleOverrides::new();
-        builder.add("process_prefix_.+", "thread_prefix_.+", None, "replacement_role");
+        builder.add("replacement_role").process("process_prefix_.+").thread("thread_prefix_.+");
         let mappings = builder.build().unwrap();
 
         assert_eq!(
@@ -267,10 +454,10 @@ mod tests {
     #[fuchsia::test]
     fn multiple_patterns() {
         let mut builder = RoleOverrides::new();
-        builder.add("pre_one.+", "pre_one.+", None, "replace_one");
-        builder.add("pre_two.+", "pre_two.+", None, "replace_two");
-        builder.add("pre_three.+", "pre_three.+", None, "replace_three");
-        builder.add("pre_four.+", "pre_four.+", None, "replace_four");
+        builder.add("replace_one").process("pre_one.+").thread("pre_one.+");
+        builder.add("replace_two").process("pre_two.+").thread("pre_two.+");
+        builder.add("replace_three").process("pre_three.+").thread("pre_three.+");
+        builder.add("replace_four").process("pre_four.+").thread("pre_four.+");
         let mappings = builder.build().unwrap();
 
         assert_eq!(
@@ -306,9 +493,9 @@ mod tests {
     #[fuchsia::test]
     fn cgroup_patterns() {
         let mut builder = RoleOverrides::new();
-        builder.add("proc", "thread", Some("/background".to_string()), "bg_role");
-        builder.add("proc", "thread", Some("/foreground".to_string()), "fg_role");
-        builder.add("proc", "thread", None, "default_role");
+        builder.add("bg_role").process("proc").thread("thread").cgroup("/background");
+        builder.add("fg_role").process("proc").thread("thread").cgroup("/foreground");
+        builder.add("default_role").process("proc").thread("thread");
         let mappings = builder.build().unwrap();
 
         assert_eq!(str_role_name(&mappings, "proc", "thread", "/background"), Some("bg_role"));
@@ -320,48 +507,25 @@ mod tests {
     #[fuchsia::test]
     fn leader_and_nice_filters() {
         let mut builder = RoleOverrides::new();
-        builder.add_with_filters(
-            ".+",
-            ".+",
-            Some("^/active$".to_string()),
-            Some(true),
-            None,
-            None,
-            None,
-            None,
-            "leader_role",
-        );
-        builder.add_with_filters(
-            ".+",
-            ".+",
-            Some("^/active$".to_string()),
-            None,
-            Some(1),
-            None,
-            None,
-            None,
-            "low_prio_worker_role",
-        );
-        builder.add_with_filters(
-            ".+",
-            ".+",
-            Some("^/active$".to_string()),
-            None,
-            None,
-            Some(-1),
-            None,
-            None,
-            "boosted_worker_role",
-        );
-        builder.add(".+", ".+", Some("^/active$".to_string()), "default_worker_role");
+        builder.add("leader_role").cgroup("^/active$").is_leader(true);
+        builder.add("low_prio_worker_role").cgroup("^/active$").min_nice(1);
+        builder.add("boosted_worker_role").cgroup("^/active$").max_nice(-1);
+        builder.add("default_worker_role").cgroup("^/active$");
         let mappings = builder.build().unwrap();
 
         let proc_cmd = TaskCommand::new(b"app");
         let worker_cmd = TaskCommand::new(b"worker");
 
         assert_eq!(
-            mappings
-                .get_role_name_with_filters(&proc_cmd, &proc_cmd, "/active", true, 0, 0, "NOMINAL"),
+            mappings.get_role_name_with_filters(
+                &proc_cmd,
+                &proc_cmd,
+                "/active",
+                true,
+                0,
+                0,
+                "NOMINAL",
+            ),
             (Some("leader_role"), false)
         );
         assert_eq!(
@@ -372,7 +536,7 @@ mod tests {
                 false,
                 0,
                 0,
-                "NOMINAL"
+                "NOMINAL",
             ),
             (Some("default_worker_role"), false)
         );
@@ -384,7 +548,7 @@ mod tests {
                 false,
                 10,
                 0,
-                "NOMINAL"
+                "NOMINAL",
             ),
             (Some("low_prio_worker_role"), false)
         );
@@ -396,7 +560,7 @@ mod tests {
                 false,
                 -2,
                 0,
-                "NOMINAL"
+                "NOMINAL",
             ),
             (Some("boosted_worker_role"), false)
         );
@@ -405,51 +569,25 @@ mod tests {
     #[fuchsia::test]
     fn uclamp_min_and_system_mode_patterns() {
         let mut builder = RoleOverrides::new();
-        builder.add_with_filters(
-            ".*",
-            "^RenderThread.*",
-            Some("^/top-app$".to_string()),
-            None,
-            None,
-            None,
-            Some((512, 1024)),
-            None,
-            "render_thread_high_boost",
-        );
-        builder.add_with_filters(
-            ".*",
-            "^RenderThread.*",
-            Some("^/top-app$".to_string()),
-            None,
-            None,
-            None,
-            Some((1, 511)),
-            None,
-            "render_thread_low_boost",
-        );
-        builder.add_with_filters(
-            ".*",
-            "^RenderThread.*",
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("^(LAUNCH|LAUNCH_EXTEND)$".to_string()),
-            "render_thread_launch",
-        );
-        builder.add(".*", "^RenderThread.*", None, "render_thread_default");
-        builder.add_with_filters(
-            ".*",
-            "^LaunchOnlyWorker$",
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("^(LAUNCH|LAUNCH_EXTEND)$".to_string()),
-            "launch_only_worker_role",
-        );
+        builder
+            .add("render_thread_high_boost")
+            .thread("^RenderThread.*")
+            .cgroup("^/top-app$")
+            .uclamp_min((512, 1024));
+        builder
+            .add("render_thread_low_boost")
+            .thread("^RenderThread.*")
+            .cgroup("^/top-app$")
+            .uclamp_min((1, 511));
+        builder
+            .add("render_thread_launch")
+            .thread("^RenderThread.*")
+            .system_mode("^(LAUNCH|LAUNCH_EXTEND)$");
+        builder.add("render_thread_default").thread("^RenderThread.*");
+        builder
+            .add("launch_only_worker_role")
+            .thread("^LaunchOnlyWorker$")
+            .system_mode("^(LAUNCH|LAUNCH_EXTEND)$");
         let mappings = builder.build().unwrap();
 
         let proc = TaskCommand::new(b"com.example.app");
@@ -465,7 +603,7 @@ mod tests {
                 false,
                 0,
                 0,
-                "NOMINAL"
+                "NOMINAL",
             ),
             (None, true)
         );
@@ -477,46 +615,48 @@ mod tests {
                 false,
                 0,
                 0,
-                "LAUNCH"
+                "LAUNCH",
             ),
             (Some("launch_only_worker_role"), true)
         );
 
         assert_eq!(
-            mappings.get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 0, "NOMINAL"),
+            mappings
+                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 0, "NOMINAL",),
             (Some("render_thread_default"), true)
         );
         assert_eq!(
-            mappings.get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 0, "LAUNCH"),
+            mappings.get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 0, "LAUNCH",),
             (Some("render_thread_launch"), true)
         );
         assert_eq!(
-            mappings.get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 1, "NOMINAL"),
+            mappings
+                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 1, "NOMINAL",),
             (Some("render_thread_low_boost"), false)
         );
         assert_eq!(
             mappings
-                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 256, "NOMINAL"),
+                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 256, "NOMINAL",),
             (Some("render_thread_low_boost"), false)
         );
         assert_eq!(
             mappings
-                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 511, "NOMINAL"),
+                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 511, "NOMINAL",),
             (Some("render_thread_low_boost"), false)
         );
         assert_eq!(
             mappings
-                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 512, "NOMINAL"),
+                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 512, "NOMINAL",),
             (Some("render_thread_high_boost"), false)
         );
         assert_eq!(
             mappings
-                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 768, "NOMINAL"),
+                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 768, "NOMINAL",),
             (Some("render_thread_high_boost"), false)
         );
         assert_eq!(
             mappings
-                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 1024, "NOMINAL"),
+                .get_role_name_with_filters(&proc, &thread, "/top-app", false, 0, 1024, "NOMINAL",),
             (Some("render_thread_high_boost"), false)
         );
         assert_eq!(
@@ -527,7 +667,7 @@ mod tests {
                 false,
                 0,
                 768,
-                "NOMINAL"
+                "NOMINAL",
             ),
             (Some("render_thread_default"), true)
         );
@@ -539,7 +679,7 @@ mod tests {
                 false,
                 0,
                 0,
-                "NOMINAL"
+                "NOMINAL",
             ),
             (None, false)
         );
@@ -555,8 +695,8 @@ mod tests {
                 "render_thread_high_boost",
                 "render_thread_low_boost",
                 "render_thread_launch",
-                "render_thread_default",
                 "launch_only_worker_role",
+                "render_thread_default",
             ]
         );
         assert_eq!(
@@ -565,8 +705,8 @@ mod tests {
                 "render_thread_high_boost",
                 "render_thread_low_boost",
                 "render_thread_launch",
-                "render_thread_default",
                 "launch_only_worker_role",
+                "render_thread_default",
             ]
         );
         assert_eq!(
@@ -575,21 +715,247 @@ mod tests {
         );
 
         let mut bad_regex_builder = RoleOverrides::new();
-        bad_regex_builder.add_with_filters(
-            ".*",
-            ".*",
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("[unclosed".to_string()),
-            "bad_regex_role",
-        );
+        bad_regex_builder.add("bad_regex_role").system_mode("[unclosed");
         let err = bad_regex_builder.build().expect_err("expected invalid system_mode regex");
         assert!(
             format!("{err:#}").contains("non-empty character class has no closing bracket"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[fuchsia::test]
+    fn waterfall_layer_and_modifier_precedence_independent_of_declaration_order() {
+        let mut builder = RoleOverrides::new();
+        // Declare from least specific to most specific and baseline before state-modified to
+        // verify build-time waterfall sorting.
+        builder.add("cgroup_default").cgroup("^/top-app$");
+        builder.add("cgroup_leader").cgroup("^/top-app$").is_leader(true);
+        builder.add("process_default").process("^app$");
+        builder.add("process_boosted").process("^app$").uclamp_min((1, 1024));
+        builder.add("process_in_bg").process("^app$").cgroup("^/background$");
+        builder.add("any_shared_worker").thread("^SharedWorker$");
+        builder.add("any_render_thread").thread("^RenderThread$");
+        builder.add("render_thread_bg").thread("^RenderThread$").cgroup("^/background$");
+        builder.add("app_render_thread").process("^app$").thread("^RenderThread$");
+        builder
+            .add("app_render_thread_launch")
+            .process("^app$")
+            .thread("^RenderThread$")
+            .system_mode("^LAUNCH$");
+        let mappings = builder.build().unwrap();
+
+        let app = TaskCommand::new(b"app");
+        let other_proc = TaskCommand::new(b"other");
+        let render = TaskCommand::new(b"RenderThread");
+        let shared_worker = TaskCommand::new(b"SharedWorker");
+        let worker = TaskCommand::new(b"worker");
+
+        // Layer 1 (ProcessAndThread): state-modified beats unqualified, and beats Layer 2 (Thread).
+        assert_eq!(
+            mappings.get_role_name_with_filters(&app, &render, "/top-app", false, 0, 0, "LAUNCH",),
+            (Some("app_render_thread_launch"), true)
+        );
+        assert_eq!(
+            mappings.get_role_name_with_filters(&app, &render, "/top-app", false, 0, 0, "NOMINAL",),
+            (Some("app_render_thread"), true)
+        );
+
+        // Layer 2 (Thread): cgroup-constrained beats cgroup-agnostic, and beats Layer 3 (Process)
+        // when no Layer 1 rule matches `(app, SharedWorker)`.
+        assert_eq!(
+            mappings.get_role_name_with_filters(
+                &app,
+                &shared_worker,
+                "/background",
+                false,
+                0,
+                512,
+                "NOMINAL",
+            ),
+            (Some("any_shared_worker"), false)
+        );
+        assert_eq!(
+            mappings.get_role_name_with_filters(
+                &other_proc,
+                &render,
+                "/background",
+                false,
+                0,
+                0,
+                "NOMINAL",
+            ),
+            (Some("render_thread_bg"), false)
+        );
+        assert_eq!(
+            mappings.get_role_name_with_filters(
+                &other_proc,
+                &render,
+                "/top-app",
+                false,
+                0,
+                0,
+                "NOMINAL",
+            ),
+            (Some("any_render_thread"), false)
+        );
+
+        // Layer 3 (Process): cgroup-constrained beats state-modified (`uclamp_min = 512`), which
+        // beats baseline, and all beat Layer 4 (Unidentified).
+        assert_eq!(
+            mappings.get_role_name_with_filters(
+                &app,
+                &worker,
+                "/background",
+                false,
+                0,
+                512,
+                "NOMINAL",
+            ),
+            (Some("process_in_bg"), false)
+        );
+        assert_eq!(
+            mappings
+                .get_role_name_with_filters(&app, &worker, "/top-app", false, 0, 512, "NOMINAL",),
+            (Some("process_boosted"), false)
+        );
+        assert_eq!(
+            mappings.get_role_name_with_filters(&app, &worker, "/top-app", false, 0, 0, "NOMINAL",),
+            (Some("process_default"), false)
+        );
+
+        // Layer 4 (Unidentified): state-modified (is_leader) beats unqualified cgroup baseline.
+        assert_eq!(
+            mappings.get_role_name_with_filters(
+                &other_proc,
+                &other_proc,
+                "/top-app",
+                true,
+                0,
+                0,
+                "NOMINAL",
+            ),
+            (Some("cgroup_leader"), false)
+        );
+        assert_eq!(
+            mappings.get_role_name_with_filters(
+                &other_proc,
+                &worker,
+                "/top-app",
+                false,
+                0,
+                0,
+                "NOMINAL",
+            ),
+            (Some("cgroup_default"), false)
+        );
+    }
+
+    #[fuchsia::test]
+    fn waterfall_cross_layer_fallthrough() {
+        let mut builder = RoleOverrides::new();
+        builder.add("layer4_cgroup").cgroup("^/top-app$");
+        builder.add("layer3_proc_boosted").process("^app$").uclamp_min((512, 1024));
+        builder.add("layer2_thread_launch").thread("^Worker$").system_mode("^LAUNCH$");
+        builder
+            .add("layer1_proc_thread_bg")
+            .process("^app$")
+            .thread("^Worker$")
+            .cgroup("^/background$");
+        let mappings = builder.build().unwrap();
+
+        let app = TaskCommand::new(b"app");
+        let worker = TaskCommand::new(b"Worker");
+        let other_thread = TaskCommand::new(b"OtherThread");
+
+        // Layer 1 matches when in `/background`.
+        assert_eq!(
+            mappings.get_role_name_with_filters(
+                &app,
+                &worker,
+                "/background",
+                false,
+                0,
+                0,
+                "NOMINAL",
+            ),
+            (Some("layer1_proc_thread_bg"), false)
+        );
+
+        // Layer 1 (`cgroup`) fails -> falls through to Layer 2 (`system_mode == LAUNCH`).
+        assert_eq!(
+            mappings.get_role_name_with_filters(&app, &worker, "/top-app", false, 0, 0, "LAUNCH"),
+            (Some("layer2_thread_launch"), true)
+        );
+
+        // Layer 1 (`cgroup`) and Layer 2 (`system_mode`) fail -> falls through to Layer 3
+        // (`uclamp_min`), preserving `is_system_mode_dependent = true`.
+        assert_eq!(
+            mappings
+                .get_role_name_with_filters(&app, &worker, "/top-app", false, 0, 768, "NOMINAL"),
+            (Some("layer3_proc_boosted"), true)
+        );
+
+        // Layers 1, 2 (`system_mode`), and 3 (`uclamp_min`) all fail -> falls through to Layer 4
+        // (`cgroup`), preserving `is_system_mode_dependent = true`.
+        assert_eq!(
+            mappings.get_role_name_with_filters(&app, &worker, "/top-app", false, 0, 0, "NOMINAL"),
+            (Some("layer4_cgroup"), true)
+        );
+
+        // Non-`system_mode` modifier failure in Layer 3 (`uclamp_min`) without matching any
+        // `system_mode`-gated rule falls through to Layer 4 with `is_system_mode_dependent = false`.
+        assert_eq!(
+            mappings.get_role_name_with_filters(
+                &app,
+                &other_thread,
+                "/top-app",
+                false,
+                0,
+                0,
+                "NOMINAL",
+            ),
+            (Some("layer4_cgroup"), false)
+        );
+    }
+
+    #[fuchsia::test]
+    fn legacy_catch_all_patterns_normalized_to_unconstrained() {
+        let mut builder = RoleOverrides::new();
+        builder.add("bg_catch_all_plus").process(".+").thread(".+").cgroup("^/background$");
+        builder.add("fg_catch_all_star").process(".*").thread(".*").cgroup("^/foreground$");
+        builder.add("top_anchored_catch_all").process("^.+$").thread("^.*$").cgroup("^/top-app$");
+        builder.add("render_thread").process(".+").thread("^RenderThread$");
+        builder.add("composer_proc").process("^composer$").thread(".*");
+        builder.add("sf_main").process("^surfaceflinger$").thread("^surfaceflinger$");
+        let mappings = builder.build().unwrap();
+
+        // Layer 1 beats legacy `.*` Layer 4 cgroup catch-all.
+        assert_eq!(
+            str_role_name(&mappings, "surfaceflinger", "surfaceflinger", "/foreground"),
+            Some("sf_main")
+        );
+        // Layer 2 (`.+` process normalized to `None`) beats Layer 3 and Layer 4 (`^.+$` / `^.*$`).
+        assert_eq!(
+            str_role_name(&mappings, "composer", "RenderThread", "/top-app"),
+            Some("render_thread")
+        );
+        // Layer 3 (`.*` thread normalized to `None`) beats Layer 4 (`.+` / `.+` cgroup catch-all).
+        assert_eq!(
+            str_role_name(&mappings, "composer", "binder:1", "/background"),
+            Some("composer_proc")
+        );
+        // Layer 4 catch-alls still match tasks with no higher-layer identity match.
+        assert_eq!(
+            str_role_name(&mappings, "other", "worker", "/background"),
+            Some("bg_catch_all_plus")
+        );
+        assert_eq!(
+            str_role_name(&mappings, "other", "worker", "/foreground"),
+            Some("fg_catch_all_star")
+        );
+        assert_eq!(
+            str_role_name(&mappings, "other", "worker", "/top-app"),
+            Some("top_anchored_catch_all")
         );
     }
 
@@ -601,17 +967,7 @@ mod tests {
             ((1025, 2048), "uclamp_min range [1025, 2048] must satisfy min <= max <= 1024"),
         ] {
             let mut builder = RoleOverrides::new();
-            builder.add_with_filters(
-                ".*",
-                ".*",
-                None,
-                None,
-                None,
-                None,
-                Some(range),
-                None,
-                "bad_range",
-            );
+            builder.add("bad_range").uclamp_min(range);
             let err = builder.build().expect_err("expected invalid uclamp_min range to fail");
             let err_msg = format!("{err:#}");
             assert!(
@@ -619,5 +975,31 @@ mod tests {
                 "expected error containing {expected_err:?}, got {err_msg:?}"
             );
         }
+    }
+
+    #[fuchsia::test]
+    fn invalid_nice_bounds_rejected() {
+        for (min_nice, max_nice, expected_err) in [
+            (Some(-21), None, "min_nice=-21 outside valid Linux range [-20, 19]"),
+            (Some(20), None, "min_nice=20 outside valid Linux range [-20, 19]"),
+            (None, Some(-21), "max_nice=-21 outside valid Linux range [-20, 19]"),
+            (None, Some(20), "max_nice=20 outside valid Linux range [-20, 19]"),
+            (Some(5), Some(-5), "nice range [5, -5] must satisfy min_nice <= max_nice"),
+        ] {
+            let mut builder = RoleOverrides::new();
+            builder.add("bad_nice").with_min_nice(min_nice).with_max_nice(max_nice);
+            let err = builder.build().expect_err("expected invalid nice bounds to fail");
+            let err_msg = format!("{err:#}");
+            assert!(
+                err_msg.contains(expected_err),
+                "expected error containing {expected_err:?}, got {err_msg:?}"
+            );
+        }
+
+        // Valid inclusive boundaries must build cleanly.
+        let mut valid = RoleOverrides::new();
+        valid.add("full_range").min_nice(-20).max_nice(19);
+        valid.add("exact_zero").min_nice(0).max_nice(0);
+        valid.build().expect("valid nice bounds should succeed");
     }
 }

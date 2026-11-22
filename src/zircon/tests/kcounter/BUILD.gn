@@ -2,28 +2,32 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/test.gni")
+import("//build/dist/renamed_binary.gni")
+import("//build/rust/rustc_test.gni")
 import("//build/testing/bootfs_test.gni")
 
-test("kcounter") {
-  if (is_fuchsia) {
-    fdio_config = [ "//build/config/fuchsia:fdio_config" ]
-    if (configs + fdio_config - fdio_config != configs) {
-      configs -= fdio_config
-    }
-  }
-  output_dir = "$root_out_dir/zircon-migrated"
-  sources = [ "kcounter-test.cc" ]
+rustc_test("kcounter_test") {
+  visibility = [ ":*" ]
+  edition = "2024"
+  configs += [ "//build/config/rust:bootfs" ]
+  source_root = "kcounter_test.rs"
+  sources = [ "kcounter_test.rs" ]
   deps = [
-    "//sdk/lib/fdio",
-    "//src/zircon/bin/kcounter:cmdline",
-    "//zircon/kernel/lib/counters",
-    "//zircon/system/ulib/fbl",
-    "//zircon/system/ulib/fzl",
-    "//zircon/system/ulib/pretty",
-    "//zircon/system/ulib/zx",
-    "//zircon/system/ulib/zxtest",
+    "//sdk/rust/zx",
+    "//src/lib/fdio/rust:fdio",
+    "//src/zircon/bin/kcounter/lib:kcounter-lib",
+    "//third_party/rust_crates:zerocopy",
+    "//zircon/kernel/lib/counters/abi:counters-abi",
   ]
+}
+
+# Installs the test binary as /boot/test/kcounter for bootfs_test() rather
+# than at the default bin/kcounter_test that rustc_test() would use.
+renamed_binary("kcounter") {
+  testonly = true
+  source = "$root_out_dir/kcounter_test"
+  source_deps = [ ":kcounter_test" ]
+  dest = "test/kcounter"
 }
 
 bootfs_test("kcounter-bootfs-test") {

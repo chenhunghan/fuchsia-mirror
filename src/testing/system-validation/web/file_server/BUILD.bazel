@@ -2,7 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@fuchsia_rules_common//packages:resources.bzl", "resource")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component",
@@ -13,6 +12,7 @@ load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
 )
+load("//build/bazel/rules/packages:resources.bzl", "resource_group")
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
@@ -36,9 +36,6 @@ rustc_library(
     ],
 )
 
-# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
-# targets, so GN retains resource_group("server_data") in data_deps.
-# @bazel2gn:raw_attribute:data_deps = [ ":server_data" ]
 rustc_binary(
     name = "bin",
     srcs = ["src/main.rs"],
@@ -51,31 +48,22 @@ rustc_binary(
     ],
 )
 
-# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
-# targets; GN uses resource_group("server_data") above the sentinel.
-# @bazel2gn:skip
-resource(
-    name = "sample_video",
-    src = "data/test_video.webm",
-    dest = "data/sample_video.webm",
-)
-
-# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
-# targets; GN uses resource_group("server_data") above the sentinel.
-# @bazel2gn:skip
-resource(
-    name = "fuchsia_logo",
-    src = "data/fuchsia_logo.png",
-    dest = "data/fuchsia_logo.png",
-)
-
-# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
-# targets; GN uses resource_group("server_data") above the sentinel.
-# @bazel2gn:skip
-resource(
-    name = "100Hz_tone",
-    src = "data/100Hz_tone.mp3",
-    dest = "data/100Hz_tone.mp3",
+resource_group(
+    name = "server_data",
+    files = [
+        {
+            "source": "data/test_video.webm",
+            "dest": "data/sample_video.webm",
+        },
+        {
+            "source": "data/fuchsia_logo.png",
+            "dest": "data/fuchsia_logo.png",
+        },
+        {
+            "source": "data/100Hz_tone.mp3",
+            "dest": "data/100Hz_tone.mp3",
+        },
+    ],
 )
 
 fx_packaged_binary(
@@ -97,18 +85,7 @@ fx_component(
     visibility = ["//src/testing/system-validation/web:__pkg__"],
     deps = [
         ":file_server_packaged_bin",
-        # TODO(https://fxbug.dev/570694755): In GN, these resources are
-        # packaged via data_deps = [ ":server_data" ] on :bin.
-        # @bazel2gn:skip
-        ":100Hz_tone",
-        # TODO(https://fxbug.dev/570694755): In GN, these resources are
-        # packaged via data_deps = [ ":server_data" ] on :bin.
-        # @bazel2gn:skip
-        ":fuchsia_logo",
-        # TODO(https://fxbug.dev/570694755): In GN, these resources are
-        # packaged via data_deps = [ ":server_data" ] on :bin.
-        # @bazel2gn:skip
-        ":sample_video",
+        ":server_data",
     ],
 )
 

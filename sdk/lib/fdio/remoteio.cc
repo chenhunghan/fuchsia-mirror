@@ -47,7 +47,6 @@ zx_status_t fdio::zxio_allocator(zxio_object_type_t type, zxio_storage_t** out_s
   // The type of storage (fdio subclass) depends on the type of the object until
   // https://fxbug.dev/42119552 is resolved, so this has to switch on the type.
   switch (type) {
-    case ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET:
     case ZXIO_OBJECT_TYPE_PACKET_SOCKET:
     case ZXIO_OBJECT_TYPE_RAW_SOCKET:
     case ZXIO_OBJECT_TYPE_STREAM_SOCKET:

@@ -973,6 +973,7 @@ impl ChannelDispatcher {
     }
 
     /// Returns the current and maximum pending message counts for this endpoint.
+    #[cfg(console_enabled)]
     pub(super) fn get_message_counts(&self) -> (usize, u64) {
         let state = self.state();
         state.canary.assert();
@@ -1385,13 +1386,13 @@ impl MessageWaiter {
             // Note: `this_ptr` must not be dereferenced after this point, as another CPU may now
             // observe `signaled == true` and destroy the enclosing `ThreadDispatcher`.
             if let Some(t_ptr) = waiter {
-                // SAFETY: `t_ptr`'s ChainLock is still held by the active transaction `token`, so
-                // the thread cannot exit until `scheduler::unblock` releases its lock below, and
-                // no other proof or guard for it is live.
-                let t_guard = unsafe { OwnerGuard::adopt_unchecked(t_ptr.as_ref(), token) };
-                // SAFETY: `t_ptr`'s thread was dequeued from `wait_queue` above and the active
-                // transaction is finalized.
-                unsafe { scheduler::unblock(t_guard, token) };
+                // SAFETY: `t_ptr` is non-idle (it was blocked in `wait_queue`) and was dequeued
+                // from `wait_queue` above with its lock held as the sole lock in the active,
+                // finalized transaction `token` and no conflicting reference, guard, or proof
+                // live; interrupts and local preemption are disabled by
+                // `EAGER_RESCHED_DISABLE_AND_IRQ_SAVE_OPTION`; and `t_ptr` is not dereferenced
+                // after this call.
+                unsafe { scheduler::unblock(t_ptr, token) };
             }
             TransactionResult::DONE
         };

@@ -38,15 +38,17 @@ pub unsafe fn riscv64_thread_fpu_save(thread: *mut core::ffi::c_void, status: Ex
     match status {
         ExtensionStatus::Dirty => {
             // The hardware state is dirty, save the old state.
-            // SAFETY: Caller guarantees thread is valid; saves FPU hardware state.
-            let arch = unsafe { &mut *thread_arch(thread) };
-            // SAFETY: `riscv64_fpu_save` writes the FP register file into
-            // `arch.fpu_state`, which is uniquely borrowed here and large enough.
-            unsafe { riscv64_fpu_save(core::ptr::addr_of_mut!(arch.fpu_state)) };
+            // SAFETY: Caller guarantees `thread` is valid and uniquely owns its FPU arch state;
+            // raw-pointer field projection avoids creating `&mut ArchThread` while a `&Thread`
+            // reference may be live.
+            unsafe {
+                let arch = thread_arch(thread);
+                riscv64_fpu_save(&raw mut (*arch).fpu_state);
 
-            // Record that this thread has modified the state and will need to restore it
-            // from now on out on every context switch.
-            arch.fpu_dirty = true;
+                // Record that this thread has modified the state and will need to restore it
+                // from now on out on every context switch.
+                (*arch).fpu_dirty = true;
+            }
         }
         // These three states means the thread didn't modify the state, so do not
         // write anything back.
@@ -78,15 +80,17 @@ pub unsafe fn riscv64_thread_fpu_restore(
     status: ExtensionStatus,
 ) {
     debug_assert!(!thread.is_null());
-    // SAFETY: Caller guarantees thread is valid; restores FPU registers or resets to initial.
-    let arch = unsafe { &*thread_arch(thread as *mut _) };
-    if arch.fpu_dirty {
+    // SAFETY: Caller guarantees `thread` is valid; raw-pointer field projection avoids creating
+    // `&ArchThread` over the full arch struct.
+    let arch = unsafe { thread_arch(thread.cast_mut()) };
+    // SAFETY: Caller guarantees `thread` is valid and `arch` points to its `ArchThread`.
+    let fpu_dirty = unsafe { (*arch).fpu_dirty };
+    if fpu_dirty {
         // Restore the state from the new thread
-        // SAFETY: `riscv64_fpu_restore` loads the FP register file from
-        // `arch.fpu_state`, which belongs to the live arch state borrowed above, and
+        // SAFETY: `riscv64_fpu_restore` loads the FP register file from `(*arch).fpu_state`, and
         // the CSR updates touch only the FS field of this hart's `sstatus`.
         unsafe {
-            riscv64_fpu_restore(core::ptr::addr_of!(arch.fpu_state));
+            riscv64_fpu_restore(&raw const (*arch).fpu_state);
 
             // Set the fpu hardware state to clean.  These stay as csrc/csrs rather
             // than an SSTATUS read-modify-write so that the bits hardware owns -- fs

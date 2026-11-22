@@ -2,7 +2,35 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":usb-policy-integration-tests_test",
+        ":usb-policy-tests",
+    ],
+    visibility = ["//src/devices:__pkg__"],
+)
 
 exports_files(
     [
@@ -10,4 +38,137 @@ exports_files(
         "meta/usb-policy.core_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/controller.rs",
+        "src/main.rs",
+    ],
+    binary_name = "usb-policy",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.power.charger:fuchsia.hardware.power.charger_rust",
+        "//sdk/fidl/fuchsia.hardware.power.usb:fuchsia.hardware.power.usb_rust",
+        "//sdk/fidl/fuchsia.hardware.usb.peripheral:fuchsia.hardware.usb.peripheral_rust",
+        "//sdk/fidl/fuchsia.hardware.usb.policy:fuchsia.hardware.usb.policy_rust",
+        "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_rust",
+        "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+        "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
+        "//sdk/fidl/fuchsia.usb.policy:fuchsia.usb.policy_rust",
+        "//sdk/rust/zx",
+        "//src/lib/async-utils",
+        "//src/lib/diagnostics/inspect/contrib/rust",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Preserves the GN test binary name from `rustc_binary(name = "usb-policy", with_unit_tests = true)`.
+    crate_name = "usb_policy_bin_test",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.power.source:fuchsia.hardware.power.source_rust",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fidl/rust/fidl",
+    ],
+)
+
+fx_unittest_package(
+    name = "usb-policy-tests",
+    unit_tests = [":bin_test"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "usb-policy",
+)
+
+fx_component_manifest(
+    name = "usb-policy-manifest",
+    component_name = "usb-policy",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/usb-policy.cml",
+)
+
+fx_component(
+    name = "service",
+    compiled_manifest = ":usb-policy-manifest",
+    visibility = ["//vendor/google:__subpackages__"],
+    deps = [":bin_packaged"],
+)
+
+rustc_test(
+    name = "usb_policy_integration_test_bin",
+    srcs = ["tests/integration.rs"],
+    crate_root = "tests/integration.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.usb.policy:fuchsia.hardware.usb.policy_rust",
+        "//sdk/fidl/fuchsia.usb.policy:fuchsia.usb.policy_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "usb_policy_integration_test_bin_packaged",
+    testonly = True,
+    binary = ":usb_policy_integration_test_bin",
+    binary_name = "usb_policy_integration_test_bin",
+)
+
+fx_component_manifest(
+    name = "integration_test_manifest",
+    testonly = True,
+    component_name = "usb-policy-integration-test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/sys/testing:rust_test_runner.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/integration-test.cml",
+)
+
+fx_test_component(
+    name = "integration_test_component",
+    compiled_manifest = ":integration_test_manifest",
+    deps = [":usb_policy_integration_test_bin_packaged"],
+)
+
+fx_package(
+    name = "usb-policy-integration-tests",
+    testonly = True,
+    components = [
+        ":service",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":integration_test_component"],
+)
+
+fx_test(
+    name = "usb-policy-integration-tests_test",
+    max_log_severity = "ERROR",
+    package = ":usb-policy-integration-tests",
 )

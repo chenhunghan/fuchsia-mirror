@@ -13,7 +13,7 @@ To provide more ways to express payloads whose shape may need to evolve
 over time, we propose to **replace unions as they exist today with
 extensible unions**.
 
-# Motivation
+## Motivation
 
 Today, unions provide no way to evolve over time, and we even warn that
 "in general, changing the definition of a union will break binary
@@ -25,14 +25,14 @@ necessary, e.g.,
 where fields are deprecated without being removed, or
 [fuchsia.modular/Interaction][interaction].
 
-As described [later](#drawbacks_alternatives_and-unknowns),
+As described [later](#drawbacks-alternatives-and-unknowns),
 there also many unions whose current representation is
 appropriate as they are unlikely to evolve in the near-future. However,
 keeping both `static unions` and `extensible unions` introduces
 unneeded complexity, see the
-[pros and cons](#pros-and-cons-of-keeping-static-unions).
+[pros and cons](#pros-and-cons).
 
-# Design
+## Design
 
 To introduce extensible unions, we need to modify multiple parts of FIDL:
 the language and `fidlc`, the JSON IR, the wire format and all language
@@ -40,7 +40,7 @@ bindings.
 We'll also need to document this new feature in various places.
 We discuss each change one by one.
 
-## Language
+### Language
 
 Syntactically, extensible unions look exactly the same as static unions:
 
@@ -84,12 +84,12 @@ Particularly:
 - Interface arguments or returns can be extensible unions;
 - Extensible unions can be nullable.
 
-## JSON IR
+### JSON IR
 
 Following tables, we will add one key in each union field declaration
 "ordinal."
 
-## Wire format
+### Wire format
 
 On the wire, an extensible union is represented by the ordinal to
 discriminate amongst the choices (padded to 8 bytes), followed by an
@@ -117,7 +117,7 @@ A **nullable extensible union** has a **tag of 0**, **num_bytes is set to 0**,
 i.e., **0**.
 Essentially, a null extensible union is 24 bytes of 0s.
 
-## Language Bindings
+### Language bindings
 
 Extensible unions are similar to unions, except that one needs to also
 handle an "unknown" case when union is read.
@@ -135,7 +135,7 @@ To start, we suggest no language bindings expose reserved members: while
 these are present in the JSON IR for completeness, we do not expect that
 exposing them in language bindings be useful.
 
-# Implementation strategy
+## Implementation strategy {#implementation-strategy}
 
 Implementation will be done in two steps.
 
@@ -164,7 +164,7 @@ Second, we will migrate all static unions to extensible unions:
 4. When all writers have been updated, deployed, and propagated, remove
    static union handling, and scaffolding code for the soft transition.
 
-# Documentation and examples
+## Documentation and examples
 
 This would require documentation in at least these places:
 
@@ -173,27 +173,27 @@ This would require documentation in at least these places:
 * [Wire Format Specification][fidl-wire-format]: add a section under "Data
   Types;"
 
-# Backwards compatibility
+## Backwards compatibility
 
 An extensible union is explicitly **not** backwards compatible with a "static"
 union.
 
-# Performance
+## Performance
 
 No impact on performance when not used.
 Negligible performance impact during build time.
 
-# Security
+## Security
 
 No impact on security.
 
-# Testing
+## Testing
 
 Unit tests in the compiler, unit tests for encoding/decoding in various
 language bindings, and compatibility test to check various language
 bindings together.
 
-# Drawbacks, alternatives, and unknowns
+## Drawbacks, alternatives, and unknowns {#drawbacks-alternatives-and-unknowns}
 
 Extensible unions are less efficient than non-extensible unions.
 Furthermore, non-extensible unions are not expressible through other means
@@ -206,9 +206,9 @@ This would go against various places in Fuchsia where unions represent
 performance critical messages, and where there is little extension
 expectation, e.g. `fuchsia.io/NodeInfo`, `fuchsia.net/IpAddress`.
 
-## Pros and Cons of Keeping Static Unions {#pros-and-cons}
+### Pros and cons of keeping static unions {#pros-and-cons}
 
-### Pros
+#### Pros
 
 * Compared to a union, an extensible union incurs an 8 byte cost (for the
   size of the envelope, and number of handles).
@@ -228,7 +228,7 @@ expectation, e.g. `fuchsia.io/NodeInfo`, `fuchsia.net/IpAddress`.
   where the **InterfaceAddress** could directly be written, with an `enum`
   to indicate whether it is added or removed.
 
-### Cons
+#### Cons
 
 * Keeping both static unions and extensible unions forces complexity in the
   compiler, the JSON IR, all backends, as well as encoding/decoding.
@@ -255,7 +255,7 @@ expectation, e.g. `fuchsia.io/NodeInfo`, `fuchsia.net/IpAddress`.
 
 All in all, we decided to replace static unions with extensible unions.
 
-## Tag vs Ordinal
+### Tag vs ordinal
 
 We use **ordinal** to denote the internal numeric value assigned to fields,
 i.e., the value calculated through hashing.
@@ -267,7 +267,7 @@ Developers would most likely deal with tags only.
 And bindings provide translation from the high-level tag, to the low-level
 internal ordinal.
 
-## No Empty Extensible Unions
+### No empty extensible unions
 
 During the design phase, we considered having extensible unions be empty.
 However, we chose to disallow that in the end: choosing a nullable
@@ -276,7 +276,7 @@ models the intent.
 This also avoids having two "unit" values for extensible unions i.e., a
 null value and an empty value.
 
-# Prior art and references
+## Prior art and references
 
 * Protocol buffers has [oneof].
 * FlatBuffers's [unions][flatbufferunion] aren't extensible except under special circumstances.

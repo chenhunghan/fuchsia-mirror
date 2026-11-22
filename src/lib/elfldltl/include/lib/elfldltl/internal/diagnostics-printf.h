@@ -7,6 +7,7 @@
 
 #include <inttypes.h>
 
+#include <concepts>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
@@ -125,7 +126,7 @@ struct FormatFor {
 
 template <typename T, class First, class... Rest>
 consteval std::string Pick(First first, Rest... rest) {
-  if constexpr (std::is_same_v<T, typename First::Type>) {
+  if constexpr (std::same_as<T, typename First::Type>) {
     return first.string;
   } else {
     static_assert(sizeof...(Rest) > 0, "missing type?");
@@ -164,9 +165,9 @@ struct PrintfType<const char*> {
 // This is specialized on its const& type because it's not copyable.
 template <typename CharT, class Traits>
 struct PrintfType<const ConstString<CharT, Traits>&> {
-  static_assert(std::is_same_v<CharT, char>,
+  static_assert(std::same_as<CharT, char>,
                 "PrintfDiagnosticsReport doesn't support non-char instantiations of ConstString");
-  static_assert(std::is_same_v<Traits, std::string_view::traits_type>,
+  static_assert(std::same_as<Traits, std::string_view::traits_type>,
                 "PrintfDiagnosticsReport doesn't support special instantiations of ConstString");
   static consteval std::string Format() { return "%s"; }
   static constexpr auto Arguments(const ConstString<CharT, Traits>& str) {

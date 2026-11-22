@@ -7,8 +7,7 @@
 use crate::fuchsia::directory::FxDirectory;
 use crate::fuchsia::errors::map_to_status;
 use crate::fuchsia::fxblob::BlobDirectory;
-use crate::fuchsia::fxblob::blob::FxBlob;
-use crate::fuchsia::node::{FxNode, GetResult};
+use crate::fuchsia::node::FxNode;
 use crate::fuchsia::volume::FxVolume;
 use anyhow::{Context as _, Error};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
@@ -26,6 +25,7 @@ use fxfs::blob_metadata::{
 };
 use fxfs::errors::FxfsError;
 use fxfs::object_handle::ObjectHandle;
+use fxfs::object_store::allocator::Preallocation;
 use fxfs::object_store::directory::{ReplacedChild, replace_child_with_object};
 use fxfs::object_store::transaction::{LockKey, lock_keys};
 use fxfs::object_store::{
@@ -40,6 +40,14 @@ use zx::Status;
 static RING_BUFFER_SIZE: LazyLock<u64> = LazyLock::new(|| 64 * storage_units::page_size());
 
 const PAYLOAD_BUFFER_FLUSH_THRESHOLD: usize = 131_072; /* 128 KiB */
+
+/// Estimated LZ4-to-ZSTD payload ratio (numerator / denominator) plus a small fixed margin when
+/// preallocating device space for ZSTD -> LZ4 recompression.  Chosen toward the lower end so an
+/// occasional outlier simply falls back to regular per-flush allocation for the tail rather than
+/// over-holding free space.
+const LZ4_FROM_ZSTD_NUMERATOR: u64 = 3;
+const LZ4_FROM_ZSTD_DENOMINATOR: u64 = 2;
+const LZ4_FROM_ZSTD_MARGIN_BYTES: u64 = 16 * 1024;
 
 /// Maximum amount of *compressed* data we'll record when we fail to decompress a chunk.
 /// We use base64 encoding, so the actual storage of the data will be large (~50 KiB).
@@ -74,11 +82,9 @@ enum Stage {
 }
 
 impl Stage {
-    fn complete(&mut self) -> DataObjectHandle<FxVolume> {
-        let old = std::mem::replace(self, Stage::Complete);
-        match old {
-            Stage::Writing(handle) => handle,
-            Stage::Complete => panic!("Called complete twice!"),
+    fn complete(&mut self) {
+        if matches!(std::mem::replace(self, Stage::Complete), Stage::Complete) {
+            panic!("Called complete twice!");
         }
     }
 
@@ -146,6 +152,12 @@ pub struct DeliveryBlobWriter {
     write_buffer: Vec<u8>,
     /// How many bytes from `write_buffer` have been written to disk so far.
     payload_persisted: u64,
+    /// Remaining bytes we know (or estimate) will still be written to storage, set once headers
+    /// are decoded.  Blobs at or below `PAYLOAD_BUFFER_FLUSH_THRESHOLD` leave this at 0 because
+    /// they already flush as a single extent.
+    prealloc_remaining: u64,
+    /// In-memory preallocated device run carved from the allocator for sequential flushes.
+    preallocation: Option<Preallocation>,
 }
 
 impl DeliveryBlobWriter {
@@ -190,6 +202,8 @@ impl DeliveryBlobWriter {
             recompressor: None,
             write_buffer: Vec::new(),
             payload_persisted: 0,
+            prealloc_remaining: 0,
+            preallocation: None,
         })
     }
 }
@@ -197,6 +211,7 @@ impl DeliveryBlobWriter {
 impl Drop for DeliveryBlobWriter {
     /// Tombstone the object if we didn't finish writing the blob or the hash didn't match.
     fn drop(&mut self) {
+        self.preallocation = None;
         if let Stage::Writing(handle) = &self.stage {
             let store = handle.store();
             store
@@ -231,6 +246,10 @@ impl DeliveryBlobWriter {
             block_size.align_down(self.write_buffer.len() as u64) as usize
         };
         if len == 0 {
+            if is_final {
+                self.preallocation = None;
+                self.prealloc_remaining = 0;
+            }
             return Ok(());
         }
         let aligned_len = block_size.align_up(len as u64).ok_or(FxfsError::OutOfRange)? as usize;
@@ -243,20 +262,46 @@ impl DeliveryBlobWriter {
         let offset = self.payload_persisted;
         let range = offset..offset + aligned_len as u64;
 
+        if !is_final && self.preallocation.as_ref().is_none_or(Preallocation::is_empty) {
+            if let Some(prealloc_len) = block_size
+                .align_up(self.prealloc_remaining)
+                .filter(|&prealloc_len| prealloc_len > aligned_len as u64)
+            {
+                let store = handle.store();
+                if let Ok(prealloc) = store
+                    .filesystem()
+                    .ensure_local()
+                    .allocator()
+                    .preallocate(store.store_object_id(), prealloc_len)
+                    .await
+                {
+                    if !prealloc.is_empty() {
+                        self.preallocation = Some(prealloc);
+                    }
+                }
+            }
+        }
+
         let mut transaction =
             handle.new_transaction().await.context("Failed to create transaction.")?;
         handle
-            .multi_write(
+            .multi_write_with_preallocation(
                 &mut transaction,
                 handle.attribute_id(),
+                self.preallocation.as_mut(),
                 std::slice::from_ref(&range),
                 transfer_buf.as_mut(),
             )
             .await
             .context("Failed to write data to object handle.")?;
-        handle.txn_update_size(&mut transaction, new_persisted, None).await?;
+        handle.txn_update_size(&mut transaction, new_persisted).await?;
         transaction.commit().await.context("Failed to commit transaction.")?;
 
+        self.prealloc_remaining = self.prealloc_remaining.saturating_sub(aligned_len as u64);
+        if is_final {
+            self.preallocation = None;
+            self.prealloc_remaining = 0;
+        }
         self.write_buffer.drain(..len);
         self.payload_persisted = new_persisted;
         Ok(())
@@ -485,40 +530,25 @@ impl DeliveryBlobWriter {
         .context("Replacing child failed.")?
         {
             ReplacedChild::None => None,
-            ReplacedChild::Object(old) => {
-                let pager_info = if volume.use_driver_blob_paging() {
-                    None
-                } else {
-                    let compressed_size = self.payload_persisted;
-                    let compression_info = metadata.format.compression_info(compressed_size)?;
-                    let merkle_verifier = metadata.into_merkle_verifier(root)?;
-                    Some((merkle_verifier, compression_info))
-                };
-                let reservation = match volume.cache().get_or_reserve(object_id).await {
-                    GetResult::Placeholder(p) => p,
-                    _ => unreachable!(),
-                };
-                Some((old, reservation, pager_info))
-            }
+            ReplacedChild::Object(old) => Some(old),
             _ => return Err(FxfsError::Inconsistent.into()),
         };
 
+        let mut replaced_open_blob = false;
         transaction
             .commit_with_callback(|_| {
-                let handle = self.stage.complete();
+                self.stage.complete();
                 if replacing.is_some() {
                     self.parent.did_remove(&name);
                 }
                 self.parent.did_add(&name, None);
-                if let Some((old_id, reservation, pager_info)) = replacing {
-                    // If the blob is in the cache, then we need to swap it.
+                if let Some(old_id) = replacing {
                     let cache = self.parent.volume().cache();
                     match cache.get(old_id) {
                         Some(old_blob) => {
-                            let old_blob = old_blob.into_any().downcast::<FxBlob>().unwrap();
-                            let new_blob = old_blob.overwrite_me(handle, pager_info);
+                            cache.remove(old_blob.as_ref());
                             old_blob.mark_to_be_purged();
-                            reservation.commit(&(new_blob as Arc<dyn FxNode>));
+                            replaced_open_blob = true;
                         }
                         None => {
                             // If it isn't open now, it is no longer reachable to be opened, so just
@@ -538,6 +568,9 @@ impl DeliveryBlobWriter {
             })
             .await
             .context("Failed to commit transaction!")?;
+        if replaced_open_blob {
+            dir.mapping_provider().on_blob_overwritten(self.hash).await;
+        }
         Ok(())
     }
 
@@ -628,6 +661,27 @@ impl DeliveryBlobWriter {
             )?);
         }
         let consumed = self.buffer.len() - chunk_data.len();
+        let chunk_data_len = (archive_length - consumed) as u64;
+        let decompressed_size = decoded_archive.decompressed_size() as u64;
+        let estimated_output_size = match self.storage_format {
+            BlobStorageFormat::DeliveryBlob => Some(chunk_data_len),
+            BlobStorageFormat::Uncompressed => Some(decompressed_size),
+            BlobStorageFormat::Lz4
+                if decoded_archive.compression_algorithm() == CompressionAlgorithm::Zstd =>
+            {
+                let scaled = chunk_data_len
+                    .saturating_mul(LZ4_FROM_ZSTD_NUMERATOR)
+                    .div_ceil(LZ4_FROM_ZSTD_DENOMINATOR)
+                    .saturating_add(LZ4_FROM_ZSTD_MARGIN_BYTES);
+                Some(std::cmp::min(decompressed_size, scaled))
+            }
+            BlobStorageFormat::Zstd | BlobStorageFormat::Lz4 => None,
+        };
+        if let Some(size) =
+            estimated_output_size.filter(|&s| s > PAYLOAD_BUFFER_FLUSH_THRESHOLD as u64)
+        {
+            self.prealloc_remaining = size;
+        }
         self.buffer.drain(..consumed);
         let hash = self.hash;
         self.decompressor = Some(
@@ -652,8 +706,15 @@ impl DeliveryBlobWriter {
         if self.header.is_none() && !self.decode_delivery_blob_header()? {
             return Ok(false);
         }
-        if self.header().is_compressed && !self.decode_archive_header()? {
-            return Ok(false);
+        if self.header().is_compressed {
+            if !self.decode_archive_header()? {
+                return Ok(false);
+            }
+        } else {
+            let payload_len = self.header().payload_length as u64;
+            if payload_len > PAYLOAD_BUFFER_FLUSH_THRESHOLD as u64 {
+                self.prealloc_remaining = payload_len;
+            }
         }
         if self.is_passthrough() {
             debug_assert!(self.write_buffer.is_empty());
@@ -1610,6 +1671,8 @@ mod tests {
     }
 
     #[fuchsia::test(threads = 10)]
+    // TODO(https://fxbug.dev/535490285): Re-enable once blob overwrite is implemented.
+    #[ignore]
     async fn allow_existing_cleans_up_old_while_vmo_held() {
         let fixture = new_blob_fixture().await;
 
@@ -1700,10 +1763,8 @@ mod tests {
             blob_dir.directory().directory().lookup(&hash_string).await.unwrap().expect("");
         // The `read_blob` call above gets a VMO for the blob. Even though the VMO is dropped, the
         // blob receives the ON_ZERO_CHILDREN signal asynchronously meaning that the blob may still
-        // be open here. The dirent cache also keeps the blob open so it needs to be cleared.
-        // Waiting for the blob to be removed from the node cache is the best guarantee that the
-        // blob is actually closed.
-        fixture.volume().volume().dirent_cache().clear();
+        // be open here. Waiting for the blob to be removed from the node cache is the best
+        // guarantee that the blob is actually closed.
         async {
             while fixture.volume().volume().cache().get(old_id).is_some() {
                 fuchsia_async::Timer::new(std::time::Duration::from_millis(5)).await;
@@ -1741,6 +1802,8 @@ mod tests {
     }
 
     #[fuchsia::test(threads = 10)]
+    // TODO(https://fxbug.dev/535490285): Re-enable once blob overwrite is implemented.
+    #[ignore]
     async fn allow_existing_page_in_smoke_test() {
         let fixture = new_blob_fixture().await;
 
@@ -1818,6 +1881,8 @@ mod tests {
     }
 
     #[fuchsia::test(threads = 10)]
+    // TODO(https://fxbug.dev/535490285): Re-enable once blob overwrite is implemented.
+    #[ignore]
     async fn test_overwrite_with_different_chunk_size() {
         // The merkle verifier and chunks supplied bits can't be cloned from the original blob to
         // the new blob because the chunk size might be different in the new blob.
@@ -1891,6 +1956,8 @@ mod tests {
     }
 
     #[fuchsia::test(threads = 10)]
+    // TODO(https://fxbug.dev/535490285): Re-enable once blob overwrite is implemented.
+    #[ignore]
     async fn test_overwrite_lz4_to_zstd() {
         // There's currently no LZ4 delivery blobs so only LZ4 -> ZSTD can be tested. That's also
         // why make-blob-image is used to generate the LZ4 blob.
@@ -2579,5 +2646,255 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Returns the coalesced physical device ranges backing `handle`'s data attribute.
+    async fn data_device_ranges(handle: &DataObjectHandle<FxVolume>) -> Vec<Range<u64>> {
+        use futures::StreamExt as _;
+        let layer_set = handle.store().tree().layer_set();
+        let mut merger = layer_set.merger();
+        let stream =
+            handle.extent_stream(&mut merger, fxfs::object_store::AttributeId::DATA).await.unwrap();
+        let mut stream = std::pin::pin!(stream);
+        let mut raw: Vec<Range<u64>> = Vec::new();
+        while let Some(ext) = stream.next().await {
+            let ext = ext.unwrap();
+            let dev = ext.device_range().clone();
+            if let Some(last) = raw.last_mut()
+                && last.end == dev.start
+            {
+                last.end = dev.end;
+            } else {
+                raw.push(dev);
+            }
+        }
+        raw
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_interleaved_uncompressed_blobs_are_contiguous_on_device() {
+        let fixture = new_blob_fixture().await;
+        let mut data_a = vec![0xaa; 640 * 1024];
+        let mut data_b = vec![0xbb; 640 * 1024];
+        rand::fill(&mut data_a[..64]);
+        rand::fill(&mut data_b[..64]);
+        let hash_a = fuchsia_merkle::root_from_slice(&data_a);
+        let hash_b = fuchsia_merkle::root_from_slice(&data_b);
+        let delivery_a = Type1Blob::generate(&data_a, CompressionMode::Never);
+        let delivery_b = Type1Blob::generate(&data_b, CompressionMode::Never);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer_a =
+                DeliveryBlobWriter::new(&blob_dir, hash_a, BlobStorageFormat::DeliveryBlob)
+                    .await
+                    .unwrap();
+            let mut writer_b =
+                DeliveryBlobWriter::new(&blob_dir, hash_b, BlobStorageFormat::DeliveryBlob)
+                    .await
+                    .unwrap();
+            let vmo_a = writer_a.get_vmo(delivery_a.len() as u64).unwrap();
+            let vmo_b = writer_b.get_vmo(delivery_b.len() as u64).unwrap();
+            let vmo_size = vmo_a.get_size().unwrap();
+            let writes_a = generate_list_of_writes(delivery_a.len() as u64);
+            let writes_b = generate_list_of_writes(delivery_b.len() as u64);
+            assert!(writes_a.len() >= 5);
+            for i in 0..std::cmp::max(writes_a.len(), writes_b.len()) {
+                if let Some(r) = writes_a.get(i) {
+                    vmo_a
+                        .write(&delivery_a[r.start as usize..r.end as usize], r.start % vmo_size)
+                        .unwrap();
+                    writer_a.bytes_ready(r.end - r.start).await.unwrap();
+                }
+                if let Some(r) = writes_b.get(i) {
+                    vmo_b
+                        .write(&delivery_b[r.start as usize..r.end as usize], r.start % vmo_size)
+                        .unwrap();
+                    writer_b.bytes_ready(r.end - r.start).await.unwrap();
+                }
+            }
+        }
+
+        let handle_a = fixture.get_blob_handle(&format!("{hash_a}")).await;
+        let handle_b = fixture.get_blob_handle(&format!("{hash_b}")).await;
+        assert_eq!(data_device_ranges(&handle_a).await.len(), 1);
+        assert_eq!(data_device_ranges(&handle_b).await.len(), 1);
+        std::mem::drop(handle_a);
+        std::mem::drop(handle_b);
+
+        assert_eq!(fixture.read_blob(hash_a).await, data_a);
+        assert_eq!(fixture.read_blob(hash_b).await, data_b);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_prealloc_falls_back_cleanly_under_tight_byte_limit() {
+        let fixture = new_blob_fixture().await;
+        let data = vec![0x5a; 300 * 1024];
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery = Type1Blob::generate(&data, CompressionMode::Never);
+
+        let store = fixture.volume().volume().store();
+        let bs = fixture.fs().block_size().get();
+        let used = fixture.fs().allocator().owner_allocation_info(store.store_object_id()).0;
+        let mut txn = fixture
+            .fs()
+            .root_store()
+            .new_transaction(fxfs::object_store::transaction::lock_keys![], Default::default())
+            .await
+            .unwrap();
+        fixture
+            .fs()
+            .allocator()
+            .set_bytes_limit(&mut txn, store.store_object_id(), used + 340 * 1024 + 8 * bs)
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        // Temporarily hold 200 KiB of the store's byte limit (and physical range `[start, +200K)`)
+        // across the first 128 KiB flush so `writer`'s initial 300 KiB preallocation is clamped to
+        // ~172 KiB, then release the temporary hold so subsequent flushes tear out of the clamped
+        // preallocation and fall back into the lower freed range (producing multiple extents).
+        let mut temp_prealloc = Some(
+            fixture
+                .fs()
+                .allocator()
+                .preallocate(store.store_object_id(), 200 * 1024)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(temp_prealloc.as_ref().unwrap().remaining(), 200 * 1024);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::DeliveryBlob)
+                    .await
+                    .unwrap();
+            let vmo = writer.get_vmo(delivery.len() as u64).unwrap();
+            let vmo_size = vmo.get_size().unwrap();
+            let mut offset = 0u64;
+            // Write in 140 KiB chunks so the first chunk still exceeds the 128 KiB payload buffer
+            // flush threshold after stripping the 12-byte Type1 delivery blob header.
+            for chunk in delivery.chunks(140 * 1024) {
+                let vmo_offset = offset % vmo_size;
+                let first_len = std::cmp::min(chunk.len(), (vmo_size - vmo_offset) as usize);
+                vmo.write(&chunk[..first_len], vmo_offset).unwrap();
+                if first_len < chunk.len() {
+                    vmo.write(&chunk[first_len..], 0).unwrap();
+                }
+                offset += chunk.len() as u64;
+                writer.bytes_ready(chunk.len() as u64).await.unwrap();
+                if writer.payload_persisted > 0 && temp_prealloc.is_some() {
+                    let remaining = writer.preallocation.as_ref().unwrap().remaining();
+                    assert!(
+                        remaining < (300 - 128) * 1024,
+                        "expected clamped preallocation, got {remaining} remaining"
+                    );
+                    temp_prealloc = None;
+                }
+            }
+        }
+        let handle = fixture.get_blob_handle(&format!("{hash}")).await;
+        let ranges = data_device_ranges(&handle).await;
+        assert!(ranges.len() >= 2, "expected multiple extents after fallback, got {ranges:?}");
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_recompress_zstd_to_lz4_over_estimate_releases_tail() {
+        let fixture = new_blob_fixture().await;
+        // Each 256-byte block has 160 fresh random bytes followed by 96 zero bytes: both ZSTD and
+        // LZ4 compress the zero runs while emitting literals for the random bytes (~330 KiB each),
+        // so `min(512 KiB, 1.5 * zstd + 16 KiB)` (~503 KiB) over-estimates the ~330 KiB LZ4 output
+        // and must release the unused ~173 KiB tail on completion.
+        let mut data = vec![0u8; 512 * 1024];
+        rand::fill(&mut data[..]);
+        for chunk in data.chunks_exact_mut(256) {
+            chunk[160..].fill(0);
+        }
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery = Type1Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Lz4).await.unwrap();
+            let vmo = writer.get_vmo(delivery.len() as u64).unwrap();
+            let vmo_size = vmo.get_size().unwrap();
+            for r in generate_list_of_writes(delivery.len() as u64) {
+                vmo.write(&delivery[r.start as usize..r.end as usize], r.start % vmo_size).unwrap();
+                writer.bytes_ready(r.end - r.start).await.unwrap();
+            }
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{hash}")).await;
+        let stored_size = fxfs::object_handle::ReadObjectHandle::get_size(&handle);
+        assert!(
+            stored_size > 2 * PAYLOAD_BUFFER_FLUSH_THRESHOLD as u64,
+            "expected multiple flushes, got stored_size={stored_size}"
+        );
+        let estimate_lower_bound =
+            (delivery.len() as u64 * LZ4_FROM_ZSTD_NUMERATOR) / LZ4_FROM_ZSTD_DENOMINATOR;
+        assert!(
+            stored_size < estimate_lower_bound,
+            "expected over-estimated preallocation: stored_size={stored_size}, \
+            estimate_lower_bound={estimate_lower_bound}"
+        );
+        let ranges = data_device_ranges(&handle).await;
+        assert_eq!(ranges.len(), 1, "expected contiguous LZ4 output, got {ranges:?}");
+        let bs = fixture.fs().block_size();
+        assert_eq!(ranges[0].end - ranges[0].start, bs.align_up(stored_size).unwrap());
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        // `close()` runs fsck, verifying that no over-held bytes leaked in allocator accounting.
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_recompress_zstd_to_lz4_under_estimate_falls_back_to_extra_extent() {
+        let fixture = new_blob_fixture().await;
+        // Random bytes drawn from 16 values have no long repeats for LZ4 to match, but ZSTD's
+        // entropy coding halves them, so LZ4 output is ~1.75x the ZSTD payload and exceeds the
+        // preallocation estimate.
+        let mut data = vec![0u8; 1024 * 1024];
+        rand::fill(&mut data[..]);
+        for byte in &mut data {
+            *byte &= 0x0f;
+        }
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery = Type1Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Lz4).await.unwrap();
+            let vmo = writer.get_vmo(delivery.len() as u64).unwrap();
+            let vmo_size = vmo.get_size().unwrap();
+            for r in generate_list_of_writes(delivery.len() as u64) {
+                vmo.write(&delivery[r.start as usize..r.end as usize], r.start % vmo_size).unwrap();
+                writer.bytes_ready(r.end - r.start).await.unwrap();
+            }
+        }
+
+        // Check the data really was under-estimated; the estimate can't exceed this bound because
+        // the ZSTD payload is smaller than the delivery blob.
+        let handle = fixture.get_blob_handle(&format!("{hash}")).await;
+        let estimate_bound = (delivery.len() as u64 * LZ4_FROM_ZSTD_NUMERATOR)
+            .div_ceil(LZ4_FROM_ZSTD_DENOMINATOR)
+            + LZ4_FROM_ZSTD_MARGIN_BYTES;
+        let stored_size = fxfs::object_handle::ReadObjectHandle::get_size(&handle);
+        assert!(stored_size > estimate_bound, "{stored_size} <= {estimate_bound}");
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
     }
 }

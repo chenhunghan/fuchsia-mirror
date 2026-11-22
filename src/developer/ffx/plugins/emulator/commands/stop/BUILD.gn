@@ -29,10 +29,7 @@ if (is_host) {
 
     sources = [ "src/lib.rs" ]
 
-    test_deps = [
-      "//src/lib/fuchsia",
-      "//third_party/rust_crates:tempfile",
-    ]
+    test_deps = [ "//src/lib/fuchsia" ]
   }
 
   group("tests") {

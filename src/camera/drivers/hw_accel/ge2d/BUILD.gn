@@ -82,7 +82,6 @@ fuchsia_driver_component("ge2d-driver") {
     ":ge2d-driver-driver",
     ":ge2d_bind",
   ]
-  info = "meta/ge2d-driver-info.json"
 }
 
 fuchsia_driver_package("ge2d") {

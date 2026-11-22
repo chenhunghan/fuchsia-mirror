@@ -230,6 +230,8 @@ enum TaskRequest {
         remote_binder_connection: Arc<RemoteBinderConnection>,
         vmo: fidl::Vmo,
         mapped_address: u64,
+        /// The size of the mapping of the VMO, if the client gave it.
+        mapped_size: Option<u64>,
         // a synchronous function avoids thread hops.
         #[derivative(Debug = "ignore")]
         responder: SynchronousResponder<()>,
@@ -911,6 +913,7 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
                     remote_binder_connection: remote_binder_connection.clone(),
                     vmo,
                     mapped_address,
+                    mapped_size: None,
                     responder,
                 });
                 waiter.await;
@@ -929,6 +932,35 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
                     remote_binder_connection: remote_binder_connection.clone(),
                     vmo,
                     mapped_address,
+                    mapped_size: None,
+                    responder,
+                });
+                waiter.await;
+            }
+            fbinder::BinderRequest::MapVmoWithSize { payload, responder } => {
+                let fbinder::BinderMapVmoWithSizeRequest {
+                    vmo: Some(vmo),
+                    mapped_address: Some(mapped_address),
+                    mapped_size: Some(mapped_size),
+                    ..
+                } = payload
+                else {
+                    let _ = responder.send(Err(fposix::Errno::Einval));
+                    return Ok(());
+                };
+                // Respond once the VMO is mapped, as for `MapVmo`.
+                let (responder, waiter) =
+                    Self::make_synchronous_responder(responder, |responder, result| {
+                        responder.send(result.map_err(|e| {
+                            fposix::Errno::from_primitive(e.code.error_code() as i32)
+                                .unwrap_or(fposix::Errno::Einval)
+                        }))
+                    });
+                self.enqueue_taskless_request(TaskRequest::SetVmo {
+                    remote_binder_connection: remote_binder_connection.clone(),
+                    vmo,
+                    mapped_address,
+                    mapped_size: Some(mapped_size),
                     responder,
                 });
                 waiter.await;
@@ -1434,12 +1466,14 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
                     remote_binder_connection,
                     vmo,
                     mapped_address,
+                    mapped_size,
                     responder,
                 } => {
                     let result = remote_binder_connection.map_external_vmo(
                         current_task,
                         vmo,
                         mapped_address,
+                        mapped_size,
                     );
                     let interruption = must_interrupt(&result);
                     responder(result).map_err(|_| errno!(EINVAL))?;
@@ -1846,6 +1880,74 @@ mod tests {
                 binder.map_vmo(vmo, address).await.expect("map_vmo"),
                 Err(fposix::Errno::Einval)
             );
+            binder
+        })
+        .await;
+    }
+
+    /// Calls `MapVmoWithSize` with `mapped_vmo`, of which the client mapped `mapped_size` bytes.
+    async fn map_vmo_with_size(
+        binder: &fbinder::BinderProxy,
+        mapped_vmo: &MappedTestVmo,
+        mapped_size: u64,
+    ) -> Result<(), fposix::Errno> {
+        let (vmo, address) = mapped_vmo.vmo_args();
+        binder
+            .map_vmo_with_size(fbinder::BinderMapVmoWithSizeRequest {
+                vmo: Some(vmo),
+                mapped_address: Some(address),
+                mapped_size: Some(mapped_size),
+                ..Default::default()
+            })
+            .await
+            .expect("map_vmo_with_size")
+    }
+
+    #[::fuchsia::test]
+    async fn map_vmo_with_size_responds_once_mapped() {
+        run_remote_binder_test(|binder| async move {
+            let mapped_vmo = MappedTestVmo::new();
+            let mapped_size = (MappedTestVmo::SIZE / 2) as u64;
+            assert_eq!(map_vmo_with_size(&binder, &mapped_vmo, mapped_size).await, Ok(()));
+
+            // The VMO is mapped once `map_vmo_with_size` responds, so the driver rejects another
+            // one, and returns the error to the client.
+            assert_eq!(
+                map_vmo_with_size(&binder, &mapped_vmo, mapped_size).await,
+                Err(fposix::Errno::Einval)
+            );
+            binder
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn map_vmo_with_size_rejects_invalid_requests() {
+        run_remote_binder_test(|binder| async move {
+            let mapped_vmo = MappedTestVmo::new();
+            let vmo_size = MappedTestVmo::SIZE as u64;
+            for mapped_size in [0, *PAGE_SIZE + 1, vmo_size + *PAGE_SIZE] {
+                assert_eq!(
+                    map_vmo_with_size(&binder, &mapped_vmo, mapped_size).await,
+                    Err(fposix::Errno::Einval),
+                    "mapped_size: {mapped_size}"
+                );
+            }
+            let (vmo, address) = mapped_vmo.vmo_args();
+            assert_eq!(
+                binder
+                    .map_vmo_with_size(fbinder::BinderMapVmoWithSizeRequest {
+                        vmo: Some(vmo),
+                        mapped_address: Some(address),
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("map_vmo_with_size"),
+                Err(fposix::Errno::Einval)
+            );
+
+            // The invalid requests did not map the VMO.
+            assert_eq!(map_vmo_with_size(&binder, &mapped_vmo, vmo_size).await, Ok(()));
             binder
         })
         .await;
@@ -2629,11 +2731,9 @@ mod tests {
                     request: TaskRequest::Return { spawn_thread: false },
                 }),
             );
-            worker_task.thread_group().set_stopped(
-                starnix_core::ptrace::StopState::GroupStopping,
-                None,
-                false,
-            );
+            worker_task
+                .thread_group()
+                .set_stopped(starnix_core::ptrace::StopState::GroupStopping, None);
             assert_eq!(worker_task.load_stopped(), starnix_core::ptrace::StopState::Awake);
 
             assert_matches::assert_matches!(

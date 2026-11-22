@@ -1,0 +1,110 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//sdk/ctf/build:ctf_fx_package.bzl", "ctf_fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fuchsia-examples-cpp-tests-package_test"],
+    visibility = ["//sdk:__pkg__"],
+)
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["main.cc"],
+    gn_output_name = "ctf_fuchsia_examples_cpp_test",
+    deps = [
+        "//examples/fidl/fuchsia.examples:fuchsia.examples_hlcpp",
+        "//sdk/ctf/tests/examples/fidl/fuchsia.examples/testing/fidl:test.example_hlcpp",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_hlcpp",
+        "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "ctf_fuchsia_examples_cpp_test",
+)
+
+fx_component_manifest(
+    name = "test-suite_manifest",
+    testonly = True,
+    component_name = "test-suite",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/testing:elf_test_runner",
+        "//sdk/lib/syslog:client.shard",
+        "//src/testing/realm_client:meta/realm_client.shard.cml",
+    ],
+    manifest = "meta/test-suite.cml",
+)
+
+fx_component(
+    name = "test-suite",
+    testonly = True,
+    compiled_manifest = ":test-suite_manifest",
+    deps = [":bin_packaged"],
+)
+
+ctf_fx_package(
+    name = "fuchsia-examples-cpp-tests",
+    testonly = True,
+    components = [":test-suite"],
+)
+
+fx_component_manifest(
+    name = "test-root_manifest",
+    testonly = True,
+    component_name = "test-root",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/test-root.cml",
+)
+
+fx_test_component(
+    name = "test-root",
+    compiled_manifest = ":test-root_manifest",
+    test_type = "ctf",
+)
+
+fx_package(
+    name = "fuchsia-examples-cpp-tests-package",
+    testonly = True,
+    subpackages = [
+        ":fuchsia-examples-cpp-tests",
+        "//sdk/ctf/tests/examples/fidl/fuchsia.examples/testing/realm-factory:echo-realm-factory",
+    ],
+    test_components = [":test-root"],
+)
+
+fx_test(
+    name = "fuchsia-examples-cpp-tests-package_test",
+    package = ":fuchsia-examples-cpp-tests-package",
+)

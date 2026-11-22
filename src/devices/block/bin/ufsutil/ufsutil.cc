@@ -9,8 +9,19 @@
 #include <zircon/errors.h>
 
 #include <cstdlib>
+#include <format>
+#include <functional>
+#include <map>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <unordered_map>
+#include <utility>
 
+#include "error-history.h"
 #include "query.h"
+#include "rpmb.h"
+#include "uic.h"
 
 namespace ufsutil {
 namespace {
@@ -34,9 +45,36 @@ constexpr char kWriteDescUsageMessage[] = QUERY_REQUEST_COMMAND_USAGE_MESSAGE(
     "  [--file=<FILE_PATH>, -f <FILE_PATH>]  (required by the configuration descriptor)\n");
 constexpr char kWriteAttributeUsageMessage[] =
     QUERY_REQUEST_COMMAND_USAGE_MESSAGE("write-attr", "  [--value=<NUM>, -v <NUM>]\n");
+constexpr char kErrorHistoryUsageMessage[] =
+    "Usage: ufsutil <device> error-history [options]\n"
+    "options:\n"
+    "  [--out-dir=<OUTPUT_DIR>, -o <OUTPUT_DIR>]    (required)\n"
+    "\n"
+    "  Retrieves error history data from the UFS device and saves it to files\n"
+    "  in the specified output directory.\n"
+    "\n"
+    "  Each error history entry will be saved as:\n"
+    "    ufsutil_error_entry_<buffer_id>.bin (buffer_id in hex, e.g. 10)\n";
+constexpr char kDmeGetUsageMessage[] =
+    "Usage: ufsutil <device> dme-get [options]\n"
+    "options:\n"
+    "  [--id=<NUM>, -i <NUM>]          ID of the attribute (required)\n"
+    "  [--selector=<NUM>, -s <NUM>]    GenSelectorIndex (default = 0)\n"
+    "  [--peer, -p]                    Access to peer UniPort (default: local)\n";
+constexpr char kDmeSetUsageMessage[] =
+    "Usage: ufsutil <device> dme-set [options]\n"
+    "options:\n"
+    "  [--id=<NUM>, -i <NUM>]          ID of the attribute (required)\n"
+    "  [--selector=<NUM>, -s <NUM>]    GenSelectorIndex (default = 0)\n"
+    "  [--peer, -p]                    Access to peer UniPort (default: local)\n"
+    "  [--value=<NUM>, -v <NUM>]       (required)\n"
+    "\n"
+    "Only volatile values of the attributes allowed by the driver (e.g. PA_TActivate,\n"
+    "PA_Granularity) can be set.\n";
 
-using CommandHandler = std::function<int(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>&,
-                                         const std::unordered_map<uint32_t, OptionValue>&)>;
+using CommandHandler = std::function<zx::result<>(
+    const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>&,
+    const std::unordered_map<uint32_t, OptionValue>&, std::ostream&, std::ostream&)>;
 
 const char* kQueryRequestShortOptions = "ht:i:s:";
 const struct option kQueryRequestOptions[] = {
@@ -68,6 +106,32 @@ const struct option kWriteDescriptorOptions[] = {
     {.name = nullptr, .has_arg = 0, .flag = nullptr, .val = 0},
 };
 
+const char* kErrorHistoryShortOptions = "ho:";
+const struct option kErrorHistoryLongOptions[] = {
+    {.name = "help", .has_arg = no_argument, .flag = nullptr, .val = 'h'},
+    {.name = "out-dir", .has_arg = required_argument, .flag = nullptr, .val = 'o'},
+    {.name = nullptr, .has_arg = 0, .flag = nullptr, .val = 0},
+};
+
+const char* kDmeGetShortOptions = "hi:s:p";
+const struct option kDmeGetLongOptions[] = {
+    {.name = "help", .has_arg = no_argument, .flag = nullptr, .val = 'h'},
+    {.name = "id", .has_arg = required_argument, .flag = nullptr, .val = 'i'},
+    {.name = "selector", .has_arg = required_argument, .flag = nullptr, .val = 's'},
+    {.name = "peer", .has_arg = no_argument, .flag = nullptr, .val = 'p'},
+    {.name = nullptr, .has_arg = 0, .flag = nullptr, .val = 0},
+};
+
+const char* kDmeSetShortOptions = "hi:s:v:p";
+const struct option kDmeSetLongOptions[] = {
+    {.name = "help", .has_arg = no_argument, .flag = nullptr, .val = 'h'},
+    {.name = "id", .has_arg = required_argument, .flag = nullptr, .val = 'i'},
+    {.name = "selector", .has_arg = required_argument, .flag = nullptr, .val = 's'},
+    {.name = "value", .has_arg = required_argument, .flag = nullptr, .val = 'v'},
+    {.name = "peer", .has_arg = no_argument, .flag = nullptr, .val = 'p'},
+    {.name = nullptr, .has_arg = 0, .flag = nullptr, .val = 0},
+};
+
 enum class UfsCommand : uint8_t {
   READ_DESC,
   WRITE_DESC,
@@ -77,6 +141,9 @@ enum class UfsCommand : uint8_t {
   TOGGLE_FLAG,
   READ_ATTR,
   WRITE_ATTR,
+  ERROR_HISTORY,
+  DME_GET,
+  DME_SET,
 };
 
 struct CommandDefinition {
@@ -89,7 +156,7 @@ struct CommandDefinition {
 };
 
 struct ParsedCommand {
-  std::string_view name;
+  std::string name;
   std::unordered_map<uint32_t, OptionValue> options;
   CommandHandler handler;
 };
@@ -100,77 +167,82 @@ void registerCommand(const std::string& cmd_name, const CommandDefinition& cmd) 
   commandRegistry[cmd_name] = cmd;
 }
 
-std::optional<uint32_t> ParseStrToUint32(const char* str) {
-  char* endptr;
-  uint64_t ret = std::strtoul(str, &endptr, 0);
-  if (endptr == str || *endptr != '\0') {
-    return std::nullopt;
+zx::result<std::optional<ParsedCommand>> ParseCommand(int argc, char** argv, std::ostream& out,
+                                                      std::ostream& err) {
+  if (argc < 3) {
+    PrintUsage(out);
+    return zx::error(ZX_ERR_INVALID_ARGS);
   }
-  if (ret > UINT32_MAX) {
-    return std::nullopt;
-  }
-  return static_cast<uint32_t>(ret);
-}
 
-std::unique_ptr<ParsedCommand> ParseCommand(int argc, char** argv) {
   std::string cmd_name = argv[2];
   auto cmd = commandRegistry.find(cmd_name);
   if (cmd == commandRegistry.end()) {
-    fprintf(stderr, "error: Invalid command '%s'\n", cmd_name.c_str());
-    PrintUsage();
-    return nullptr;
+    err << std::format("error: Invalid command '{}'\n", cmd_name);
+    PrintUsage(out);
+    return zx::error(ZX_ERR_INVALID_ARGS);
   }
 
-  std::unique_ptr<ParsedCommand> result = std::make_unique<ParsedCommand>();
-  result->name = cmd_name;
-  result->handler = cmd->second.handler;
+  ParsedCommand result{
+      .name = cmd_name,
+      .options = {},
+      .handler = cmd->second.handler,
+  };
 
+  opterr = 0;
   optind = 3;
   int opt;
   while ((opt = getopt_long(argc, argv, cmd->second.short_opts, cmd->second.long_opts, nullptr)) !=
          -1) {
     switch (opt) {
       case '?':
+        err << std::format("error: invalid or incomplete option for '{}'\n", cmd_name);
+        out << cmd->second.description << "\n" << cmd->second.helpMessage;
+        return zx::error(ZX_ERR_INVALID_ARGS);
       case 'h':
-        printf("%s\n", cmd->second.description);
-        printf("%s", cmd->second.helpMessage);
-        return nullptr;
+        out << cmd->second.description << "\n" << cmd->second.helpMessage;
+        return zx::ok(std::nullopt);
       case 'f':
-        result->options[opt] = optarg;
+      case 'o':
+        result.options[opt] = optarg;
         break;
       case 't':
       case 'i':
       case 's': {
         auto val = ParseStrToUint32(optarg);
         if (!val) {
-          fprintf(stderr, "error: invalid argument for -%c\n", opt);
-          return nullptr;
+          err << std::format("error: invalid argument for -{:c}\n", static_cast<char>(opt));
+          return zx::error(ZX_ERR_INVALID_ARGS);
         }
-        result->options[opt] = *val;
+        result.options[opt] = *val;
       } break;
       case 'v': {
         if (cmd->second.command_type == UfsCommand::WRITE_DESC) {
-          result->options[opt] = optarg;
-        } else if (cmd->second.command_type == UfsCommand::WRITE_ATTR) {
+          result.options[opt] = optarg;
+        } else if (cmd->second.command_type == UfsCommand::WRITE_ATTR ||
+                   cmd->second.command_type == UfsCommand::DME_SET) {
           auto val = ParseStrToUint32(optarg);
           if (!val) {
-            fprintf(stderr, "error: invalid argument for -%c\n", opt);
-            return nullptr;
+            err << std::format("error: invalid argument for -{:c}\n", static_cast<char>(opt));
+            return zx::error(ZX_ERR_INVALID_ARGS);
           }
-          result->options[opt] = *val;
+          result.options[opt] = *val;
         }
       } break;
+      case 'p':
+        // Flag option: presence is what matters.
+        result.options[opt] = 0u;
+        break;
       default:
         break;
     }
   }
 
-  return result;
+  return zx::ok(std::move(result));
 }
 
-int ExecuteCommand(fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
-                   const ParsedCommand& cmd) {
-  return cmd.handler(client, cmd.options);
+zx::result<> ExecuteCommand(fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
+                            const ParsedCommand& cmd, std::ostream& out, std::ostream& err) {
+  return cmd.handler(client, cmd.options, out, err);
 }
 
 }  // namespace
@@ -232,29 +304,57 @@ void Initialize() {
                    .short_opts = kWriteAttributeShortOptions,
                    .handler = HandleWriteAttribute,
                    .helpMessage = kWriteAttributeUsageMessage});
+  registerCommand(
+      "error-history",
+      {.command_type = UfsCommand::ERROR_HISTORY,
+       .description = "Retrieve the error history directory and data of the UFS device.\n",
+       .long_opts = kErrorHistoryLongOptions,
+       .short_opts = kErrorHistoryShortOptions,
+       .handler = HandleErrorHistory,
+       .helpMessage = kErrorHistoryUsageMessage});
+  registerCommand(
+      "dme-get",
+      {.command_type = UfsCommand::DME_GET,
+       .description = "Retrieve UniPro and M-PHY attributes of the local or peer UniPort.\n",
+       .long_opts = kDmeGetLongOptions,
+       .short_opts = kDmeGetShortOptions,
+       .handler = HandleDmeGet,
+       .helpMessage = kDmeGetUsageMessage});
+  registerCommand(
+      "dme-set",
+      {.command_type = UfsCommand::DME_SET,
+       .description = "Configure UniPro and M-PHY attributes of the local or peer UniPort.\n",
+       .long_opts = kDmeSetLongOptions,
+       .short_opts = kDmeSetShortOptions,
+       .handler = HandleDmeSet,
+       .helpMessage = kDmeSetUsageMessage});
 }
 
-void PrintUsage() {
-  printf(
-      "Usage: ufsutil <device> <command> [options]\n"
-      "   <device>       Path to the UFS device service endpoint, e.g., "
-      "/svc/fuchsia.hardware.ufs.Service/<instance_id>/device\n\n");
-
-  printf("Available commands:\n");
+void PrintUsage(std::ostream& out) {
+  out << "Usage: ufsutil <device> <command> [options]\n"
+         "   <device>       Path to the UFS device service endpoint, e.g., "
+         "/svc/fuchsia.hardware.ufs.Service/<instance_id>/device\n\n"
+         "Available commands:\n";
   for (const auto& cmd : commandRegistry) {
-    printf("  %-40s  %s", cmd.first.c_str(), cmd.second.description);
+    out << std::format("  {:<40}  {}", cmd.first, cmd.second.description);
   }
-  printf("\nType 'ufsutil <device> <command> -h' for help on a specific command.\n");
-  printf("\nSupported Specifiation: JEDEC UFS 3.1 (JESD220E)\n");
+  PrintRpmbUsage(out);
+  out << "\nType 'ufsutil <device> <command> -h' for help on a specific command.\n"
+         "\nSupported Specifiation: JEDEC UFS 3.1 (JESD220E)\n";
 }
 
-int RunUfsUtils(fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs> client, int argc, char** argv) {
-  std::unique_ptr<ParsedCommand> cmd = ParseCommand(argc, argv);
-  if (!cmd) {
-    return EXIT_FAILURE;
+zx::result<> RunUfsUtils(fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs> client, int argc,
+                         char** argv, std::ostream& out, std::ostream& err) {
+  zx::result<std::optional<ParsedCommand>> cmd = ParseCommand(argc, argv, out, err);
+  if (cmd.is_error()) {
+    return cmd.take_error();
+  }
+  const std::optional<ParsedCommand>& parsed = cmd.value();
+  if (!parsed.has_value()) {
+    return zx::ok();
   }
 
-  return ExecuteCommand(client, *cmd);
+  return ExecuteCommand(client, *parsed, out, err);
 }
 
 zx::result<fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>> OpenDevice(const char* dev) {

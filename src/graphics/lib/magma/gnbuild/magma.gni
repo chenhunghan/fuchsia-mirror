@@ -10,19 +10,10 @@ import("//build/testing/environments.gni")
 declare_args() {
   # Enable this to include fuchsia tracing capability
   magma_enable_tracing = true
-
-  # The path to OpenVX headers
-  magma_openvx_include = ""
-
-  # The path to an OpenVX implementation
-  magma_openvx_package = ""
 }
 
 # Target environments with an Intel GPU.
-magma_intel_gpu_envs = [
-  nuc7_env,
-  nuc11_env,
-]
+magma_intel_gpu_envs = [ nuc11_env ]
 
 # Target environments with an ARM Mali GPU.
 magma_arm_gpu_envs = [

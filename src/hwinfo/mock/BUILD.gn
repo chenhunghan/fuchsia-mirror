@@ -18,11 +18,10 @@ group("mock") {
 
 group("tests") {
   testonly = true
-  deps = [ "integration/tests" ]
+  deps = [ "//src/hwinfo:bazel_tests" ]
 }
 
-# //src/hwinfo/mock/integration/testing/realm-factory still uses this package
-# from GN.
+# Kept for group("mock") and GN callers of //src/hwinfo/mock:package.
 bazel_fuchsia_package("package") {
   testonly = true
   bazel_config = "fuchsia_platform"

@@ -15,6 +15,7 @@ group("pkg") {
 group("tests") {
   testonly = true
   public_deps = [
+    ":bazel_tests",
     ":non_hermetic_tests($target_toolchain)",
     "lib:tests",
     "//src/sys/lib/fidl-fuchsia-pkg-ext:tests",
@@ -22,10 +23,15 @@ group("tests") {
   ]
 }
 
+bazel_test_suite("bazel_tests") {
+  target_tests = [ "//src/sys/pkg:tests" ]
+}
+
 if (is_fuchsia) {
   group("hermetic_tests") {
     testonly = true
     public_deps = [
+      ":bazel_tests",
       "bin:hermetic_tests",
       "lib:hermetic_tests",
       "testing:hermetic_tests",

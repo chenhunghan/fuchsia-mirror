@@ -2,7 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
 import("//build/testing/perf/test.gni")
 
 group("benchmarks") {
@@ -18,28 +17,6 @@ group("pkg") {
   testonly = true
 }
 
-fuchsia_component("rcu_rseq_benchmarks_component") {
-  testonly = true
-  component_name = "rcu_rseq_benchmarks"
-  manifest = "meta/rcu_rseq_benchmarks.cml"
-  deps = [ ":bin_rseq" ]
-}
-
-fuchsia_component("rcu_atomic_benchmarks_component") {
-  testonly = true
-  component_name = "rcu_atomic_benchmarks"
-  manifest = "meta/rcu_atomic_benchmarks.cml"
-  deps = [ ":bin_atomic" ]
-}
-
-fuchsia_test_package("fuchsia_rcu_benchmarks_pkg") {
-  package_name = "fuchsia_rcu_benchmarks"
-  test_components = [
-    ":rcu_atomic_benchmarks_component",
-    ":rcu_rseq_benchmarks_component",
-  ]
-}
-
 group("fuchsia_rcu_benchmarks") {
   testonly = true
   deps = [ ":fuchsia_rcu_benchmarks_pkg" ]
@@ -47,7 +24,7 @@ group("fuchsia_rcu_benchmarks") {
 
 fuchsia_component_perf_test("rcu_rseq_benchmarks") {
   package = ":fuchsia_rcu_benchmarks_pkg"
-  package_name = "fuchsia_rcu_benchmarks"
+  package_name = "fuchsia_rcu_benchmarks-gn"
   component_name = "rcu_rseq_benchmarks"
   expected_metric_names_filepath =
       "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.rcu.rseq.txt"
@@ -55,7 +32,7 @@ fuchsia_component_perf_test("rcu_rseq_benchmarks") {
 
 fuchsia_component_perf_test("rcu_atomic_benchmarks") {
   package = ":fuchsia_rcu_benchmarks_pkg"
-  package_name = "fuchsia_rcu_benchmarks"
+  package_name = "fuchsia_rcu_benchmarks-gn"
   component_name = "rcu_atomic_benchmarks"
   expected_metric_names_filepath =
       "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.rcu.atomic.txt"
@@ -120,4 +97,37 @@ rustc_binary("bin_atomic") {
     "//src/developer/fuchsia-criterion",
     "//src/lib/fuchsia-rcu:fuchsia-rcu-atomic",
   ]
+}
+
+fuchsia_component_manifest("rcu_rseq_benchmarks_manifest") {
+  testonly = true
+  component_name = "rcu_rseq_benchmarks"
+  manifest = "meta/rcu_rseq_benchmarks.cml"
+}
+
+fuchsia_test_component("rcu_rseq_benchmarks_component") {
+  cm_label = ":rcu_rseq_benchmarks_manifest"
+  deps = [ ":bin_rseq" ]
+}
+
+fuchsia_component_manifest("rcu_atomic_benchmarks_manifest") {
+  testonly = true
+  component_name = "rcu_atomic_benchmarks"
+  manifest = "meta/rcu_atomic_benchmarks.cml"
+}
+
+fuchsia_test_component("rcu_atomic_benchmarks_component") {
+  cm_label = ":rcu_atomic_benchmarks_manifest"
+  deps = [ ":bin_atomic" ]
+}
+
+fuchsia_test_package("fuchsia_rcu_benchmarks_pkg") {
+  package_name = "fuchsia_rcu_benchmarks-gn"
+  test_components = [
+    ":rcu_atomic_benchmarks_component",
+    ":rcu_rseq_benchmarks_component",
+  ]
+  test_specs = {
+    build_only = true
+  }
 }

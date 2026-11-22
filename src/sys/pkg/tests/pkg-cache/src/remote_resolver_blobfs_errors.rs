@@ -62,6 +62,9 @@ impl crate::Blobfs for BlobFsWithFileCreateOverride {
     fn blob_reader_proxy(&self) -> ffxfs::BlobReaderProxy {
         panic!("not implemented");
     }
+    fn use_driver_blob_paging(&self) -> bool {
+        self.wrapped.use_driver_blob_paging()
+    }
 }
 
 #[derive(Clone)]
@@ -220,7 +223,7 @@ impl FakeWriter {
 }
 
 async fn make_blobfs_with_minimal_system_image() -> (blobfs_ramdisk::BlobfsRamdisk, Hash) {
-    let blobfs = blobfs_ramdisk::BlobfsRamdisk::start().await.unwrap();
+    let blobfs = blobfs_ramdisk::BlobfsRamdisk::builder().impl_from_env().start().await.unwrap();
     let system_image = fuchsia_pkg_testing::SystemImageBuilder::new().build().await;
     system_image.write_to_blobfs(&blobfs).await;
     (blobfs, *system_image.hash())

@@ -417,6 +417,30 @@ fuchsia_structured_config_rust_lib("shared_config") {
 }`,
 		},
 		{
+			name: "manifest referenced by fuchsia_structured_config_cpp_elf_lib is hoisted and retained",
+			bazel: `fuchsia_structured_config_cpp_elf_lib(
+	name = "cpp_config",
+	cm_label = ":cpp-manifest",
+)
+
+# @bazel2gn:skip
+fx_component(
+	name = "skipped-cpp-comp",
+	compiled_manifest = ":cpp-manifest",
+)
+
+fx_component_manifest(
+	name = "cpp-manifest",
+	manifest = "meta/cpp.cml",
+)`,
+			wantGN: `fuchsia_component_manifest("cpp-manifest") {
+	manifest = "meta/cpp.cml"
+}
+fuchsia_structured_config_cpp_elf_lib("cpp_config") {
+	cm_label = ":cpp-manifest"
+}`,
+		},
+		{
 			name: "fx_component_manifest with restricted_features",
 			bazel: `fx_component_manifest(
 	name = "manifest",

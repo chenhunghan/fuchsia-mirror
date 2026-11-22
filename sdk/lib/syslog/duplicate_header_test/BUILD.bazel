@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "duplicate-header-test",
+    testonly = True,
+    srcs = ["duplicate_header_unittest.cc"],
+    # TODO(https://fxbug.dev/570694755): duplicate_header_unittest.cc uses
+    # angled #include <sdk/lib/...>, which GN resolves via its root -I flag
+    # while Bazel only adds -iquote .
+    # @bazel2gn:skip
+    copts = ["-I."],
+    # In GN, duplicate-header-test is only instantiated in the default
+    # (Fuchsia) toolchain via group("tests").
+    # @bazel2gn:skip
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_cpp",
+        "//sdk/lib/syslog/cpp",
+        "//sdk/lib/syslog/structured_backend",
+        "@com_google_googletest//:gtest",
+    ],
+)

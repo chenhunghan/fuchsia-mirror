@@ -1,0 +1,11 @@
+Source: https://chromium.googlesource.com/infra/luci/luci-go
+License: Apache 2.0
+
+Modifications:
+- Added README.fuchsia
+- Imported resultdb/proto/v1/test_result.proto
+- Set up proto_library rule for generating .pb.go code from .proto
+- Modified import rules from "go.chromium.org/luci/..." to relative paths from "//third_party/luci-go/..."
+- Removed dependency on "google/api/field_behavior.proto"
+- Imported analysis/proto/v1/{common,sources,test_variants}.proto
+- Imported resultdb/pbutil/test_id.go and replaced go.chromium.org/luci/common/errors and validate with stdlib errors and fmt.Errorf

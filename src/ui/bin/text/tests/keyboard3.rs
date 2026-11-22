@@ -20,7 +20,7 @@ use {
 };
 
 const URL_TEXT_MANAGER: &str =
-    "fuchsia-pkg://fuchsia.com/keyboard_test_parallel#meta/text_manager.cm";
+    "#meta/text_manager.cm";
 
 // A shorthand for type safe routing the given protocol from a child to the parent.
 async fn route_to_parent<P: DiscoverableProtocolMarker>(

@@ -57,12 +57,13 @@ This proposal considers the following to be future work and out-of-scope for thi
 
 *   [Support for config schemas in manifest shards](#structured-config-in-manifest-shards)
 *   [Support for complex data types](#complex-data-types)
-*   [Support for default values in config schemas](#default-values-in-config-schemas)
+*   [Support for default values in config
+    schemas](#default-values-in-config-schema)
 *   Support for override policies
     *   Per [RFC-0127][rfc-0127], override policies are declared for config value files
 
 
-### CML Syntax
+### CML syntax {:#cml-syntax}
 
 We will introduce a new top-level key in the component manifest to define the structured
 configuration for a component. The corresponding value contains a key for each configuration field.
@@ -263,7 +264,7 @@ config: {
 }
 ```
 
-### FIDL specification
+### FIDL specification {:#fidl-specification}
 
 The CML syntax defined above must be compiled into an equivalent FIDL object by `cmc`, processed by
 Component Manager and used for override resolution in later stages of implementation.
@@ -592,14 +593,14 @@ config: [
 
 ## Future work
 
-### Structured config in manifest shards
+### Structured config in manifest shards {:#structured-config-in-manifest-shards}
 
 We are deferring this work until we can prove it is necessary. We also do not have a good strategy
 for handling merge conflicts. If merge conflicts halt compilation then each shard needs to name
 config fields defensively. If merge conflicts can be resolved, then different shards may
 unintentionally share the same config field.
 
-### Default values in config schema
+### Default values in config schema {:#default-values-in-config-schema}
 
 Defaults can be supported in configuration fields. These default values will be described using
 JSON types. [RFC-0127][rfc-0127] assumes that defaults should be a part of the configuration
@@ -631,7 +632,7 @@ config: {
 We are deferring this work until we can prove that the subassembly system cannot be used for
 default values.
 
-### Complex data types
+### Complex data types {:#complex-data-types}
 
 In the future, we expect to add support for complex types like `array`, `enum`, `float`, and
 `struct`. These types should be supported in `vector` and may go through additional verification
@@ -734,15 +735,15 @@ config: {
 
 ## Prior art & references
 
-[Component manifest syntax](/docs/concepts/components/v2/component_manifests.md#syntax)
+[Component manifest syntax](/docs/concepts/components/v2/component_manifests.md)
 
-[FIDL language specification](/docs/reference/fidl/language/language.md#types_and_type_declarations)
+[FIDL language specification](/docs/reference/fidl/language/language.md#types-and-type-declarations)
 
 [The JSON5 Data Interchange Format](https://spec.json5.org/)
 
 [rfc-0127]: /docs/contribute/governance/rfcs/0127_structured_configuration.md
-[rfc-0127-config-fidl]: /docs/contribute/governance/rfcs/0127_structured_configuration.md#define_configuration_keys_using_fidl
-[rfc-0098]: /docs/contribute/governance/rfcs/0098_component_framework_rfc_criteria.md#changes_that_require_an_rfc
+[rfc-0127-config-fidl]: /docs/contribute/governance/rfcs/0127_structured_configuration.md#define-configuration-keys-using-fidl
+[rfc-0098]: /docs/contribute/governance/rfcs/0098_component_framework_rfc_criteria.md#changes-that-require-an-rfc
 [archivist-cli]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/diagnostics/archivist/src/main.rs;l=32;drc=2f81b79bd11f245e4fedd593b10e7e324d41c294
 [archivist-json]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/diagnostics/archivist/configs/archivist_config.json;drc=734f251e7c7d1673a874be8747aee3940d45e03a
 [detect-cli]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/diagnostics/detect/src/lib.rs;l=43;drc=d079db3c28c5c6851a99ec16f1395ddcaee55582

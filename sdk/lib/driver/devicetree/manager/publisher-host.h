@@ -15,7 +15,6 @@ namespace fdf_devicetree {
 struct PbusNode {
   fuchsia_hardware_platform_bus::Node node;
   std::vector<std::optional<std::string>> metadata_text;
-  std::vector<std::optional<std::string>> power_config_text;
 };
 
 struct CompositeNodeSpecInfo {
@@ -26,8 +25,7 @@ struct CompositeNodeSpecInfo {
 class PublisherHost : public testing::TestPublisher {
  public:
   zx::result<> AddPbusNode(fuchsia_hardware_platform_bus::Node& pbus_node,
-                           std::vector<std::optional<std::string>> metadata_text = {},
-                           std::vector<std::optional<std::string>> power_config_text = {}) override;
+                           std::vector<std::optional<std::string>> metadata_text = {}) override;
 
   zx::result<> AddBoardChildNode(BoardChildNode args) override;
 

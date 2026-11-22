@@ -347,16 +347,18 @@ impl CoreVerifierLogger for VerifierLoggerAdapter<'_> {
 mod tests {
     use super::*;
     use crate::{
-        ARGUMENT_COUNT, BPF_ADD, BPF_ALU64, BPF_CALL, BPF_DW, BPF_EXIT, BPF_JA, BPF_JEQ, BPF_JMP,
-        BPF_K, BPF_LDDW, BPF_LDX, BPF_MAP_TYPE_ARRAY, BPF_MEM, BPF_MOV, BPF_PSEUDO_MAP_IDX_VALUE,
-        BPF_ST, BPF_STX, BPF_SUB, BPF_W, BPF_X, DataWidth, MapFlags, VerifierErrorKind,
+        ARGUMENT_COUNT, BPF_ABS, BPF_ADD, BPF_ALU64, BPF_AND, BPF_B, BPF_CALL, BPF_DW, BPF_EXIT,
+        BPF_H, BPF_JA, BPF_JEQ, BPF_JGT, BPF_JMP, BPF_K, BPF_LD, BPF_LDDW, BPF_LDX,
+        BPF_MAP_TYPE_ARRAY, BPF_MEM, BPF_MOV, BPF_OR, BPF_PSEUDO_MAP_IDX_VALUE, BPF_RSH, BPF_ST,
+        BPF_STX, BPF_SUB, BPF_W, BPF_X, DataWidth, MapFlags, VerifierErrorKind,
     };
     use core::cmp::Ordering;
     use ebpf_core::scalar_value::{ScalarValueData, U64Range};
     use ebpf_core::verifier::{
         BoundsMap, ComputationContext, DataDependencies, ExplorerArena, ExplorerNode, Field, IdSet,
-        JumpType, JumpWidth, KnownScalars, Namespace, NullCoreVerifierLogger, Stack, StackOffset,
-        TerminatingContexts, VerificationContext, Worklist, WorklistEntry, comp_eq32, comp_eq64,
+        JumpType, JumpWidth, KnownScalars, MAX_PENDING_STATES, MAX_TERMINATING_CONTEXTS_PER_PC,
+        Namespace, NullCoreVerifierLogger, Stack, StackOffset, TerminatingContexts,
+        VerificationContext, Worklist, WorklistEntry, comp_eq32, comp_eq64,
     };
     use linux_uapi::{EACCES, EINVAL};
     use std::collections::BTreeSet;
@@ -947,6 +949,61 @@ mod tests {
             ),
             Err(VerifierErrorKind::UseAfterRelease),
         );
+        let null_or_t1 = Type::NullOr { id: MemoryId::from_raw(100), inner: Box::new(t1.clone()) };
+        assert_eq!(
+            null_or_t1.match_parameter_type(
+                &verification_context,
+                &comp_ctx,
+                &Type::AnyParameter,
+                0,
+                &mut next_after_free.clone(),
+            ),
+            Err(VerifierErrorKind::UseAfterRelease),
+        );
+
+        let mut leak_ctx = make_verification_context();
+        leak_ctx.calling_context.allow_ptr_leaks = true;
+        assert_eq!(
+            t2.match_parameter_type(
+                &leak_ctx,
+                &comp_ctx,
+                &Type::AnyParameter,
+                0,
+                &mut next_after_free.clone(),
+            ),
+            Ok(()),
+        );
+        assert_eq!(
+            null_or_t1.match_parameter_type(
+                &leak_ctx,
+                &comp_ctx,
+                &Type::AnyParameter,
+                0,
+                &mut next_after_free.clone(),
+            ),
+            Err(VerifierErrorKind::UseAfterRelease),
+        );
+        assert_eq!(
+            Type::UNINITIALIZED.match_parameter_type(
+                &leak_ctx,
+                &comp_ctx,
+                &Type::AnyParameter,
+                0,
+                &mut next_after_free.clone(),
+            ),
+            Err(VerifierErrorKind::HelperArgumentTypeMismatch(0)),
+        );
+        let partial_uninit = Type::ScalarValue(ScalarValueData::UNINITIALIZED | 1.into());
+        assert_eq!(
+            partial_uninit.match_parameter_type(
+                &leak_ctx,
+                &comp_ctx,
+                &Type::AnyParameter,
+                0,
+                &mut next_after_free.clone(),
+            ),
+            Err(VerifierErrorKind::HelperArgumentTypeMismatch(0)),
+        );
 
         // Releasing an already-released resource reports DoubleRelease even at a non-zero offset.
         let t1_offset = t1.with_offset(8.into());
@@ -978,6 +1035,37 @@ mod tests {
                 t2.clone(),
             ),
             Ok((other_ptr, t2)),
+        );
+    }
+
+    #[test]
+    fn test_any_parameter_rejects_partial_uninitialized_scalar() {
+        let code = vec![
+            EbpfInstruction::new(BPF_ALU64 | BPF_OR | BPF_K, 3, 0, 0, 1),
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_X, 1, 3, 0, 0),
+            EbpfInstruction::new(BPF_JMP | BPF_CALL, 0, 0, 0, 112),
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 0),
+            EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        let sig = FunctionSignatureBuilder {
+            args: vec![Type::AnyParameter],
+            return_value: Type::UNKNOWN_SCALAR,
+            invalidate_array_bounds: false,
+        }
+        .build();
+        let ctx = CoreCallingContext {
+            maps: vec![],
+            helpers: vec![(112, sig)],
+            args: vec![],
+            packet_type: None,
+            allow_ptr_leaks: false,
+        };
+        assert_eq!(
+            verify_program_core(code, ctx, &mut NullCoreVerifierLogger).err(),
+            Some(VerifierError {
+                kind: VerifierErrorKind::HelperArgumentTypeMismatch(0),
+                pc: Some(2),
+            })
         );
     }
 
@@ -2184,5 +2272,210 @@ mod tests {
         c_wider.registers[1] = Type::UNKNOWN_SCALAR;
         tc.insert(c_wider, DataDependencies::default());
         assert_eq!(tc.contexts.len(), 1);
+    }
+
+    #[test]
+    fn test_narrow_scalar_load_masks_bounds_and_allows_pointer_addition() {
+        let make_ctx = |buffer_size: u64| {
+            let array_id = new_memory_id();
+            let struct_type = Type::PtrToStruct {
+                id: new_memory_id(),
+                offset: 0.into(),
+                descriptor: Box::new(StructDescriptor {
+                    fields: vec![
+                        FieldDescriptor { offset: 0, field_type: FieldType::Scalar { size: 8 } },
+                        FieldDescriptor {
+                            offset: 8,
+                            field_type: FieldType::MutableScalar { size: 8 },
+                        },
+                    ],
+                }),
+            };
+            CallingContext {
+                args: vec![
+                    Type::PtrToMemory {
+                        id: new_memory_id(),
+                        offset: 0.into(),
+                        buffer_size,
+                        origin: PointerOrigin::KernelReadOnly,
+                    },
+                    struct_type.clone(),
+                    Type::PtrToArray { id: array_id.clone(), offset: 0.into() },
+                    Type::PtrToEndArray { id: array_id },
+                ],
+                packet_type: Some(struct_type),
+                ..Default::default()
+            }
+        };
+
+        // Regression test for tracepoint __data_loc offset addition (b/582666680):
+        // Narrow loads (U8, U16, U32) from PtrToMemory (`r1`), PtrToStruct (`r2` Scalar at +0 and
+        // MutableScalar at +8), and PtrToArray (`r3` bounded against PtrToEndArray `r4`) must
+        // bound `urange.max` to `0xff`, `0xffff`, and `0xffff_ffff` respectively so pointer
+        // addition (`r1 += r5`) and subsequent memory access succeed up to `expected_max + 1`
+        // bytes and fail at `expected_max` bytes.
+        for (src_reg, src_offset) in [(1u8, 0i16), (2, 0), (2, 8), (3, 0)] {
+            for (size_flag, rsh_bits, expected_max) in
+                [(BPF_B, 0, 0xffu64), (BPF_H, 0, 0xffffu64), (BPF_W, 16, 0xffffu64)]
+            {
+                let mut body = vec![EbpfInstruction::new(
+                    BPF_LDX | BPF_MEM | size_flag,
+                    5,
+                    src_reg,
+                    src_offset,
+                    0,
+                )];
+                if rsh_bits > 0 {
+                    body.push(EbpfInstruction::new(BPF_ALU64 | BPF_RSH | BPF_K, 5, 0, 0, rsh_bits));
+                }
+                body.extend([
+                    EbpfInstruction::new(BPF_ALU64 | BPF_ADD | BPF_X, 1, 5, 0, 0),
+                    EbpfInstruction::new(BPF_LDX | BPF_MEM | BPF_B, 0, 1, 0, 0),
+                    EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+                ]);
+
+                let mut program = Vec::new();
+                if src_reg == 3 {
+                    let jump_to_exit = (body.len() - 1) as i16;
+                    program.extend([
+                        EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 0),
+                        EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_X, 5, 3, 0, 0),
+                        EbpfInstruction::new(BPF_ALU64 | BPF_ADD | BPF_K, 5, 0, 0, 8),
+                        EbpfInstruction::new(BPF_JMP | BPF_JGT | BPF_X, 5, 4, jump_to_exit, 0),
+                    ]);
+                }
+                program.extend(body);
+                let oob_pc = program.len() - 2;
+
+                assert!(
+                    verify_program(
+                        program.clone(),
+                        make_ctx(expected_max + 1),
+                        &mut NullVerifierLogger
+                    )
+                    .is_ok()
+                );
+                assert_eq!(
+                    verify_program(program, make_ctx(expected_max), &mut NullVerifierLogger).err(),
+                    Some(VerifierError {
+                        kind: VerifierErrorKind::OutOfBoundsMemoryAccess,
+                        pc: Some(oob_pc),
+                    })
+                );
+            }
+
+            // A full 64-bit load (`BPF_DW`) leaves `urange.max == u64::MAX`, so adding it to `r1`
+            // fails with `PointerOffsetOverflow`.
+            let mut u64_load_program = Vec::new();
+            if src_reg == 3 {
+                u64_load_program.extend([
+                    EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 0),
+                    EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_X, 5, 3, 0, 0),
+                    EbpfInstruction::new(BPF_ALU64 | BPF_ADD | BPF_K, 5, 0, 0, 8),
+                    EbpfInstruction::new(BPF_JMP | BPF_JGT | BPF_X, 5, 4, 3, 0),
+                ]);
+            }
+            let overflow_pc = u64_load_program.len() + 1;
+            u64_load_program.extend([
+                EbpfInstruction::new(BPF_LDX | BPF_MEM | BPF_DW, 5, src_reg, src_offset, 0),
+                EbpfInstruction::new(BPF_ALU64 | BPF_ADD | BPF_X, 1, 5, 0, 0),
+                EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 0),
+                EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+            ]);
+            assert_eq!(
+                verify_program(u64_load_program, make_ctx(64), &mut NullVerifierLogger).err(),
+                Some(VerifierError {
+                    kind: VerifierErrorKind::PointerOffsetOverflow,
+                    pc: Some(overflow_pc),
+                })
+            );
+        }
+
+        // Legacy packet loads (`BPF_LD | BPF_ABS | BPF_B`) leave `r0` as `Type::UNKNOWN_SCALAR`,
+        // so masking `r0` with `0x1ffff` yields bounds `[0, 131071]` rather than `[0, 255]`, and
+        // indexing into a 64 KiB `PtrToMemory` fails with `OutOfBoundsMemoryAccess`.
+        let packet_load_program = vec![
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_X, 6, 2, 0, 0),
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_X, 7, 1, 0, 0),
+            EbpfInstruction::new(BPF_LD | BPF_ABS | BPF_B, 0, 0, 0, 0),
+            EbpfInstruction::new(BPF_ALU64 | BPF_AND | BPF_K, 0, 0, 0, 0x1ffff),
+            EbpfInstruction::new(BPF_ALU64 | BPF_ADD | BPF_X, 7, 0, 0, 0),
+            EbpfInstruction::new(BPF_LDX | BPF_MEM | BPF_B, 0, 7, 0, 0),
+            EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        assert_eq!(
+            verify_program(packet_load_program, make_ctx(65536), &mut NullVerifierLogger).err(),
+            Some(VerifierError { kind: VerifierErrorKind::OutOfBoundsMemoryAccess, pc: Some(5) })
+        );
+    }
+
+    #[test]
+    fn test_verifier_bounds_pending_states_and_terminating_contexts() {
+        // 1. A chain of `MAX_PENDING_STATES` sequential conditional branches keeps `jmp_seq` and
+        // `path_depth` within bounds (`8191 <= MAX_JMP_SEQ`, `8191 <= BPF_MAX_INSTS`) while
+        // exceeding `MAX_PENDING_STATES` when queuing the 8192nd branch's two successors. One fewer
+        // branch (`MAX_PENDING_STATES - 1`) stays within `MAX_PENDING_STATES` and succeeds.
+        let build_pending_states_prog = |branch_count: usize| {
+            let mut prog = Vec::with_capacity(branch_count + 2);
+            for idx in 0..branch_count {
+                prog.push(EbpfInstruction::new(
+                    BPF_JMP | BPF_JEQ | BPF_K,
+                    1,
+                    0,
+                    (branch_count - idx - 1) as i16,
+                    idx as i32,
+                ));
+            }
+            prog.push(EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 0));
+            prog.push(EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0));
+            prog
+        };
+        let pending_ctx =
+            || CallingContext { args: vec![Type::UNKNOWN_SCALAR], ..Default::default() };
+        assert!(
+            verify_program(
+                build_pending_states_prog(MAX_PENDING_STATES - 1),
+                pending_ctx(),
+                &mut NullVerifierLogger,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            verify_program(
+                build_pending_states_prog(MAX_PENDING_STATES),
+                pending_ctx(),
+                &mut NullVerifierLogger,
+            )
+            .unwrap_err(),
+            VerifierError { kind: VerifierErrorKind::ComplexityLimitExceeded, pc: None }
+        );
+
+        // 2. TerminatingContexts per-PC cache must stay bounded by MAX_TERMINATING_CONTEXTS_PER_PC
+        // even when fed hundreds of incomparable register constant combinations, evicting the
+        // oldest entries while retaining the newest `MAX_TERMINATING_CONTEXTS_PER_PC` entries.
+        let mut contexts = TerminatingContexts::default();
+        let total_inserted = MAX_TERMINATING_CONTEXTS_PER_PC * 3;
+        for i in 0..total_inserted {
+            let mut ctx = ComputationContext::default();
+            ctx.set_reg(0, Type::from(i as u64)).unwrap();
+            contexts.insert(ctx, DataDependencies::default());
+        }
+        assert_eq!(contexts.contexts.len(), MAX_TERMINATING_CONTEXTS_PER_PC);
+        for i in 0..(total_inserted - MAX_TERMINATING_CONTEXTS_PER_PC) {
+            let mut ctx = ComputationContext::default();
+            ctx.set_reg(0, Type::from(i as u64)).unwrap();
+            assert!(
+                contexts.find_greater_or_equal(&ctx).is_none(),
+                "evicted context {i} should no longer be present"
+            );
+        }
+        for i in (total_inserted - MAX_TERMINATING_CONTEXTS_PER_PC)..total_inserted {
+            let mut ctx = ComputationContext::default();
+            ctx.set_reg(0, Type::from(i as u64)).unwrap();
+            assert!(
+                contexts.find_greater_or_equal(&ctx).is_some(),
+                "retained context {i} should still be present"
+            );
+        }
     }
 }

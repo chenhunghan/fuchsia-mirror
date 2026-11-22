@@ -431,24 +431,31 @@ impl ArchVmAspace {
     ///
     /// # Safety
     ///
-    /// `self` must be an initialized, non-unified `ArchVmAspace`, the specified virtual range must
-    /// no longer be in use, and if `ARCH_UNMAP_OPTION_HARVEST` is set, any mapped pages in the
-    /// range must be valid PMM-managed `VmPage`s.
+    /// - `self` must be an initialized, non-unified `ArchVmAspace`.
+    /// - `count * page::SIZE` must not overflow, and `[vaddr, vaddr + count * page::SIZE)` must
+    ///   lie within the range `self` was created with.
+    /// - Nothing may access `[vaddr, vaddr + count * page::SIZE)` in a way that relies on it
+    ///   staying mapped, and no Rust reference into it may be live.
+    /// - Unless `enlarge` is `ARCH_UNMAP_OPTION_NONE` and `self.unmap_only_enlarge_on_oom()` is
+    ///   true, both of these also apply to the rest of any large page the range partly covers.
+    /// - If `ARCH_UNMAP_OPTION_HARVEST` is set, any mapped pages in the range must be valid
+    ///   PMM-managed `VmPage`s eligible for `PageQueues::mark_accessed`.
     pub unsafe fn unmap(
         &self,
         vaddr: usize,
         count: usize,
         enlarge: ArchUnmapOptions,
     ) -> Result<(), Status> {
-        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`, and the caller upholds this
+        // function's `# Safety` requirements for the range and `enlarge`.
         let status: zx_status_t =
             unsafe { bindings::cpp_arch_vm_aspace_unmap(self.as_ffi_ptr(), vaddr, count, enlarge) };
         Status::ok(status)
     }
 
-    /// Returns whether or not an unmap might need to enlarge an operation for reasons other than
-    /// being out of memory. If this returns true, then unmapping a partial large page will fail
-    /// always require an enlarged operation.
+    /// Returns whether an unmap needs to enlarge the operation only when it runs out of memory. If
+    /// this returns true, unmapping part of a large page with `ARCH_UNMAP_OPTION_NONE` either
+    /// splits it without unmapping anything outside the range, or fails.
     pub fn unmap_only_enlarge_on_oom(&self) -> bool {
         // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`.
         unsafe { bindings::cpp_arch_vm_aspace_unmap_only_enlarge_on_oom(self.as_ffi_ptr()) }
@@ -604,10 +611,56 @@ impl ArchVmAspace {
         PAddr(phys)
     }
 
+    /// Sets the ASID or VMID assigned to this address space.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - `self` is an initialized, undestroyed guest (`ARCH_ASPACE_FLAG_GUEST`) `ArchVmAspace` with
+    ///   no mappings installed yet, and no concurrent operations on `self` race with this call
+    ///   (establishing happens-before any subsequent operations on `self`).
+    /// - The kernel is executing at EL2 with `FEAT_VHE` enabled.
+    /// - `asid` is non-zero (`0` is reserved for the host and `MMU_ARM64_UNUSED_ASID` is invalid)
+    ///   and fits within the active hardware VMID width (`1..=u8::MAX as u16`, or `1..u16::MAX`
+    ///   when 16-bit VMIDs are enabled in `VTCR_EL2.VS`).
+    /// - If `self` is entered by a VCPU (`HCR_EL2.VM == 1`), `asid` does not collide with any VMID
+    ///   concurrently active on any CPU until `self` is destroyed.
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn arch_set_asid(&self, asid: u16) {
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`, and the caller upholds the
+        // synchronization, guest stage-2 state, EL2/VHE, and VMID validity preconditions.
+        unsafe { bindings::cpp_arch_vm_aspace_arch_set_asid(self.as_ffi_ptr(), asid) }
+    }
+
     #[inline(always)]
     pub fn next_user_page_table_offset(va: usize) -> usize {
         // SAFETY: This has no preconditions.
         unsafe { bindings::cpp_arch_vm_aspace_next_user_page_table_offset(va) }
+    }
+
+    /// Switches the user MMU hardware context of the current CPU from `from` to `to`, where `None`
+    /// means no user address space (`ArchVmAspace::ContextSwitch`).
+    ///
+    /// `from` and `to` must not refer to the same address space (neither both `None` nor `Some`
+    /// pointing to the same `ArchVmAspace`).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - Interrupts are disabled on the calling CPU.
+    /// - `from` is the user address space currently loaded on the calling CPU (or `None` if no
+    ///   user address space is loaded).
+    /// - `to`, if `Some`, is an initialized user `ArchVmAspace` (`flags == 0`, not kernel or
+    ///   guest-physical) that is not destroyed while it is loaded on the calling CPU.
+    #[inline]
+    pub unsafe fn context_switch(from: Option<&Self>, to: Option<&Self>) {
+        let from = from.map_or(core::ptr::null_mut(), Self::as_ffi_ptr);
+        let to = to.map_or(core::ptr::null_mut(), Self::as_ffi_ptr);
+        debug_assert!(from != to);
+        // SAFETY: Discharged by the caller: interrupts are disabled, `from` is the user address
+        // space loaded on this CPU, and `to` (if non-null) is an initialized user `ArchVmAspace`
+        // that is not destroyed while loaded on this CPU.
+        unsafe { bindings::cpp_arch_vm_aspace_context_switch(from, to) }
     }
 
     /// Transfer ownership of pre-PMM kernel page table pages from physboot to the arch VM

@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Typing stubs for //third_party/mobly, consumed through its `pyi_deps`.
+# LINT.IfChange(mobly)
+py_library(
+    name = "mobly",
+    imports = ["."],
+    pyi_srcs = [
+        "mobly/__init__.pyi",
+        "mobly/asserts.pyi",
+        "mobly/base_test.pyi",
+        "mobly/config_parser.pyi",
+        "mobly/controller_manager.pyi",
+        "mobly/expects.pyi",
+        "mobly/keys.pyi",
+        "mobly/logger.pyi",
+        "mobly/records.pyi",
+        "mobly/runtime_test_info.pyi",
+        "mobly/signals.pyi",
+        "mobly/test_runner.pyi",
+        "mobly/utils.pyi",
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//third_party/mobly:__pkg__"],
+)
+# LINT.ThenChange(//third_party/mobly/BUILD.gn:mobly)

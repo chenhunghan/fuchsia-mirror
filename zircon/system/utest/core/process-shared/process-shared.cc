@@ -153,6 +153,34 @@ TEST(ProcessShared, InvalidPrototype) {
             ZX_ERR_INVALID_ARGS);
 }
 
+TEST(ProcessShared, NullNameFails) {
+  NEEDS_NEXT_SKIP(zx_process_create_shared);
+
+  zx::process prototype_process;
+  zx::vmar shared_vmar;
+  constexpr const char kPrototypeName[] = "prototype_process";
+  ASSERT_OK(zx::process::create(*zx::job::default_job(), kPrototypeName, sizeof(kPrototypeName),
+                                ZX_PROCESS_SHARED, &prototype_process, &shared_vmar));
+
+  zx::process process;
+  zx::vmar restricted_vmar;
+  // Zero-length copy skips reading user memory, so an explicit null check is required.
+  EXPECT_EQ(zx_process_create_shared(prototype_process.get(), 0, nullptr, 0,
+                                     process.reset_and_get_address(),
+                                     restricted_vmar.reset_and_get_address()),
+            ZX_ERR_INVALID_ARGS);
+  EXPECT_FALSE(process.is_valid());
+  EXPECT_FALSE(restricted_vmar.is_valid());
+
+  // Also cover a non-zero length, which faults when copying from address 0.
+  EXPECT_EQ(zx_process_create_shared(prototype_process.get(), 0, nullptr, 4,
+                                     process.reset_and_get_address(),
+                                     restricted_vmar.reset_and_get_address()),
+            ZX_ERR_INVALID_ARGS);
+  EXPECT_FALSE(process.is_valid());
+  EXPECT_FALSE(restricted_vmar.is_valid());
+}
+
 TEST(ProcessShared, InfoProcessVmos) {
   NEEDS_NEXT_SKIP(zx_process_create_shared);
 

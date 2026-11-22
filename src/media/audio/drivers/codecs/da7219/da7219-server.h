@@ -65,7 +65,7 @@ class Server final
   static constexpr float kMaxHeadphoneGainDb = 6.0f;
   static constexpr float kGainStepHeadphoneGainDb = 1.0f;
 
-  // LLCPP implementation for the Codec API.
+  // FIDL wire implementation for the Codec API.
   void Reset(ResetCompleter::Sync& completer) override;
   void Stop(StopCompleter::Sync& completer) override;
   void Start(StartCompleter::Sync& completer) override;
@@ -78,7 +78,7 @@ class Server final
   void SignalProcessingConnect(SignalProcessingConnectRequestView request,
                                SignalProcessingConnectCompleter::Sync& completer) override;
 
-  // LLCPP implementation for the SignalProcessing API.
+  // FIDL wire implementation for the SignalProcessing API.
   void GetElements(GetElementsCompleter::Sync& completer) override;
   void WatchElementState(WatchElementStateRequestView request,
                          WatchElementStateCompleter::Sync& completer) override;

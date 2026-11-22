@@ -2,35 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_test.gni")
-
-# Kept in GN because `mock-omaha-server-fuchsia-tests` subpackages
-# `//src/connectivity/network/netstack3:package-for-tests`, which has no
-# Bazel build yet.
-rustc_test("mock-omaha-server-fuchsia_test") {
-  edition = "2024"
-  output_name = "mock_omaha_server_fuchsia_lib_test"
-  sources = [ "src/lib.rs" ]
-  deps = [
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-hyper",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:hyper-util",
-    "//third_party/rust_crates:mock-omaha-server",
-  ]
-}
-
-fuchsia_unittest_package("mock-omaha-server-fuchsia-tests") {
-  manifest = "meta/mock-omaha-server-fuchsia-tests.cml"
-  deps = [ ":mock-omaha-server-fuchsia_test" ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
-}
-
 group("hermetic_tests") {
   testonly = true
-  public_deps = [ ":mock-omaha-server-fuchsia-tests" ]
+  public_deps = [ ":mock-omaha-server-fuchsia-tests-package" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -74,4 +48,36 @@ rustc_library("mock-omaha-server-fuchsia") {
     "//third_party/rust_crates:hyper-util",
     "//third_party/rust_crates:mock-omaha-server",
   ]
+}
+if (is_fuchsia) {
+  rustc_test("mock-omaha-server-fuchsia_test") {
+    sources = [ "src/lib.rs" ]
+    edition = "2024"
+    deps = [
+      "//src/lib/fuchsia-async",
+      "//src/lib/fuchsia-hyper",
+      "//third_party/rust_crates:anyhow",
+      "//third_party/rust_crates:futures",
+      "//third_party/rust_crates:hyper-util",
+      "//third_party/rust_crates:mock-omaha-server",
+    ]
+    output_name = "mock_omaha_server_fuchsia_lib_test"
+  }
+}
+
+fuchsia_component_manifest("mock-omaha-server-fuchsia-tests-manifest") {
+  testonly = true
+  component_name = "mock-omaha-server-fuchsia-tests"
+  manifest = "meta/mock-omaha-server-fuchsia-tests.cml"
+}
+
+fuchsia_test_component("mock-omaha-server-fuchsia-tests-component") {
+  cm_label = ":mock-omaha-server-fuchsia-tests-manifest"
+  deps = [ ":mock-omaha-server-fuchsia_test" ]
+}
+
+fuchsia_test_package("mock-omaha-server-fuchsia-tests-package") {
+  package_name = "mock-omaha-server-fuchsia-tests-gn"
+  test_components = [ ":mock-omaha-server-fuchsia-tests-component" ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 }

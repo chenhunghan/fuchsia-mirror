@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.gpio",
+    src = "fuchsia.gpio.bind",
+    api_area = "Driver SDK",
+    category = "partner",
+    visibility = [
+        "//examples/drivers/interrupt_handling/rust:__pkg__",
+        "//sdk:__pkg__",
+        "//sdk/lib/driver/devicetree/visitors/drivers/gpio-controllers/gpioimpl-visitor:__pkg__",
+        "//src/camera:__subpackages__",
+        "//src/connectivity:__subpackages__",
+        "//src/devices:__subpackages__",
+        "//src/graphics:__subpackages__",
+        "//src/media:__subpackages__",
+        "//src/ui:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)

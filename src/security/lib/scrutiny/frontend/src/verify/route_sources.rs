@@ -518,7 +518,7 @@ mod tests {
     };
     use cm_rust_testing::*;
     use cm_types::{HandleType, Path, Url};
-    use fidl_fuchsia_io as fio;
+    use fidl_fuchsia_io_common as fio;
     use fuchsia_merkle::{HASH_SIZE, Hash};
     use maplit::{hashmap, hashset};
     use moniker::Moniker;

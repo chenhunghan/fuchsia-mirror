@@ -1319,6 +1319,116 @@ TEST_F(CloneAndExecTest, ChildWithCloneFsCanChangeCwd) {
   ASSERT_TRUE(helper.WaitForChildren());
 }
 
+TEST_F(CloneAndExecTest, UnshareNewnsImpliesCloneFs) {
+  if (!test_helper::HasCapability(CAP_SYS_ADMIN)) {
+    GTEST_SKIP() << "Not running with CAP_SYS_ADMIN";
+  }
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    std::string original_cwd = GetCurrentWorkingDirectory();
+    umask(0022);
+
+    char parent_mnt_ns[PATH_MAX] = {};
+    ASSERT_THAT(readlink("/proc/self/ns/mnt", parent_mnt_ns, sizeof(parent_mnt_ns) - 1),
+                SyscallSucceeds());
+
+    test_helper::ScopedTempDir new_cwd;
+
+    int child_pid = static_cast<int>(
+        SAFE_SYSCALL(syscall(SYS_clone, CLONE_FS | SIGCHLD, nullptr, nullptr, nullptr, nullptr)));
+
+    if (child_pid == 0) {
+      SAFE_SYSCALL(unshare(CLONE_NEWNS));
+
+      char child_mnt_ns[PATH_MAX] = {};
+      SAFE_SYSCALL(readlink("/proc/self/ns/mnt", child_mnt_ns, sizeof(child_mnt_ns) - 1));
+      if (std::string_view(child_mnt_ns) == std::string_view(parent_mnt_ns)) {
+        _exit(EXIT_FAILURE);
+      }
+
+      SAFE_SYSCALL(chdir(new_cwd.path().c_str()));
+      umask(0077);
+      if (GetCurrentWorkingDirectory() != new_cwd.path() || umask(0077) != 0077) {
+        _exit(EXIT_FAILURE);
+      }
+      _exit(0);
+    }
+
+    int wstatus = 0;
+    SAFE_SYSCALL(waitpid(child_pid, &wstatus, 0));
+    if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
+      ADD_FAILURE() << "wait_status: WIFEXITED(wstatus) = " << WIFEXITED(wstatus)
+                    << ", WEXITSTATUS(wstatus) = " << WEXITSTATUS(wstatus)
+                    << ", WTERMSIG(wstatus) = " << WTERMSIG(wstatus);
+    }
+
+    // Because unshare(CLONE_NEWNS) implies CLONE_FS, the child's chdir and umask changes must not
+    // affect the parent.
+    EXPECT_EQ(original_cwd, GetCurrentWorkingDirectory());
+    EXPECT_EQ(mode_t{0022}, umask(0022));
+  });
+
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST_F(CloneAndExecTest, UnshareWithoutPermissionDoesNotPartiallyUnshare) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    umask(0022);
+
+    test_helper::ScopedTempDir new_cwd;
+    auto temp_fd = test_helper::ScopedTempFD();
+    int shared_fd = temp_fd.fd();
+    ASSERT_THAT(fcntl(shared_fd, F_GETFD), SyscallSucceeds());
+
+    int child_pid = static_cast<int>(SAFE_SYSCALL(
+        syscall(SYS_clone, CLONE_FS | CLONE_FILES | SIGCHLD, nullptr, nullptr, nullptr, nullptr)));
+
+    if (child_pid == 0) {
+      test_helper::UnsetCapability(CAP_SYS_ADMIN);
+
+      if (unshare(CLONE_NEWNS | CLONE_FS) != -1 || errno != EPERM) {
+        fprintf(stderr, "Expected unshare(CLONE_NEWNS | CLONE_FS) to fail with EPERM\n");
+        _exit(EXIT_FAILURE);
+      }
+      if (unshare(CLONE_NEWNS | CLONE_FILES) != -1 || errno != EPERM) {
+        fprintf(stderr, "Expected unshare(CLONE_NEWNS | CLONE_FILES) to fail with EPERM\n");
+        _exit(EXIT_FAILURE);
+      }
+      if (unshare(CLONE_NEWUTS | CLONE_FS | CLONE_FILES) != -1 || errno != EPERM) {
+        fprintf(stderr,
+                "Expected unshare(CLONE_NEWUTS | CLONE_FS | CLONE_FILES) to fail with EPERM\n");
+        _exit(EXIT_FAILURE);
+      }
+
+      // Mutate cwd, umask, and the FD table in the child to verify that the failed unshare calls
+      // did not partially unshare CLONE_FS or CLONE_FILES.
+      SAFE_SYSCALL(chdir(new_cwd.path().c_str()));
+      umask(0077);
+      SAFE_SYSCALL(close(shared_fd));
+      _exit(0);
+    }
+
+    int wstatus = 0;
+    SAFE_SYSCALL(waitpid(child_pid, &wstatus, 0));
+    if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
+      ADD_FAILURE() << "wait_status: WIFEXITED(wstatus) = " << WIFEXITED(wstatus)
+                    << ", WEXITSTATUS(wstatus) = " << WEXITSTATUS(wstatus)
+                    << ", WTERMSIG(wstatus) = " << WTERMSIG(wstatus);
+    }
+
+    // Because the unshare calls failed atomically, FsContext and FdTable remain shared with the
+    // parent.
+    EXPECT_EQ(new_cwd.path(), GetCurrentWorkingDirectory());
+    EXPECT_EQ(mode_t{0077}, umask(0022));
+    EXPECT_THAT(fcntl(shared_fd, F_GETFD), SyscallFailsWithErrno(EBADF));
+    temp_fd.fd_.release();
+  });
+
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
 TEST_F(CloneAndExecTest, ExecveRequiresCallerCanExecuteScriptAndInterp) {
   test_helper::ScopedTempDir temp_dir;
 
@@ -1642,12 +1752,6 @@ class DumpableTest : public ::testing::Test {
         << dumpable_str;
   }
 
-  void TearDown() override {
-    if (dumpable_default_ != -1) {
-      EXPECT_TRUE(files::WriteFile(kSuidDumpablePath, std::to_string(dumpable_default_)));
-    }
-  }
-
   int dumpable_default_ = -1;
 };
 
@@ -1722,7 +1826,8 @@ TEST_F(DumpableTest, SuidDumpableRejectsInvalidValues) {
 }
 
 TEST_F(DumpableTest, DumpableResetsToSuidDumpableUser) {
-  ASSERT_TRUE(files::WriteFile(kSuidDumpablePath, "1")) << strerror(errno);
+  auto suid_dumpable = test_helper::ScopedSysctl::Create(kSuidDumpablePath, "1");
+  ASSERT_THAT(suid_dumpable, SyscallResultIsOk());
 
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([&] {
@@ -1734,7 +1839,8 @@ TEST_F(DumpableTest, DumpableResetsToSuidDumpableUser) {
 }
 
 TEST_F(DumpableTest, DumpableResetsToSuidDumpableDisable) {
-  ASSERT_TRUE(files::WriteFile(kSuidDumpablePath, "0")) << strerror(errno);
+  auto suid_dumpable = test_helper::ScopedSysctl::Create(kSuidDumpablePath, "0");
+  ASSERT_THAT(suid_dumpable, SyscallResultIsOk());
 
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([&] {

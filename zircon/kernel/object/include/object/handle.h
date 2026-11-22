@@ -7,13 +7,10 @@
 #ifndef ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_HANDLE_H_
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_HANDLE_H_
 
-#include <stdint.h>
 #include <zircon/types.h>
 
-#include <fbl/intrusive_double_list.h>
 #include <fbl/macros.h>
 #include <fbl/ref_ptr.h>
-#include <ktl/atomic.h>
 #include <ktl/unique_ptr.h>
 #include <ktl/utility.h>
 
@@ -40,16 +37,6 @@ using HandleOwner = ktl::unique_ptr<Handle, HandleDestroyer>;
 // A Handle is how a specific process refers to a specific Dispatcher.
 class Handle final {
  public:
-  // Returns the Dispatcher to which this instance points.
-  const fbl::RefPtr<Dispatcher>& dispatcher() const { return dispatcher_; }
-
-  // Returns the |rights| parameter that was provided when this instance
-  // was created.
-  uint32_t rights() const { return rights_; }
-
-  // Get the number of outstanding handles for a given dispatcher.
-  static uint32_t Count(const Dispatcher&);
-
   // Handle should never be created by anything other than Make.
   static HandleOwner Make(KernelHandle<Dispatcher> kernel_handle, zx_rights_t rights);
 
@@ -58,23 +45,6 @@ class Handle final {
 
   // Handle should never be destroyed by anything other than rust_handle_destroy.
   ~Handle() = default;
-
-  // handle_table_id_ is atomic because threads from different processes can
-  // access it concurrently, while holding different instances of
-  // handle_table_lock_.
-  ktl::atomic<zx_koid_t> handle_table_id_;
-  fbl::RefPtr<Dispatcher> dispatcher_;
-  const zx_rights_t rights_;
-  [[maybe_unused]] const uint32_t base_value_;
-
-  // Validates in handle.cc that this C++ view of a Handle matches the Rust definition that
-  // actually constructs them (see handle.rs).
-  friend struct HandleLayoutCheck;
-
-  // Use a manually declared linked list node state instead of inheriting so that the early
-  // memory of the class can be used by the members we want to preserve, and our node state can
-  // be placed later.
-  fbl::DoublyLinkedListNodeState<Handle*> node_state_;
 };
 
 // This can't be defined directly in the HandleDestroyer struct definition

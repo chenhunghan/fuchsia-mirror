@@ -27,6 +27,7 @@ class PlanterCheckLibTest(unittest.TestCase):
         self.assertIn("third_party/rust_crates", pcl.EXCLUDED_GLOBAL_DIRS)
         self.assertIn("rustc_test", pcl.BAZEL_TEST_RULES)
         self.assertIn("fx_unittest_package", pcl.BAZEL_TEST_RULES)
+        self.assertIn("golden_test", pcl.BAZEL_TEST_RULES)
         self.assertIn("template", pcl.GN_NON_TARGET_KEYWORDS)
         self.assertIn("declare_args", pcl.GN_NON_TARGET_KEYWORDS)
         self.assertEqual(pcl.NOT_TARGETS, pcl.GN_NON_TARGET_KEYWORDS)
@@ -340,7 +341,59 @@ class PlanterCheckLibTest(unittest.TestCase):
                     pcl.resolve_change_base(tmpdir, target_dirs=["src/other"]),
                     "HEAD",
                 )
+                # Target directories relocated or removed upstream (absent on disk)
+                # must also keep change_base at a stacked prerequisite HEAD.
+                self.assertEqual(
+                    pcl.resolve_change_base(
+                        tmpdir, target_dirs=["src/relocated_upstream"]
+                    ),
+                    "HEAD",
+                )
                 self.assertEqual(pcl.resolve_change_base(tmpdir), "HEAD~1")
+
+                # Uncommitted edits in an umbrella target_dir stacked on top of
+                # a committed subpackage migration must keep change_base at HEAD.
+                os.makedirs(os.path.join(tmpdir, "src", "area", "sub"))
+                with open(
+                    os.path.join(tmpdir, "src", "area", "sub", "BUILD.bazel"),
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+                    f.write("# sub\n")
+                subprocess.run(
+                    ["git", "-C", tmpdir, "add", "src/area/sub/BUILD.bazel"],
+                    check=True,
+                )
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        tmpdir,
+                        "commit",
+                        "-q",
+                        "-m",
+                        "[bazel_migration] //src/area/sub",
+                    ],
+                    check=True,
+                )
+                with open(
+                    os.path.join(tmpdir, "src", "area", "BUILD.bazel"),
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+                    f.write("# umbrella\n")
+                self.assertEqual(
+                    pcl.resolve_change_base(
+                        tmpdir, change_base="HEAD", target_dirs=["src/area"]
+                    ),
+                    "HEAD",
+                )
+                self.assertEqual(
+                    pcl.changed_files(
+                        tmpdir, change_base="HEAD", target_dirs=["src/area"]
+                    ),
+                    ["src/area/BUILD.bazel"],
+                )
 
     def test_external_repo_test_blockers(self):
         """Shared external-repo detection used by migration_sanity and cq_reachability."""
@@ -1331,9 +1384,15 @@ rustc_library(
                     "category": "test_dropped_from_tests_json",
                     "file": "",
                 },
+                {
+                    "source": "tests_json_parity",
+                    "category": "dual_build_bazel_variant_missing",
+                    "file": "src/foo/BUILD.gn",
+                },
             ]
             self.assertTrue(is_disp(sample_findings[1], sample_findings))
             self.assertTrue(is_disp(sample_findings[2], sample_findings))
+            self.assertTrue(is_disp(sample_findings[3], sample_findings))
             sample_with_unrelated = sample_findings + [
                 {
                     "source": "tests_json_parity",
@@ -1424,7 +1483,6 @@ rustc_library(
 
                 test_suite(
                     name = "host_tests",
-                    target_compatible_with = HOST_OS_CONSTRAINTS,
                     tests = [":iob_host_test"],
                     visibility = ["//sdk:__pkg__"],
                 )
@@ -1829,6 +1887,40 @@ rustc_library(
                 )
                 """,
             )
+            write(
+                "src/area/dual/BUILD.bazel",
+                """
+                load("//build/bazel/rules/rust:defs.bzl", "host_rustc_test", "rustc_test")
+
+                test_suite(
+                    name = "tests",
+                    tests = [],
+                )
+
+                host_rustc_test(
+                    name = "dual_host_test",
+                )
+
+                rustc_test(
+                    name = "dual_device_test",
+                )
+                """,
+            )
+            write(
+                "src/hostarea/BUILD.bazel",
+                """
+                load("//build/bazel/rules/rust:defs.bzl", "host_rustc_test")
+
+                test_suite(
+                    name = "tests",
+                    tests = [":hostarea_test"],
+                )
+
+                host_rustc_test(
+                    name = "hostarea_test",
+                )
+                """,
+            )
             subprocess.run(["git", "-C", tmpdir, "add", "."], check=True)
             subprocess.run(
                 ["git", "-C", tmpdir, "commit", "-q", "-m", "init"], check=True
@@ -2177,6 +2269,607 @@ rustc_library(
                     if f["file"] == "src/area/pkg/BUILD.bazel"
                 ],
                 [],
+            )
+
+            # 9. In a package with both host and device tests, a suite that
+            # lists only host tests isn't treated as a host suite, so omitting
+            # the device test is still flagged.
+            write(
+                "src/area/dual/BUILD.bazel",
+                """
+                load("//build/bazel/rules/rust:defs.bzl", "host_rustc_test", "rustc_test")
+
+                test_suite(
+                    name = "tests",
+                    tests = [":dual_host_test"],
+                )
+
+                host_rustc_test(
+                    name = "dual_host_test",
+                )
+
+                rustc_test(
+                    name = "dual_device_test",
+                )
+                """,
+            )
+            f9 = [
+                f
+                for f in run_layout_check("src/area/dual")
+                if f.get("category") == "implicit_test_suite"
+            ]
+            self.assertEqual(len(f9), 1)
+            self.assertIn('":dual_device_test"', f9[0]["message"])
+
+            # 10. A suite that only lists host tests counts as a host suite
+            # even without HOST_OS_CONSTRAINTS, so adding a Fuchsia-only
+            # target to it is flagged.
+            write(
+                "src/hostarea/BUILD.bazel",
+                """
+                load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+                load("//build/bazel/rules/rust:defs.bzl", "host_rustc_test")
+
+                test_suite(
+                    name = "tests",
+                    tests = [
+                        ":device_pkg",
+                        ":hostarea_test",
+                    ],
+                )
+
+                host_rustc_test(
+                    name = "hostarea_test",
+                )
+
+                fx_package(
+                    name = "device_pkg",
+                )
+                """,
+            )
+            f10 = [
+                f
+                for f in run_layout_check("src/hostarea")
+                if f.get("category") == "fuchsia_target_in_host_test_suite"
+            ]
+            self.assertEqual(len(f10), 1)
+            self.assertIn("`:device_pkg`", f10[0]["message"])
+
+    def test_stacked_parent_commit_format_and_active_prereq_rebase_guard(self):
+        checks_dir = os.path.dirname(os.path.abspath(__file__))
+        cm_sh = os.path.join(checks_dir, "commit_message_format.sh")
+        cq_sh = os.path.join(checks_dir, "cq_reachability.sh")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subprocess.run(["git", "-C", tmpdir, "init", "-q"], check=True)
+            subprocess.run(
+                ["git", "-C", tmpdir, "config", "user.email", "test-user"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", tmpdir, "config", "user.name", "Test"],
+                check=True,
+            )
+
+            def write(rel, content):
+                p = os.path.join(tmpdir, rel)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(textwrap.dedent(content))
+
+            write(
+                "src/dep/BUILD.bazel",
+                """
+                cc_library(
+                    name = "dep",
+                    visibility = ["//src/foo:__pkg__"],
+                )
+                """,
+            )
+            write("src/foo/BUILD.gn", 'source_set("foo") {}\n')
+            write("src/foo/bar/BUILD.gn", 'source_set("bar") {}\n')
+            subprocess.run(["git", "-C", tmpdir, "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", tmpdir, "commit", "-q", "-m", "base"], check=True
+            )
+            base_sha = subprocess.check_output(
+                ["git", "-C", tmpdir, "rev-parse", "HEAD"], text=True
+            ).strip()
+
+            # Upstream origin/main advances with a conflicting edit in src/dep/BUILD.bazel.
+            write(
+                "src/dep/BUILD.bazel",
+                """
+                cc_library(
+                    name = "dep",
+                    visibility = [
+                        "//src/foo:__pkg__",
+                        "//src/upstream:__pkg__",
+                    ],
+                )
+                """,
+            )
+            subprocess.run(["git", "-C", tmpdir, "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", tmpdir, "commit", "-q", "-m", "upstream"],
+                check=True,
+            )
+            origin_sha = subprocess.check_output(
+                ["git", "-C", tmpdir, "rev-parse", "HEAD"], text=True
+            ).strip()
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    tmpdir,
+                    "update-ref",
+                    "refs/remotes/origin/main",
+                    origin_sha,
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", tmpdir, "reset", "--hard", "-q", base_sha],
+                check=True,
+            )
+
+            # Stacked prerequisite commit 1 grants visibility in src/dep/BUILD.bazel.
+            write(
+                "src/dep/BUILD.bazel",
+                """
+                cc_library(
+                    name = "dep",
+                    visibility = [
+                        "//src/foo:__pkg__",
+                        "//src/foo/bar:__pkg__",
+                    ],
+                )
+                """,
+            )
+            subprocess.run(["git", "-C", tmpdir, "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    tmpdir,
+                    "commit",
+                    "-q",
+                    "-m",
+                    "[bazel] Grant dep visibility\n\nChange-Id: I" + "1" * 40,
+                ],
+                check=True,
+            )
+
+            # Stacked parent migration commit migrates //src/foo (not child //src/foo/bar).
+            write("src/foo/BUILD.bazel", 'cc_library(name = "foo")\n')
+            subprocess.run(["git", "-C", tmpdir, "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    tmpdir,
+                    "commit",
+                    "-q",
+                    "-m",
+                    "[bazel_migration] //src/foo\n\n"
+                    "Migrate //src/foo.\n\n"
+                    "Test: fx lint\n"
+                    "Bazel-Migration-Target: //src/foo:foo\n"
+                    "Change-Id: I" + "2" * 40,
+                ],
+                check=True,
+            )
+
+            # Current task is //src/foo/bar with uncommitted working-tree edits.
+            write(
+                "src/foo/bar/BUILD.bazel",
+                """
+                cc_library(
+                    name = "bar",
+                    deps = ["//src/dep"],
+                )
+                """,
+            )
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if not k.startswith("PLANTER_")
+            }
+            env.update(
+                {
+                    "PLANTER_WORKDIR": tmpdir,
+                    "PLANTER_TARGET_DIR": "src/foo/bar",
+                    "PLANTER_TARGET_DIRS": "src/foo/bar",
+                    "PLANTER_CHANGE_BASE": base_sha,
+                    "PLANTER_ORIG_CHANGE_BASE": "HEAD",
+                    "PLANTER_SKIP_BUILD": "1",
+                }
+            )
+            # Prevent cq_reachability from fetching network origin/main over test ref.
+            git_dir = subprocess.check_output(
+                ["git", "-C", tmpdir, "rev-parse", "--absolute-git-dir"],
+                text=True,
+            ).strip()
+            with open(os.path.join(git_dir, "FETCH_HEAD"), "w") as fh:
+                fh.write(origin_sha + "\n")
+
+            cm_findings = json.loads(
+                subprocess.check_output([cm_sh], env=env, text=True)
+            )
+            self.assertEqual(cm_findings, [])
+
+            cq_findings = json.loads(
+                subprocess.check_output([cq_sh], env=env, text=True)
+            )
+            rebase_findings = [
+                f
+                for f in cq_findings
+                if f.get("category") == "upstream_rebase_conflict"
+            ]
+            self.assertEqual(len(rebase_findings), 1)
+            self.assertIn(
+                "Rebase the full prerequisite commit stack",
+                rebase_findings[0]["remediation"],
+            )
+            self.assertNotIn(
+                "Detach `HEAD` onto the latest `origin/main`",
+                rebase_findings[0]["remediation"],
+            )
+
+            # Also keep active prerequisite stack when HEAD is a task commit
+            # whose prerequisite commit HEAD~1 grants visibility in src/dep.
+            subprocess.run(["git", "-C", tmpdir, "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    tmpdir,
+                    "commit",
+                    "-q",
+                    "-m",
+                    "[bazel_migration] //src/foo/bar\n\n"
+                    "Migrate //src/foo/bar.\n\n"
+                    "Test: fx lint\n"
+                    "Bazel-Migration-Target: //src/foo/bar:bar\n"
+                    "TAG: planter\n"
+                    "Change-Id: I" + "3" * 40,
+                ],
+                check=True,
+            )
+            cq_committed = json.loads(
+                subprocess.check_output([cq_sh], env=env, text=True)
+            )
+            rebase_committed = [
+                f
+                for f in cq_committed
+                if f.get("category") == "upstream_rebase_conflict"
+            ]
+            self.assertEqual(len(rebase_committed), 1)
+            self.assertIn(
+                "Rebase the full prerequisite commit stack",
+                rebase_committed[0]["remediation"],
+            )
+            self.assertNotIn(
+                "Detach `HEAD` onto the latest `origin/main`",
+                rebase_committed[0]["remediation"],
+            )
+
+    def test_sso_https_git_config_args_skips_vendor_google(self):
+        import rdeps_lib as rl
+
+        with tempfile.TemporaryDirectory() as td:
+            subprocess.run(
+                ["git", "init", td], check=True, stdout=subprocess.DEVNULL
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    td,
+                    "config",
+                    "remote.origin.url",
+                    "sso://turquoise-internal/vendor/google",
+                ],
+                check=True,
+            )
+            self.assertEqual(rl.sso_https_git_config_args(td), [])
+
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    td,
+                    "config",
+                    "remote.origin.url",
+                    "sso://fuchsia/third_party/foo",
+                ],
+                check=True,
+            )
+            self.assertEqual(
+                rl.sso_https_git_config_args(td),
+                [
+                    "-c",
+                    "url.https://fuchsia.googlesource.com/.insteadOf=sso://fuchsia/",
+                ],
+            )
+
+    def test_unrestricted_fostr_fidl_subpackages(self):
+        checks_dir = os.path.dirname(os.path.abspath(__file__))
+        vis_audit_sh = os.path.join(checks_dir, "visibility_audit.sh")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subprocess.run(["git", "-C", tmpdir, "init", "-q"], check=True)
+            subprocess.run(
+                ["git", "-C", tmpdir, "config", "user.email", "test-user"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", tmpdir, "config", "user.name", "Test"],
+                check=True,
+            )
+
+            pkg_dir = os.path.join(tmpdir, "src/lib/fostr/fidl/fuchsia.example")
+            caller_dir = os.path.join(tmpdir, "src/sys/bar")
+            os.makedirs(pkg_dir)
+            os.makedirs(caller_dir)
+
+            with open(os.path.join(pkg_dir, "BUILD.gn"), "w") as f:
+                f.write(
+                    textwrap.dedent(
+                        """
+                        fostr_fidl("fuchsia.example") {
+                          fidl_target = "//sdk/fidl/fuchsia.example"
+                        }
+                        fostr_fidl("testonly_ex") {
+                          fidl_target = "//sdk/fidl/fuchsia.example"
+                          testonly = true
+                        }
+                        """
+                    )
+                )
+            with open(os.path.join(caller_dir, "BUILD.gn"), "w") as f:
+                f.write(
+                    textwrap.dedent(
+                        """
+                        source_set("bar") {
+                          deps = [
+                            "//src/lib/fostr/fidl/fuchsia.example",
+                            "//src/lib/fostr/fidl/fuchsia.example:testonly_ex",
+                          ]
+                        }
+                        """
+                    )
+                )
+            subprocess.run(["git", "-C", tmpdir, "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", tmpdir, "commit", "-q", "-m", "init"], check=True
+            )
+
+            with open(os.path.join(pkg_dir, "BUILD.gn"), "w") as f:
+                f.write(
+                    textwrap.dedent(
+                        """
+                        ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
+                        fostr_fidl("fuchsia.example") {
+                          fidl_target = "//sdk/fidl/fuchsia.example"
+                        }
+                        fostr_fidl("testonly_ex") {
+                          fidl_target = "//sdk/fidl/fuchsia.example"
+                          testonly = true
+                        }
+                        """
+                    )
+                )
+
+            env = dict(os.environ)
+            env["PLANTER_WORKDIR"] = tmpdir
+            env["PLANTER_TARGET_DIR"] = "src/lib/fostr/fidl/fuchsia.example"
+            env["PLANTER_SKIP_FETCH"] = "1"
+            env["PLANTER_SKIP_DIFF_COVERAGE"] = "1"
+            env.pop("PLANTER_CHANGED_FILES", None)
+            env.pop("PLANTER_RESOLVED_CHANGE_BASE", None)
+
+            # 1. Non-test unrestricted GN-synced fostr_fidl allows //:__subpackages__.
+            with open(os.path.join(pkg_dir, "BUILD.bazel"), "w") as f:
+                f.write(
+                    textwrap.dedent(
+                        """
+                        load("//src/lib/fostr/build:fostr_fidl.bzl", "fostr_fidl")
+
+                        fostr_fidl(
+                            name = "fuchsia.example",
+                            fidl_target = "//sdk/fidl/fuchsia.example",
+                            visibility = ["//:__subpackages__"],
+                        )
+                        """
+                    )
+                )
+            va_out = subprocess.check_output([vis_audit_sh], env=env, text=True)
+            findings = json.loads(va_out)
+            disguised = [
+                f
+                for f in findings
+                if f.get("category") == "disguised_public_visibility"
+            ]
+            self.assertEqual(disguised, [], findings)
+
+            # 2. testonly=True or @bazel2gn:skip fostr_fidl still flags disguised_public_visibility.
+            with open(os.path.join(pkg_dir, "BUILD.bazel"), "w") as f:
+                f.write(
+                    textwrap.dedent(
+                        """
+                        load("//src/lib/fostr/build:fostr_fidl.bzl", "fostr_fidl")
+
+                        fostr_fidl(
+                            name = "testonly_ex",
+                            fidl_target = "//sdk/fidl/fuchsia.example",
+                            testonly = True,
+                            visibility = ["//:__subpackages__"],
+                        )
+
+                        # @bazel2gn:skip
+                        fostr_fidl(
+                            name = "brand_new",
+                            fidl_target = "//sdk/fidl/fuchsia.example",
+                            visibility = ["//:__subpackages__"],
+                        )
+                        """
+                    )
+                )
+            va_out2 = subprocess.check_output(
+                [vis_audit_sh], env=env, text=True
+            )
+            findings2 = json.loads(va_out2)
+            disguised2 = [
+                f
+                for f in findings2
+                if f.get("category") == "disguised_public_visibility"
+            ]
+            self.assertEqual(len(disguised2), 2, findings2)
+
+    def test_visibility_allowlist_files_not_external_rdeps(self):
+        import rdeps_lib
+
+        self.assertTrue(
+            rdeps_lib.is_visibility_allowlist_file(
+                "build/cpp/hlcpp_visibility.gni"
+            )
+        )
+        self.assertTrue(
+            rdeps_lib.is_visibility_allowlist_file(
+                "build/cpp/hlcpp_visibility.bzl"
+            )
+        )
+        self.assertFalse(
+            rdeps_lib.is_visibility_allowlist_file("src/foo/BUILD.gn")
+        )
+
+        checks_dir = os.path.dirname(os.path.abspath(__file__))
+        vis_audit_sh = os.path.join(checks_dir, "visibility_audit.sh")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subprocess.run(["git", "-C", tmpdir, "init", "-q"], check=True)
+            subprocess.run(
+                ["git", "-C", tmpdir, "config", "user.email", "test-user"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", tmpdir, "config", "user.name", "Test"],
+                check=True,
+            )
+            pkg_dir = os.path.join(tmpdir, "src/camera/bin/factory_cli")
+            allow_dir = os.path.join(tmpdir, "build/cpp")
+            os.makedirs(pkg_dir)
+            os.makedirs(allow_dir)
+            with open(
+                os.path.join(allow_dir, "hlcpp_visibility.gni"), "w"
+            ) as f:
+                f.write(
+                    'hlcpp_visibility = [\n  "//src/camera/bin/factory_cli:camera_factory_cli_bin",\n]\n'
+                )
+            with open(
+                os.path.join(allow_dir, "hlcpp_visibility.bzl"), "w"
+            ) as f:
+                f.write(
+                    'HLCPP_VISIBILITY = [\n    "//src/camera/bin/factory_cli:__pkg__",\n]\n'
+                )
+            with open(os.path.join(pkg_dir, "BUILD.gn"), "w") as f:
+                f.write(
+                    'executable("camera_factory_cli_bin") {\n  sources = [ "main.cc" ]\n}\n'
+                )
+            subprocess.run(["git", "-C", tmpdir, "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", tmpdir, "commit", "-q", "-m", "init"], check=True
+            )
+            with open(os.path.join(pkg_dir, "BUILD.bazel"), "w") as f:
+                f.write(
+                    textwrap.dedent(
+                        """
+                        load("//build/bazel/rules/cc:defs.bzl", "fx_cc_binary")
+
+                        fx_cc_binary(
+                            name = "camera_factory_cli_bin",
+                            srcs = ["main.cc"],
+                        )
+                        """
+                    )
+                )
+            env = dict(os.environ)
+            env["PLANTER_WORKDIR"] = tmpdir
+            env["PLANTER_TARGET_DIR"] = "src/camera/bin/factory_cli"
+            env["PLANTER_SKIP_FETCH"] = "1"
+            env["PLANTER_SKIP_DIFF_COVERAGE"] = "1"
+            env.pop("PLANTER_CHANGED_FILES", None)
+            env.pop("PLANTER_RESOLVED_CHANGE_BASE", None)
+            out = subprocess.check_output([vis_audit_sh], env=env, text=True)
+            findings = json.loads(out)
+            self.assertEqual(
+                [
+                    f
+                    for f in findings
+                    if f.get("category")
+                    in (
+                        "missing_target_visibility",
+                        "visibility_allowlist_false_rdep",
+                        "false_positive_rdep_visibility",
+                    )
+                ],
+                [],
+                findings,
+            )
+
+    def test_resolve_relocated_target_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+
+            def git(*args: str) -> str:
+                return subprocess.check_output(
+                    ["git", "-C", tmpdir, *args], text=True
+                ).strip()
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.com")
+            git("config", "user.name", "Test User")
+            old_dir = os.path.join(tmpdir, "src", "old", "pkg")
+            del_dir = os.path.join(tmpdir, "src", "deleted", "pkg")
+            os.makedirs(old_dir, exist_ok=True)
+            os.makedirs(del_dir, exist_ok=True)
+            with open(os.path.join(old_dir, "BUILD.gn"), "w") as f:
+                f.write(
+                    '# Copyright\nsource_set("pkg") {\n  sources = [ "a.cc" ]\n}\n'
+                )
+            with open(os.path.join(old_dir, "a.cc"), "w") as f:
+                f.write(
+                    "// source file for rename detection\nint f() { return 0; }\n"
+                )
+            with open(os.path.join(del_dir, "BUILD.gn"), "w") as f:
+                f.write('group("dead") {}\n')
+            git("add", ".")
+            git("commit", "-q", "-m", "initial")
+
+            os.makedirs(os.path.join(tmpdir, "src", "mid"), exist_ok=True)
+            git("mv", "src/old/pkg", "src/mid/pkg")
+            git("commit", "-q", "-m", "move 1")
+            os.makedirs(os.path.join(tmpdir, "src", "new"), exist_ok=True)
+            git("mv", "src/mid/pkg", "src/new/pkg")
+            git("commit", "-q", "-m", "move 2")
+            git("rm", "-r", "-q", "src/deleted/pkg")
+            git("commit", "-q", "-m", "delete dead")
+
+            pcl._relocated_target_dir_cache.clear()
+            self.assertEqual(
+                pcl.resolve_relocated_target_dir(tmpdir, "src/old/pkg"),
+                "src/new/pkg",
+            )
+            self.assertEqual(
+                pcl.resolve_relocated_target_dir(tmpdir, "src/new/pkg"),
+                "",
+            )
+            self.assertEqual(
+                pcl.resolve_relocated_target_dir(tmpdir, "src/deleted/pkg"),
+                "",
+            )
+            self.assertEqual(
+                pcl.with_relocated_target_dirs(tmpdir, ["src/old/pkg"]),
+                ["src/old/pkg", "src/new/pkg"],
             )
 
 

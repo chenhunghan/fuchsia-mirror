@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::errors::FxfsError;
 use crate::fsck::{FsckOptions, fsck_volume_with_options, fsck_with_options};
 use crate::hooks::HooksHandle;
 use crate::log::*;
@@ -23,7 +24,7 @@ use crate::object_store::{
 };
 use crate::range::RangeExt;
 use crate::serialized_types::{LATEST_VERSION, Version};
-use anyhow::{Context, Error, anyhow, bail};
+use anyhow::{Context, Error, anyhow, bail, ensure};
 use async_trait::async_trait;
 use fuchsia_async as fasync;
 use fuchsia_async::condition::Condition;
@@ -329,6 +330,7 @@ pub struct FxFilesystemBuilder {
     on_new_allocator: Option<Box<dyn Fn(Arc<Allocator>) + Send + Sync>>,
     on_new_store: Option<Box<dyn Fn(&ObjectStore) + Send + Sync>>,
     fsck_after_every_transaction: bool,
+    fsck_before_open: bool,
     layer_pager: Option<Arc<dyn LayerPager>>,
 }
 
@@ -341,6 +343,7 @@ impl FxFilesystemBuilder {
             on_new_allocator: None,
             on_new_store: None,
             fsck_after_every_transaction: false,
+            fsck_before_open: false,
             layer_pager: None,
         }
     }
@@ -421,6 +424,13 @@ impl FxFilesystemBuilder {
         self
     }
 
+    /// If set, `open` checks the filesystem after replaying the journal and fails if the check
+    /// fails.  Nothing is written or flushed to the device before the check.  Defaults to `false`.
+    pub fn fsck_before_open(mut self, fsck_before_open: bool) -> Self {
+        self.fsck_before_open = fsck_before_open;
+        self
+    }
+
     pub fn trim_config(mut self, delay_and_interval: Option<(Duration, Duration)>) -> Self {
         self.options.trim_config = delay_and_interval;
         self
@@ -485,7 +495,30 @@ impl FxFilesystemBuilder {
             bail!("A filesystem using inline encryption requires barriers");
         }
 
-        let objects = Arc::new(ObjectManager::new(self.on_new_store));
+        ensure!(
+            self.journal_options.reclaim_size >= journal::MIN_RECLAIM_SIZE,
+            anyhow!(FxfsError::InvalidArgs).context(format!(
+                "Journal reclaim_size ({}) must be at least {}",
+                self.journal_options.reclaim_size,
+                journal::MIN_RECLAIM_SIZE,
+            ))
+        );
+
+        let device_block_size = BlockSize::new(device.block_size() as u64)
+            .expect("Device block size is not a power of 2");
+        // Journal and superblock I/O currently operate in fixed `journal::BLOCK_SIZE` (4 KiB)
+        // blocks.
+        ensure!(
+            device_block_size <= journal::BLOCK_SIZE,
+            anyhow!(FxfsError::NotSupported).context(format!(
+                "Device block size ({}) must not exceed journal block size ({})",
+                device_block_size.get(),
+                journal::BLOCK_SIZE.get(),
+            ))
+        );
+
+        let objects =
+            Arc::new(ObjectManager::new(self.on_new_store, self.journal_options.reclaim_size));
         let journal = Arc::new(Journal::new(
             objects.clone(),
             self.journal_options,
@@ -494,8 +527,6 @@ impl FxFilesystemBuilder {
 
         let image_builder_mode = self.options.image_builder_mode;
 
-        let device_block_size =
-            BlockSize::new(device.block_size()).expect("Device block size is not a power of 2");
         let block_size = std::cmp::max(device_block_size, MIN_BLOCK_SIZE);
         assert!(block_size <= MAX_BLOCK_SIZE, "Max supported block size is 64KiB");
 
@@ -507,12 +538,6 @@ impl FxFilesystemBuilder {
             fsck_after_every_transaction = Some(instance.clone());
             filesystem_options.post_commit_hook =
                 Some(Box::new(move || Box::pin(instance.clone().run())));
-        }
-
-        if !read_only && !format {
-            // See comment in JournalRecord::DidFlushDevice for why we need to flush the device
-            // before replay.
-            device.flush().await.context("Device flush failed")?;
         }
 
         let filesystem = Arc::new_cyclic(|weak: &Weak<FxFilesystem>| {
@@ -588,7 +613,32 @@ impl FxFilesystemBuilder {
                 .context("Journal replay failed")?;
             filesystem.root_store().set_trace(self.trace);
 
+            if self.fsck_before_open {
+                // Replay doesn't write to or flush the device, so check here, before anything
+                // below touches it.  This leaves a filesystem that fails the check as it was
+                // found.
+                fsck_with_options(filesystem.clone(), &FsckOptions::default())
+                    .trace(trace_future_args!("fsck"))
+                    .await
+                    .context("Fsck failed")?;
+            }
+
             if !read_only {
+                filesystem.allocator().ensure_free_space()?;
+
+                // This can fail if a filesystem is created and truncated to a size
+                // that doesn't leave enough free space for metadata reservations.
+                objects
+                    .init_metadata_reservation()
+                    .context("Insufficient free space for metadata reservation.")?;
+
+                // See comment in JournalRecord::DidFlushDevice for why we need to flush the device
+                // before writing anything (including zeroing the journal before the checkpoint).
+                filesystem.device().flush().await.context("Device flush failed")?;
+
+                // The device has now been flushed, so the replayed super-block is durable.
+                filesystem.journal.zero_journal_before_checkpoint();
+
                 // Queue all purged entries for tombstoning.  Don't start the reaper yet because
                 // that can trigger a flush which can add more entries to the graveyard which might
                 // get caught in the initial reap and cause objects to be prematurely tombstoned.
@@ -828,6 +878,7 @@ impl FxFilesystem {
         } else {
             self.journal.commit(transaction).await?
         };
+        transaction.mark_committed();
 
         std::mem::drop(guards);
         self.completed_transactions.add(1);
@@ -838,6 +889,7 @@ impl FxFilesystem {
         // callers don't depend on this.
         let result = callback(journal_offset);
 
+        self.hooks().on_post_commit();
         if let Some(hook) = self.options.post_commit_hook.as_ref() {
             hook().await;
         }
@@ -1403,9 +1455,11 @@ mod tests {
     use super::{FlushReason, ForceMajor, FxFilesystem, FxFilesystemBuilder, SyncOptions};
     use crate::errors::FxfsError;
     use crate::fsck::{fsck, fsck_volume};
+    use crate::hooks::Hooks;
     use crate::log::*;
     use crate::lsm_tree::Operation;
-    use crate::lsm_tree::types::Item;
+    use crate::lsm_tree::persistent_layer::PersistentLayerWriter;
+    use crate::lsm_tree::types::{Item, LayerWriter};
     use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, WriteObjectHandle};
     use crate::object_store::directory::{Directory, replace_child};
     use crate::object_store::journal::JournalOptions;
@@ -1413,19 +1467,21 @@ mod tests {
     use crate::object_store::transaction::{LockKey, Mutation, Options, lock_keys};
     use crate::object_store::volume::root_volume;
     use crate::object_store::{
-        HandleOptions, NewChildStoreOptions, ObjectDescriptor, ObjectKey, ObjectStore, ObjectValue,
-        StoreOptions,
+        DirectWriter, HandleOptions, NewChildStoreOptions, ObjectDescriptor, ObjectKey,
+        ObjectStore, ObjectValue, StoreOptions,
     };
     use crate::range::RangeExt;
+    use crate::serialized_types::{EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, VersionedLatest};
     use fuchsia_async as fasync;
     use fuchsia_sync::Mutex;
+    use futures::channel::oneshot;
     use futures::future::join_all;
     use futures::stream::{FuturesUnordered, TryStreamExt};
     use fxfs_insecure_crypto::new_insecure_crypt;
     use rustc_hash::FxHashMap as HashMap;
     use std::ops::Range;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, mpsc};
     use std::time::Duration;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::{self, FakeDevice};
@@ -1565,8 +1621,8 @@ mod tests {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
 
-        // Reopen the store, but set reclaim size to a very large value which will effectively
-        // stop the journal from flushing and allows us to track all the mutations to the store.
+        // Reopen the store, but stop compactions so the journal does not flush and we can track all
+        // the mutations to the store.
         fs.close().await.expect("close failed");
         let device = fs.take_device().await;
         device.reopen(false);
@@ -1586,8 +1642,7 @@ mod tests {
         let open_fs = |device,
                        object_mutations: Arc<Mutex<HashMap<_, _>>>,
                        allocator_mutations: Arc<Mutations<_, _>>| async {
-            FxFilesystemBuilder::new()
-                .journal_options(JournalOptions { reclaim_size: u64::MAX, ..Default::default() })
+            let fs = FxFilesystemBuilder::new()
                 .on_new_allocator(move |allocator| {
                     let allocator_mutations = allocator_mutations.clone();
                     allocator.tree().set_mutation_callback(Some(Box::new(move |op, item| {
@@ -1603,7 +1658,9 @@ mod tests {
                 })
                 .open(device)
                 .await
-                .expect("open failed")
+                .expect("open failed");
+            fs.journal().stop_compactions().await;
+            fs
         };
 
         let allocator_mutations = Arc::new(Mutations::new());
@@ -2497,8 +2554,8 @@ mod tests {
                     handle
                 };
 
-                // Populate enough metadata (> 1 MiB of layer file data) so that `vol`'s store
-                // reservation exceeds the initial `journal::RESERVED_SPACE`.
+                // Populate enough metadata so that `vol`'s store reservation exceeds the initial
+                // `journal::reserved_space`.
                 for batch in 0..64 {
                     let mut transaction = store
                         .new_transaction(
@@ -2572,7 +2629,7 @@ mod tests {
     }
 
     #[fuchsia::test]
-    async fn test_read_only_mount_on_full_filesystem() {
+    async fn test_mount_on_full_filesystem() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystemBuilder::new().format(device).await.expect("new_empty failed");
         let root_store = fs.root_store();
@@ -2618,12 +2675,26 @@ mod tests {
         device.read(0, buffer.as_mut()).await.expect("read failed");
 
         let image_data = buffer.to_vec();
-        let device = DeviceHolder::new(
-            FakeDevice::from_image(image_data.as_slice(), TEST_DEVICE_BLOCK_SIZE)
-                .expect("from_image failed"),
-        );
-        let fs =
-            FxFilesystemBuilder::new().read_only(true).open(device).await.expect("open failed");
+        let new_device = || {
+            DeviceHolder::new(
+                FakeDevice::from_image(image_data.as_slice(), TEST_DEVICE_BLOCK_SIZE)
+                    .expect("from_image failed"),
+            )
+        };
+
+        // A writable mount needs free space.
+        let error = FxFilesystemBuilder::new()
+            .open(new_device())
+            .await
+            .map(|_| ())
+            .expect_err("writable open succeeded on a full filesystem");
+        assert!(FxfsError::Inconsistent.matches(&error), "{error:?}");
+
+        let fs = FxFilesystemBuilder::new()
+            .read_only(true)
+            .open(new_device())
+            .await
+            .expect("open failed");
         fs.close().await.expect("Close failed");
     }
 
@@ -2950,5 +3021,259 @@ mod tests {
         assert!(matches!(res, Err(e) if FxfsError::AlreadyBound.matches(&e)));
 
         fs.close().await.expect("close failed");
+    }
+
+    /// A point at which a background operation can be held whilst the test does something else.
+    #[derive(Clone, Default)]
+    struct PausePoint(Arc<Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>>);
+
+    impl PausePoint {
+        /// Arms the pause point: the next call to `pause` signals the returned receiver and then
+        /// blocks until the returned sender is used or dropped.
+        fn arm(&self) -> (oneshot::Receiver<()>, mpsc::Sender<()>) {
+            let (paused_sender, paused) = oneshot::channel();
+            let (resume, resume_receiver) = mpsc::channel();
+            *self.0.lock() = Some((paused_sender, resume_receiver));
+            (paused, resume)
+        }
+
+        fn pause(&self) {
+            let armed = self.0.lock().take();
+            if let Some((paused, resume)) = armed {
+                let _ = paused.send(());
+                let _ = resume.recv();
+            }
+        }
+    }
+
+    /// A `FakeDevice` observer that, when armed, pauses at the next super-block write.
+    struct SuperBlockWritten(PausePoint);
+
+    impl fake_device::Observer for SuperBlockWritten {
+        fn write(&self, offset: u64, _len: usize) {
+            // Super-blocks start at one of these fixed extents. In this test the super-block fits
+            // within `first_extent()` (`MIN_SUPER_BLOCK_SIZE`), so pausing at
+            // `first_extent().start` captures the complete super-block write.
+            if [SuperBlockInstance::A, SuperBlockInstance::B]
+                .iter()
+                .any(|instance| instance.first_extent().start == offset)
+            {
+                self.0.pause();
+            }
+        }
+    }
+
+    /// Formats `device` with empty `"filler"` and `"target"` volumes, appends an empty
+    /// `EARLIEST_SUPPORTED_VERSION` layer to `"target"`, and closes and reopens `device` so the
+    /// test can mount it via public APIs as if opening an image from an older Fxfs version.
+    ///
+    /// Using internal layer/`StoreInfo` APIs (`PersistentLayerWriter::new_with_version` and
+    /// writing `StoreInfo` in `root_store`) is unavoidable here because public APIs only write
+    /// layers at `LATEST_VERSION`.
+    async fn format_with_old_version_target_volume(device: DeviceHolder) -> DeviceHolder {
+        let fs = FxFilesystemBuilder::new().format(device).await.expect("format failed");
+        {
+            let volumes = root_volume(fs.clone()).await.expect("root_volume failed");
+            volumes
+                .new_volume("filler", NewChildStoreOptions::default())
+                .await
+                .expect("new_volume failed");
+            let target = volumes
+                .new_volume("target", NewChildStoreOptions::default())
+                .await
+                .expect("new_volume failed");
+            // Flush `target` so its root directory is persisted in its base layer and `target` has
+            // no journal mutations left to replay on remount.
+            target.flush().await.expect("flush failed");
+
+            let root_store = fs.root_store();
+            let mut transaction = root_store
+                .new_transaction(lock_keys![], Options::default())
+                .await
+                .expect("new_transaction failed");
+            let old_layer = ObjectStore::create_object(
+                &root_store,
+                &mut transaction,
+                HandleOptions::default(),
+                None,
+            )
+            .await
+            .expect("create_object failed");
+            transaction.commit().await.expect("commit failed");
+
+            let writer = PersistentLayerWriter::<_, ObjectKey, ObjectValue>::new_with_version(
+                DirectWriter::new(&old_layer, Options::default()).await,
+                None,
+                fs.block_size(),
+                EARLIEST_SUPPORTED_VERSION,
+            )
+            .await
+            .expect("new_with_version failed");
+            writer.complete().await.expect("complete failed");
+
+            let store_info_handle = ObjectStore::open_object(
+                &root_store,
+                target.store_info_handle_object_id().unwrap(),
+                HandleOptions::default(),
+                None,
+            )
+            .await
+            .expect("open_object failed");
+            let mut store_info = target.store_info().unwrap();
+            store_info.layers.push(old_layer.object_id());
+            let mut serialized_info = Vec::new();
+            store_info.serialize_with_version(&mut serialized_info).expect("serialize failed");
+            let mut buf = store_info_handle.allocate_buffer(serialized_info.len()).await;
+            buf.copy_from_slice(&serialized_info);
+            let mut transaction =
+                store_info_handle.new_transaction().await.expect("new_transaction failed");
+            store_info_handle
+                .txn_write(&mut transaction, 0, buf.as_ref())
+                .await
+                .expect("txn_write");
+            transaction.commit().await.expect("commit failed");
+        }
+        fs.close().await.expect("close failed");
+        let device = fs.take_device().await;
+        device.reopen(false);
+        device
+    }
+
+    async fn create_file(store: &Arc<ObjectStore>, name: &str) {
+        let root_directory =
+            Directory::open(store, store.root_directory_object_id()).await.expect("open failed");
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(
+                    store.store_object_id(),
+                    store.root_directory_object_id()
+                )],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        root_directory.create_child_file(&mut transaction, name).await.expect("create failed");
+        transaction.commit().await.expect("commit failed");
+    }
+
+    async fn has_file(fs: &Arc<FxFilesystem>, volume: &str, name: &str) -> bool {
+        let store = root_volume(fs.clone())
+            .await
+            .expect("root_volume failed")
+            .volume(volume, StoreOptions::default())
+            .await
+            .expect("volume failed");
+        let root_directory =
+            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
+        root_directory.lookup(name).await.expect("lookup failed").is_some()
+    }
+
+    // Up to two background tasks (`flush_task` and `UpgradeVersion`) pause at once, so the test
+    // needs spare executor threads.
+    #[fuchsia::test(threads = 4)]
+    async fn test_store_flushed_during_compaction_survives_crash() {
+        if LATEST_VERSION == EARLIEST_SUPPORTED_VERSION {
+            return;
+        }
+        const RECLAIM_SIZE: u64 = 32768;
+        let device_flush = PausePoint::default();
+        let super_block_written = PausePoint::default();
+        let mut device = FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE);
+        device.set_observer(Box::new(SuperBlockWritten(super_block_written.clone())));
+        device.set_op_callback({
+            let device_flush = device_flush.clone();
+            move |op| {
+                if let fake_device::Op::Flush = op {
+                    device_flush.pause();
+                }
+                Ok(())
+            }
+        });
+        let device = format_with_old_version_target_volume(DeviceHolder::new(device)).await;
+
+        // Synchronous test callbacks (`Hooks::set_before_commit`,
+        // `ObjectStore::set_flush_callback`, and `FakeDevice` flush/write callbacks) are used
+        // solely to deterministically order the concurrent background compaction and
+        // `UpgradeVersion` tasks without timing sleeps.
+        let before_commit = PausePoint::default();
+        let (mut hooks, hooks_handle) = Hooks::new();
+        hooks.set_before_commit({
+            let before_commit = before_commit.clone();
+            move || before_commit.pause()
+        });
+        let fs = FxFilesystemBuilder::new()
+            .hooks(hooks_handle)
+            .journal_options(JournalOptions { reclaim_size: RECLAIM_SIZE, ..Default::default() })
+            .open(device)
+            .await
+            .expect("open failed");
+        let volumes = root_volume(fs.clone()).await.expect("root_volume failed");
+        let filler =
+            volumes.volume("filler", StoreOptions::default()).await.expect("volume failed");
+
+        let filler_flushed = PausePoint::default();
+        filler.set_flush_callback({
+            let filler_flushed = filler_flushed.clone();
+            move |_| filler_flushed.pause()
+        });
+        let (compaction_held, resume_compaction) = filler_flushed.arm();
+
+        // Write files to `filler` just until journal usage crosses `RECLAIM_SIZE` (32 KiB), so
+        // background compaction starts with ~32 KiB of headroom below `2 * RECLAIM_SIZE` (64 KiB).
+        // `target` has no journal checkpoint, so compaction skips it and pauses after flushing
+        // `filler`.
+        let sb_offset = fs.super_block_header().journal_checkpoint.file_offset;
+        let mut i = 0;
+        while fs.object_manager().last_end_offset() - sb_offset <= RECLAIM_SIZE {
+            create_file(&filler, &format!("file {i}")).await;
+            i += 1;
+        }
+        compaction_held.await.expect("compaction didn't flush filler");
+
+        // Opening `target` via `volumes.volume` sees the older-version layer, spawns a background
+        // `UpgradeVersion` flush on the filesystem scope, and returns `target` immediately. Hold
+        // that flush right before `BeginFlush`, then create `foo` in `target` and `bar` in `filler`
+        // so both are journaled before compaction's super-block offset.
+        let (upgrade_flush_paused, resume_upgrade_flush) = before_commit.arm();
+        let target =
+            volumes.volume("target", StoreOptions::default()).await.expect("volume failed");
+        upgrade_flush_paused.await.expect("UpgradeVersion flush didn't reach BeginFlush");
+        create_file(&target, "foo").await;
+        create_file(&filler, "bar").await;
+
+        // Finish `target`'s `UpgradeVersion` flush whilst compaction's `write_super_block` awaits
+        // `flush_device` without holding `writer_mutex`.
+        let (super_block_flush, resume_super_block) = device_flush.arm();
+        resume_compaction.send(()).unwrap();
+        super_block_flush.await.expect("device flush not reached");
+
+        let (target_flush_done_tx, target_flush_done) = oneshot::channel();
+        let target_flush_done_tx = Mutex::new(Some(target_flush_done_tx));
+        target.set_flush_callback(move |_| {
+            if let Some(tx) = target_flush_done_tx.lock().take() {
+                let _ = tx.send(());
+            }
+        });
+        resume_upgrade_flush.send(()).unwrap();
+        target_flush_done.await.expect("target flush didn't finish");
+
+        // Pause right after the new super-block hits the device, before `flush_task` can flush
+        // `target`'s buffered `EndFlush` journal records to disk.
+        let (super_block_written, resume_super_block_write) = super_block_written.arm();
+        resume_super_block.send(()).unwrap();
+        super_block_written.await.expect("super-block not written");
+
+        let snapshot = fs.device().snapshot().expect("snapshot failed");
+        resume_super_block_write.send(()).unwrap();
+        fs.close().await.expect("close failed");
+        std::mem::drop(hooks);
+
+        let fs = FxFilesystem::open(snapshot).await.expect("open failed");
+        let has_bar = has_file(&fs, "filler", "bar").await;
+        let has_foo = has_file(&fs, "target", "foo").await;
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("close failed");
+        assert!(has_bar, "bar wasn't replayed");
+        assert!(has_foo, "foo was lost but bar, created after it, survived");
     }
 }

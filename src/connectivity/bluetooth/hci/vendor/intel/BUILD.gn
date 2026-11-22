@@ -82,7 +82,6 @@ fuchsia_driver_component("driver") {
     ":bt_hci_intel_bind",
     ":fuchsia_driver",
   ]
-  info = "meta/driver-info.json"
 }
 
 if (internal_access) {

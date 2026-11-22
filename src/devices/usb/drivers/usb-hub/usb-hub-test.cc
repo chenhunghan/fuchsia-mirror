@@ -116,10 +116,12 @@ class UsbHarness : public zxtest::Test {
 
   void Interrupt() { device_->Interrupt(); }
   usb_hub::UsbHubDevice* device() { return device_->device(); }
+  FakeDevice* fake_device() { return &*device_; }
 
   void TearDown() override {
     device()->DdkUnbind(ddk::UnbindTxn(device()->zxdev()));
     parent_->GetLatestChild()->WaitUntilUnbindReplyCalled();
+    ASSERT_EQ(device_->cancel_all_count(), 1u);
     device_->Unplug();
   }
 
@@ -566,6 +568,206 @@ TEST_F(SyntheticHarness, ControlInErrorPropagationTest) {
   auto result = dev->GetUsbHubDescriptor(0);
   ASSERT_TRUE(result.is_error());
   ASSERT_EQ(result.error_value(), ZX_ERR_IO);
+}
+
+class InitErrorHarness : public zxtest::Test {
+ public:
+  void SetUp() override {
+    parent_ = MockDevice::FakeRootParent();
+    device_.emplace(EmulationMode::Smays);
+
+    usb_protocol_t usb_proto;
+    usb_bus_protocol_t bus_proto;
+    ASSERT_OK(device_->GetProtocol(ZX_PROTOCOL_USB, &usb_proto));
+    ASSERT_OK(device_->GetProtocol(ZX_PROTOCOL_USB_BUS, &bus_proto));
+    parent_->AddProtocol(ZX_PROTOCOL_USB, usb_proto.ops, usb_proto.ctx);
+    parent_->AddProtocol(ZX_PROTOCOL_USB_BUS, bus_proto.ops, bus_proto.ctx);
+
+    ASSERT_OK(usb_hub::UsbHubDevice::Bind(nullptr, reinterpret_cast<zx_device_t*>(parent_.get())));
+    device_->SetChildContext(parent_->GetLatestChild()->GetDeviceContext<usb_hub::UsbHubDevice>());
+    ASSERT_TRUE(device_->HasOps());
+  }
+
+  void TearDown() override {
+    device()->DdkUnbind(ddk::UnbindTxn(device()->zxdev()));
+    parent_->GetLatestChild()->WaitUntilUnbindReplyCalled();
+    ASSERT_EQ(device_->cancel_all_count(), expected_cancel_all_count_);
+    device_->Unplug();
+  }
+
+  void set_expected_cancel_all_count(uint32_t count) { expected_cancel_all_count_ = count; }
+  MockDevice* child_mock() { return parent_->GetLatestChild(); }
+  usb_hub::UsbHubDevice* device() { return device_->device(); }
+  FakeDevice* fake_device() { return &*device_; }
+
+ private:
+  std::shared_ptr<MockDevice> parent_;
+  std::optional<FakeDevice> device_;
+  uint32_t expected_cancel_all_count_ = 0;
+};
+
+TEST_F(InitErrorHarness, DdkInitFailsWhenNoInterruptEndpoint) {
+  // Configuration descriptor with three hub interfaces: one with b_num_endpoints == 0, one with a
+  // single Bulk IN endpoint (exercising !usb_ep_is_int), and one with a single Interrupt OUT
+  // endpoint (exercising !usb_ep_is_in).
+  static constexpr uint8_t kNoEndpointHubDescriptor[] = {
+      9, 2, 50,   0, 3, 1, 0,  224, 50,  // Configuration descriptor (3 interfaces, 50 bytes)
+      9, 4, 0,    0, 0, 9, 0,  0,   0,   // Interface 0 (b_num_endpoints = 0)
+      9, 4, 1,    0, 1, 9, 0,  0,   0,   // Interface 1 (b_num_endpoints = 1)
+      7, 5, 0x81, 2, 8, 0, 0,            // Bulk IN endpoint (0x81, bm_attributes = 2)
+      9, 4, 2,    0, 1, 9, 0,  0,   0,   // Interface 2 (b_num_endpoints = 1)
+      7, 5, 0x01, 3, 8, 0, 12,           // Interrupt OUT endpoint (0x01, bm_attributes = 3)
+  };
+  fake_device()->SetDescriptorOverride(
+      cpp20::span(kNoEndpointHubDescriptor, sizeof(kNoEndpointHubDescriptor)));
+
+  device()->DdkInit(ddk::InitTxn(device()->zxdev()));
+  child_mock()->WaitUntilInitReplyCalled();
+  ASSERT_EQ(child_mock()->InitReplyCallStatus(), ZX_ERR_IO);
+  ASSERT_EQ(fake_device()->configure_hub_seq(), 0u);
+  ASSERT_EQ(fake_device()->enable_endpoint_seq(), 0u);
+  ASSERT_EQ(fake_device()->power_on_seq(), 0u);
+}
+
+TEST_F(InitErrorHarness, DdkInitFailsWhenConfigureHubFails) {
+  fake_device()->SetConfigureHubStatus(ZX_ERR_IO);
+  set_expected_cancel_all_count(1u);
+
+  device()->DdkInit(ddk::InitTxn(device()->zxdev()));
+  child_mock()->WaitUntilInitReplyCalled();
+  ASSERT_EQ(child_mock()->InitReplyCallStatus(), ZX_ERR_IO);
+  ASSERT_GT(fake_device()->enable_endpoint_seq(), 0u);
+  ASSERT_GT(fake_device()->set_hub_interface_seq(), fake_device()->enable_endpoint_seq());
+  ASSERT_GT(fake_device()->configure_hub_seq(), fake_device()->set_hub_interface_seq());
+  ASSERT_EQ(fake_device()->power_on_seq(), 0u);
+}
+
+TEST_F(InitErrorHarness, DdkInitFailsWhenEnableEndpointFails) {
+  fake_device()->SetEnableEndpointStatus(ZX_ERR_IO_REFUSED);
+
+  device()->DdkInit(ddk::InitTxn(device()->zxdev()));
+  child_mock()->WaitUntilInitReplyCalled();
+  ASSERT_EQ(child_mock()->InitReplyCallStatus(), ZX_ERR_IO_REFUSED);
+  ASSERT_GT(fake_device()->enable_endpoint_seq(), 0u);
+  ASSERT_EQ(fake_device()->set_hub_interface_seq(), 0u);
+  ASSERT_EQ(fake_device()->configure_hub_seq(), 0u);
+  ASSERT_EQ(fake_device()->power_on_seq(), 0u);
+}
+
+TEST_F(SmaysHarness, UnbindRepliesWhenCancelAllFails) {
+  // SmaysHarness::TearDown() invokes DdkUnbind() and WaitUntilUnbindReplyCalled(), verifying that
+  // Shutdown() still replies to unbind_txn_ even when CancelAll() returns an error.
+  fake_device()->SetCancelAllStatus(ZX_ERR_IO);
+}
+
+TEST_F(SmaysHarness, FailedDeviceAddedDisablesPortClearsTtBufferAndContinuesEnumeration) {
+  auto dispatcher = StartDispatching();
+  sync_completion_t enum_complete;
+  uint8_t attempted_ports = 0;
+
+  // Port 1 (Low-Speed) and Port 2 (High-Speed) fail DeviceAdded; Port 3 (Full-Speed) succeeds.
+  // Because HandleResetComplete disables the port and clears the TT buffer before calling
+  // EnumerateNext, Ports 1 and 2 have already finished cleanup by the time Port 3 runs.
+  SetConnectCallback([&](uint32_t port, usb_speed_t speed) {
+    attempted_ports |= static_cast<uint8_t>(1u << (port - 1));
+    if (port == 1) {
+      ZX_ASSERT(speed == USB_SPEED_LOW);
+      return ZX_ERR_IO;
+    }
+    if (port == 2) {
+      ZX_ASSERT(speed == USB_SPEED_HIGH);
+      return ZX_ERR_IO;
+    }
+    ZX_ASSERT(port == 3);
+    ZX_ASSERT(speed == USB_SPEED_FULL);
+    ZX_ASSERT(attempted_ports == 0b111);
+    sync_completion_signal(&enum_complete);
+    return ZX_OK;
+  });
+
+  ConnectDevice(0, USB_SPEED_LOW);
+  ConnectDevice(1, USB_SPEED_HIGH);
+  ConnectDevice(2, USB_SPEED_FULL);
+  Interrupt();
+  ASSERT_OK(sync_completion_wait(&enum_complete, ZX_TIME_INFINITE));
+
+  ASSERT_EQ(fake_device()->clear_port_enable_count(), 2u);
+  ASSERT_FALSE(fake_device()->PortEnabled(0));
+  ASSERT_EQ(fake_device()->PortChangeMask(0), 0u);
+  ASSERT_FALSE(fake_device()->PortEnabled(1));
+  ASSERT_EQ(fake_device()->PortChangeMask(1), 0u);
+  ASSERT_TRUE(fake_device()->PortEnabled(2));
+
+  // CLEAR_TT_BUFFER should be issued only for the failed Low-Speed port (EP0 OUT 0x0000 and EP0 IN
+  // 0x8000 on Single-TT wIndex=1), not for the failed High-Speed port.
+  auto tt_calls = fake_device()->GetClearTtBufferCalls();
+  ASSERT_EQ(tt_calls.size(), 2u);
+  ASSERT_EQ(tt_calls[0].value, 0x0000u);
+  ASSERT_EQ(tt_calls[0].index, 1u);
+  ASSERT_EQ(tt_calls[1].value, 0x8000u);
+  ASSERT_EQ(tt_calls[1].index, 1u);
+
+  // Disconnecting all three ports should only invoke DeviceRemoved for Port 3 (the only port whose
+  // DeviceAdded succeeded).
+  sync_completion_t disconnect_complete;
+  uint32_t removed_ports_mask = 0;
+  SetConnectCallback([&](uint32_t port, usb_speed_t speed) {
+    ZX_ASSERT(speed == static_cast<usb_speed_t>(-1));
+    removed_ports_mask |= (1u << (port - 1));
+    sync_completion_signal(&disconnect_complete);
+    return ZX_OK;
+  });
+  DisconnectDevice(0);
+  DisconnectDevice(1);
+  DisconnectDevice(2);
+  Interrupt();
+  ASSERT_OK(sync_completion_wait(&disconnect_complete, ZX_TIME_INFINITE));
+  ASSERT_EQ(removed_ports_mask, 0b100u);
+}
+
+TEST_F(UnbrandedHarness, SuperSpeedFailedDeviceAddedDoesNotClearPortEnable) {
+  auto dispatcher = StartDispatching();
+  sync_completion_t enum_complete;
+
+  // Connect Port 1 and Port 2 so that when Port 2's connect callback runs via EnumerateNext(),
+  // Port 1's HandleResetComplete error-handling block has already finished.
+  SetConnectCallback([&](uint32_t port, usb_speed_t speed) {
+    ZX_ASSERT(speed == USB_SPEED_SUPER);
+    if (port == 1) {
+      return ZX_ERR_IO;
+    }
+    ZX_ASSERT(port == 2);
+    sync_completion_signal(&enum_complete);
+    return ZX_OK;
+  });
+
+  ConnectDevice(0, USB_SPEED_SUPER);
+  ConnectDevice(1, USB_SPEED_SUPER);
+  Interrupt();
+  ASSERT_OK(sync_completion_wait(&enum_complete, ZX_TIME_INFINITE));
+
+  // Per USB 3.2 section 10.16.2.4, SuperSpeed hubs do not support ClearPortFeature(PORT_ENABLE).
+  ASSERT_EQ(fake_device()->clear_port_enable_count(), 0u);
+  ASSERT_TRUE(fake_device()->PortEnabled(0));
+  ASSERT_TRUE(fake_device()->PortEnabled(1));
+  ASSERT_TRUE(fake_device()->GetClearTtBufferCalls().empty());
+
+  // Disconnect both ports before stopping DispatchThread so TearDown's DdkUnbind does not block on
+  // state_change_queue_ when removing Port 2, and verify that DeviceRemoved is only invoked for
+  // Port 2.
+  sync_completion_t disconnect_complete;
+  uint32_t removed_ports_mask = 0;
+  SetConnectCallback([&](uint32_t port, usb_speed_t speed) {
+    ZX_ASSERT(speed == static_cast<usb_speed_t>(-1));
+    removed_ports_mask |= (1u << (port - 1));
+    sync_completion_signal(&disconnect_complete);
+    return ZX_OK;
+  });
+  DisconnectDevice(0);
+  DisconnectDevice(1);
+  Interrupt();
+  ASSERT_OK(sync_completion_wait(&disconnect_complete, ZX_TIME_INFINITE));
+  ASSERT_EQ(removed_ports_mask, 0b10u);
 }
 
 }  // namespace

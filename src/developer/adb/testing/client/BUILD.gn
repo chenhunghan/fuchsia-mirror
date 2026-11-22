@@ -3,28 +3,42 @@
 # found in the LICENSE file.
 
 import("//build/components.gni")
+import("//build/test.gni")
+
+source_set("adb_client_lib") {
+  testonly = true
+  sources = [
+    "adb_client.cc",
+    "adb_client.h",
+  ]
+  public_deps = [
+    "//sdk/fidl/fuchsia.hardware.usb:fuchsia.hardware.usb_cpp",
+    "//sdk/fidl/fuchsia.hardware.usb.device:fuchsia.hardware.usb.device_cpp",
+    "//sdk/fidl/fuchsia.hardware.usb.endpoint:fuchsia.hardware.usb.endpoint_cpp",
+    "//sdk/lib/async:async-cpp",
+    "//src/developer/adb/testing/fidl:fuchsia.testing.adb_cpp",
+    "//src/developer/adb/third_party/adb",
+    "//zircon/system/ulib/zx",
+  ]
+  deps = [
+    "//sdk/fidl/fuchsia.hardware.usb.descriptor:fuchsia.hardware.usb.descriptor_cpp",
+    "//sdk/lib/component/incoming/cpp",
+    "//sdk/lib/device-watcher/cpp",
+    "//sdk/lib/syslog/cpp",
+    "//src/devices/usb/lib/usb",
+  ]
+}
 
 executable("bin") {
   output_name = "adb_client"
   testonly = true
-  sources = [
-    "adb_client.cc",
-    "main.cc",
-  ]
+  sources = [ "main.cc" ]
   deps = [
-    "//sdk/fidl/fuchsia.hardware.usb:fuchsia.hardware.usb_cpp",
-    "//sdk/fidl/fuchsia.hardware.usb.descriptor:fuchsia.hardware.usb.descriptor_cpp",
-    "//sdk/fidl/fuchsia.hardware.usb.device:fuchsia.hardware.usb.device_cpp",
-    "//sdk/fidl/fuchsia.hardware.usb.endpoint:fuchsia.hardware.usb.endpoint_cpp",
+    ":adb_client_lib",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/component/outgoing/cpp",
-    "//sdk/lib/device-watcher/cpp",
     "//sdk/lib/syslog/cpp",
-    "//src/developer/adb/testing/fidl:fuchsia.testing.adb_cpp",
-    "//src/developer/adb/third_party/adb",
-    "//src/devices/usb/lib/usb",
   ]
 }
 
@@ -32,4 +46,30 @@ fuchsia_component("adb_client") {
   testonly = true
   manifest = "meta/adb_client.cml"
   deps = [ ":bin" ]
+}
+
+test("adb-client-test-bin") {
+  sources = [ "adb_client_test.cc" ]
+  deps = [
+    ":adb_client_lib",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/loop_fixture:gtest",
+    "//third_party/googletest:gtest",
+  ]
+}
+
+fuchsia_unittest_package("adb-client-test") {
+  deps = [ ":adb-client-test-bin" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+}
+
+group("tests") {
+  testonly = true
+  deps = [ ":adb-client-test" ]
 }

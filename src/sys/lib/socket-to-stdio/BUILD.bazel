@@ -43,7 +43,6 @@ rustc_test(
 
 fx_unittest_package(
     name = "socket-to-stdio-tests",
-    package_name = "socket-to-stdio-tests",
     unit_tests = [":socket-to-stdio_test"],
     visibility = ["//src/sys:__pkg__"],
 )

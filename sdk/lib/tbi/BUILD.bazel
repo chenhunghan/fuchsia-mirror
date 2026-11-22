@@ -11,6 +11,7 @@ fx_cc_library_headers(
     hdrs = ["include/lib/tbi/tbi.h"],
     visibility = [
         "//sdk/lib/c/test/sanitizer:__pkg__",
+        "//src/bringup/bin/critical-services/storage-watchdog:__pkg__",
         "//zircon/system/utest/debugger:__pkg__",
     ],
 )

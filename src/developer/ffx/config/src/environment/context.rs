@@ -761,6 +761,16 @@ impl From<EnvironmentContext> for serde_json::Value {
     }
 }
 
+impl agents::EnvironmentSource for EnvironmentContext {
+    fn has_var(&self, key: &str) -> bool {
+        self.env_var(key).is_ok_and(|v| !v.trim().is_empty())
+    }
+
+    fn var(&self, key: &str) -> Option<String> {
+        self.env_var(key).ok()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1286,5 +1296,36 @@ mod test {
         if hostname.is_some() {
             assert_eq!(parsed.get("host_val"), Some(&serde_json::json!("node.$HOSTNAME.local")));
         }
+    }
+
+    #[fuchsia::test]
+    fn test_emu_instance_dir_default() {
+        let key = crate::keys::EMU_INSTANCE_ROOT_DIR;
+
+        // By default, instances are created in $SHARED_DATA/emu/instances, and
+        // $DATA/emu/instances is also searched for instances created by older
+        // versions of ffx.
+        let env = crate::test_env().build().unwrap();
+        let shared = env.isolate_root.path().join("shared/emu/instances");
+        let data = env.isolate_root.path().join("data/emu/instances");
+        let root: PathBuf = env.context.get(key).unwrap();
+        assert_eq!(root, shared);
+        let roots: Vec<PathBuf> = env.context.get(key).unwrap();
+        assert_eq!(roots, vec![shared, data]);
+
+        // In strict mode, $DATA is skipped.
+        let strict_shared = tempdir().unwrap();
+        let mut config_map = ConfigMap::new();
+        config_map
+            .insert("shared_data".to_string(), serde_json::json!(strict_shared.path().to_str()));
+        let strict = EnvironmentContext::strict(ExecutableKind::Test, config_map).unwrap();
+        let roots: Vec<PathBuf> = strict.get(key).unwrap();
+        assert_eq!(roots, vec![strict_shared.path().join("emu/instances")]);
+
+        // An explicit emu.instance_dir replaces the default list.
+        let env_override =
+            crate::test_env().user_config(key, "/custom/emu/instances").build().unwrap();
+        let roots: Vec<PathBuf> = env_override.context.get(key).unwrap();
+        assert_eq!(roots, vec![PathBuf::from("/custom/emu/instances")]);
     }
 }

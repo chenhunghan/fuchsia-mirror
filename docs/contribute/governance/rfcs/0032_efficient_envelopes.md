@@ -132,7 +132,7 @@ typedef union {
 static_assert(sizeof(fidl_envelope_t) == sizeof(void*));
 ```
 
-### Unknown data
+### Unknown data {:#unknown-data}
 
 Receivers &mdash; validators & decoders &mdash; may not know the type of an
 envelope when they're used in an evolvable data structure.
@@ -151,7 +151,7 @@ and skipped.
         handle count information before overwriting the envelope; this
         FTP does not express an opinion on how such a mechanism could work.
 
-## Implementation strategy
+## Implementation strategy {:#implementation-strategy}
 
 **This FTP is a breaking wire format change.**
 

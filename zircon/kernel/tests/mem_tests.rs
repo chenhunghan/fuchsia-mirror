@@ -258,7 +258,6 @@ unsafe extern "C" fn mem_test(argc: c_int, argv: *const CmdArgs, _flags: u32) ->
     }
 
     if argc == 2 {
-        let mut ptr: *mut c_void = core::ptr::null_mut();
         let len = args[1].arg_uint as usize;
 
         // rounding up len to the next page
@@ -269,21 +268,24 @@ unsafe extern "C" fn mem_test(argc: c_int, argv: *const CmdArgs, _flags: u32) ->
         }
 
         // allocate a region to test in
-        // SAFETY: Allocating an uncached contiguous kernel test region of `len` bytes.
+        // SAFETY: Creating a mapping of a new contiguous VMO is sound.
         let status = unsafe {
             VmAspace::kernel_aspace().alloc_contiguous(
                 b"memtest",
                 len,
-                &mut ptr,
+                None,
                 0,
                 vmm_flag::COMMIT,
                 ARCH_MMU_FLAG_UNCACHED | ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
             )
         };
-        if let Err(status) = status {
-            kprintln!("error {} allocating test region", status.into_raw());
-            return -1;
-        }
+        let ptr: *mut c_void = match status {
+            Ok(base) => core::ptr::with_exposed_provenance_mut(base),
+            Err(status) => {
+                kprintln!("error {} allocating test region", status.into_raw());
+                return -1;
+            }
+        };
 
         let pa = vaddr_to_paddr(ptr);
         kprintln!("physical address {:#x}", pa.0);
@@ -295,7 +297,8 @@ unsafe extern "C" fn mem_test(argc: c_int, argv: *const CmdArgs, _flags: u32) ->
         unsafe { do_mem_tests(ptr, len) };
 
         // free the test memory
-        // SAFETY: `ptr` is the base address of the region allocated above.
+        // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned by a pin
+        // this code owns, and nothing uses that mapping any more.
         let _ = unsafe { VmAspace::kernel_aspace().free_region(ptr.addr()) };
     } else if argc == 3 {
         let ptr = args[1].arg_ptr;

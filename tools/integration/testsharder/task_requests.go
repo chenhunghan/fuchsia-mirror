@@ -152,7 +152,7 @@ var randInt = func(n int) int {
 }
 
 func GetEnabledExperiments(experiments []string) ([]string, error) {
-	enabledExperiments := []string{}
+	var enabledExperiments []string
 	for _, exp := range experiments {
 		colonIndex := strings.LastIndex(exp, ":")
 		if colonIndex > 0 {

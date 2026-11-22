@@ -4,17 +4,12 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! A basic counting semaphore, implementing the C++ `Semaphore` declared in
-//! `<kernel/semaphore.h>`.
+//! A basic counting semaphore.
 
 use core::convert::Infallible;
-use core::mem::{align_of, offset_of, size_of};
 use core::sync::atomic::{AtomicI64, Ordering};
 use pin_init::{PinInit, pin_data};
-use semaphore_bindings as bindings;
-use zr::static_assert;
 use zx_status::Status;
-use zx_types::zx_status_t;
 
 use crate::arch_rs::ops::num_spinlocks_held;
 use crate::kconcurrent::{
@@ -41,13 +36,10 @@ use crate::kernel::wait_queue::{Interruptible, ResourceOwnership, WaitQueue, Wai
 /// the gate (if there's a waiter in the queue) or admit one in the future once a waiter has
 /// queued up.
 ///
-/// Layout-compatible with the C++ `Semaphore` class, whose methods forward to the
-/// `rust_semaphore_*` functions below. Every byte of a `Semaphore` is interior-mutable (an
-/// atomic, or the `UnsafeCell`-backed state of the `!Freeze` [`WaitQueue`]; there is no padding),
-/// so `&Semaphore` references remain sound while other CPUs operate on it. Do not add a `Freeze`
-/// field.
+/// Every byte of a `Semaphore` is interior-mutable (an atomic, or the `UnsafeCell`-backed state of
+/// the `!Freeze` [`WaitQueue`]; there is no padding), so `&Semaphore` references remain sound while
+/// other CPUs operate on it. Do not add a `Freeze` field.
 #[pin_data]
-#[repr(C)]
 pub struct Semaphore {
     /// This struct has two fields that must be kept in sync, a count and a `WaitQueue`. There are
     /// some rules for keeping them in sync. See the implementation comments of `post_worker` and
@@ -78,12 +70,6 @@ pub struct Semaphore {
     #[pin]
     waitq: WaitQueue,
 }
-
-// Compile-time layout assertions against the C++ Semaphore type via bindgen.
-static_assert!(size_of::<Semaphore>() == size_of::<bindings::Semaphore>());
-static_assert!(align_of::<Semaphore>() == align_of::<bindings::Semaphore>());
-static_assert!(offset_of!(Semaphore, count) == offset_of!(bindings::Semaphore, count_));
-static_assert!(offset_of!(Semaphore, waitq) == offset_of!(bindings::Semaphore, waitq_));
 
 impl Semaphore {
     /// Creates an in-place pinned initializer for a `Semaphore` with `initial_count`.
@@ -124,7 +110,7 @@ impl Semaphore {
 
     /// Implementation of [`Semaphore::post`], taking `this: *const Self` so that no `&Semaphore`
     /// is held after `waitq`'s lock is released (allowing a woken waiter to immediately destroy
-    /// the `Semaphore`, as permitted by the C++ `Semaphore::Post`).
+    /// the `Semaphore`).
     ///
     /// # Safety
     ///
@@ -195,7 +181,7 @@ impl Semaphore {
             // which counts as preemption being disabled for the duration of this transaction.
             let preempt_disabled = unsafe { PreemptDisabledToken::new() };
 
-            let thread_guard = {
+            let thread_ptr = {
                 // SAFETY: The caller guarantees `this` points to a valid `Semaphore` that stays
                 // live at least until `guard.release()` at the end of this block (or until a
                 // return from this block that wakes no waiter). Nothing reads it afterwards.
@@ -249,7 +235,9 @@ impl Semaphore {
                 // SAFETY: `num_in_queue != 0`, so `peek_front` returned a thread which is
                 // currently blocked in `sema.waitq`, and which cannot exit while `sema.waitq`'s
                 // lock (held by `guard`) or its own lock (held by `thread_guard` below, once
-                // acquired, until `thread_guard` is consumed by `scheduler::unblock*`) is held.
+                // acquired, until `scheduler::unblock*` releases it) is held. `thread` and
+                // `thread_guard` are scoped to this block so no `&Thread` remains live across
+                // `scheduler::unblock*`.
                 let thread: &Thread = unsafe { thread_ptr.as_ref() };
                 let Some(mut thread_guard) = OwnerGuard::acquire_or_backoff(thread, token) else {
                     return Action::Backoff.into();
@@ -326,7 +314,8 @@ impl Semaphore {
                 }
 
                 guard.release();
-                thread_guard
+                let _ = thread_guard.into_unguarded();
+                thread_ptr
             };
 
             ChainLockTransaction::finalize(token);
@@ -334,13 +323,17 @@ impl Semaphore {
                 // The new owner of the queue will unblock synchronously. This causes us to defer
                 // rescheduling until we block in `MessageWaiter::wait`
                 // (object/channel_dispatcher.rs).
-                // SAFETY: `thread` was dequeued from `waitq` and the active transaction is
-                // finalized.
-                unsafe { scheduler::unblock_synchronous(thread_guard, token) };
+                // SAFETY: `thread_ptr` is non-idle (it was blocked in `waitq`) and was dequeued
+                // from `waitq` with its lock held as the sole lock in the active, finalized
+                // transaction `token` and no conflicting reference, guard, or proof live;
+                // interrupts and local preemption are disabled by
+                // `EAGER_RESCHED_DISABLE_AND_IRQ_SAVE_OPTION`; and `thread_ptr` is not
+                // dereferenced after this call.
+                unsafe { scheduler::unblock_synchronous(thread_ptr, token) };
             } else {
-                // SAFETY: `thread` was dequeued from `waitq` and the active transaction is
-                // finalized.
-                unsafe { scheduler::unblock(thread_guard, token) };
+                // SAFETY: Same preconditions as `unblock_synchronous` above; `scheduler::unblock`
+                // has the identical safety contract.
+                unsafe { scheduler::unblock(thread_ptr, token) };
             }
             DONE.into()
         };
@@ -649,57 +642,6 @@ impl Semaphore {
             },
         )
     }
-}
-
-/// C++ FFI entry point for `Semaphore::Post()`.
-///
-/// # Safety
-///
-/// - `semaphore` must point to a live `Semaphore` that remains allocated at least until the count
-///   has been updated without waking a waiter, or until a waiter has been dequeued and `waitq`'s
-///   lock released (a woken waiter may then destroy it, as with C++ `Semaphore::Post`).
-/// - If any spinlocks are held, preemption must have been disabled outside of the outermost one.
-///
-/// # Panics
-///
-/// Panics if a [`ChainLockTransaction`] is active on the current CPU and `waitq`'s lock is needed
-/// (the C++ declaration is `TA_EXCL(chainlock_transaction_token)`).
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/semaphore.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_semaphore_post(semaphore: *const Semaphore) {
-    debug_assert!(!semaphore.is_null());
-    // SAFETY: Forwarded from this function's `# Safety`. `semaphore` is passed as a raw pointer so
-    // that no `&Semaphore` outlives `waitq`'s lock inside `post_worker`.
-    unsafe { Semaphore::post_worker(semaphore, None) };
-}
-
-/// C++ FFI entry point for `Semaphore::Wait()`.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `semaphore` points to a live `Semaphore` which remains valid at least until the count has
-///   been decremented without blocking, or until the current thread has been inserted into its
-///   wait queue and the queue's lock released.
-/// - The current thread is running in thread context (after threading has been initialized)
-///   where blocking is permitted (no spinlocks held and blocking not disallowed).
-///
-/// # Panics
-///
-/// Panics if a [`ChainLockTransaction`] is active on the current CPU and `waitq`'s lock is needed
-/// (the C++ declaration is `TA_EXCL(chainlock_transaction_token)`).
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/semaphore.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_semaphore_wait_infinite(semaphore: *const Semaphore) -> zx_status_t {
-    debug_assert!(!semaphore.is_null());
-    // SAFETY: Forwarded from this function's `# Safety` (`Deadline::infinite()` has no timeline).
-    // `semaphore` is passed as a raw pointer so that no `&Semaphore` lives across
-    // `scheduler::block` inside `wait_worker`.
-    Status::result_into_raw(unsafe {
-        Semaphore::wait_worker(semaphore, &const { Deadline::infinite() }, Interruptible::No)
-    })
 }
 
 /// Semaphore tests

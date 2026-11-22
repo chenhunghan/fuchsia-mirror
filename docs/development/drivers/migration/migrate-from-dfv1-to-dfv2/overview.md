@@ -57,4 +57,4 @@ special conditions or edge cases that may apply to your driver.
 [update-unit-tests]: update-other-services-to-dfv2.md#update-unit-tests-to-dfv2
 [additional-resources]: update-other-services-to-dfv2.md#additional-resources
 [set-up-compat-device-server]: /docs/development/drivers/migration/set-up-compat-device-server.md
-[compat-shim]: faq.md#what_is_the_compatibility_shim_and_when_is_it_necessary
+[compat-shim]: faq.md#what-is-the-compatibility-shim-and-when-is-it-necessary

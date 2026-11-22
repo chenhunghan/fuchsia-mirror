@@ -4,14 +4,12 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! ARM CoreSight component identification registers and constants, mirroring
-//! `<dev/coresight/component.h>`.
+//! ARM CoreSight component identification registers and constants.
 
-use core::ffi::c_char;
 use core::fmt;
 
 use bitrs::{bitfield_repr, layout};
-use regio::{AccessRestrictsTo, Accessible, MmioBank, MmioPtr, Offset, Ro};
+use regio::{AccessRestrictsTo, Accessible, MmioBank, Offset, Ro};
 use zr::static_assert;
 
 /// Typically components are 4KiB in size; the spec permits them to be larger.
@@ -65,7 +63,7 @@ pub mod arm {
     }
 }
 
-/// Component class identifier encoded in `CIDR1.CLASS` (`ComponentIdRegister::Class`).
+/// Component class identifier encoded in `CIDR1.CLASS`.
 #[bitfield_repr(u8)]
 #[derive(Copy, Clone)]
 pub enum ClassId {
@@ -259,7 +257,7 @@ layout!({
 /// Byte offset of [`DeviceArchRegister`] (`DEVARCH`) within a component page.
 pub const DEVARCH: Offset<DeviceArchRegister, Ro> = Offset::new(0xfbc);
 
-/// Major component type encoded in `DEVTYPE.MAJOR` (`DeviceTypeRegister::MajorType`).
+/// Major component type encoded in `DEVTYPE.MAJOR`.
 #[bitfield_repr(u8)]
 #[derive(Copy, Clone)]
 pub enum MajorType {
@@ -282,7 +280,7 @@ pub enum MajorType {
 static_assert!(size_of::<MajorType>() == size_of::<u8>());
 static_assert!(align_of::<MajorType>() == align_of::<u8>());
 
-/// Combined CoreSight device type (`DeviceTypeRegister::Type`) decoded from `(major, sub)`.
+/// Combined CoreSight device type decoded from `(major, sub)`.
 #[bitfield_repr(u32)]
 #[derive(Copy, Clone)]
 pub enum DeviceType {
@@ -445,89 +443,10 @@ impl DeviceTypeRegister {
 /// Byte offset of [`DeviceTypeRegister`] (`DEVTYPE`) within a component page.
 pub const DEVTYPE: Offset<DeviceTypeRegister, Ro> = Offset::new(0xfcc);
 
-/// FFI trampoline for `coresight::DeviceTypeRegister::type()`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_coresight_device_type_from_raw(reg_value: u32) -> u32 {
-    DeviceTypeRegister::from(reg_value).device_type() as u32
-}
-
-/// FFI trampoline for `coresight::ToString(ComponentIdRegister::Class)`.
-///
-/// # Safety
-///
-/// `out_len` must be a valid, aligned pointer writable for the duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_coresight_class_id_to_string(
-    raw_classid: u8,
-    out_len: *mut usize,
-) -> *const c_char {
-    let s =
-        zerocopy::TryFromBytes::try_read_from_bytes(zerocopy::IntoBytes::as_bytes(&raw_classid))
-            .map_or("unknown", class_id_to_string);
-    // SAFETY: Caller guarantees `out_len` is a valid, aligned, writable pointer.
-    unsafe {
-        out_len.write(s.len());
-    }
-    s.as_ptr().cast::<c_char>()
-}
-
-/// FFI trampoline for `coresight::ToString(DeviceTypeRegister::Type)`.
-///
-/// # Safety
-///
-/// `out_len` must be a valid, aligned pointer writable for the duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_coresight_device_type_to_string(
-    raw_dev_type: u32,
-    out_len: *mut usize,
-) -> *const c_char {
-    let dev_type =
-        zerocopy::TryFromBytes::try_read_from_bytes(zerocopy::IntoBytes::as_bytes(&raw_dev_type))
-            .unwrap_or(DeviceType::Unknown);
-    let s = device_type_to_string(dev_type);
-    // SAFETY: Caller guarantees `out_len` is a valid, aligned, writable pointer.
-    unsafe {
-        out_len.write(s.len());
-    }
-    s.as_ptr().cast::<c_char>()
-}
-
-/// FFI trampoline for `coresight::GetDesigner`.
-///
-/// # Safety
-///
-/// `base` must be a valid, 4-byte aligned pointer to a mapped CoreSight component MMIO region of
-/// at least [`MINIMUM_COMPONENT_SIZE`] bytes that is safe to read for the duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_coresight_get_designer(base: *const u32) -> u16 {
-    // SAFETY: Caller guarantees `base` is a valid, aligned pointer to a mapped component MMIO
-    // region of at least `MINIMUM_COMPONENT_SIZE` bytes.
-    unsafe {
-        let ptr = MmioPtr::<u32, Ro>::new(base);
-        let bank = MmioBank::new(ptr, MINIMUM_COMPONENT_SIZE);
-        get_designer(&bank)
-    }
-}
-
-/// FFI trampoline for `coresight::GetPartId`.
-///
-/// # Safety
-///
-/// `base` must be a valid, 4-byte aligned pointer to a mapped CoreSight component MMIO region of
-/// at least [`MINIMUM_COMPONENT_SIZE`] bytes that is safe to read for the duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_coresight_get_part_id(base: *const u32) -> u16 {
-    // SAFETY: Caller guarantees `base` is a valid, aligned pointer to a mapped component MMIO
-    // region of at least `MINIMUM_COMPONENT_SIZE` bytes.
-    unsafe {
-        let ptr = MmioPtr::<u32, Ro>::new(base);
-        let bank = MmioBank::new(ptr, MINIMUM_COMPONENT_SIZE);
-        get_part_id(&bank)
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use regio::MmioPtr;
+
     use super::*;
 
     #[repr(C, align(8))]
@@ -561,10 +480,6 @@ mod tests {
             // SAFETY: `self.words` is a valid, 8-byte aligned 4 KiB region alive for the borrow.
             let ptr = unsafe { MmioPtr::<u64, Ro>::new(self.words.as_ptr().cast::<u64>()) };
             MmioBank::new(ptr, MINIMUM_COMPONENT_SIZE)
-        }
-
-        fn as_ptr(&self) -> *const u32 {
-            self.words.as_ptr()
         }
     }
 
@@ -643,7 +558,6 @@ mod tests {
             reg.set_major(major).set_sub(sub);
             assert_eq!(reg.device_type(), expected_type);
             assert_eq!(reg.device_type().as_str(), expected_str);
-            assert_eq!(rust_coresight_device_type_from_raw(reg.bits()), expected_type as u32);
         }
 
         let unknown = DeviceTypeRegister::from(0xff);
@@ -686,39 +600,8 @@ mod tests {
         unsafe {
             assert_eq!(get_designer(&bank), arm::ARCHITECT);
             assert_eq!(get_part_id(&bank), arm::partid::CTI_400);
-            assert_eq!(rust_coresight_get_designer(page.as_ptr()), arm::ARCHITECT);
-            assert_eq!(rust_coresight_get_part_id(page.as_ptr()), arm::partid::CTI_400);
             assert_eq!(bank64.at(DEVAFF).read().bits(), 0x8000_0001);
             assert_eq!(bank.at(CIDR1).read().try_classid().ok(), Some(ClassId::CoreSight));
-        }
-    }
-
-    #[test]
-    fn ffi_trampolines() {
-        let mut len = 0usize;
-        // SAFETY: `&mut len` is a valid, aligned pointer, and the FFI functions return valid
-        // static UTF-8 slices of length `len`.
-        unsafe {
-            let ptr = rust_coresight_class_id_to_string(ClassId::CoreSight as u8, &mut len);
-            let s =
-                core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr.cast::<u8>(), len));
-            assert_eq!(s, "CoreSight");
-
-            let ptr = rust_coresight_class_id_to_string(0x5, &mut len);
-            let s =
-                core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr.cast::<u8>(), len));
-            assert_eq!(s, "unknown");
-
-            let ptr =
-                rust_coresight_device_type_to_string(DeviceType::CpuDebugLogic as u32, &mut len);
-            let s =
-                core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr.cast::<u8>(), len));
-            assert_eq!(s, "CPU debug logic");
-
-            let ptr = rust_coresight_device_type_to_string(0xffff, &mut len);
-            let s =
-                core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr.cast::<u8>(), len));
-            assert_eq!(s, "unknown");
         }
     }
 }

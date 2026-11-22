@@ -1,6 +1,6 @@
 # Rust
 
-## Build
+## Build {:#build}
 
 There are four GN target templates that should be used for Rust projects:
 

@@ -11,7 +11,7 @@ The FIDL specification doesn't state whether primitive and enum struct
 fields have default values.
 This tuning proposes that we document explicitly that they do not.
 
-# Motivation
+## Motivation {:#motivation}
 
 Requiring initialization is challenging in some languages and impossible
 in others.
@@ -33,7 +33,7 @@ For example, if a `uint32_t` is representing an FTP number then 0
 isn't a valid value but FIDL has no way to express that a caller should
 specify a number.
 
-# Design
+## Design
 
 This is primarily a documentation clarification.
 It merely clarifies the semantics expressed in FIDL interfaces.
@@ -57,31 +57,31 @@ information,  possibly in a different form:
 > provided, and MUST report an error if a programmer fails to initialize
 > non-defaulted fields.
 
-# Documentation and examples
+## Documentation and examples
 
 The language specification and tutorial should be updated to reflect this
 change.
 
-# Backwards compatibility
+## Backwards compatibility
 
 Existing behavior varies between different language bindings.
 This change  allows all existing behavior and encourages better future behavior.
 
-# Performance
+## Performance
 
 No impact.
 
-# Security
+## Security
 
 This clarifies the specification and makes accidental misuse of interfaces
 more difficult.
 These are good for security.
 
-# Testing
+## Testing
 
 No testing is required.
 
-# Drawbacks, alternatives, and unknowns
+## Drawbacks, alternatives, and unknowns
 
 An alternative would be to formally define that:
 
@@ -109,7 +109,7 @@ A previous iteration of this proposal included strings but at the time of
 writing they're still nullable so have a way of indicating that they're
 required or optional.
 
-# Prior art and references
+## Prior art and references
 
 n/a
 

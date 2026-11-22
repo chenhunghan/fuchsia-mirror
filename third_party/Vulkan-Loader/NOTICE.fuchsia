@@ -1,0 +1,285 @@
+================================================================================
+The following files are covered by this license:
+  - src/tests/framework/icd/test_icd.cpp
+  - src/tests/loader_regression_tests.cpp
+--------------------------------------------------------------------------------
+/*
+ * Copyright (c) 2021-2023 The Khronos Group Inc.
+ * Copyright (c) 2021-2023 Valve Corporation
+ * Copyright (c) 2021-2023 LunarG, Inc.
+ * Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2023-2023 RasterGrid Kft.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and/or associated documentation files (the "Materials"), to
+ * deal in the Materials without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Materials, and to permit persons to whom the Materials are
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice(s) and this permission notice shall be included in
+ * all copies or substantial portions of the Materials.
+ *
+ * THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ *
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIALS OR THE
+ * USE OR OTHER DEALINGS IN THE MATERIALS.
+================================================================================
+
+================================================================================
+The following files are covered by this license:
+  - src/tests/framework/icd/test_icd.h
+  - src/tests/framework/test_environment.cpp
+  - src/tests/framework/test_environment.h
+  - src/tests/loader_alloc_callback_tests.cpp
+  - src/tests/loader_envvar_tests.cpp
+  - src/tests/loader_layer_tests.cpp
+  - src/tests/loader_testing_main.cpp
+  - src/tests/loader_version_tests.cpp
+--------------------------------------------------------------------------------
+/*
+ * Copyright (c) 2021-2023 The Khronos Group Inc.
+ * Copyright (c) 2021-2023 Valve Corporation
+ * Copyright (c) 2021-2023 LunarG, Inc.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and/or associated documentation files (the "Materials"), to
+ * deal in the Materials without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Materials, and to permit persons to whom the Materials are
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice(s) and this permission notice shall be included in
+ * all copies or substantial portions of the Materials.
+ *
+ * THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ *
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIALS OR THE
+ * USE OR OTHER DEALINGS IN THE MATERIALS.
+================================================================================
+
+================================================================================
+The following files are covered by this license:
+  - src/tests/framework/layer/layer_util.h
+  - src/tests/framework/shim/shim_common.cpp
+  - src/tests/framework/shim/windows_shim.cpp
+  - src/tests/loader_threading_tests.cpp
+  - src/tests/loader_unknown_ext_tests.cpp
+--------------------------------------------------------------------------------
+/*
+ * Copyright (c) 2021 The Khronos Group Inc.
+ * Copyright (c) 2021 Valve Corporation
+ * Copyright (c) 2021 LunarG, Inc.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and/or associated documentation files (the "Materials"), to
+ * deal in the Materials without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Materials, and to permit persons to whom the Materials are
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice(s) and this permission notice shall be included in
+ * all copies or substantial portions of the Materials.
+ *
+ * THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ *
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIALS OR THE
+ * USE OR OTHER DEALINGS IN THE MATERIALS.
+================================================================================
+
+================================================================================
+The following files are covered by this license:
+  - src/tests/framework/layer/test_layer.cpp
+  - src/tests/framework/layer/test_layer.h
+  - src/tests/framework/shim/shim.h
+  - src/tests/framework/shim/unix_shim.cpp
+  - src/tests/loader_get_proc_addr_tests.cpp
+  - src/tests/loader_handle_validation_tests.cpp
+  - src/tests/loader_phys_dev_inst_ext_tests.cpp
+  - src/tests/loader_wsi_tests.cpp
+--------------------------------------------------------------------------------
+/*
+ * Copyright (c) 2021-2022 The Khronos Group Inc.
+ * Copyright (c) 2021-2022 Valve Corporation
+ * Copyright (c) 2021-2022 LunarG, Inc.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and/or associated documentation files (the "Materials"), to
+ * deal in the Materials without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Materials, and to permit persons to whom the Materials are
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice(s) and this permission notice shall be included in
+ * all copies or substantial portions of the Materials.
+ *
+ * THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ *
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIALS OR THE
+ * USE OR OTHER DEALINGS IN THE MATERIALS.
+================================================================================
+
+================================================================================
+The following files are covered by this license:
+  - src/tests/framework/util/builder_defines.h
+  - src/tests/framework/util/dispatch_table.cpp
+  - src/tests/framework/util/dispatch_table.h
+  - src/tests/framework/util/dispatchable_handle.h
+  - src/tests/framework/util/dynamic_library_wrapper.cpp
+  - src/tests/framework/util/dynamic_library_wrapper.h
+  - src/tests/framework/util/env_var_wrapper.cpp
+  - src/tests/framework/util/env_var_wrapper.h
+  - src/tests/framework/util/equality_helpers.cpp
+  - src/tests/framework/util/equality_helpers.h
+  - src/tests/framework/util/folder_manager.cpp
+  - src/tests/framework/util/folder_manager.h
+  - src/tests/framework/util/functions.h
+  - src/tests/framework/util/get_executable_path.cpp
+  - src/tests/framework/util/get_executable_path.h
+  - src/tests/framework/util/manifest_builders.cpp
+  - src/tests/framework/util/manifest_builders.h
+  - src/tests/framework/util/platform_wsi.cpp
+  - src/tests/framework/util/platform_wsi.h
+  - src/tests/framework/util/test_defines.h
+  - src/tests/framework/util/vulkan_object_wrappers.cpp
+  - src/tests/framework/util/vulkan_object_wrappers.h
+  - src/tests/framework/util/wide_char_handling.cpp
+  - src/tests/framework/util/wide_char_handling.h
+--------------------------------------------------------------------------------
+/*
+ * Copyright (c) 2025 The Khronos Group Inc.
+ * Copyright (c) 2025 Valve Corporation
+ * Copyright (c) 2025 LunarG, Inc.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and/or associated documentation files (the "Materials"), to
+ * deal in the Materials without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Materials, and to permit persons to whom the Materials are
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice(s) and this permission notice shall be included in
+ * all copies or substantial portions of the Materials.
+ *
+ * THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ *
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIALS OR THE
+ * USE OR OTHER DEALINGS IN THE MATERIALS.
+================================================================================
+
+================================================================================
+The following files are covered by this license:
+  - src/tests/framework/util/json_writer.cpp
+  - src/tests/framework/util/json_writer.h
+  - src/tests/live_verification/time_dynamic_loading.cpp
+  - src/tests/loader_settings_tests.cpp
+--------------------------------------------------------------------------------
+/*
+ * Copyright (c) 2023 The Khronos Group Inc.
+ * Copyright (c) 2023 Valve Corporation
+ * Copyright (c) 2023 LunarG, Inc.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and/or associated documentation files (the "Materials"), to
+ * deal in the Materials without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Materials, and to permit persons to whom the Materials are
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice(s) and this permission notice shall be included in
+ * all copies or substantial portions of the Materials.
+ *
+ * THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ *
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIALS OR THE
+ * USE OR OTHER DEALINGS IN THE MATERIALS.
+================================================================================
+
+================================================================================
+The following files are covered by this license:
+  - src/tests/live_verification/dynamic_loader_behavior/dynamic_library.cpp
+  - src/tests/live_verification/dynamic_loader_behavior/dynamic_library.h
+  - src/tests/live_verification/dynamic_loader_behavior/test_dynamic_linking.cpp
+  - src/tests/live_verification/dynamic_loader_behavior/test_dynamic_loading.cpp
+  - src/tests/live_verification/dynamic_loader_behavior/test_dynamic_loading_and_linking.cpp
+  - src/tests/live_verification/dynamic_rendering_get_proc_addr.cpp
+  - src/tests/live_verification/macos_static_loader_build.cpp
+  - src/tests/loader_debug_ext_tests.cpp
+--------------------------------------------------------------------------------
+/*
+ * Copyright (c) 2022 The Khronos Group Inc.
+ * Copyright (c) 2022 Valve Corporation
+ * Copyright (c) 2022 LunarG, Inc.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and/or associated documentation files (the "Materials"), to
+ * deal in the Materials without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Materials, and to permit persons to whom the Materials are
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice(s) and this permission notice shall be included in
+ * all copies or substantial portions of the Materials.
+ *
+ * THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ *
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIALS OR THE
+ * USE OR OTHER DEALINGS IN THE MATERIALS.
+================================================================================
+
+================================================================================
+The following files are covered by this license:
+  - src/tests/loader_fuzz_tests.cpp
+--------------------------------------------------------------------------------
+/*
+ * Copyright (c) 2024 The Khronos Group Inc.
+ * Copyright (c) 2024 Valve Corporation
+ * Copyright (c) 2024 LunarG, Inc.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and/or associated documentation files (the "Materials"), to
+ * deal in the Materials without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Materials, and to permit persons to whom the Materials are
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice(s) and this permission notice shall be included in
+ * all copies or substantial portions of the Materials.
+ *
+ * THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ *
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIALS OR THE
+ * USE OR OTHER DEALINGS IN THE MATERIALS.
+================================================================================

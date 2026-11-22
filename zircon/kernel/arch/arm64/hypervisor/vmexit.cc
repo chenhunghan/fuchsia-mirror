@@ -20,7 +20,6 @@
 #include <dev/psci.h>
 #include <dev/timer/arm_generic.h>
 #include <hypervisor/ktrace.h>
-#include <kernel/percpu.h>
 #include <kernel/stats.h>
 #include <vm/fault.h>
 #include <vm/physmap.h>

@@ -1,11 +1,10 @@
 // Copyright 2019 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be found in the LICENSE file.
 
-#include <fuchsia/exception/cpp/fidl.h>
-#include <fuchsia/feedback/testing/cpp/fidl.h>
+#include <fidl/fuchsia.exception/cpp/fidl.h>
+#include <fidl/fuchsia.feedback.testing/cpp/fidl.h>
 #include <lib/sys/cpp/service_directory.h>
 #include <lib/syslog/cpp/macros.h>
-#include <zircon/status.h>
 #include <zircon/syscalls.h>
 
 #include <gtest/gtest.h>
@@ -16,8 +15,8 @@ namespace forensics {
 namespace exceptions {
 namespace {
 
-using fuchsia::exception::ExceptionInfo;
-using fuchsia::exception::ExceptionType;
+using fuchsia_exception::ExceptionInfo;
+using fuchsia_exception::ExceptionType;
 
 bool GetExceptionContext(ExceptionContext* pe) {
   // Create a process that crashes and obtain the relevant handles and exception.
@@ -34,9 +33,9 @@ bool GetExceptionContext(ExceptionContext* pe) {
 ExceptionInfo ExceptionContextToExceptionInfo(const ExceptionContext& pe) {
   // Translate the exception to the fidl format.
   ExceptionInfo exception_info;
-  exception_info.process_koid = pe.exception_info.pid;
-  exception_info.thread_koid = pe.exception_info.tid;
-  exception_info.type = static_cast<ExceptionType>(pe.exception_info.type);
+  exception_info.process_koid(pe.exception_info.pid);
+  exception_info.thread_koid(pe.exception_info.tid);
+  exception_info.type(static_cast<ExceptionType>(pe.exception_info.type));
 
   return exception_info;
 }
@@ -45,29 +44,39 @@ TEST(ExceptionBrokerIntegrationTest, OnExceptionSmokeTest) {
   constexpr size_t kNumExceptions = 50;
   std::vector<ExceptionContext> exceptions(kNumExceptions);
 
-  fuchsia::exception::HandlerSyncPtr exception_handler;
+  auto [handler_client, handler_server] = fidl::Endpoints<fuchsia_exception::Handler>::Create();
 
   std::shared_ptr<sys::ServiceDirectory> environment_services =
       sys::ServiceDirectory::CreateFromNamespace();
-  environment_services->Connect(exception_handler.NewRequest());
+  environment_services->Connect(fidl::DiscoverableProtocolName<fuchsia_exception::Handler>,
+                                handler_server.TakeChannel());
+  fidl::SyncClient exception_handler(std::move(handler_client));
 
   for (size_t i = 0; i < kNumExceptions; ++i) {
     ExceptionContext& exception = exceptions[i];
     ASSERT_TRUE(GetExceptionContext(&exception));
 
-    ASSERT_EQ(exception_handler->OnException(std::move(exception.exception),
-                                             ExceptionContextToExceptionInfo(exception)),
-              ZX_OK);
+    const fidl::Result result = exception_handler->OnException({{
+        .exception = std::move(exception.exception),
+        .info = ExceptionContextToExceptionInfo(exception),
+    }});
+    ASSERT_TRUE(result.is_ok()) << result.error_value();
   }
 
-  fuchsia::feedback::testing::FakeCrashReporterQuerierSyncPtr crash_reporter;
-  environment_services->Connect(crash_reporter.NewRequest());
+  auto [querier_client, querier_server] =
+      fidl::Endpoints<fuchsia_feedback_testing::FakeCrashReporterQuerier>::Create();
+  environment_services->Connect(
+      fidl::DiscoverableProtocolName<fuchsia_feedback_testing::FakeCrashReporterQuerier>,
+      querier_server.TakeChannel());
+  fidl::SyncClient crash_reporter(std::move(querier_client));
 
   size_t num_crashreports{0};
   // Depending on how fast exception handling happens for each of the 5 exceptions, there might be
   // up to 6 calls to WatchFile() needed to get to the 5 filed crash reports.
   for (size_t i = 0; i < kNumExceptions + 1; ++i) {
-    ASSERT_EQ(crash_reporter->WatchFile(&num_crashreports), ZX_OK);
+    const fidl::Result result = crash_reporter->WatchFile();
+    ASSERT_TRUE(result.is_ok()) << result.error_value();
+    num_crashreports = result->num_filed();
     if (num_crashreports == kNumExceptions) {
       break;
     }
@@ -86,15 +95,16 @@ TEST(ExceptionBrokerIntegrationTest, GetProcessesOnExceptionSmokeTest) {
   ExceptionContext pe;
   ASSERT_TRUE(GetExceptionContext(&pe));
 
-  fuchsia::exception::ProcessLimboSyncPtr limbo;
+  auto [limbo_client, limbo_server] = fidl::Endpoints<fuchsia_exception::ProcessLimbo>::Create();
 
   std::shared_ptr<sys::ServiceDirectory> environment_services =
       sys::ServiceDirectory::CreateFromNamespace();
-  environment_services->Connect(limbo.NewRequest());
+  environment_services->Connect(fidl::DiscoverableProtocolName<fuchsia_exception::ProcessLimbo>,
+                                limbo_server.TakeChannel());
+  fidl::SyncClient limbo(std::move(limbo_client));
 
-  fuchsia::exception::ProcessLimbo_WatchProcessesWaitingOnException_Result result;
-  zx_status_t status = limbo->WatchProcessesWaitingOnException(&result);
-  ASSERT_EQ(status, ZX_OK) << zx_status_get_string(status);
+  const fidl::Result result = limbo->WatchProcessesWaitingOnException();
+  ASSERT_TRUE(result.is_ok() || result.error_value().is_domain_error()) << result.error_value();
 
   // Kill the job so that the exception that will be freed here doesn't bubble out of the test
   // environment.

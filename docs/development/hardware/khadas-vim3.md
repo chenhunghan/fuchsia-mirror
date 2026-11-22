@@ -446,7 +446,7 @@ command from a host terminal while the VIM3 is in `fastboot` mode:
 [VIM3 official docs]: https://docs.khadas.com/linux/vim3/index.html
 [Khadas VIM3 official forum]: https://forum.khadas.com/c/khadas-vim3/30
 [Fuchsia mailing lists and chat rooms]: /docs/contribute/community/mailing-lists.md
-[persistent local build arguments]: /docs/development/build/fx.md#defining_persistent_local_build_arguments
+[persistent local build arguments]: /docs/development/build/fx.md#defining-persistent-local-build-arguments
 [Update your Fuchsia image]: #update
 [Troubleshooting: Bootloops]: #bootloops
 [issue 122113]: https://bugs.fuchsia.dev/p/fuchsia/issues/detail?id=122113

@@ -176,6 +176,114 @@ def parse_data_runfile_path(
     return rlocation, artifact_path
 
 
+def resolve_through_directory(path: Path, directory: Path) -> str | None:
+    """Resolves the symlinks of path that lead through directory.
+
+    This follows symlinks one path component at a time, like the kernel does,
+    checking every intermediate location rather than only the final one. Once
+    resolution has gone through directory and then reaches a location outside
+    of it, symlinks are no longer followed (unless a later ".." component
+    requires it). This keeps intentional symlinks outside of directory
+    intact, e.g. clang's ld.lld -> llvm.
+
+    Args:
+        path: The path to resolve. Relative paths are relative to the current
+            directory.
+        directory: An absolute directory path, without symlinks.
+    Returns:
+        None if resolving path never visits directory or its content.
+        Otherwise, the absolute path obtained by resolving the symlinks that
+        lead through directory.
+    """
+    directory_str = str(directory)
+
+    def is_inside(location: str) -> bool:
+        return location == directory_str or location.startswith(
+            directory_str + os.sep
+        )
+
+    # Do not use os.path.abspath(), which normalizes ".." lexically, while the
+    # kernel resolves the symlinks of the preceding components first.
+    path_str = str(path)
+    if not os.path.isabs(path_str):
+        path_str = os.path.join(os.getcwd(), path_str)
+    pending = path_str.split(os.sep)
+    current = os.sep
+    visited = False
+    symlink_count = 0
+    while pending:
+        component = pending.pop(0)
+        if component in ("", "."):
+            continue
+        if component == "..":
+            current = os.path.dirname(current)
+            continue
+        candidate = os.path.join(current, component)
+        if is_inside(candidate):
+            visited = True
+        elif visited and os.path.islink(candidate) and ".." not in pending:
+            # Resolution left directory, do not follow symlinks anymore,
+            # unless a later ".." requires resolving them.
+            return os.path.join(
+                candidate, *[c for c in pending if c not in ("", ".")]
+            )
+        if not os.path.islink(candidate):
+            current = candidate
+            continue
+        symlink_count += 1
+        if symlink_count > 64:
+            # Symlink loop, give up.
+            return None
+        link = os.readlink(candidate)
+        if os.path.isabs(link):
+            current = os.sep
+        pending = link.split(os.sep) + pending
+    return current if visited else None
+
+
+def make_runtime_symlink(
+    dest_path: Path, target_path: Path, workspace_dir: Path | None = None
+) -> None:
+    """Creates a symlink with a relative target path calculated from target_path.
+
+    This ensures the symlink remains valid in isolated environments (like
+    Swarming bots in infra).
+
+    If resolving target_path goes through the Bazel workspace directory
+    (gen/build/bazel/workspace, whose entries symlink to the top-level
+    directories of the Fuchsia checkout), the symlinks leading through the
+    workspace are resolved, so the runtime symlink points directly into the
+    Fuchsia checkout. This is the case for source files reached through
+    execroot/_main/<dir> -> workspace/<dir> -> <dir>, and for Bazel symlink
+    artifacts pointing into the workspace (e.g. copy_file() outputs).
+    Otherwise, the CAS archive of a test shard can record a path like
+    workspace/<dir> both as a symlink and as a directory, which makes the
+    shard fail to download on bots.
+
+    Other symlinks are kept as is, since some files rely on their location,
+    e.g. the prebuilt python3 wrapper script locates python3.14-real next to
+    its own real path, and clang tools are symlinks to the same llvm binary.
+
+    Args:
+        dest_path: Path of the symlink to create.
+        target_path: Path of the symlink's target.
+        workspace_dir: Optional absolute path to the Bazel workspace directory,
+            without symlinks.
+    """
+    resolved = (
+        resolve_through_directory(target_path, workspace_dir)
+        if workspace_dir
+        else None
+    )
+    if resolved:
+        relative_target = os.path.relpath(
+            resolved, os.path.realpath(dest_path.parent)
+        )
+    else:
+        relative_target = os.path.relpath(target_path, dest_path.parent)
+    build_utils.force_raw_symlink(dest_path, Path(relative_target))
+
+
 def format_ld_library_path_export(
     env_vars: list[tuple[str, str]], so_dirs: set[str]
 ) -> tuple[list[tuple[str, str]], str]:
@@ -257,6 +365,11 @@ def generate_test_wrapper(
     """
     ninja_build_dir = find_ninja_build_dir()
     fuchsia_dir = build_utils.find_fuchsia_dir(from_path=ninja_build_dir)
+    workspace_dir = build_utils.find_bazel_workspace_path(
+        fuchsia_dir, ninja_build_dir
+    )
+    if workspace_dir:
+        workspace_dir = workspace_dir.resolve()
 
     # Read //build/bazel/BAZEL_RUNFILES.md to understand the layout of the runfiles directory.
 
@@ -288,15 +401,6 @@ def generate_test_wrapper(
         repo_mapping_path.exists()
     ), f"Missing Bazel repository mapping file: {repo_mapping_path}"
 
-    def make_runtime_symlink(dest_path: Path, target_path: Path) -> None:
-        """Creates a symlink with a relative target path calculated from target_path.
-
-        This ensures the symlink remains valid in isolated environments (like
-        Swarming bots in infra).
-        """
-        relative_target = os.path.relpath(target_path, dest_path.parent)
-        build_utils.force_raw_symlink(dest_path, Path(relative_target))
-
     if output_runtime_dir.exists():
         shutil.rmtree(output_runtime_dir)
     output_runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -325,7 +429,7 @@ def generate_test_wrapper(
             if not target_path.is_absolute():
                 target_path = bazel_execroot / target_path_str
 
-            make_runtime_symlink(dest_path, target_path)
+            make_runtime_symlink(dest_path, target_path, workspace_dir)
             manifest_path = source_path
 
             if source_path.endswith(".so") or ".so." in source_path:
@@ -346,7 +450,7 @@ def generate_test_wrapper(
             runfile_path, fuchsia_dir, bazel_execroot
         )
         dest_path = output_runfiles_dir / rlocation
-        make_runtime_symlink(dest_path, artifact_path)
+        make_runtime_symlink(dest_path, artifact_path, workspace_dir)
         output_manifest_entries.setdefault(rlocation, rlocation)
         runtime_deps_paths.append(dest_path)
 
@@ -372,12 +476,16 @@ def generate_test_wrapper(
     output_manifest_symlink = (
         output_runtime_dir / f"{entry_point.name}.runfiles_manifest"
     )
-    make_runtime_symlink(output_manifest_symlink, output_manifest_path)
+    make_runtime_symlink(
+        output_manifest_symlink, output_manifest_path, workspace_dir
+    )
     runtime_deps_paths.append(output_manifest_symlink)
 
     # Create a symlink in foo.runtime_dir for the entry point.
     output_entry_point = output_runtime_dir / entry_point.name
-    make_runtime_symlink(output_entry_point, bazel_execroot / entry_point)
+    make_runtime_symlink(
+        output_entry_point, bazel_execroot / entry_point, workspace_dir
+    )
     runtime_deps_paths.append(output_entry_point)
 
     # Generate the launcher script
@@ -460,7 +568,7 @@ def generate_test_wrapper(
         )
         for dest, source in host_test_data_map.items():
             dest_path = output_runtime_dir / dest
-            make_runtime_symlink(dest_path, source)
+            make_runtime_symlink(dest_path, source, workspace_dir)
             runtime_deps_paths.append(dest_path)
 
     # Generate the test_runtime_deps.json file.

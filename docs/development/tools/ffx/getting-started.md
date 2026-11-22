@@ -3,7 +3,7 @@
 This doc will guide you through some of the features of `ffx`. For an overview
 of the design and components of `ffx`, see [the ffx overview](/docs/development/tools/ffx/overview.md).
 
-## Contacting the ffx team
+## Contacting the ffx team {:#contacting-the-ffx-team}
 
 If you discover possible bugs or have questions or suggestions,
 [file a bug](https://issues.fuchsia.dev/issues/new?component=1378294&template=1838957).
@@ -67,7 +67,7 @@ Commands:
 You can use `ffx help <subcommand>` or `ffx <subcommand> --help` to see
 more about any subcommand.
 
-## Interacting with target devices
+## Interacting with target devices {:#interacting-with-target-devices}
 
 In a terminal, run the following:
 
@@ -115,7 +115,7 @@ the logs:
 [00009.776170][28540][28542][remote-control, remote_control_bin] INFO: published remote control service to overnet
 ```
 
-## Interacting with multiple devices
+## Interacting with multiple devices {:#interacting-with-multiple-devices}
 
 When multiple targets are visible in `ffx target list`, you must specify which
 target to use. Most `ffx` commands will fail if it is ambiguous which device
@@ -287,7 +287,7 @@ Log "targets" are simply prefixes to a log line.
 
 See documentation for the [config command](/docs/development/tools/ffx/commands/config.md).
 
-## Interacting with Components
+## Interacting with components {:#interacting-with-components}
 
 ### Monikers
 
@@ -451,7 +451,7 @@ Instance ID: eb345fb7dcaa4260ee0c65bb73ef0ec5341b15a4f603f358d6631c4be6bf7080
 The `component run` command can create and launch components in a given isolated collection.
 
 Note: `fx serve` must be running in order to run a package that is not
-[in base or cached](/docs/development/build/software_assembly/build_configuration.md#dependency_sets).
+[in base or cached](/docs/development/build/software_assembly/build_configuration.md#dependency-sets).
 
 Here's an example of running the Rust `hello-world` component in the `/core/ffx-laboratory`
 collection. First, you'll need the hello-world package in your universe:
@@ -571,7 +571,8 @@ when running tests which use `ffx`.
 
 ## Next steps
 
-- Please provide feedback on this doc by [reaching out to the ffx team](#contacting_the_ffx_team)!
+- Please provide feedback on this doc by
+  [reaching out to the ffx team](#contacting-the-ffx-team)!
 - Learn how to [extend `ffx`](/docs/development/tools/ffx/development/README.md).
 
 

@@ -38,7 +38,7 @@ source_set("lib") {
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/sys/cpp",
     "//sdk/lib/syslog/cpp",
-    "//src/developer/forensics/exceptions/fidl:fuchsia.exception.internal_hlcpp",
+    "//src/developer/forensics/exceptions/fidl:fuchsia.exception.internal_cpp",
     "//src/lib/fsl",
     "//src/lib/fxl",
     "//third_party/rapidjson",

@@ -12,4 +12,18 @@
             url: "#meta/fake-dependencies-fxblob.cm",
         },
     ],
+    capabilities: [
+        {
+            config: "fuchsia.pkgcache.UseDriverBlobPaging",
+            type: "bool",
+            value: true,
+        },
+    ],
+    offer: [
+        {
+            config: "fuchsia.pkgcache.UseDriverBlobPaging",
+            from: "self",
+            to: "#pkg-cache",
+        },
+    ],
 }

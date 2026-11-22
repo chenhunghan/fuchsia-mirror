@@ -49,7 +49,7 @@ impl HostListener for () {
 async fn host_device_set_local_name() -> Result<(), Error> {
     let (client, mut server) = fidl::endpoints::create_proxy_and_stream::<HostMarker>();
     let address = Address::Public([0, 0, 0, 0, 0, 0]);
-    let host = HostDevice::mock(HostId(1), address, "/dev/class/bt-hci/test".to_string(), client);
+    let host = HostDevice::mock(HostId(1), address, "test-host".to_string(), client);
     let expected_name = "EXPECTED_NAME".to_string();
     let info = Arc::new(RwLock::new(host.info()));
     let _delegate = expect_set_bonding_delegate(&mut server).await?;
@@ -82,7 +82,7 @@ async fn test_discovery_session() -> Result<(), Error> {
     let (client, mut server) = fidl::endpoints::create_proxy_and_stream::<HostMarker>();
 
     let address = Address::Public([0, 0, 0, 0, 0, 0]);
-    let host = HostDevice::mock(HostId(1), address, "/dev/class/bt-hci/test".to_string(), client);
+    let host = HostDevice::mock(HostId(1), address, "test-host".to_string(), client);
     let info_server = Arc::new(RwLock::new(host.info()));
     let _delegate = expect_set_bonding_delegate(&mut server).await?;
 
@@ -126,7 +126,7 @@ async fn test_discovery_session() -> Result<(), Error> {
 async fn host_device_restore_bonds() -> Result<(), Error> {
     let (client, host_request_stream) = fidl::endpoints::create_proxy_and_stream::<HostMarker>();
     let address = Address::Public([0, 0, 0, 0, 0, 0]);
-    let host = HostDevice::mock(HostId(1), address, "/dev/class/bt-hci/test".to_string(), client);
+    let host = HostDevice::mock(HostId(1), address, "test-host".to_string(), client);
     let mut fake_host_server =
         FakeHostServer::new(host_request_stream, Arc::new(RwLock::new(host.info())));
 
@@ -202,7 +202,7 @@ async fn bond_data_with_unexpected_address() -> Result<(), Error> {
         fidl::endpoints::create_proxy_and_stream::<HostMarker>();
     let address_a = Address::Public([0xAA; 6]);
     let address_b = Address::Public([0xBB; 6]);
-    let host = HostDevice::mock(HostId(1), address_a, "/dev/class/bt-hci/test".to_string(), client);
+    let host = HostDevice::mock(HostId(1), address_a, "test-host".to_string(), client);
 
     let bonding_delegate_stream = expect_set_bonding_delegate(&mut host_request_stream).await?;
 
@@ -287,8 +287,7 @@ async fn refresh_host_info_rejects_changed_id_or_address() -> Result<(), Error> 
     let (client, mut server) = fidl::endpoints::create_proxy_and_stream::<HostMarker>();
     let initial_id = HostId(1);
     let initial_address = Address::Public([0x11; 6]);
-    let host =
-        HostDevice::mock(initial_id, initial_address, "/dev/class/bt-hci/test".to_string(), client);
+    let host = HostDevice::mock(initial_id, initial_address, "test-host".to_string(), client);
     let _delegate = expect_set_bonding_delegate(&mut server).await?;
 
     // 1. Attempt to change HostId in WatchState response.

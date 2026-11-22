@@ -5,6 +5,9 @@
 #![recursion_limit = "256"]
 
 pub(crate) mod device;
+#[cfg(test)]
+#[path = "testing/starnix_replayer.rs"]
+mod starnix_replayer;
 pub(crate) mod sysfs;
 
 use crate::device::{
@@ -29,7 +32,7 @@ use starnix_sync::{
 use starnix_uapi::device_id::{DeviceId, USB_DEVICE_MAJOR};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::open_flags::OpenFlags;
-use starnix_uapi::{errno, usb_device_descriptor};
+use starnix_uapi::{errno, error, usb_device_descriptor};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
@@ -156,21 +159,30 @@ impl UsbDeviceManager {
         metadata.properties.insert(b"BUSNUM".into(), format!("{:03}", device.bus_num).into());
         metadata.properties.insert(b"DEVNUM".into(), format!("{:03}", device.dev_num).into());
 
-        self.devices.lock().insert(devt, device.clone());
+        {
+            let mut devices = self.devices.lock();
+            if devices.contains_key(&devt) {
+                return error!(EBUSY);
+            }
+            devices.insert(devt, device.clone());
+        }
 
         let device_clone = device.clone();
-        let registered_device = kernel.device_registry.add_major_device(
-            kernel,
-            sysname.as_bytes().into(),
-            metadata,
-            None,
-            self.bus.clone(),
-            move |device_obj, dir| {
-                build_usb_device_directory(device_obj, dir, &device_clone);
-            },
-        );
-
-        Ok(registered_device)
+        kernel
+            .device_registry
+            .add_major_device(
+                kernel,
+                sysname.as_bytes().into(),
+                metadata,
+                /* parent = */ None,
+                self.bus.clone(),
+                move |device_obj, dir| {
+                    build_usb_device_directory(device_obj, dir, &device_clone);
+                },
+            )
+            .inspect_err(|_| {
+                self.devices.lock().remove(&devt);
+            })
     }
 
     pub(crate) fn remove_device(
@@ -188,29 +200,6 @@ impl UsbDeviceManager {
         current_task.kernel().device_registry.remove_device(current_task, registered_device);
         Ok(())
     }
-}
-
-async fn run_in_kernel_task_async<F, R>(
-    kernel: &Kernel,
-    debug_name: &'static str,
-    f: F,
-) -> Result<R, Errno>
-where
-    F: FnOnce(&CurrentTask) -> R + Send + 'static,
-    R: Send + 'static,
-{
-    let closure = move |current_task: &CurrentTask| {
-        current_task.override_creds(
-            starnix_core::security::creds_start_internal_operation(current_task),
-            || f(current_task),
-        )
-    };
-    let (result_fut, req) = SpawnRequestBuilder::new()
-        .with_debug_name(debug_name)
-        .with_sync_closure(closure)
-        .build_with_async_result();
-    kernel.kthreads.spawner().spawn_from_request(req);
-    result_fut.await
 }
 
 pub fn usbfs_init(kernel: &Arc<Kernel>) -> Result<UsbDeviceManager, Errno> {
@@ -379,10 +368,9 @@ async fn watch_usb_devices_from_service(
                         let mut event_stream = proxy_for_close.take_event_stream();
                         let _ = event_stream.try_next().await;
                         active_hw_ids_for_close.lock().remove(&hw_device_id);
-                        let _ = run_in_kernel_task_async(
-                            &kernel_for_close,
-                            "usbfs-device-disconnect",
-                            move |current_task| {
+                        let req = SpawnRequestBuilder::new()
+                            .with_debug_name("usbfs-device-disconnect")
+                            .with_sync_closure(move |current_task| {
                                 if manager_for_close
                                     .remove_device(current_task, registered_device)
                                     .is_ok()
@@ -392,9 +380,9 @@ async fn watch_usb_devices_from_service(
                                         assigned_dev_num
                                     );
                                 }
-                            },
-                        )
-                        .await;
+                            })
+                            .build();
+                        kernel_for_close.kthreads.spawner().spawn_from_request(req);
                     },
                     "usbfs-device-lifecycle",
                 );
@@ -1537,6 +1525,76 @@ mod tests {
     }
 
     #[::fuchsia::test]
+    async fn test_usbfs_duplicate_and_rollback_on_registration_failure() {
+        spawn_kernel_with_features_and_run(
+            async |current_task| {
+                let kernel = current_task.kernel();
+                let manager = usbfs_init(kernel).expect("usbfs_init failed");
+                let (device_desc, config_bytes) = create_mock_hid_descriptors();
+
+                let original = Arc::new(UsbDevice::new(
+                    1,
+                    2,
+                    USB_SPEED_HIGH,
+                    device_desc,
+                    config_bytes.clone(),
+                ));
+                let devt = DeviceId::new(USB_DEVICE_MAJOR, original.minor());
+                let registered =
+                    manager.add_device(kernel, original.clone()).expect("add original");
+
+                // Duplicate devt returns EBUSY and leaves the original device untouched.
+                let duplicate = Arc::new(UsbDevice::new(
+                    1,
+                    2,
+                    USB_SPEED_FULL,
+                    device_desc,
+                    config_bytes.clone(),
+                ));
+                assert_eq!(manager.add_device(kernel, duplicate).unwrap_err(), errno!(EBUSY));
+                assert!(Arc::ptr_eq(manager.devices.lock().get(&devt).unwrap(), &original));
+                assert!(
+                    kernel
+                        .device_registry
+                        .objects
+                        .root
+                        .lookup("bus/usb/devices/1-2".into())
+                        .is_some()
+                );
+
+                manager.remove_device(current_task, registered).expect("remove_device failed");
+                assert!(!manager.devices.lock().contains_key(&devt));
+
+                // Pre-create a conflicting `/sys/bus/usb/devices/1-2` entry so
+                // `DeviceRegistry::add_major_device` fails with `EEXIST` and rolls back `devices`.
+                let conflict = kernel
+                    .device_registry
+                    .add_bus_device(
+                        "1-2".into(),
+                        /* parent = */ None,
+                        manager.bus.clone(),
+                        starnix_core::fs::sysfs::build_device_directory,
+                    )
+                    .expect("add conflicting bus device");
+
+                let retry_dev =
+                    Arc::new(UsbDevice::new(1, 2, USB_SPEED_HIGH, device_desc, config_bytes));
+                assert_eq!(
+                    manager.add_device(kernel, retry_dev.clone()).unwrap_err(),
+                    errno!(EEXIST)
+                );
+                assert!(!manager.devices.lock().contains_key(&devt));
+
+                kernel.device_registry.remove_device(current_task, conflict);
+                let registered = manager.add_device(kernel, retry_dev).expect("add after cleanup");
+                manager.remove_device(current_task, registered).expect("remove_device failed");
+            },
+            KernelFeatures { devtmpfs: true, ..Default::default() },
+        )
+        .await;
+    }
+
+    #[::fuchsia::test]
     async fn test_usbfs_read_descriptors() {
         spawn_kernel_with_features_and_run(
             async |current_task| {
@@ -1617,7 +1675,7 @@ mod tests {
             let registered = manager.add_device(kernel, usb_dev).unwrap();
 
             let props: HashMap<FsString, FsString> =
-                registered.get_uevent_properties_list().into_iter().collect();
+                registered.get_netlink_uevent_properties_list().into_iter().collect();
             assert_eq!(props.get(&FsString::from(b"SUBSYSTEM")).unwrap().as_slice(), b"usb");
             assert_eq!(props.get(&FsString::from(b"DEVTYPE")).unwrap().as_slice(), b"usb_device");
             assert_eq!(props.get(&FsString::from(b"BUSNUM")).unwrap().as_slice(), b"001");

@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 #include <endian.h>
+#include <fidl/fuchsia.driver.framework/cpp/wire.h>
+#include <fidl/fuchsia.driver.token/cpp/wire.h>
 #include <fidl/fuchsia.hardware.network/cpp/wire.h>
 #include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.peripheral/cpp/wire.h>
@@ -11,12 +13,12 @@
 #include <lib/async-loop/default.h>
 #include <lib/async-loop/testing/cpp/real_loop.h>
 #include <lib/component/incoming/cpp/protocol.h>
-#include <lib/fdio/cpp/caller.h>
+#include <lib/component/incoming/cpp/service.h>
+#include <lib/component/incoming/cpp/service_member_watcher.h>
 #include <lib/fdio/directory.h>
 #include <lib/fdio/watcher.h>
 #include <lib/fzl/vmo-mapper.h>
 #include <lib/hid/boot.h>
-#include <lib/stdcompat/string_view.h>
 #include <lib/usb-virtual-bus-launcher/usb-virtual-bus-launcher.h>
 #include <lib/zx/fifo.h>
 #include <lib/zx/vmo.h>
@@ -25,11 +27,12 @@
 #include <zircon/syscalls.h>
 
 #include <algorithm>
+#include <string>
+#include <string_view>
 #include <vector>
 
-#include <fbl/string.h>
+#include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
-#include <src/devices/lib/client/device_topology.h>
 #include <usb/cdc.h>
 #include <usb/descriptors.h>
 
@@ -48,34 +51,6 @@ constexpr const char kProduct[] = "CDC Ethernet";
 constexpr const char kSerial[] = "ebfd5ad49d2a";
 constexpr size_t kEthernetMtu = 1500;
 
-struct DevicePaths {
-  std::optional<std::string> path;
-  std::string subdir;
-  std::string query;
-};
-
-zx_status_t WaitForDevice(int dirfd, int event, const char* name, void* cookie) {
-  if (std::string_view{name} == ".") {
-    return ZX_OK;
-  }
-  if (event != WATCH_EVENT_ADD_FILE) {
-    return ZX_OK;
-  }
-  fdio_cpp::UnownedFdioCaller caller(dirfd);
-
-  const fit::result response = fdf_topology::GetTopologicalPath(caller.directory(), name);
-  if (response.is_error()) {
-    return response.error_value();
-  }
-  std::string_view topological_path = response.value();
-  DevicePaths* paths = reinterpret_cast<DevicePaths*>(cookie);
-  if (cpp23::contains(topological_path, paths->query)) {
-    paths->path = paths->subdir + std::string{name};
-    return ZX_ERR_STOP;
-  }
-  return ZX_OK;
-}
-
 class NetworkDeviceInterface {
  public:
   NetworkDeviceInterface() : loop_(&kAsyncLoopConfigNoAttachToCurrentThread) {}
@@ -83,12 +58,9 @@ class NetworkDeviceInterface {
   // Must be called exactly once, before any other method. Fatal assertions cannot be used in a
   // constructor with gtest, so initialization lives here instead; callers should wrap this in
   // ASSERT_NO_FATAL_FAILURE.
-  void Init(fidl::UnownedClientEnd<fuchsia_io::Directory> directory, const fbl::String& path,
+  void Init(fidl::ClientEnd<fuchsia_hardware_network::Device> device,
             const std::string& session_name) {
-    zx::result device = component::ConnectAt<fuchsia_hardware_network::Device>(directory, path);
-    ASSERT_OK(device);
-
-    netdevice_client_.emplace(std::move(device.value()), loop_.dispatcher());
+    netdevice_client_.emplace(std::move(device), loop_.dispatcher());
     network::client::NetworkDeviceClient& client = netdevice_client_.value();
     {
       std::optional<zx_status_t> result;
@@ -233,11 +205,14 @@ class NetworkDeviceInterface {
 class UsbCdcEcmTest : public ::testing::Test {
  public:
   void SetUp() override {
-    auto bus = BusLauncher::Create();
+    auto bus = BusLauncher::Create({
+        fuchsia_component_test::Capability::WithService(
+            fuchsia_component_test::Service{{.name = fuchsia_hardware_network::Service::Name}}),
+    });
     ASSERT_OK(bus.status_value());
     bus_ = std::move(bus.value());
 
-    ASSERT_NO_FATAL_FAILURE(InitUsbCdcEcm(&peripheral_path_, &host_path_));
+    ASSERT_NO_FATAL_FAILURE(InitUsbCdcEcm(&peripheral_device_, &host_device_));
   }
 
   void TearDown() override {
@@ -247,10 +222,11 @@ class UsbCdcEcmTest : public ::testing::Test {
 
  protected:
   std::optional<BusLauncher> bus_;
-  std::string peripheral_path_;
-  std::string host_path_;
+  fidl::ClientEnd<fuchsia_hardware_network::Device> peripheral_device_;
+  fidl::ClientEnd<fuchsia_hardware_network::Device> host_device_;
 
-  void InitUsbCdcEcm(std::string* peripheral_path, std::string* host_path) {
+  void InitUsbCdcEcm(fidl::ClientEnd<fuchsia_hardware_network::Device>* peripheral_device,
+                     fidl::ClientEnd<fuchsia_hardware_network::Device>* host_device) {
     namespace usb_peripheral = fuchsia_hardware_usb_peripheral;
     using ConfigurationDescriptor =
         ::fidl::VectorView<fuchsia_hardware_usb_peripheral::wire::FunctionDescriptor>;
@@ -286,29 +262,52 @@ class UsbCdcEcmTest : public ::testing::Test {
 
     ASSERT_OK(bus_->SetupPeripheralDevice(std::move(device_desc), std::move(config_descs)));
 
-    const auto wait_for_device = [this](DevicePaths& paths) {
-      fbl::unique_fd fd;
-      ASSERT_OK(fdio_open3_fd_at(bus_->GetRootFd(), paths.subdir.c_str(),
-                                 static_cast<uint64_t>(fuchsia_io::wire::kPermReadable),
-                                 fd.reset_and_get_address()));
-      ASSERT_STATUS(fdio_watch_directory(fd.get(), WaitForDevice, ZX_TIME_INFINITE, &paths),
-                    ZX_ERR_STOP);
-    };
-    DevicePaths host_device_paths{
-        .subdir = "class/network/",
-        .query = "/usb-bus/",
-    };
-    // Attach to function-001, because it implements usb-cdc-ecm.
-    DevicePaths peripheral_device_paths{
-        .subdir = "class/network/",
-        .query = "/usb-peripheral/function-001",
-    };
+    zx::result bus_topology =
+        component::ConnectAt<fuchsia_driver_token::NodeBusTopology>(bus_->GetExposedDir());
+    ASSERT_OK(bus_topology.status_value());
 
-    wait_for_device(host_device_paths);
-    wait_for_device(peripheral_device_paths);
+    component::SyncServiceMemberWatcher<fuchsia_hardware_network::Service::Token> watcher(
+        bus_->GetExposedDir());
+    while (!peripheral_device->is_valid() || !host_device->is_valid()) {
+      std::string instance_name;
+      zx::result token_client = watcher.GetNextInstance(false, &instance_name);
+      ASSERT_OK(token_client.status_value());
 
-    *host_path = host_device_paths.path.value();
-    *peripheral_path = peripheral_device_paths.path.value();
+      fidl::WireResult token_res = fidl::WireCall(token_client.value())->Get();
+      ASSERT_OK(token_res.status());
+      ASSERT_TRUE(token_res->is_ok()) << zx_status_get_string(token_res->error_value());
+
+      fidl::WireResult topo_res =
+          fidl::WireCall(bus_topology.value())->Get(std::move(token_res->value()->token));
+      ASSERT_OK(topo_res.status());
+      ASSERT_TRUE(topo_res->is_ok()) << zx_status_get_string(topo_res->error_value());
+
+      for (const auto& bus_info : topo_res->value()->path) {
+        if (!bus_info.has_bus()) {
+          continue;
+        }
+        if (bus_info.bus() == fuchsia_driver_framework::wire::BusType::kUsbPeripheral) {
+          // Configuration 1 (`function-000`, address 0) is unconfigured; select configuration 2
+          // (`function-001`, address 1).
+          if (bus_info.has_address() && bus_info.address().is_int_value() &&
+              bus_info.address().int_value() == 1) {
+            zx::result device =
+                component::ConnectAtMember<fuchsia_hardware_network::Service::Device>(
+                    bus_->GetExposedDir(), instance_name);
+            ASSERT_OK(device.status_value());
+            *peripheral_device = std::move(device.value());
+          }
+          break;
+        }
+        if (bus_info.bus() == fuchsia_driver_framework::wire::BusType::kUsb) {
+          zx::result device = component::ConnectAtMember<fuchsia_hardware_network::Service::Device>(
+              bus_->GetExposedDir(), instance_name);
+          ASSERT_OK(device.status_value());
+          *host_device = std::move(device.value());
+          break;
+        }
+      }
+    }
   }
 };
 
@@ -336,14 +335,103 @@ void TransmitAndReceive(NetworkDeviceInterface& a, NetworkDeviceInterface& b,
   }
 }
 
+// Waits for each path segment in |path| to appear in |dir_fd|, opening intermediate segments as
+// directories without connecting to any devfs protocol, controller, or device_topology service
+// (connecting to device_topology on classless nodes triggers a devfs allowlist debug assertion).
+zx_status_t WaitForTopologicalNode(int dir_fd, std::string_view path) {
+  fbl::unique_fd owned_dir;
+  int current_fd = dir_fd;
+  while (!path.empty()) {
+    const size_t slash = path.find('/');
+    const std::string_view segment =
+        (slash == std::string_view::npos) ? path : path.substr(0, slash);
+    if (segment.empty()) {
+      return ZX_ERR_INVALID_ARGS;
+    }
+    std::string target(segment);
+    zx_status_t watch_status = fdio_watch_directory(
+        current_fd,
+        [](int, int event, const char* fn, void* cookie) {
+          if (event != WATCH_EVENT_ADD_FILE) {
+            return ZX_OK;
+          }
+          const auto* expected = static_cast<const std::string*>(cookie);
+          return (*expected == fn) ? ZX_ERR_STOP : ZX_OK;
+        },
+        ZX_TIME_INFINITE, &target);
+    if (watch_status != ZX_ERR_STOP) {
+      return watch_status;
+    }
+    if (slash == std::string_view::npos) {
+      return ZX_OK;
+    }
+    fbl::unique_fd next_dir;
+    if (zx_status_t status = fdio_open3_fd_at(
+            current_fd, target.c_str(),
+            uint64_t{fuchsia_io::wire::kPermReadable | fuchsia_io::wire::Flags::kProtocolDirectory},
+            next_dir.reset_and_get_address());
+        status != ZX_OK) {
+      return status;
+    }
+    owned_dir = std::move(next_dir);
+    current_fd = owned_dir.get();
+    path.remove_prefix(slash + 1);
+  }
+  return ZX_ERR_INVALID_ARGS;
+}
+
+// Binds the driver over the virtual bus, then unbinds it with the interrupt transfer queued.
+// Uses a single USB configuration (without loading network-device) so at most one instance of each
+// DriverBase2 DSO runs in driver-host-root during teardown (see https://fxbug.dev/317149053).
+TEST(UsbCdcEcmBindTest, BindThenUnbind) {
+  zx::result bus = BusLauncher::Create();
+  ASSERT_OK(bus.status_value());
+
+  namespace usb_peripheral = fuchsia_hardware_usb_peripheral;
+  using ConfigurationDescriptor =
+      ::fidl::VectorView<fuchsia_hardware_usb_peripheral::wire::FunctionDescriptor>;
+
+  usb_peripheral::wire::DeviceDescriptor device_desc = {};
+  device_desc.bcd_usb = htole16(0x0200);
+  device_desc.b_max_packet_size0 = 64;
+  device_desc.bcd_device = htole16(0x0100);
+  device_desc.b_num_configurations = 1;
+  device_desc.manufacturer = fidl::StringView(kManufacturer);
+  device_desc.product = fidl::StringView(kProduct);
+  device_desc.serial = fidl::StringView(kSerial);
+  device_desc.id_vendor = htole16(0x18D1);
+  device_desc.id_product = htole16(0xA020);
+
+  usb_peripheral::wire::FunctionDescriptor usb_cdc_ecm_function_desc = {
+      .interface_class = fidl::ToUnderlying(fdescriptor::UsbClass::kComm),
+      .interface_subclass = fidl::ToUnderlying(fdescriptor::CdcSubclass::kEthernet),
+      .interface_protocol = 0,
+  };
+  std::vector<usb_peripheral::wire::FunctionDescriptor> function_descs = {
+      usb_cdc_ecm_function_desc,
+  };
+  std::vector<ConfigurationDescriptor> config_descs = {
+      ConfigurationDescriptor::FromExternal(function_descs),
+  };
+
+  ASSERT_OK(bus->SetupPeripheralDevice(std::move(device_desc), std::move(config_descs)));
+
+  ASSERT_OK(WaitForTopologicalNode(bus->GetRootFd(),
+                                   "usb-virtual-host/usb-bus/000/000/asc-000/usb-cdc-ecm"));
+  ASSERT_OK(WaitForTopologicalNode(
+      bus->GetRootFd(), "usb-virtual-device/usb-peripheral/function-000/usb-cdc-netdev"));
+
+  ASSERT_OK(bus->ClearPeripheralDeviceFunctions());
+  ASSERT_OK(bus->Disable());
+}
+
 // TODO(b/316176095): Re-enable test after ensuring it works with DFv2.
 TEST_F(UsbCdcEcmTest, DISABLED_TransmitReceive) {
-  fdio_cpp::UnownedFdioCaller caller(bus_->GetRootFd());
   NetworkDeviceInterface peripheral;
   ASSERT_NO_FATAL_FAILURE(
-      peripheral.Init(caller.directory(), peripheral_path_, "usb-cdc-function-peripheral"));
+      peripheral.Init(std::move(peripheral_device_), "usb-cdc-function-peripheral"));
   NetworkDeviceInterface host;
-  ASSERT_NO_FATAL_FAILURE(host.Init(caller.directory(), host_path_, "usb-cdc-ecm-host"));
+  ASSERT_NO_FATAL_FAILURE(host.Init(std::move(host_device_), "usb-cdc-ecm-host"));
 
   ASSERT_EQ(peripheral.mtu(), kEthernetMtu);
   ASSERT_EQ(host.mtu(), kEthernetMtu);

@@ -77,10 +77,6 @@
             "bug": "https://fxbug.dev/570203009"
         },
         {
-            "path": "build/bazel/debug_symbols/tests/defs.bzl",
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
             "path": "build/bazel/fuchsia_idk/repository_rules.bzl",
             "bug": "https://fxbug.dev/570203009"
         },

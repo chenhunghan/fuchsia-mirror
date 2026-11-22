@@ -9,32 +9,8 @@
 use core::ffi::c_void;
 
 use super::{
-    ProdEntry, TraceBufferType, jtrace_dump, jtrace_init, jtrace_invalidate, jtrace_log,
-    jtrace_set_after_thread_init_early, jtrace_set_location,
+    ProdEntry, TraceBufferType, jtrace_dump, jtrace_invalidate, jtrace_log, jtrace_set_location,
 };
-
-/// FFI entry point for C++ `jtrace_init()`.
-// SAFETY: Globally unique symbol name matching the extern "C" declaration in
-// <lib/jtrace/jtrace_ffi.h>.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_jtrace_init() {
-    jtrace_init();
-}
-
-/// FFI entry point for C++ `jtrace_set_after_thread_init_early()`.
-///
-/// # Safety
-///
-/// The caller must ensure that early thread initialization is complete so that
-/// [`ThreadPtr::current()`](crate::kernel::thread::ThreadPtr::current) is valid on the calling
-/// CPU.
-// SAFETY: Globally unique symbol name matching the extern "C" declaration in
-// <lib/jtrace/jtrace_ffi.h>.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_jtrace_set_after_thread_init_early() {
-    // SAFETY: Caller guarantees early thread initialization is complete.
-    unsafe { jtrace_set_after_thread_init_early() };
-}
 
 /// FFI entry point for C++ `jtrace_set_location(void* ptr, size_t len)`.
 ///

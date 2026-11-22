@@ -2,9 +2,24 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+# Exported only for rule and macro tests under
+# `//src/lib/testing/sharding/rules/tests`.
+exports_files(
+    [
+        "example_expectations.json5",
+        "meta/example-test.cml",
+        "meta/example-test-with-expectations.cml",
+    ],
+    visibility = ["//src/lib/testing/sharding/rules/tests:__pkg__"],
+)
 
 rustc_test(
     name = "underlying_test_to_be_sharded",
@@ -15,6 +30,14 @@ rustc_test(
     target_compatible_with = ["@platforms//os:fuchsia"],
 )
 
+fx_packaged_binary(
+    name = "underlying_test_to_be_sharded_packaged",
+    testonly = True,
+    binary = ":underlying_test_to_be_sharded",
+    binary_name = "underlying_test_to_be_sharded",
+    visibility = ["//src/lib/testing/sharding/rules/tests:__pkg__"],
+)
+
 rustc_test(
     name = "underlying_test_to_be_sharded_with_failures",
     srcs = ["src/lib.rs"],
@@ -23,4 +46,12 @@ rustc_test(
     proc_macro_deps = ["//third_party/rust_crates/vendor:paste"],
     rustc_flags = ["--cfg=make_case_f_fail"],
     target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_packaged_binary(
+    name = "underlying_test_to_be_sharded_with_failures_packaged",
+    testonly = True,
+    binary = ":underlying_test_to_be_sharded_with_failures",
+    binary_name = "underlying_test_to_be_sharded_with_failures",
+    visibility = ["//src/lib/testing/sharding/rules/tests:__pkg__"],
 )

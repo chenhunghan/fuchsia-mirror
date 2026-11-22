@@ -11,10 +11,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import remotetool
-import reproxy_logs
-import rpl_tool
 from api.log import log_pb2
+from build.rbe import remotetool, reproxy_logs, rpl_tool
 
 
 class NormalizeInputPathPrefixTests(unittest.TestCase):
@@ -201,7 +199,7 @@ class MainTests(unittest.TestCase):
         ) as mock_parse_log:
             with mock.patch.object(
                 remotetool,
-                "configure_remotetool",
+                "configure",
                 return_value=_FAKE_REMOTETOOL,
             ) as mock_remotetool:
                 with mock.patch.object(
@@ -232,7 +230,7 @@ class MainTests(unittest.TestCase):
         ) as mock_parse_log:
             with mock.patch.object(
                 remotetool,
-                "configure_remotetool",
+                "configure",
                 return_value=_FAKE_REMOTETOOL,
             ) as mock_remotetool:
                 with mock.patch.object(

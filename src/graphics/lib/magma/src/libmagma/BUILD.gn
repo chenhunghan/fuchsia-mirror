@@ -12,6 +12,16 @@ group("libmagma") {
   public_deps = [ ":libmagma_static" ]
 }
 
+# Like ":libmagma", but uses the shared libtrace-engine.so instead of the
+# static trace engine, for processes that already use libtrace-engine.so and
+# must not link a second engine. In particular, the Starnix kernel's trace
+# events would otherwise be attributed to the wrong process if they went to
+# the static engine.
+group("libmagma_shared_engine") {
+  visibility = [ "//src/starnix/*" ]
+  public_deps = [ ":libmagma_static_shared_engine" ]
+}
+
 # Magma ICDs are only allowed to depend on (parts of) libc and libzircon, and no
 # other shared libraries.
 disallowed_dependencies = [
@@ -70,6 +80,44 @@ static_library("libmagma_static") {
   assert_no_deps = disallowed_dependencies
 }
 
+# Like ":libmagma_static", but uses the shared libtrace-engine.so instead of
+# the static trace engine. See ":libmagma_shared_engine".
+static_library("libmagma_static_shared_engine") {
+  visibility = [ ":libmagma_shared_engine" ]
+
+  public_deps = [ "//sdk/lib/magma_client:magma_headers" ]
+
+  configs += [ ":static_lib_config" ]
+
+  # This allows the library to be used as a dependency by rust build rules.
+  public_configs = [ "//build/config/fuchsia:static_cpp_standard_library" ]
+
+  sources = [
+    "enumerator.cc",
+    "enumerator.h",
+    "magma.cc",
+  ]
+
+  deps = [
+    ":magma_sysmem_shared_engine",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+    "//src/graphics/magma/lib/magma/platform:buffer",
+    "//src/graphics/magma/lib/magma/platform:connection_client",
+    "//src/graphics/magma/lib/magma/platform:device_client",
+    "//src/graphics/magma/lib/magma/platform:handle",
+    "//src/graphics/magma/lib/magma/platform:logger_impl",
+    "//src/graphics/magma/lib/magma/platform:semaphore",
+    "//src/graphics/magma/lib/magma/platform:thread",
+    "//src/graphics/magma/lib/magma/platform:trace",
+    "//src/graphics/magma/lib/magma/platform:trace_provider_shared_engine",
+    "//src/graphics/magma/lib/magma/util:short_macros",
+  ]
+
+  # Unlike ":libmagma_static", this may depend on libfdio.so (through the
+  # shared engine's trace provider), as it isn't used by ICDs.
+  assert_no_deps = [ "//zircon/system/ulib/trace-engine:trace-engine-static" ]
+}
+
 # Factored out from ":libmagma_static" in order to support Lavapipe. See
 # "visibility" labels.
 source_set("magma_sysmem") {
@@ -90,6 +138,28 @@ source_set("magma_sysmem") {
     "//src/graphics/magma/lib/magma/util:short_macros",
     "//zircon/system/ulib/trace:trace-with-static-engine",
     "//zircon/system/ulib/trace-vthread:trace-vthread-with-static-engine",
+  ]
+
+  assert_no_deps = disallowed_dependencies
+}
+
+# Like ":magma_sysmem", but uses the shared libtrace-engine.so instead of the
+# static trace engine.
+source_set("magma_sysmem_shared_engine") {
+  visibility = [ ":libmagma_static_shared_engine" ]
+
+  configs += [ ":static_lib_config" ]
+
+  # This allows the library to be used as a dependency by rust build rules.
+  public_configs = [ "//build/config/fuchsia:static_cpp_standard_library" ]
+
+  sources = [ "magma_sysmem.cc" ]
+
+  deps = [
+    "//src/graphics/magma/lib/magma/platform:sysmem_connection",
+    "//src/graphics/magma/lib/magma/util:short_macros",
+    "//zircon/system/ulib/trace",
+    "//zircon/system/ulib/trace-vthread",
   ]
 
   assert_no_deps = disallowed_dependencies

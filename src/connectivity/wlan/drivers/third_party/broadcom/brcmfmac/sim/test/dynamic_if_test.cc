@@ -327,7 +327,7 @@ TEST_F(DynamicIfTest, EventHandlingOnSoftAPDel) {
     ASSERT_NE(ifp, nullptr);
 
     const uint8_t free_idx = 3;
-    brcmf_event_msg emsg = {.event_code = BRCMF_E_IF};
+    brcmf_event_msg emsg = {.event_code = BRCMF_E_IF, .datalen = sizeof(brcmf_if_event)};
     brcmf_if_event add_free = {
         .ifidx = free_idx, .action = BRCMF_E_IF_ADD, .bsscfgidx = free_idx};
 
@@ -367,6 +367,33 @@ TEST_F(DynamicIfTest, EventHandlingOnSoftAPDel) {
 
     EXPECT_EQ(wdev->iftype, fuchsia_wlan_common::WlanMacRole::kAp);
     EXPECT_EQ(ZX_OK, brcmf_fil_bsscfg_data_set(ifp, "interface_remove", nullptr, 0));
+  });
+}
+
+// An IF event whose payload is shorter than struct brcmf_if_event must be dropped.
+TEST_F(DynamicIfTest, TruncatedIfDelEventIsDropped) {
+  Init();
+  ASSERT_EQ(ZX_OK, StartInterface(wlan_common::WlanMacRole::kAp, &softap_ifc_));
+
+  WithSimDevice([this](brcmfmac::SimDevice* device) {
+    brcmf_simdev* sim = device->GetSim();
+    struct brcmf_if* ifp = brcmf_get_ifp(sim->drvr, softap_ifc_.iface_id_);
+    ASSERT_NE(ifp, nullptr);
+
+    brcmf_if_event del_event = {.ifidx = static_cast<uint8_t>(ifp->ifidx),
+                                .action = BRCMF_E_IF_DEL,
+                                .bsscfgidx = static_cast<uint8_t>(ifp->bsscfgidx)};
+    brcmf_event_msg emsg = {.event_code = BRCMF_E_IF, .datalen = sizeof(brcmf_if_event) - 1};
+
+    {
+      ScopedSharedWriteLock lock(sim->drvr->if_mutex);
+      brcmf_fweh_handle_if_event(sim->drvr, &emsg, &del_event);
+    }
+    EXPECT_EQ(sim->drvr->iflist[ifp->bsscfgidx], ifp);
+    EXPECT_EQ(brcmf_get_ifp(sim->drvr, softap_ifc_.iface_id_), ifp);
+
+    ASSERT_NE(sim->drvr->fweh.evt_handler[BRCMF_E_IF], nullptr);
+    EXPECT_EQ(ZX_ERR_INVALID_ARGS, sim->drvr->fweh.evt_handler[BRCMF_E_IF](ifp, &emsg, &del_event));
   });
 }
 

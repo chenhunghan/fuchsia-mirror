@@ -28,9 +28,12 @@ type DeviceNetworkConfig struct {
 
 // DeviceConfig holds all the data that we expect to be present in /etc/botanist/config.json
 type DeviceConfig struct {
-	FastbootSerial string              `json:"fastboot_sernum"`
-	SerialMux      string              `json:"serial_mux"`
-	Network        DeviceNetworkConfig `json:"network"`
+	// SerialNumber is the serial number of the device. The JSON key is
+	// "fastboot_sernum" for historical reasons: fastboot was originally the
+	// only tool that used this field.
+	SerialNumber string              `json:"fastboot_sernum"`
+	SerialMux    string              `json:"serial_mux"`
+	Network      DeviceNetworkConfig `json:"network"`
 }
 
 // ReadDeviceConfig returns a DeviceConfig.

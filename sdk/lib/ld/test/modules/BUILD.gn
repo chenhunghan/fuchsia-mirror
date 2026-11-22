@@ -26,6 +26,7 @@ per_test_modules = [
   ":transitive-foo-dep",
   ":root-precedence-in-dep-resolution",
   ":precedence-in-dep-resolution",
+  ":cyclic-dep-parent",
   ":soname-filename-loaded-dep",
   ":soname-filename-dep",
 ]
@@ -42,7 +43,6 @@ per_test_executables = [
   ":missing-sym",
   ":missing-dep",
   ":missing-transitive-dep",
-  ":cyclic-dep-parent",
   ":one-weak-symbol",
   ":all-weak-symbols",
 ]
@@ -1579,31 +1579,33 @@ foreach(test, [ "" ] + per_test_suffices) {
   test_loadable_module("cyclic-dep-parent$suffix.module") {
     defines = [ "TEST_SYMBOL_SUFFIX=$sym_suffix" ]
     sources = [ "foo.cc" ]
-    deps = [ ":has-cyclic-dep.ifs$suffix" ]
+    ldflags = [ "-Wl,-soname=cyclic-dep-parent$suffix.module.so" ]
+
+    # foo() is resolved at runtime from the transitive dependency foo-v1 rather
+    # than from the direct dependency has-cyclic-dep.
+    remove_configs = [ "//build/config:symbol_no_undefined" ]
+    deps = [ ":has-cyclic-dep$suffix" ]
   }
 
-  # This shlib stub depends on the parent module (cyclic-dep-parent)
-  test_ifs_shared_library("has-cyclic-dep.ifs$suffix") {
-    soname = "libhas-cyclic-dep$suffix.so"
+  # A stub for cyclic-dep-parent so has-cyclic-dep can have a DT_NEEDED for it
+  # without a GN dependency cycle.
+  test_ifs_shared_library("cyclic-dep-parent$suffix.ifs") {
+    soname = "cyclic-dep-parent$suffix.module.so"
     symbols = [
       {
-        name = "foo$sym_suffix"
+        name = "call_foo$sym_suffix"
         type = "Func"
       },
     ]
-    needed_libs = [
-      "cylic-dep-parent$suffix.module.so",
-      "libld-dep-foo-v1$suffix.so",
-    ]
-    data_deps = [ ":has-cyclic-dep$suffix" ]
   }
 
-  # This test shlib will generate build artifacts for :has-cyclic-dep.ifs, but
-  # is not used directly in tests.
   test_shared_library("has-cyclic-dep$suffix") {
     defines = [ "TEST_SYMBOL_SUFFIX=$sym_suffix" ]
     sources = [ "foo.cc" ]
-    deps = [ ":ld-dep-foo-v1$suffix" ]
+    deps = [
+      ":cyclic-dep-parent$suffix.ifs",
+      ":ld-dep-foo-v1$suffix",
+    ]
   }
 
   # soname-filename-match:

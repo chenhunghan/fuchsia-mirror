@@ -20,8 +20,18 @@ using ::media_audio::SincFilterCoefficientTable;
 struct Key {
   int32_t source_rate;
   int32_t dest_rate;
+  bool high_pass = false;
+  bool low_pass = false;
 
   SincFilterCoefficientTable::Inputs MakeInputs() {
+    FX_CHECK(!(high_pass && low_pass));
+    FX_CHECK(!high_pass || source_rate == dest_rate);
+    if (high_pass) {
+      return SincFilterCoefficientTable::MakeHighPassInputs(source_rate);
+    }
+    if (low_pass) {
+      return SincFilterCoefficientTable::MakeLowPassInputs(source_rate, dest_rate);
+    }
     return SincFilterCoefficientTable::MakeInputs(source_rate, dest_rate);
   }
 };
@@ -53,6 +63,8 @@ int main(int argc, const char** argv) {
       << SincFilterCoefficientTable::kSideTaps << ");\n";
   out << "static_assert(media_audio::SincFilterCoefficientTable::kFracSideLength == "
       << SincFilterCoefficientTable::kFracSideLength << ");\n";
+  out << "static_assert(media_audio::kUltrasoundMinFrequencyHz == 23000);\n";
+  out << "static_assert(media_audio::kAudioMaxFrequencyHz == 23000);\n";
   out << "\n";
 
   // TODO(https://fxbug.dev/42167697): Move these to a shared header, to eliminate duplication with
@@ -66,6 +78,8 @@ int main(int argc, const char** argv) {
       {48000, 16000},
       {44100, 48000},
       {16000, 48000},
+      {96000, 96000, true, false},
+      {96000, 96000, false, true},
       // clang-format on
   };
 
@@ -100,6 +114,8 @@ int main(int argc, const char** argv) {
     out << "    .dest_rate = " << keys[k].dest_rate << ",\n";
     out << "    .table = cpp20::span<const float>(kPrebuiltTableData" << k
         << ", static_cast<size_t>(" << tables[k]->raw_table().size() << ")),\n";
+    out << "    .high_pass = " << (keys[k].high_pass ? "true" : "false") << ",\n";
+    out << "    .low_pass = " << (keys[k].low_pass ? "true" : "false") << ",\n";
     out << "  },\n";
   }
   out << "};\n";

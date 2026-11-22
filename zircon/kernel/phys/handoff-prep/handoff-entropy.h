@@ -17,7 +17,7 @@
 #include <ktl/byte.h>
 #include <ktl/optional.h>
 #include <ktl/span.h>
-#include <phys/stdio.h>
+#include <phys/output/stdout.h>
 
 // Thin wrapper for the handoff process of entropy related items and options.
 // This involves policies regarding entropy consumption and boot requirements.

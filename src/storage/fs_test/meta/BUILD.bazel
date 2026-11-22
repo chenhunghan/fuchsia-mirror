@@ -1,0 +1,16 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+
+package(default_applicable_licenses = ["//:license"])
+
+cml_shard(
+    name = "fxfs_crypt_test.shard",
+    shard = "fxfs_crypt_test.shard.cml",
+    visibility = [
+        "//src/storage/fxfs/test:__pkg__",
+        "//src/storage/fxfs/test-fxfs:__pkg__",
+    ],
+)

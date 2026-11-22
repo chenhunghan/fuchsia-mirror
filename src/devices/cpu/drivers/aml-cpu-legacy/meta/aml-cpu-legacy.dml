@@ -21,11 +21,9 @@
         // device controlling the DDR sensor.
         {
             name: "thermal",
+            service: "fuchsia.hardware.thermal.Service",
             primary: true,
-            bind: {
-                banjo: "fuchsia.thermal.BIND_PROTOCOL.DEVICE",
-                did: "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_DID.THERMAL_PLL",
-            },
+            bind: { did: "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_DID.THERMAL_PLL" },
         },
         {
             name: "pdev",

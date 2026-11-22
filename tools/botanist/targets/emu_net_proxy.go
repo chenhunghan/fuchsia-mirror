@@ -94,6 +94,7 @@ type emuNetProxy struct {
 	tls5228Ln      net.Listener
 	http80Ln       net.Listener
 	dialer         func(ctx context.Context, host string, port int) (net.Conn, error)
+	events         *proxyEventLog
 
 	// lookupIPAddr and dialContext resolve and connect to upstream hosts in
 	// dialAllowedHost. They are fields so that tests can fake them.
@@ -111,19 +112,21 @@ type emuNetProxy struct {
 	conns     map[net.Conn]struct{}
 	closed    bool
 	closeOnce sync.Once
+	closeErr  error
 }
 
 // newEmuNetProxy starts an emuNetProxy that only allows guest access to
 // allowedDomains. If allowedDomains is empty, all guest network requests are
-// blocked.
-func newEmuNetProxy(parentCtx context.Context, allowedDomains []string, execPath string) (*emuNetProxy, error) {
-	return newEmuNetProxyWithConfig(parentCtx, allowedDomains, execPath, nil)
+// blocked. If logPath is non-empty, an audit record of every guest DNS query
+// and TCP connection is written to it as JSON lines (see proxyEvent).
+func newEmuNetProxy(parentCtx context.Context, allowedDomains []string, execPath, logPath string) (*emuNetProxy, error) {
+	return newEmuNetProxyWithConfig(parentCtx, allowedDomains, execPath, logPath, nil)
 }
 
 // newEmuNetProxyWithConfig is newEmuNetProxy, but calls configure (if
 // non-nil) before the proxy starts serving, so that tests can replace the
 // proxy's dependencies without racing with its goroutines.
-func newEmuNetProxyWithConfig(parentCtx context.Context, allowedDomains []string, execPath string, configure func(*emuNetProxy)) (*emuNetProxy, error) {
+func newEmuNetProxyWithConfig(parentCtx context.Context, allowedDomains []string, execPath, logPath string, configure func(*emuNetProxy)) (*emuNetProxy, error) {
 	if execPath == "" {
 		var err error
 		execPath, err = os.Executable()
@@ -132,23 +135,31 @@ func newEmuNetProxyWithConfig(parentCtx context.Context, allowedDomains []string
 		}
 	}
 
+	events, err := newProxyEventLog(logPath)
+	if err != nil {
+		return nil, err
+	}
 	netdevLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		_ = events.close()
 		return nil, fmt.Errorf("failed to listen for netdev socket: %w", err)
 	}
 	tls443Ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		_ = events.close()
 		_ = netdevLn.Close()
 		return nil, fmt.Errorf("failed to listen for TLS 443 proxy: %w", err)
 	}
 	tls5228Ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		_ = events.close()
 		_ = netdevLn.Close()
 		_ = tls443Ln.Close()
 		return nil, fmt.Errorf("failed to listen for TLS 5228 proxy: %w", err)
 	}
 	http80Ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		_ = events.close()
 		_ = netdevLn.Close()
 		_ = tls443Ln.Close()
 		_ = tls5228Ln.Close()
@@ -169,6 +180,7 @@ func newEmuNetProxyWithConfig(parentCtx context.Context, allowedDomains []string
 		tls443Ln:       tls443Ln,
 		tls5228Ln:      tls5228Ln,
 		http80Ln:       http80Ln,
+		events:         events,
 	}
 	p.dialer = p.dialAllowedHost
 	p.lookupIPAddr = net.DefaultResolver.LookupIPAddr
@@ -218,8 +230,10 @@ func (p *emuNetProxy) Close() error {
 		}
 		p.connsMu.Unlock()
 		p.wg.Wait()
+		p.events.logSummary(p.ctx)
+		p.closeErr = p.events.close()
 	})
-	return nil
+	return p.closeErr
 }
 
 // trackConn records c as open so that Close closes it. It returns false (and
@@ -249,6 +263,22 @@ func (p *emuNetProxy) isDomainAllowed(host string) bool {
 	return isDomainAllowedInList(host, p.allowedDomains)
 }
 
+// isDNSQueryAllowed is isDomainAllowed for guest DNS queries, which are also
+// recorded in the audit log.
+func (p *emuNetProxy) isDNSQueryAllowed(name string) bool {
+	allowed := p.isDomainAllowed(name)
+	decision := proxyDecisionBlocked
+	if allowed {
+		decision = proxyDecisionAllowed
+	}
+	p.events.record(proxyEvent{Kind: proxyEventDNS, Host: name, Decision: decision})
+	return allowed
+}
+
+// isDomainAllowedInList reports whether host (optionally with a port) matches
+// an entry in allowedDomains. Entries are exact host names, or wildcards of the
+// form "*.example.com" that match any subdomain of example.com but not
+// example.com itself. IP addresses never match.
 func isDomainAllowedInList(host string, allowedDomains []string) bool {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
@@ -258,11 +288,15 @@ func isDomainAllowedInList(host string, allowedDomains []string) bool {
 		return false
 	}
 	for _, pattern := range allowedDomains {
-		d := strings.ToLower(strings.TrimPrefix(strings.TrimSuffix(strings.TrimSpace(pattern), "."), "*."))
-		if d == "" {
+		pattern = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(pattern), "."))
+		if suffix, ok := strings.CutPrefix(pattern, "*."); ok {
+			// A wildcard matches any subdomain, but not the domain itself.
+			if suffix != "" && strings.HasSuffix(host, "."+suffix) {
+				return true
+			}
 			continue
 		}
-		if host == d || strings.HasSuffix(host, "."+d) {
+		if pattern != "" && host == pattern {
 			return true
 		}
 	}
@@ -383,12 +417,14 @@ func (p *emuNetProxy) handleTLSConn(clientConn net.Conn, targetPort int) {
 	}
 	if err != nil {
 		logger.Debugf(p.ctx, "emuNetProxy: blocked TLS connection to SNI %q (err=%v)", sniHost, err)
+		p.events.record(proxyEvent{Kind: proxyEventTLS, Host: sniHost, Port: targetPort, Decision: proxyDecisionBlocked, Error: err.Error()})
 		return
 	}
 
 	upstream, err := p.dialer(p.ctx, sniHost, targetPort)
 	if err != nil {
 		logger.Debugf(p.ctx, "emuNetProxy: failed to dial TLS upstream %s:%d: %v", sniHost, targetPort, err)
+		p.events.record(proxyEvent{Kind: proxyEventTLS, Host: sniHost, Port: targetPort, Decision: proxyDecisionDialFailed, Error: err.Error()})
 		return
 	}
 	defer upstream.Close()
@@ -396,12 +432,24 @@ func (p *emuNetProxy) handleTLSConn(clientConn net.Conn, targetPort int) {
 		return
 	}
 	defer p.untrackConn(upstream)
+	start := time.Now()
 
 	if _, err := upstream.Write(clientHello); err != nil {
+		p.events.record(proxyEvent{Kind: proxyEventTLS, Host: sniHost, Port: targetPort, Decision: proxyDecisionDialFailed, Upstream: remoteAddrString(upstream), Error: err.Error()})
 		return
 	}
 
-	proxyStreams(clientConn, upstream)
+	sent, received := proxyStreams(clientConn, upstream)
+	p.events.record(proxyEvent{
+		Kind:          proxyEventTLS,
+		Host:          sniHost,
+		Port:          targetPort,
+		Decision:      proxyDecisionAllowed,
+		Upstream:      remoteAddrString(upstream),
+		BytesSent:     sent + int64(len(clientHello)),
+		BytesReceived: received,
+		DurationMs:    time.Since(start).Milliseconds(),
+	})
 }
 
 // isValidHostName reports whether host is a syntactically valid DNS host name
@@ -439,6 +487,14 @@ func validateHostName(host string) error {
 		}
 	}
 	return nil
+}
+
+// remoteAddrString returns conn's remote address, or "" if unknown.
+func remoteAddrString(conn net.Conn) string {
+	if addr := conn.RemoteAddr(); addr != nil {
+		return addr.String()
+	}
+	return ""
 }
 
 // maxClientHelloBytes bounds how many bytes of a guest's TLS handshake the
@@ -540,17 +596,21 @@ func (p *emuNetProxy) handleHTTPConn(clientConn net.Conn) {
 	}
 	_ = clientConn.SetReadDeadline(time.Time{})
 
+	// Audit events record the host without any port, so that they're
+	// summarized together with the other events for the same host.
 	host := req.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
 	if req.Method == http.MethodConnect {
 		logger.Debugf(p.ctx, "emuNetProxy: blocked HTTP CONNECT to %q", req.Host)
+		p.events.record(proxyEvent{Kind: proxyEventHTTP, Host: host, Port: 80, Decision: proxyDecisionBlocked, Error: "CONNECT is not allowed"})
 		_, _ = io.WriteString(clientConn, "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
 	if !isValidHostName(host) || !p.isDomainAllowed(host) {
 		logger.Debugf(p.ctx, "emuNetProxy: blocked HTTP request to Host %q", req.Host)
+		p.events.record(proxyEvent{Kind: proxyEventHTTP, Host: host, Port: 80, Decision: proxyDecisionBlocked, Error: "not in allowlist"})
 		_, _ = io.WriteString(clientConn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
@@ -558,6 +618,7 @@ func (p *emuNetProxy) handleHTTPConn(clientConn net.Conn) {
 	upstream, err := p.dialer(p.ctx, host, 80)
 	if err != nil {
 		logger.Debugf(p.ctx, "emuNetProxy: failed to dial HTTP upstream %s:80: %v", host, err)
+		p.events.record(proxyEvent{Kind: proxyEventHTTP, Host: host, Port: 80, Decision: proxyDecisionDialFailed, Error: err.Error()})
 		_, _ = io.WriteString(clientConn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
@@ -566,6 +627,7 @@ func (p *emuNetProxy) handleHTTPConn(clientConn net.Conn) {
 		return
 	}
 	defer p.untrackConn(upstream)
+	start := time.Now()
 
 	// Forward only this request, and ask the upstream server to close the
 	// connection after its response. Any further requests that the guest
@@ -575,32 +637,59 @@ func (p *emuNetProxy) handleHTTPConn(clientConn net.Conn) {
 	req.Header.Del("Connection")
 	req.Header.Del("Keep-Alive")
 	req.Header.Del("Proxy-Connection")
-	if err := req.Write(upstream); err != nil {
+	upstreamWriter := &countingWriter{w: upstream}
+	if err := req.Write(upstreamWriter); err != nil {
+		p.events.record(proxyEvent{Kind: proxyEventHTTP, Host: host, Port: 80, Decision: proxyDecisionDialFailed, Upstream: remoteAddrString(upstream), Error: err.Error()})
 		return
 	}
-	_, _ = io.Copy(clientConn, upstream)
+	received, _ := io.Copy(clientConn, upstream)
+	sent := upstreamWriter.n
+	p.events.record(proxyEvent{
+		Kind:          proxyEventHTTP,
+		Host:          host,
+		Port:          80,
+		Decision:      proxyDecisionAllowed,
+		Upstream:      remoteAddrString(upstream),
+		BytesSent:     sent,
+		BytesReceived: received,
+		DurationMs:    time.Since(start).Milliseconds(),
+	})
+}
+
+// countingWriter counts the bytes written to w.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(b []byte) (int, error) {
+	n, err := c.w.Write(b)
+	c.n += int64(n)
+	return n, err
 }
 
 // proxyStreams copies data in both directions between a and b until both
-// directions are done.
-func proxyStreams(a, b net.Conn) {
+// directions are done, and returns the number of bytes copied from a to b and
+// from b to a.
+func proxyStreams(a, b net.Conn) (aToB, bToA int64) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(b, a)
+		aToB, _ = io.Copy(b, a)
 		if tc, ok := b.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(a, b)
+		bToA, _ = io.Copy(a, b)
 		if tc, ok := a.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
 	}()
 	wg.Wait()
+	return aToB, bToA
 }
 
 func (p *emuNetProxy) serveNetdevSocket() {
@@ -716,7 +805,7 @@ func (p *emuNetProxy) handleEthernetFrame(frame []byte) []byte {
 		return handleDHCPPacket(udpPayload)
 	}
 	if dstPort == 53 {
-		dnsResp := buildDNSResponse(udpPayload, p.isDomainAllowed)
+		dnsResp := buildDNSResponse(udpPayload, p.isDNSQueryAllowed)
 		if dnsResp == nil {
 			return nil
 		}

@@ -9,7 +9,7 @@
 ## **STRUCTS**
 
 ### Baz  {#Baz data-text="Baz"}
-*Defined in [test.transitivedependencies/top.test.fidl](https://cs.opensource.google/fuchsia/fuchsia/+/main:tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl;l=8)*
+*Defined in [test.transitivedependencies/top.test.fidl](https://cs.opensource.google/fuchsia/fuchsia/+/main:tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl;l=5)*
 
 <table>
     <tr><th>Field</th><th>Type</th><th>Description</th><th>Default</th></tr>

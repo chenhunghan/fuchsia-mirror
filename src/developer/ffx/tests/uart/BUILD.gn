@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/host.gni")
+import("//build/testing/host_test_data.gni")
 import("//src/developer/ffx/lib/e2e_emu/ffx_e2e_test.gni")
 
 if (is_host) {
@@ -14,15 +16,30 @@ if (is_host) {
     "//src/developer/ffx/config:lib",
     "//src/developer/ffx/lib/executor:lib",
     "//src/developer/ffx/lib/isolate:lib",
+    "//src/developer/ffx/lib/process:lib",
     "//src/developer/ffx/lib/uart_driver_api:lib",
     "//src/developer/lib/uart_fpl",
     "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//third_party/rust_crates:nix",
     "//third_party/rust_crates:serde_json",
     "//third_party/rust_crates:tempfile",
   ]
 
-  _common_data_deps =
-      [ "//src/developer/ffx/tools/uart:ffx_uart($host_toolchain)" ]
+  host_test_data("ffx_uart_test_data") {
+    data_deps = [
+      "//src/developer/ffx/tools/uart:ffx_uart_host_tool($host_toolchain)",
+      "//src/developer/ffx/tools/uart_driver:ffx_uart_driver_host_tool($host_toolchain)",
+    ]
+    sources = [
+      "${host_tools_dir}/ffx-uart",
+      "${host_tools_dir}/ffx-uart-driver",
+      "${host_tools_dir}/ffx-uart-driver.json",
+      "${host_tools_dir}/ffx-uart.json",
+    ]
+  }
+
+  _common_data_deps = [ ":ffx_uart_test_data" ]
 
   ffx_e2e_test("ffx_uart_e2e_test") {
     edition = "2024"

@@ -4,6 +4,7 @@
 
 //! Tests for the Starnix power residency sysfs files, as seen from userspace.
 
+use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -15,7 +16,13 @@ const CAP_SYSFS_DEVICE: &str = "cap_sysfs";
 const DEVICES: [(&str, &[&str]); 2] = [
     (
         RESIDENCY_DEVICE,
-        &["blockers_deep_sleep", "lpcm_gmc0", "platform_power_residency", "pwrblk_dpu"],
+        &[
+            "blockers_deep_sleep",
+            "lpcm_get_stats_calls",
+            "lpcm_gmc0",
+            "platform_power_residency",
+            "pwrblk_dpu",
+        ],
     ),
     (CAP_SYSFS_DEVICE, &["dvfs_stats_clk_dsu", "dvfs_stats_clk_lit", "power_state_stats"]),
 ];
@@ -61,7 +68,14 @@ fn devices_are_on_platform_bus() {
         let linked =
             std::fs::canonicalize(bus_device_link(device)).expect("failed to resolve bus link");
         assert_eq!(linked, dir);
-        assert!(read(device, "uevent").contains("SUBSYSTEM=platform\n"));
+        let subsystem_link = dir.join("subsystem");
+        assert_eq!(
+            std::fs::read_link(&subsystem_link).expect("failed to read subsystem link"),
+            Path::new("../../../bus/platform")
+        );
+        let subsystem =
+            std::fs::canonicalize(&subsystem_link).expect("failed to resolve subsystem link");
+        assert_eq!(subsystem, Path::new("/sys/bus/platform"));
     }
 }
 
@@ -73,6 +87,31 @@ fn perf_state_residency_is_reported() {
          pf_state: 0\npf_entry_count: 11\npf_time_in_state: 2200000 (us)\n\n\
          pf_state: 1\npf_entry_count: 4\npf_time_in_state: 7000 (us)\n\n"
     );
+}
+
+/// Returns the number of `GetStats` calls the fake provider had served when it sent the reply that
+/// this read was served from.
+fn get_stats_calls() -> u32 {
+    let contents = read(RESIDENCY_DEVICE, "lpcm_get_stats_calls");
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix("pf_entry_count: "))
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_else(|| panic!("no entry count in {contents:?}"))
+}
+
+#[test]
+fn back_to_back_reads_share_get_stats_replies() {
+    let calls: HashSet<_> = (0..10).map(|_| get_stats_calls()).collect();
+    assert!(calls.len() < 10, "each read was served from its own GetStats reply: {calls:?}");
+}
+
+#[test]
+fn reads_refresh_after_cached_reply_expires() {
+    let before = get_stats_calls();
+    // Wait well past the kernel's 50 ms reuse window for a `GetStats` reply.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(get_stats_calls() > before);
 }
 
 #[test]
@@ -135,16 +174,23 @@ fn dvfs_stats_are_reported() {
 
 #[test]
 fn dsu_available_frequencies_are_reported() {
-    let path = device_dir(DSU_DEVFREQ_DEVICE)
-        .join("devfreq")
-        .join(DSU_DEVFREQ_DEVICE)
-        .join("available_frequencies");
+    let devfreq_dir = device_dir(DSU_DEVFREQ_DEVICE).join("devfreq").join(DSU_DEVFREQ_DEVICE);
+    let path = devfreq_dir.join("available_frequencies");
     // The devfreq device is added right after its platform device, so wait for it as well.
     let deadline = Instant::now() + DEVICE_TIMEOUT;
     while !path.exists() {
         assert!(Instant::now() < deadline, "{} was not added", path.display());
         std::thread::sleep(Duration::from_millis(10));
     }
+    let subsystem_link = devfreq_dir.join("subsystem");
+    assert_eq!(
+        std::fs::read_link(&subsystem_link).expect("failed to read devfreq subsystem link"),
+        Path::new("../../../../../class/devfreq")
+    );
+    assert_eq!(
+        std::fs::canonicalize(&subsystem_link).expect("failed to resolve devfreq subsystem link"),
+        Path::new("/sys/class/devfreq")
+    );
     assert_eq!(
         std::fs::read_to_string(&path).expect("failed to read available_frequencies"),
         "115000000 268000000 400000000 537000000 691000000 768000000 844000000 960000000 \
@@ -163,7 +209,7 @@ fn only_residency_entities_are_served() {
         let mut files: Vec<_> = std::fs::read_dir(device_dir(device))
             .expect("failed to read device directory")
             .map(|entry| entry.expect("failed to read entry").file_name().into_string().unwrap())
-            .filter(|name| name != "uevent")
+            .filter(|name| name != "uevent" && name != "subsystem")
             .collect();
         files.sort();
         assert_eq!(files, expected_files, "{device}");

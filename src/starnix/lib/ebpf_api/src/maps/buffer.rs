@@ -5,7 +5,7 @@
 use super::MapError;
 use ebpf::EbpfBufferPtr;
 use std::fmt::Debug;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub(super) struct MapBuffer {
@@ -51,8 +51,6 @@ impl From<String> for VmoOrName {
 /// allowed from any thread. They are performed as a sequence of 64-bit atomic
 /// reads/writes without any ordering guarantees.
 impl MapBuffer {
-    pub const PAGE_SIZE: LazyLock<usize> = LazyLock::new(|| zx::system_get_page_size() as usize);
-
     /// Alignment required for `read()` and `write()` operations.
     pub const ALIGNMENT: usize = EbpfBufferPtr::ALIGNMENT;
 
@@ -110,7 +108,7 @@ impl MapBuffer {
         if size == 0 {
             return None;
         }
-        let page_size = *Self::PAGE_SIZE;
+        let page_size = zx::system_get_page_size() as usize;
         Some(size.checked_add(page_size - 1)? & !(page_size - 1))
     }
 }

@@ -6,7 +6,7 @@ use bt_common::{PeerId, Uuid};
 use bt_gatt::*;
 use fidl::EventPair;
 use fidl::client::QueryResponseFut;
-use fidl::endpoints::RequestStream;
+use fidl::endpoints::{Proxy as _, RequestStream};
 use fidl_fuchsia_bluetooth as fidl_bt;
 use fidl_fuchsia_bluetooth_gatt2 as fidl_gatt2;
 use fidl_fuchsia_bluetooth_le as fidl_le;
@@ -688,7 +688,7 @@ impl bt_gatt::client::PeerServiceHandle<FuchsiaTypes> for PeerServiceHandle {
 #[derive(Clone)]
 pub struct Client {
     peer_id: PeerId,
-    _connection_proxy: fidl_le::ConnectionProxy,
+    connection_proxy: fidl_le::ConnectionProxy,
     client_proxy: fidl_gatt2::ClientProxy,
     watched_uuid: Arc<Mutex<Option<fidl_bt::Uuid>>>,
     known_services: Arc<Mutex<HashMap<u64, fidl_gatt2::ServiceInfo>>>,
@@ -702,10 +702,18 @@ impl Client {
     ) -> Self {
         Client {
             peer_id,
-            _connection_proxy: connection_proxy,
+            connection_proxy,
             client_proxy,
             watched_uuid: Default::default(),
             known_services: Default::default(),
+        }
+    }
+
+    /// Resolves when the underlying LE connection to the peer closes.
+    pub fn wait_for_disconnect(&self) -> impl Future<Output = ()> + 'static {
+        let proxy = self.connection_proxy.clone();
+        async move {
+            let _ = proxy.on_closed().await;
         }
     }
 }

@@ -7,10 +7,9 @@
 pub mod blob;
 mod directory;
 pub mod mapping_provider;
-pub mod reader;
 mod writer;
 
 #[cfg(test)]
 pub mod testing;
 
-pub use crate::fxblob::directory::{BlobDirectory, Identifier};
+pub use crate::fxblob::directory::BlobDirectory;

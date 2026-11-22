@@ -25,7 +25,6 @@ rustc_test("platform_test") {
     "src/fuchsia/fxblob/blob.rs",
     "src/fuchsia/fxblob/directory.rs",
     "src/fuchsia/fxblob/mapping_provider.rs",
-    "src/fuchsia/fxblob/reader.rs",
     "src/fuchsia/fxblob/testing.rs",
     "src/fuchsia/fxblob/writer.rs",
     "src/fuchsia/inline_encryption.rs",
@@ -45,12 +44,9 @@ rustc_test("platform_test") {
     "src/lib.rs",
   ]
   deps = [
-    ":constants",
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
     "//sdk/fidl/fuchsia.fs:fuchsia.fs_rust",
     "//sdk/fidl/fuchsia.hardware.inlineencryption:fuchsia.hardware.inlineencryption_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-    "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
     "//sdk/fidl/fuchsia.memory.attribution:fuchsia.memory.attribution_rust",
     "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_rust",
     "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
@@ -68,7 +64,7 @@ rustc_test("platform_test") {
     "//src/lib/fuchsia-runtime",
     "//src/lib/fuchsia-sync",
     "//src/lib/test_util",
-    "//src/performance/memory/attribution/refaults_vmo",
+    "//src/memory/attribution/refaults_vmo",
     "//src/storage/blobfs/bin:blobfs-component",
     "//src/storage/crypt/fxfs:lib",
     "//src/storage/crypt/fxfs/common:lib",
@@ -180,7 +176,6 @@ _PLATFORM_SRCS = [
   "src/fuchsia/fxblob/blob.rs",
   "src/fuchsia/fxblob/directory.rs",
   "src/fuchsia/fxblob/mapping_provider.rs",
-  "src/fuchsia/fxblob/reader.rs",
   "src/fuchsia/fxblob/testing.rs",
   "src/fuchsia/fxblob/writer.rs",
   "src/fuchsia/inline_encryption.rs",
@@ -205,11 +200,8 @@ _PLATFORM_SRCS = [
 not_needed([ "_PLATFORM_SRCS" ])
 
 _PLATFORM_DEPS = [
-  ":constants",
-  "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
   "//sdk/fidl/fuchsia.fs:fuchsia.fs_rust",
   "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-  "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
   "//sdk/fidl/fuchsia.memory.attribution:fuchsia.memory.attribution_rust",
   "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_rust",
   "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
@@ -223,7 +215,7 @@ _PLATFORM_DEPS = [
   "//src/lib/fuchsia-component/client",
   "//src/lib/fuchsia-runtime",
   "//src/lib/fuchsia-sync",
-  "//src/performance/memory/attribution/refaults_vmo",
+  "//src/memory/attribution/refaults_vmo",
   "//src/storage/fidl/fuchsia.fs.startup:fuchsia.fs.startup_rust",
   "//src/storage/fidl/fuchsia.storage.mapping:fuchsia.storage.mapping_rust",
   "//src/storage/fxfs:lib",
@@ -301,6 +293,8 @@ rustc_library("platform_testing") {
   deps = _PLATFORM_DEPS + [
            "//src/storage/crypt/fxfs/common:lib",
            "//src/storage/fxfs/crypto/insecure",
+           "//src/storage/lib/blob_pager_and_verifier",
+           "//src/storage/lib/block_server",
          ]
 }
 

@@ -11,7 +11,10 @@ fidl_library(
     srcs = [
         "ebpf.fidl",
     ],
+    api_area = "Netstack",
+    category = "partner",
     enable_hlcpp = True,
+    stable = False,
     visibility = ["//visibility:public"],
     deps = [
         "//zircon/vdso/zx",

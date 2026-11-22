@@ -506,6 +506,21 @@ open protocol Capabilities {
         key_iterator server_end:DictionaryKeyIterator;
     }) -> () error CapabilitiesError;
 
+    /// Creates a shallow copy of the dictionary referenced by `dictionary` and
+    /// associates `copy` with the new dictionary.
+    ///
+    /// The copy contains the same entries as the original at the time of the
+    /// call. Entries that are themselves dictionaries are shared rather than
+    /// copied. Inserting or removing entries in one dictionary afterwards does
+    /// not affect the other.
+    ///
+    /// Make sure this method returns before passing the peer of `copy` to
+    /// other methods in this API. The creation may not be complete before then.
+    flexible DictionaryCopy(resource struct {
+        dictionary zx.Handle:EVENTPAIR;
+        copy zx.Handle:EVENTPAIR;
+    }) -> () error CapabilitiesError;
+
     /// Associates a legacy `fuchsia.component.sandbox.Dictionary` channel
     /// server end with the dictionary referenced by `dictionary_handle`.
     ///

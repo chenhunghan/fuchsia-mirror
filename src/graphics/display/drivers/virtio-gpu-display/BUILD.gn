@@ -179,14 +179,12 @@ fuchsia_rust_driver("driver-rust") {
 
 fuchsia_driver_component("component-cpp") {
   component_name = "virtio-gpu-display"
-  info = "meta/virtio-gpu-display-info.json"
   dml_label = ":virtio-gpu-display-cpp-dml"
   deps = [ ":driver-cpp" ]
 }
 
 fuchsia_driver_component("component-rust") {
   component_name = "virtio-gpu-display"
-  info = "meta/virtio-gpu-display-info.json"
   dml_label = ":virtio-gpu-display-rust-dml"
   deps = [ ":driver-rust" ]
 }

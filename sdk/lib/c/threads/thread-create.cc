@@ -21,7 +21,7 @@ namespace {
 
 using SanitizerBeforeThreadCreateHook = Weak<__sanitizer_before_thread_create_hook>;
 
-// TODO(https://fxbug.dev/342469121): This is only needed in this form while
+// TODO(https://fxbug.dev/349433421): This is only needed in this form while
 // using the legacy musl dynamic linker.  The new libdl's implementation of
 // dlopen needs some analogous locking, but it can be done at finer grain.
 
@@ -62,7 +62,7 @@ zx::result<CreatedThread> ThreadCreate(ThreadAttributes attrs) {
   // First allocate the storage for the Thread, its stacks, etc.
   CreatedThread thread;
   {
-    // TODO(https://fxbug.dev/342469121): With the legacy musl dynamic linker,
+    // TODO(https://fxbug.dev/349433421): With the legacy musl dynamic linker,
     // the "static" TLS size can change dynamically with dlopen calls.  The
     // GetTlsLayout() and InitializeTls() calls inside Allocate() need to be
     // "atomic" with respect to adding the thread to the global list, from the

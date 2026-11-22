@@ -33,12 +33,6 @@ fx_cc_library(
         "formatting_tests.cc",
         "validating_tests.cc",
     ],
-    # zxtest propagates //build/config:Wno-vla-cxx-extension via public_configs in GN.
-    # @bazel2gn:skip
-    copts = ["-Wno-vla-cxx-extension"],
-    # In GN, test_sources was not gated by if (is_fuchsia), as GN only
-    # instantiates it when depended on by Fuchsia-only walker_tests_bin.
-    # @bazel2gn:skip
     target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
         ":fidl.test.coding.fuchsia_cpp",
@@ -64,7 +58,6 @@ fx_cc_binary(
     name = "walker_tests_bin",
     testonly = True,
     disable_build_flags = ["//build/config/fuchsia:fdio_config"],
-    gn_output_name = "walker-tests",
     tags = ["manual"],
     target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
@@ -76,10 +69,7 @@ fx_cc_binary(
 fx_unittest_package(
     name = "fidl-walker-tests",
     unit_tests = [":walker_tests_bin"],
-    visibility = [
-        "//src/lib:__pkg__",
-        "//src/lib/fidl/c:__pkg__",
-    ],
+    visibility = ["//src/lib:__pkg__"],
 )
 
 # this must match the requested binary in run_with_handle_policy_tests.cc
@@ -92,7 +82,6 @@ fx_cc_binary(
         "fidl_coded_types.h",
         "fidl_structs.h",
     ],
-    gn_output_name = "fidl-handle-policy-test-app",
     tags = ["manual"],
     target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
@@ -115,7 +104,6 @@ fx_cc_binary(
     name = "test_launcher_bin",
     testonly = True,
     srcs = ["run_with_handle_policy_tests.cc"],
-    gn_output_name = "run_with_handle_policy_tests",
     tags = ["manual"],
     target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
@@ -158,10 +146,8 @@ fx_test_component(
 
 fx_package(
     name = "fidl-handle-closing-tests",
-    package_name = "fidl-handle-closing-tests",
     testonly = True,
     test_components = [":fidl-handle-closing-tests-component"],
-    visibility = ["//src/lib/fidl/c:__pkg__"],
 )
 
 fx_test(
@@ -182,9 +168,6 @@ fx_cc_library(
         "fidl_structs.h",
         "validating_tests.cc",
     ],
-    # zxtest propagates //build/config:Wno-vla-cxx-extension via public_configs in GN.
-    # @bazel2gn:skip
-    copts = ["-Wno-vla-cxx-extension"],
     deps = [
         ":fidl.test.coding_cpp",
         ":fidl.test.coding_hlcpp",
@@ -197,10 +180,7 @@ fx_cc_library(
 # Some of the tests can run on host.
 fx_cc_test_binary(
     name = "fidl-walker-host-tests",
-    # In GN, this target used if (!is_fuchsia) and is instantiated via ($host_toolchain).
-    # @bazel2gn:skip
     target_compatible_with = HOST_OS_CONSTRAINTS,
-    visibility = ["//src/lib/fidl/c:__pkg__"],
     deps = [":host_test_sources"],
 )
 
@@ -229,7 +209,6 @@ fidl_library(
     ],
     enable_hlcpp = True,
     # fdomain Rust bindings fail to compile on untyped zx.Handle vectors.
-    # @bazel2gn:skip
     enable_rust = False,
     visibility = ["//visibility:private"],
     deps = ["//zircon/vdso/zx"],

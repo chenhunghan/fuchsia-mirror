@@ -132,22 +132,15 @@ zx_startup_arguments_t PreMain(void* hook, zx_handle_t svc_server_end) {
 }  // namespace
 
 // This is called on the original machine stack, but outside the basic ABI
-// bubble.  That makes it safe to use globals that might be instrumented.
-void SetStartHandles(zx::process process_self, zx::vmar allocation_vmar, zx::thread thread_self) {
+// bubble.  That makes it safe to use globals that might be instrumented.  But
+// it still needs to be kept quite minimal so that its call graph cannot reach
+// code that uses much more stack.
+void SetStartHandles(zx::process process_self, zx::vmar allocation_vmar) {
   __zircon_process_self = process_self.release();
   __zircon_vmar_root_self = allocation_vmar.release();
 
-  // Initialize the zxr_thread first, taking ownership of the thread handle.
-  // The locking code uses _zx_thread_self(), which fetches the handle stored
-  // here.  So this is the bare minimum that must be done before more normal
-  // operation, even taking locks, is possible.
-  pthread* self = __pthread_self();
-  self->handle_ = thread_self.release();
-  // The zero-initialized value is already JOINABLE, so nothing to do there.
-  static_assert(static_cast<int>(Thread::Lifecycle::JOINABLE) == 0);
-  assert(self->lifecycle_ == Thread::Lifecycle::JOINABLE);
-
   // Initialize the rest of the struct pthread now, since it's simple.
+  pthread* self = __pthread_self();
   self->locale = &libc.global_locale;
 
   // These handles are used to create new threads.  They can be changed by

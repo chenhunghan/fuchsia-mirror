@@ -23,6 +23,7 @@ struct EarlyTicks {
   [[gnu::always_inline]] static EarlyTicks Get() { return {_rdtsc()}; }
   [[gnu::always_inline]] static EarlyTicks Zero() { return {0}; }
 };
+static_assert(sizeof(EarlyTicks) == 8 && alignof(EarlyTicks) == 8);
 
 }  // namespace arch
 

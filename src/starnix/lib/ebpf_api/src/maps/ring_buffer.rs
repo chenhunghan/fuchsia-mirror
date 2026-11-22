@@ -2,19 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::buffer::{MapBuffer, VmoOrName};
+use super::buffer::VmoOrName;
 use super::lock::RwMapLock;
 use super::vmar::AllocatedVmar;
-use super::{MapError, MapImpl, MapKey, MapValueRef};
+use super::{Map, MapError, MapImpl, MapKey, MapValueRef};
 use ebpf::{BpfValue, EbpfBufferPtr, MapSchema};
 use linux_uapi::{
     BPF_RB_FORCE_WAKEUP, BPF_RB_NO_WAKEUP, BPF_RINGBUF_BUSY_BIT, BPF_RINGBUF_DISCARD_BIT,
     BPF_RINGBUF_HDR_SZ,
 };
+use smallvec::SmallVec;
 use static_assertions::const_assert;
 use std::fmt::Debug;
-use std::ops::Deref;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -24,10 +23,16 @@ pub const RINGBUF_SIGNAL: zx::Signals = zx::Signals::USER_0;
 
 const RINGBUF_LOCK_SIGNAL: zx::Signals = zx::Signals::USER_1;
 
+// Number of control pages at the start of the ring buffer VMO (L, C, P).
+const CONTROL_PAGE_COUNT: usize = 3;
+
 #[derive(Debug)]
 struct RingBufferState {
     /// Address of the mapped ring buffer VMO.
     base_addr: usize,
+
+    /// System page size in bytes.
+    page_size: usize,
 
     /// The mask corresponding to the size of the ring buffer. This is used to map back the
     /// position in the ringbuffer (that are always growing) to their actual position in the memory
@@ -38,7 +43,7 @@ struct RingBufferState {
 impl RingBufferState {
     /// Pointer to the start of the data of the ring buffer.
     fn data_addr(&self) -> usize {
-        self.base_addr + 3 * *MapBuffer::PAGE_SIZE
+        self.base_addr + CONTROL_PAGE_COUNT * self.page_size
     }
 
     /// The never decreasing position of the read head of the ring buffer. This is updated
@@ -46,7 +51,7 @@ impl RingBufferState {
     fn consumer_position(&self) -> &AtomicU64 {
         // SAFETY: `RingBuffer::state()` wraps `self` in a lock, which
         // guarantees that the lock is acquired here.
-        unsafe { &*((self.base_addr + *MapBuffer::PAGE_SIZE) as *const AtomicU64) }
+        unsafe { &*((self.base_addr + self.page_size) as *const AtomicU64) }
     }
 
     /// The never decreasing position of the writing head of the ring buffer. This is updated
@@ -54,7 +59,7 @@ impl RingBufferState {
     fn producer_position(&self) -> &AtomicU64 {
         // SAFETY: `RingBuffer::state()` wraps `self` in a lock, which
         // guarantees that the lock is acquired here.
-        unsafe { &*((self.base_addr + *MapBuffer::PAGE_SIZE * 2) as *const AtomicU64) }
+        unsafe { &*((self.base_addr + self.page_size * 2) as *const AtomicU64) }
     }
 
     /// Address of the specified `position` within the buffer.
@@ -103,10 +108,9 @@ impl RingBuffer {
     ///
     /// This will create a mapping in the kernel user space with the following layout:
     ///
-    /// | T | L | C | P | D | D |
+    /// | L | C | P | D | D |
     ///
     /// where:
-    /// - T is 1 page containing at its 0 index a pointer to the `RingBuffer` itself.
     /// - L is 1 page that stores a 32-bit lock state at offset 0. Hidden from user-space.
     /// - C is 1 page containing at its 0 index a atomic u32 for the consumer position.
     ///   Accessible in user-space for write.
@@ -114,17 +118,12 @@ impl RingBuffer {
     ///   Accessible in user-space for read-only access.
     /// - D is size bytes and is the content of the ring buffer.
     ///   Accessible in user-space for read-only access.
-    ///
-    /// All sections described above are stored in the shared VMO except for T.
-    ///
-    /// The returns value is a `Pin<Box>`, because the structure is self referencing and is
-    /// required never to move in memory.
-    pub fn new(schema: &MapSchema, vmo: impl Into<VmoOrName>) -> Result<Pin<Box<Self>>, MapError> {
+    pub fn new(schema: &MapSchema, vmo: impl Into<VmoOrName>) -> Result<Self, MapError> {
         if schema.key_size != 0 || schema.value_size != 0 {
             return Err(MapError::InvalidParam);
         }
 
-        let page_size = *MapBuffer::PAGE_SIZE;
+        let page_size = zx::system_get_page_size() as usize;
         // Size must be a power of 2 and a multiple of page_size.
         let size = schema.max_entries as usize;
         if size == 0 || size % page_size != 0 || size & (size - 1) != 0 {
@@ -132,48 +131,27 @@ impl RingBuffer {
         }
         let mask: u32 = (size - 1).try_into().map_err(|_| MapError::InvalidParam)?;
 
-        // Technical VMO is mapped at the head of the VMAR used by the
-        // ring-buffer. It's used to store a pointer to the `RingBuffer`. This
-        // VMO is specific to this process.
-        let technical_vmo_size = page_size;
-
         // Add 3 control pages at the head of the ring-buffer VMO.
-        let control_pages_size = 3 * page_size;
+        let control_pages_size = CONTROL_PAGE_COUNT * page_size;
         let vmo_size = control_pages_size + size;
 
         let kernel_root_vmar = fuchsia_runtime::vmar_root_self();
-        // SAFETY
-        //
-        // The returned value and all pointer to the allocated memory will be part of `Self` and
-        // all pointers will be dropped before the vmar. This ensures the deallocated memory will
-        // not be used after it has been freed.
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
+        // SAFETY: Borrowed views returned by `state()` and `header_by_addr()` are bound to
+        // `&self`, and raw addresses returned by `ringbuf_reserve()` remain valid because
+        // `EbpfProgram` holds a strong `PinnedMap` reference to the `Map` for the duration of
+        // program execution.
         let vmar = unsafe {
             AllocatedVmar::allocate(
                 &kernel_root_vmar,
                 0,
-                // Allocate for one technical page, the control pages and twice the size.
-                technical_vmo_size + control_pages_size + 2 * size,
+                // Allocate for the control pages and twice the size.
+                control_pages_size + 2 * size,
                 zx::VmarFlags::CAN_MAP_SPECIFIC
                     | zx::VmarFlags::CAN_MAP_READ
                     | zx::VmarFlags::CAN_MAP_WRITE,
             )
             .map_err(|_| MapError::Internal)?
         };
-        let technical_vmo =
-            zx::Vmo::create(technical_vmo_size as u64).map_err(|_| MapError::Internal)?;
-        technical_vmo.set_name(&zx::Name::new_lossy("ebpf:ring_buffer_technical_vmo")).unwrap();
-        vmar.map(
-            0,
-            &technical_vmo,
-            0,
-            page_size,
-            zx::VmarFlags::SPECIFIC | zx::VmarFlags::PERM_READ | zx::VmarFlags::PERM_WRITE,
-        )
-        .map_err(|_| MapError::Internal)?;
 
         let vmo = match vmo.into() {
             VmoOrName::Vmo(vmo) => {
@@ -194,44 +172,19 @@ impl RingBuffer {
             }
         };
 
-        vmar.map(
-            technical_vmo_size,
-            &vmo,
-            0,
-            vmo_size,
-            zx::VmarFlags::SPECIFIC | zx::VmarFlags::PERM_READ | zx::VmarFlags::PERM_WRITE,
-        )
-        .map_err(|_| MapError::Internal)?;
+        let map_flags =
+            zx::VmarFlags::SPECIFIC | zx::VmarFlags::PERM_READ | zx::VmarFlags::PERM_WRITE;
+        vmar.map(0, &vmo, 0, vmo_size, map_flags).map_err(|_| MapError::Internal)?;
 
         // Map the data again at the end.
-        vmar.map(
-            technical_vmo_size + vmo_size,
-            &vmo,
-            control_pages_size as u64,
-            size,
-            zx::VmarFlags::SPECIFIC | zx::VmarFlags::PERM_READ | zx::VmarFlags::PERM_WRITE,
-        )
-        .map_err(|_| MapError::Internal)?;
+        vmar.map(vmo_size, &vmo, control_pages_size as u64, size, map_flags)
+            .map_err(|_| MapError::Internal)?;
 
-        // SAFETY
-        //
-        // This is safe as long as the vmar mapping stays alive. This will be ensured by the
-        // `RingBuffer` itself.
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
-        let storage_position = unsafe { &mut *(vmar.base() as *mut *const Self) };
-        let storage = Box::pin(Self { vmo: Arc::new(vmo), vmar, mask });
-        // Store the pointer to the storage to the start of the technical vmo. This is required to
-        // access the storage from the bpf methods that only get a pointer to the reserved memory.
-        // This is safe as the returned referenced is Pinned.
-        *storage_position = storage.deref();
-        Ok(storage)
+        Ok(Self { vmo: Arc::new(vmo), vmar, mask })
     }
 
     fn state<'a>(&'a self) -> RwMapLock<'a, RingBufferState> {
-        let page_size = *MapBuffer::PAGE_SIZE;
+        let page_size = zx::system_get_page_size() as usize;
 
         // Creates a `RwMapLock` that wraps `RingBufferState`.
         //
@@ -241,12 +194,12 @@ impl RingBuffer {
         // `RingBufferState` is synchronized with other threads sharing the ring
         // buffer.
         unsafe {
-            let lock_cell = &*((self.vmar.base() + page_size) as *const AtomicU32);
+            let lock_cell = &*(self.vmar.base() as *const AtomicU32);
             RwMapLock::new(
                 lock_cell,
                 self.vmo.as_handle_ref(),
                 RINGBUF_LOCK_SIGNAL,
-                RingBufferState { base_addr: self.vmar.base() + page_size, mask: self.mask },
+                RingBufferState { base_addr: self.vmar.base(), page_size, mask: self.mask },
             )
         }
     }
@@ -279,54 +232,34 @@ impl RingBuffer {
         }
     }
 
+    fn header_by_addr(&self, addr: usize) -> &RingBufferRecordHeader {
+        let base = self.vmar.base() + CONTROL_PAGE_COUNT * (zx::system_get_page_size() as usize);
+        let data_size = self.mask as usize + 1;
+        let header_addr = addr
+            .checked_sub(std::mem::size_of::<RingBufferRecordHeader>())
+            .expect("Ring buffer addr underflow");
+        let end = base + data_size;
+        assert!(
+            (base..end).contains(&header_addr)
+                && header_addr % std::mem::align_of::<RingBufferRecordHeader>() == 0,
+            "Invalid ring buffer address: header_addr={header_addr:#x}, range={base:#x}..{end:#x}"
+        );
+        // SAFETY: `header_addr` is within the mapped ring buffer data region,
+        // properly aligned, and `RingBufferRecordHeader` contains only atomic
+        // fields. The mapping is kept alive by `&self`.
+        unsafe { &*(header_addr as *const RingBufferRecordHeader) }
+    }
+
     /// Submit the data.
-    ///
-    /// # Safety
-    ///
-    /// `addr` must be the value returned by a previous call to `ringbuf_reserve`
-    /// on a map that has not been dropped, otherwise the behaviour is UB.
-    pub unsafe fn submit(addr: u64, flags: RingBufferWakeupPolicy) {
-        let addr = addr as usize;
-        #[allow(clippy::undocumented_unsafe_blocks, reason = "2024 edition migration")]
-        let (ringbuf_storage, header) = unsafe { Self::get_ringbuf_and_header_by_addr(addr) };
-        ringbuf_storage.commit(header, flags, false);
+    pub fn submit(&self, addr: usize, flags: RingBufferWakeupPolicy) {
+        let header = self.header_by_addr(addr);
+        self.commit(header, flags, false);
     }
 
     /// Discard the data.
-    ///
-    /// # Safety
-    ///
-    /// `addr` must be the value returned by a previous call to `ringbuf_reserve`
-    /// on a map that has not been dropped, otherwise the behaviour is UB.
-    pub unsafe fn discard(addr: u64, flags: RingBufferWakeupPolicy) {
-        let addr = addr as usize;
-        #[allow(clippy::undocumented_unsafe_blocks, reason = "2024 edition migration")]
-        let (ringbuf_storage, header) = unsafe { Self::get_ringbuf_and_header_by_addr(addr) };
-        ringbuf_storage.commit(header, flags, true);
-    }
-
-    /// Get the `RingBufferImpl` and the `RingBufferRecordHeader` associated with `addr`.
-    ///
-    /// # Safety
-    ///
-    /// `addr` must be the value returned from a previous call to `ringbuf_reserve` on a `Map` that
-    /// has not been dropped and is kept alive as long as the returned value are used.
-    unsafe fn get_ringbuf_and_header_by_addr(
-        addr: usize,
-    ) -> (&'static RingBuffer, &'static RingBufferRecordHeader) {
-        let page_size = *MapBuffer::PAGE_SIZE;
-        // addr is the data section. First access the header.
-        #[allow(clippy::undocumented_unsafe_blocks, reason = "2024 edition migration")]
-        let header = unsafe {
-            &*((addr - std::mem::size_of::<RingBufferRecordHeader>())
-                as *const RingBufferRecordHeader)
-        };
-        let addr_page = addr / page_size;
-        let mapping_start_page = addr_page - header.page_count.load(Ordering::Acquire) as usize - 1;
-        let mapping_start_address = mapping_start_page * page_size;
-        #[allow(clippy::undocumented_unsafe_blocks, reason = "2024 edition migration")]
-        let ringbuf_impl = unsafe { &*(mapping_start_address as *const &RingBuffer) };
-        (ringbuf_impl, header)
+    pub fn discard(&self, addr: usize, flags: RingBufferWakeupPolicy) {
+        let header = self.header_by_addr(addr);
+        self.commit(header, flags, true);
     }
 }
 
@@ -402,16 +335,27 @@ impl MapImpl for RingBuffer {
         }
         let data_position = state.data_position(producer_position) + BPF_RINGBUF_HDR_SZ as usize;
         let data_length = size | BPF_RINGBUF_BUSY_BIT;
-        let page_count = ((data_position - state.data_addr()) / *MapBuffer::PAGE_SIZE + 3)
+        let page_count = ((data_position - state.data_addr()) / state.page_size
+            + CONTROL_PAGE_COUNT)
             .try_into()
             .map_err(|_| MapError::SizeLimit)?;
         let header = state.header(producer_position);
         header.length.store(data_length, Ordering::Relaxed);
+        // `page_count` is not read by `ebpf_api`, but is populated for Linux
+        // `bpf_ringbuf_hdr::pg_off` UAPI compatibility.
         header.page_count.store(page_count, Ordering::Relaxed);
         state
             .producer_position()
             .store(producer_position + u64::from(total_size), Ordering::Release);
         Ok(data_position)
+    }
+
+    fn ringbuf_submit(&self, addr: usize, flags: RingBufferWakeupPolicy) {
+        self.submit(addr, flags);
+    }
+
+    fn ringbuf_discard(&self, addr: usize, flags: RingBufferWakeupPolicy) {
+        self.discard(addr, flags);
     }
 }
 
@@ -445,6 +389,41 @@ struct RingBufferRecordHeader {
 }
 
 const_assert!(std::mem::size_of::<RingBufferRecordHeader>() == BPF_RINGBUF_HDR_SZ as usize);
+
+/// Tracks active ring buffer reservations for a single eBPF program run.
+#[derive(Debug, Default)]
+pub struct RingBufferReservations<'a> {
+    reservations: SmallVec<[(usize, &'a Map); 4]>,
+}
+
+impl<'a> RingBufferReservations<'a> {
+    pub(crate) fn push(&mut self, data_addr: usize, map: &'a Map) {
+        self.reservations.push((data_addr, map));
+    }
+
+    pub(crate) fn remove(&mut self, data_addr: usize) -> &'a Map {
+        let index = self
+            .reservations
+            .iter()
+            .position(|(addr, _)| *addr == data_addr)
+            .expect("Ring buffer reservation not found");
+        self.reservations.swap_remove(index).1
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.reservations.is_empty()
+    }
+}
+
+impl Drop for RingBufferReservations<'_> {
+    fn drop(&mut self) {
+        assert!(
+            self.reservations.is_empty() || std::thread::panicking(),
+            "Ring buffer reservations leaked"
+        );
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -492,11 +471,7 @@ mod test {
         assert_eq!(ringbuf.can_read(), Some(false));
 
         // 3. After submitting, the busy bit is cleared and can_read should be true.
-        // SAFETY: `data_pos` was successfully returned by `ringbuf_reserve` on this
-        // same buffer.
-        unsafe {
-            RingBuffer::submit(data_pos as u64, RingBufferWakeupPolicy::DefaultWakeup);
-        }
+        ringbuf.submit(data_pos, RingBufferWakeupPolicy::DefaultWakeup);
         assert_eq!(ringbuf.can_read(), Some(true));
 
         // 4. If consumer position advances to match producer, can_read should
@@ -632,5 +607,127 @@ mod test {
         assert_eq!(ringbuf.ringbuf_reserve(0xffff_ffff, 0), Err(MapError::InvalidParam));
         assert_eq!(ringbuf.ringbuf_reserve(0xffff_fff1, 0), Err(MapError::InvalidParam));
         assert_eq!(ringbuf.ringbuf_reserve(0x3fff_ffff, 0), Err(MapError::SizeLimit));
+    }
+
+    fn make_test_ringbuf(size: usize) -> RingBuffer {
+        let schema = MapSchema {
+            map_type: linux_uapi::bpf_map_type_BPF_MAP_TYPE_RINGBUF,
+            key_size: 0,
+            value_size: 0,
+            max_entries: size as u32,
+            flags: MapFlags::empty(),
+        };
+        RingBuffer::new(&schema, "test_ringbuf").unwrap()
+    }
+
+    #[fuchsia::test]
+    fn test_ring_buffer_multi_page_and_wrap_boundary() {
+        let page_size = zx::system_get_page_size() as usize;
+        let size = 2 * page_size;
+        let ringbuf = make_test_ringbuf(size);
+
+        // Reserve and submit/discard across multiple pages.
+        let addr1 = ringbuf.ringbuf_reserve((page_size - 8) as u32, 0).unwrap();
+        let addr2 = ringbuf.ringbuf_reserve(16, 0).unwrap();
+        ringbuf.submit(addr1, RingBufferWakeupPolicy::DefaultWakeup);
+        ringbuf.discard(addr2, RingBufferWakeupPolicy::DefaultWakeup);
+        assert_eq!(ringbuf.can_read(), Some(true));
+        {
+            let state = ringbuf.state();
+            let state = state.read();
+            let discarded_len = state.header(page_size as u64).length.load(Ordering::Acquire);
+            assert_eq!(discarded_len, 16 | BPF_RINGBUF_DISCARD_BIT);
+        }
+
+        // Position producer and consumer at `size - 8` so the header sits at the
+        // end of the first data mapping (D1) and the data starts at byte 0 of
+        // the second data mapping (D2).
+        let wrap_pos = (size - 8) as u64;
+        {
+            let state = ringbuf.state().write();
+            state.consumer_position().store(wrap_pos, Ordering::Release);
+            state.producer_position().store(wrap_pos, Ordering::Release);
+        }
+        assert_eq!(ringbuf.can_read(), Some(false));
+
+        let wrap_addr = ringbuf.ringbuf_reserve(16, 0).unwrap();
+        ringbuf.submit(wrap_addr, RingBufferWakeupPolicy::DefaultWakeup);
+        assert_eq!(ringbuf.can_read(), Some(true));
+
+        let state = ringbuf.state();
+        let state = state.read();
+        let header = state.header(wrap_pos);
+        assert_eq!(header.length.load(Ordering::Acquire), 16);
+    }
+
+    #[fuchsia::test(logging = false)]
+    #[should_panic(expected = "Ring buffer addr underflow")]
+    fn test_ring_buffer_submit_addr_underflow() {
+        let ringbuf = make_test_ringbuf(zx::system_get_page_size() as usize);
+        ringbuf.submit(0, RingBufferWakeupPolicy::DefaultWakeup);
+    }
+
+    #[fuchsia::test(logging = false)]
+    #[should_panic(expected = "Invalid ring buffer address")]
+    fn test_ring_buffer_submit_addr_before_data() {
+        let ringbuf = make_test_ringbuf(zx::system_get_page_size() as usize);
+        let data_addr = ringbuf.state().read().data_addr();
+        ringbuf.submit(data_addr, RingBufferWakeupPolicy::DefaultWakeup);
+    }
+
+    #[fuchsia::test(logging = false)]
+    #[should_panic(expected = "Invalid ring buffer address")]
+    fn test_ring_buffer_discard_addr_after_data() {
+        let page_size = zx::system_get_page_size() as usize;
+        let ringbuf = make_test_ringbuf(page_size);
+        let data_addr = ringbuf.state().read().data_addr();
+        ringbuf.discard(data_addr + page_size + 8, RingBufferWakeupPolicy::DefaultWakeup);
+    }
+
+    #[fuchsia::test(logging = false)]
+    #[should_panic(expected = "Invalid ring buffer address")]
+    fn test_ring_buffer_submit_unaligned_addr() {
+        let ringbuf = make_test_ringbuf(zx::system_get_page_size() as usize);
+        let data_addr = ringbuf.state().read().data_addr();
+        ringbuf.submit(data_addr + 9, RingBufferWakeupPolicy::DefaultWakeup);
+    }
+
+    #[fuchsia::test(logging = false)]
+    #[should_panic(expected = "Ring buffer reservations leaked")]
+    fn test_ring_buffer_reservations_drop_leaked() {
+        let schema = MapSchema {
+            map_type: linux_uapi::bpf_map_type_BPF_MAP_TYPE_RINGBUF,
+            key_size: 0,
+            value_size: 0,
+            max_entries: zx::system_get_page_size(),
+            flags: MapFlags::empty(),
+        };
+        let map = Map::new(schema, "test_leak").unwrap();
+        let mut reservations = RingBufferReservations::default();
+        reservations.push(0x1000, &map);
+    }
+
+    #[fuchsia::test(logging = false)]
+    #[should_panic(expected = "Ring buffer reservation not found")]
+    fn test_ring_buffer_reservations_remove_unknown() {
+        let mut reservations = RingBufferReservations::default();
+        reservations.remove(0x1000);
+    }
+
+    #[fuchsia::test(logging = false)]
+    #[should_panic(expected = "Ring buffer reservation not found")]
+    fn test_ring_buffer_reservations_double_remove() {
+        let schema = MapSchema {
+            map_type: linux_uapi::bpf_map_type_BPF_MAP_TYPE_RINGBUF,
+            key_size: 0,
+            value_size: 0,
+            max_entries: zx::system_get_page_size(),
+            flags: MapFlags::empty(),
+        };
+        let map = Map::new(schema, "test_double_remove").unwrap();
+        let mut reservations = RingBufferReservations::default();
+        reservations.push(0x1000, &map);
+        let _ = reservations.remove(0x1000);
+        let _ = reservations.remove(0x1000);
     }
 }

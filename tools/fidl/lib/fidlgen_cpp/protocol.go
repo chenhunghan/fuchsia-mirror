@@ -514,7 +514,7 @@ func (m message) Forward(argName string) string {
 }
 
 // methodContext indicates where the request/response is used.
-// The allocation strategies differ for client and server contexts, in LLCPP.
+// The allocation strategies differ for client and server contexts, in wire bindings.
 type methodContext int
 
 const (
@@ -1279,7 +1279,7 @@ const (
 
 // This value needs to be kept in sync with the one defined in
 // sdk/lib/fidl/cpp/wire/include/lib/fidl/cpp/wire/sync_call.h
-const llcppMaxStackAllocSize = 512
+const wireMaxStackAllocSize = 512
 const channelMaxMessageSize = 65536
 const channelMaxHandleCount = 64
 
@@ -1335,7 +1335,7 @@ func computeAllocation(maxTotalSize int, maxTotalNumHandles int, boundedness bou
 		numHandles = channelMaxHandleCount
 	}
 
-	if numBytes > llcppMaxStackAllocSize {
+	if numBytes > wireMaxStackAllocSize {
 		return allocation{
 			IsStack:    false,
 			StackBytes: 0,

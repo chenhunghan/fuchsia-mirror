@@ -26,9 +26,9 @@ rustc_library(
     deps = [
         "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token_rust",
         "//sdk/fidl/fuchsia.hardware.hrtimer:fuchsia.hardware.hrtimer_rust",
+        "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
         "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
         "//sdk/rust/zx",
-        "//src/lib/debug/rust",
         "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia-async",
@@ -49,7 +49,6 @@ rustc_test(
     crate = ":alarms",
     edition = "2024",
     deps = [
-        "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
         "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
         "//src/lib/fuchsia",
         "//src/lib/test_util",

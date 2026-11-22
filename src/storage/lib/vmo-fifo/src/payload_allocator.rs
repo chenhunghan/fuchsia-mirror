@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::Alignment;
 use buddy_allocator::BuddyAllocator;
 
 /// Sentinel offset indicating that a reservation or FIFO slot does not own a block in the
@@ -27,9 +28,8 @@ impl PayloadAllocator {
     ///
     /// * `payload_capacity` - Total size of the payload region in bytes (must be `>= alignment`).
     /// * `queue_capacity` - Power-of-two maximum number of message slots in the `SharedQueue`.
-    /// * `alignment` - Power-of-two byte alignment (and minimum buddy block size) for allocations.
-    pub fn new(payload_capacity: usize, queue_capacity: usize, alignment: usize) -> Self {
-        assert!(alignment > 0 && alignment.is_power_of_two(), "Alignment must be a power of two.");
+    /// * `alignment` - Byte alignment (and minimum buddy block size) for allocations.
+    pub fn new(payload_capacity: usize, queue_capacity: usize, alignment: Alignment) -> Self {
         assert!(
             queue_capacity > 0 && queue_capacity.is_power_of_two(),
             "Queue capacity must be a power of two."
@@ -37,7 +37,7 @@ impl PayloadAllocator {
         // Cap capacity to `NO_ALLOCATION` so `u32::MAX` remains exclusively reserved as the
         // sentinel offset for empty slots and zero-byte reservations.
         let capped_capacity = payload_capacity.min(NO_ALLOCATION as usize);
-        let aligned_capacity = capped_capacity & !(alignment - 1);
+        let aligned_capacity = alignment.align_down(capped_capacity as u64) as usize;
         Self {
             allocator: BuddyAllocator::new(aligned_capacity, alignment),
             queue_mask: (queue_capacity - 1) as u64,
@@ -65,7 +65,7 @@ impl PayloadAllocator {
         if size > self.allocator.max_allocation_size() {
             return false;
         }
-        let block_bytes = self.allocator.block_size()
+        let block_bytes = (self.allocator.block_size().get() as usize)
             << buddy_allocator::order(size, self.allocator.block_size());
         block_bytes.saturating_add(headroom_bytes) <= self.allocator.capacity()
     }
@@ -88,7 +88,7 @@ impl PayloadAllocator {
             return None;
         }
         if headroom_bytes > 0 {
-            let block_bytes = self.allocator.block_size()
+            let block_bytes = (self.allocator.block_size().get() as usize)
                 << buddy_allocator::order(size, self.allocator.block_size());
             if self.allocator.free_bytes() < block_bytes.saturating_add(headroom_bytes) {
                 return None;
@@ -157,7 +157,7 @@ mod tests {
     fn test_allocate_sequential_and_non_power_of_two_capacity() {
         // 100 bytes with 8-byte alignment rounds down to 96 bytes (64 + 32) usable capacity,
         // with max single allocation size of 64 bytes.
-        let mut allocator = PayloadAllocator::new(100, 8, 8);
+        let mut allocator = PayloadAllocator::new(100, 8, Alignment::SIZE_8B);
         assert_eq!(allocator.payload_capacity(), 96);
         assert_eq!(allocator.max_allocation_size(), 64);
         assert!(allocator.is_within_capacity(64, 0));
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_cancel_allocation() {
-        let mut allocator = PayloadAllocator::new(100, 8, 8);
+        let mut allocator = PayloadAllocator::new(100, 8, Alignment::SIZE_8B);
         let off1 = allocator.allocate(50, 0).unwrap();
         assert_eq!(free_bytes(&allocator), 32);
 
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_empty_vs_full() {
-        let mut allocator = PayloadAllocator::new(128, 8, 64);
+        let mut allocator = PayloadAllocator::new(128, 8, Alignment::SIZE_64B);
 
         let off1 = allocator.allocate(64, 0).unwrap();
         assert_eq!(free_bytes(&allocator), 64);
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_zero_size_allocation() {
-        let mut allocator = PayloadAllocator::new(65536, 16, 4096);
+        let mut allocator = PayloadAllocator::new(65536, 16, Alignment::SIZE_4KIB);
         let mut read_index = 0;
 
         let off0 = allocator.allocate(8192, 0).unwrap();
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn test_out_of_order_reservations_and_retire() {
         let page = 4096;
-        let mut allocator = PayloadAllocator::new(4 * page, 8, page);
+        let mut allocator = PayloadAllocator::new(4 * page, 8, Alignment::SIZE_4KIB);
 
         // Two concurrent reservations: A gets [0..8192), B gets [8192..16384).
         let off_a = allocator.allocate(8192, 0).unwrap();
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn test_headroom_reservation_and_buddy_rounding() {
         let page = 4096;
-        let mut allocator = PayloadAllocator::new(8 * page, 16, page);
+        let mut allocator = PayloadAllocator::new(8 * page, 16, Alignment::SIZE_4KIB);
 
         // Non-power-of-two size (3 pages) rounds up to a 4-page buddy block, so requiring 5 pages
         // of headroom exceeds the 8-page capacity while 4 pages of headroom fits.
@@ -311,7 +311,7 @@ mod tests {
     fn test_slot_wrap_around_and_idempotent_reclaim() {
         let page = 4096;
         let queue_capacity = 4;
-        let mut allocator = PayloadAllocator::new(4 * page, queue_capacity, page);
+        let mut allocator = PayloadAllocator::new(4 * page, queue_capacity, Alignment::SIZE_4KIB);
 
         for slot in 0..(3 * queue_capacity as u64) {
             let off = allocator.allocate(page, 0).unwrap();

@@ -32,11 +32,21 @@ idk_cc_source_library_zx(
     # Widely used in GN, so GN visibility stays open via raw_overwrite; Bazel
     # visibility is limited to actual Bazel dependents.
     visibility = [
+        "//sdk/lib/async-testing/test:__pkg__",
+        "//sdk/lib/async/test:__pkg__",
+        "//sdk/lib/async_patterns/cpp/tests:__pkg__",
         "//sdk/lib/sys/service/cpp:__pkg__",
         "//src/connectivity/location/gnss:__pkg__",
+        "//src/connectivity/openthread/tests/ot-rcp-fuchsia:__pkg__",
         "//src/lib/callback:__pkg__",
+        "//src/lib/fidl/llcpp/tests/dispatcher:__pkg__",
         "//src/lib/testing/loop_fixture:__pkg__",
         "//src/lib/timekeeper:__pkg__",
+        "//src/media/audio/services/common/testing:__pkg__",
+        "//src/media/audio/services/mixer/fidl:__pkg__",
+        "//src/memory/thrasher:__pkg__",
+        "//src/storage/lib/vfs/cpp:__pkg__",
+        "//vendor/google:__subpackages__",
     ],  # @bazel2gn:raw_overwrite:[ "//*" ]
     deps = [
         # <lib/async-testing/dispatcher_stub.h> has

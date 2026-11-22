@@ -34,8 +34,8 @@ if (current_cpu == "x64") {
       ":realtek_rtl8111_bind",
       "//sdk/banjo/fuchsia.hardware.ethernet:fuchsia.hardware.ethernet_banjo_cpp",
       "//sdk/lib/driver/mmio/cpp",
+      "//sdk/lib/driver/pci/cpp",
       "//src/devices/lib/driver",
-      "//src/devices/pci/lib/device-protocol-pci",
       "//src/lib/ddk",
       "//zircon/system/ulib/fbl",
       "//zircon/system/ulib/zircon-internal",
@@ -46,7 +46,6 @@ if (current_cpu == "x64") {
     dml_label = ":realtek-8111-dml"
     component_name = "realtek-8111"
     deps = [ ":realtek-8111-driver" ]
-    info = "meta/realtek-8111-info.json"
   }
 
   fuchsia_driver_package("package") {

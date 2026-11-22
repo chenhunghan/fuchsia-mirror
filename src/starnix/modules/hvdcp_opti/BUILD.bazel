@@ -29,7 +29,6 @@ exports_files(
 
 fx_package(
     name = "hvdcp_opti",
-    package_name = "hvdcp_opti",
     components = [
         ":hvdcp_opti_component",
     ],

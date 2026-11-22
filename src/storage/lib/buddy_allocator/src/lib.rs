@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+use storage_units::BlockSize;
 
 // Stores a list of free block byte offsets for a given order.
 //
@@ -19,38 +20,33 @@ use std::ops::Range;
 type FreeList = Vec<usize>;
 
 /// Returns the smallest order whose block size (`block_size * 2^order`) is at least `size` bytes.
-///
-/// # Panics
-///
-/// Panics if `block_size` is zero or not a power of two.
 #[inline]
-pub fn order(size: usize, block_size: usize) -> usize {
-    assert!(block_size.is_power_of_two(), "block_size must be a non-zero power of two");
-    if size <= block_size {
+pub fn order(size: usize, block_size: BlockSize) -> usize {
+    if (size as u64) <= block_size {
         return 0;
     }
-    (usize::BITS - ((size - 1) >> block_size.trailing_zeros()).leading_zeros()) as usize
+    (usize::BITS - ((size - 1) >> block_size.shift()).leading_zeros()) as usize
 }
 
 // Returns the largest order whose block size (`block_size * 2^order`) is at most `size` bytes.
-// `block_size` must be a non-zero power of two and `size >= block_size`.
+// `size` must be at least `block_size`.
 #[inline]
-fn order_fit(size: usize, block_size: usize) -> usize {
-    debug_assert!(size >= block_size);
-    (size >> block_size.trailing_zeros()).ilog2() as usize
+fn order_fit(size: usize, block_size: BlockSize) -> usize {
+    debug_assert!((size as u64) >= block_size);
+    (size >> block_size.shift()).ilog2() as usize
 }
 
 // Returns the byte size of a block at `order` (`block_size * 2^order`).
 #[inline]
-fn size_for_order(order: usize, block_size: usize) -> usize {
-    block_size << order
+fn size_for_order(order: usize, block_size: BlockSize) -> usize {
+    (block_size.get() as usize) << order
 }
 
 // Greedily decomposes `capacity` (a multiple of `block_size`) into decreasing power-of-two blocks
 // from offset `0`. When `capacity` is not a power of two, each order receives at most one initial
 // block at an even multiple of its block size, and any out-of-bounds buddy beyond `capacity` can
 // never exist in `free_lists`, preventing false coalescing across remainder boundaries.
-fn initial_free_lists(capacity: usize, block_size: usize) -> Vec<FreeList> {
+fn initial_free_lists(capacity: usize, block_size: BlockSize) -> Vec<FreeList> {
     if capacity == 0 {
         return Vec::new();
     }
@@ -69,7 +65,7 @@ fn initial_free_lists(capacity: usize, block_size: usize) -> Vec<FreeList> {
 /// A buddy allocator that manages byte offsets within a contiguous region of `[0..capacity)`.
 #[derive(Debug)]
 pub struct BuddyAllocator {
-    block_size: usize,
+    block_size: BlockSize,
     capacity: usize,
     allocated_bytes: usize,
     // The index corresponds to the order of free memory blocks in the free list.
@@ -79,14 +75,9 @@ pub struct BuddyAllocator {
 }
 
 impl BuddyAllocator {
-    /// Creates a new `BuddyAllocator` managing `[0 .. size & !(block_size - 1))`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `block_size` is zero or not a power of two.
-    pub fn new(size: usize, block_size: usize) -> Self {
-        assert!(block_size.is_power_of_two(), "block_size must be a non-zero power of two");
-        let capacity = size & !(block_size - 1);
+    /// Creates a new `BuddyAllocator` managing `[0 .. block_size.align_down(size))`.
+    pub fn new(size: usize, block_size: BlockSize) -> Self {
+        let capacity = block_size.align_down(size as u64) as usize;
         let free_lists = initial_free_lists(capacity, block_size);
         Self {
             block_size,
@@ -99,7 +90,7 @@ impl BuddyAllocator {
 
     /// Returns the minimum allocation granularity (`block_size`, a power of two).
     #[inline]
-    pub fn block_size(&self) -> usize {
+    pub fn block_size(&self) -> BlockSize {
         self.block_size
     }
 
@@ -220,8 +211,8 @@ mod tests {
     #[fuchsia::test]
     fn test_odd_sized_capacity_decomposition() {
         // 123 == 64 + 32 + 16 + 8 + 2 + 1 (last 1 byte is rounded down for block_size = 2).
-        let mut allocator = BuddyAllocator::new(123, 2);
-        assert_eq!(allocator.block_size(), 2);
+        let mut allocator = BuddyAllocator::new(123, BlockSize::SIZE_2B);
+        assert_eq!(allocator.block_size(), BlockSize::SIZE_2B);
         assert_eq!(allocator.capacity(), 122);
         assert_eq!(allocator.max_allocation_size(), 64);
 
@@ -242,7 +233,7 @@ mod tests {
 
     #[fuchsia::test]
     fn test_non_power_of_two_split_and_coalesce_safety() {
-        let mut allocator = BuddyAllocator::new(123, 2);
+        let mut allocator = BuddyAllocator::new(123, BlockSize::SIZE_2B);
         // Requests above `max_allocation_size` (64) must return `None` even with 122 bytes free.
         assert_eq!(allocator.allocate(65), None);
         assert_eq!(allocator.allocate(122), None);
@@ -275,7 +266,7 @@ mod tests {
 
     #[fuchsia::test]
     fn test_lowest_offset_first_and_coalescing() {
-        let mut allocator = BuddyAllocator::new(8192, 512);
+        let mut allocator = BuddyAllocator::new(8192, BlockSize::SIZE_512B);
         let (off0, len0) = allocator.allocate(1024).unwrap();
         let (off1, len1) = allocator.allocate(1024).unwrap();
         assert_eq!((off0, len0), (0, 1024));
@@ -295,7 +286,7 @@ mod tests {
 
     #[fuchsia::test]
     fn test_multiple_free_blocks_same_order_lowest_first() {
-        let mut allocator = BuddyAllocator::new(8192, 512);
+        let mut allocator = BuddyAllocator::new(8192, BlockSize::SIZE_512B);
         // Allocate 6 blocks of 1024 bytes at offsets 0, 1024, 2048, 3072, 4096, 5120.
         for i in 0..6 {
             assert_eq!(allocator.allocate(1024), Some((i * 1024, 1024)));
@@ -326,7 +317,7 @@ mod tests {
 
     #[fuchsia::test]
     fn test_multi_level_split_and_out_of_order_coalesce() {
-        let mut allocator = BuddyAllocator::new(8192, 512);
+        let mut allocator = BuddyAllocator::new(8192, BlockSize::SIZE_512B);
         for i in 0..16 {
             assert_eq!(allocator.allocate(512), Some((i * 512, 512)));
         }
@@ -346,7 +337,7 @@ mod tests {
 
     #[fuchsia::test]
     fn test_free_ranges() {
-        let mut allocator = BuddyAllocator::new(4096, 512);
+        let mut allocator = BuddyAllocator::new(4096, BlockSize::SIZE_512B);
         assert_eq!(allocator.free_ranges().collect::<Vec<_>>(), vec![0..4096]);
 
         let (off0, _) = allocator.allocate(512).unwrap();
@@ -366,19 +357,19 @@ mod tests {
 
     #[fuchsia::test]
     fn test_order_boundaries_and_rounding() {
-        assert_eq!(order(0, 512), 0);
-        assert_eq!(order(1, 512), 0);
-        assert_eq!(order(511, 512), 0);
-        assert_eq!(order(512, 512), 0);
-        assert_eq!(order(513, 512), 1);
-        assert_eq!(order(1024, 512), 1);
-        assert_eq!(order(1025, 512), 2);
-        assert_eq!(order(1536, 512), 2);
-        assert_eq!(order(2048, 512), 2);
-        assert_eq!(order(2049, 512), 3);
-        assert_eq!(order(usize::MAX, 4096), (usize::BITS - 12) as usize);
+        assert_eq!(order(0, BlockSize::SIZE_512B), 0);
+        assert_eq!(order(1, BlockSize::SIZE_512B), 0);
+        assert_eq!(order(511, BlockSize::SIZE_512B), 0);
+        assert_eq!(order(512, BlockSize::SIZE_512B), 0);
+        assert_eq!(order(513, BlockSize::SIZE_512B), 1);
+        assert_eq!(order(1024, BlockSize::SIZE_512B), 1);
+        assert_eq!(order(1025, BlockSize::SIZE_512B), 2);
+        assert_eq!(order(1536, BlockSize::SIZE_512B), 2);
+        assert_eq!(order(2048, BlockSize::SIZE_512B), 2);
+        assert_eq!(order(2049, BlockSize::SIZE_512B), 3);
+        assert_eq!(order(usize::MAX, BlockSize::SIZE_4KIB), (usize::BITS - 12) as usize);
 
-        let mut allocator = BuddyAllocator::new(4096, 512);
+        let mut allocator = BuddyAllocator::new(4096, BlockSize::SIZE_512B);
         assert_eq!(allocator.allocate(0), Some((0, 512)));
         assert_eq!(allocator.allocate(513), Some((1024, 1024)));
         assert_eq!(allocator.allocated_bytes(), 1536);
@@ -388,7 +379,7 @@ mod tests {
     #[fuchsia::test]
     fn test_zero_or_sub_block_capacity() {
         for size in [0, 1, 4095] {
-            let mut allocator = BuddyAllocator::new(size, 4096);
+            let mut allocator = BuddyAllocator::new(size, BlockSize::SIZE_4KIB);
             assert_eq!(allocator.capacity(), 0);
             assert_eq!(allocator.max_allocation_size(), 0);
             assert_eq!(allocator.free_bytes(), 0);
@@ -398,28 +389,16 @@ mod tests {
     }
 
     #[fuchsia::test(logging = false)]
-    #[should_panic(expected = "block_size must be a non-zero power of two")]
-    fn test_new_zero_block_size_panics() {
-        let _ = BuddyAllocator::new(4096, 0);
-    }
-
-    #[fuchsia::test(logging = false)]
-    #[should_panic(expected = "block_size must be a non-zero power of two")]
-    fn test_new_non_power_of_two_block_size_panics() {
-        let _ = BuddyAllocator::new(4096, 3);
-    }
-
-    #[fuchsia::test(logging = false)]
     #[should_panic(expected = "No allocation record found for offset 0")]
     fn test_free_unallocated_offset_panics() {
-        let mut allocator = BuddyAllocator::new(4096, 512);
+        let mut allocator = BuddyAllocator::new(4096, BlockSize::SIZE_512B);
         allocator.free(0);
     }
 
     #[fuchsia::test(logging = false)]
     #[should_panic(expected = "No allocation record found for offset 512")]
     fn test_free_unaligned_interior_offset_panics() {
-        let mut allocator = BuddyAllocator::new(4096, 512);
+        let mut allocator = BuddyAllocator::new(4096, BlockSize::SIZE_512B);
         let _ = allocator.allocate(1024).unwrap();
         allocator.free(512);
     }
@@ -427,7 +406,7 @@ mod tests {
     #[fuchsia::test(logging = false)]
     #[should_panic(expected = "No allocation record found for offset 0")]
     fn test_double_free_panics() {
-        let mut allocator = BuddyAllocator::new(4096, 512);
+        let mut allocator = BuddyAllocator::new(4096, BlockSize::SIZE_512B);
         let (off, _) = allocator.allocate(1024).unwrap();
         allocator.free(off);
         allocator.free(off);

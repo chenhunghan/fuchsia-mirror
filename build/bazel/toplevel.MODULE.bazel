@@ -95,6 +95,7 @@ single_version_override(
 # - pass toolchain-wide `-Zallow-features=` through to rustc.
 # - fail instead of warning when a C++ library is listed in Rust `deps`.
 # - fix elided_lifetimes_in_paths warnings when building process_wrapper.
+# - support default toolchain build flags and response files without breaking RBE path mapping.
 bazel_dep(name = "rules_rust", version = "0.74.0")
 single_version_override(
     module_name = "rules_rust",
@@ -104,6 +105,7 @@ single_version_override(
         "//build/bazel:vendor_patches/rules_rust-0.74.0/0002-rules_rust-pass-through-toolchain-allow-features.patch",
         "//build/bazel:vendor_patches/rules_rust-0.74.0/0003-rules_rust-fail-on-cc-library-in-deps.patch",
         "//build/bazel:vendor_patches/rules_rust-0.74.0/0004-rules_rust-fix-elided-lifetimes-in-process-wrapper.patch",
+        "//build/bazel:vendor_patches/rules_rust-0.74.0/0005-rules_rust-toolchain-build-flags.patch",
     ],
     version = "0.74.0",
 )
@@ -428,4 +430,42 @@ new_local_repository(
     name = "fuchsia_perfetto_protos",
     build_file = "//tools/protobuf:third-party-perfetto-protos.BUILD.bazel",
     path = "third_party/perfetto",
+)
+
+new_local_repository(
+    name = "freetype2",
+    build_file = "//src/fonts/freetype_ffi:third-party-freetype2.BUILD.bazel",
+    path = "third_party/freetype2",
+)
+
+cobalt_repository = use_repo_rule(
+    "//build/bazel/rules/cobalt:repository_rules.bzl",
+    "cobalt_repository",
+)
+
+cobalt_repository(
+    name = "cobalt",
+)
+
+local_repository = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:local.bzl",
+    "local_repository",
+)
+
+# Unlike the other Vulkan third_party repos whose src/ directories lack a
+# BUILD.bazel, third_party/spirv-headers/src and third_party/spirv-tools/src
+# already ship upstream BUILD.bazel files, creating a subpackage boundary.
+# @spirv_headers works as-is via local_repository, while @spirv_tools uses
+# new_local_repository to substitute our Fuchsia-owned build_file (using
+# fx_cc_library and Fuchsia copt overrides) while still loading upstream
+# :build_defs.bzl for grammar/header generation macros.
+local_repository(
+    name = "spirv_headers",
+    path = "third_party/spirv-headers/src",
+)
+
+new_local_repository(
+    name = "spirv_tools",
+    build_file = "//third_party/spirv-tools:spirv-tools.BUILD.bazel",
+    path = "third_party/spirv-tools/src",
 )

@@ -139,7 +139,7 @@ fn add_blob_benchmarks(benchmark_set: &mut BenchmarkSet) {
             PageInBlobBenchmark::new_sequential_compressed(SMALL_BLOB_SIZE),
             PageInBlobBenchmark::new_random_compressed(SMALL_BLOB_SIZE),
         ],
-        [Blobfs, Fxblob::new(), Fxblob::with_driver_paging()]
+        [Blobfs, Fxblob::new()]
     );
     add_benchmarks!(
         benchmark_set,
@@ -163,7 +163,7 @@ fn add_blob_benchmarks(benchmark_set: &mut BenchmarkSet) {
             ColdPageFaultBenchmark::new_uncompressed(4096),
             ColdPageFaultBenchmark::new_uncompressed(131072),
         ],
-        [Fxblob::new(), Fxblob::with_driver_paging()]
+        [Fxblob::new()]
     );
     add_benchmarks!(
         benchmark_set,

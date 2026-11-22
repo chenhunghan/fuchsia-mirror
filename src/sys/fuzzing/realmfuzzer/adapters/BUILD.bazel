@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 
 package(default_applicable_licenses = ["//:license"])
@@ -11,4 +12,54 @@ cml_shard(
     includes = ["//src/sys/fuzzing/realmfuzzer/target:default.shard"],
     shard = "llvm.shard.cml",
     visibility = ["//src/sys/fuzzing/realmfuzzer/coverage/tests:__pkg__"],
+)
+
+# Uses Fuchsia-only Zircon/FIDL headers and dependencies.
+fx_cc_library(
+    name = "llvm",
+    testonly = True,
+    srcs = ["llvm-main.cc"],
+    implementation_deps = [":llvm-no-main"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/sys/fuzzing/realmfuzzer/tests:__pkg__"],
+    deps = [
+        "//src/sys/fuzzing/common",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_hlcpp",
+    ],
+    alwayslink = True,
+)
+
+# Version of the `target` library that does not include `main`, and can be used
+# for testing.
+# Uses Fuchsia-only Zircon/FIDL headers and dependencies.
+fx_cc_library(
+    name = "llvm-no-main",
+    testonly = True,
+    srcs = ["llvm.cc"],
+    hdrs = ["llvm.h"],
+    implementation_deps = ["//sdk/lib/syslog/cpp"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/sys/fuzzing/realmfuzzer:__subpackages__"],
+    deps = [
+        "//src/sys/fuzzing/common",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_hlcpp",
+        "//zircon/system/ulib/sync",
+    ],
+    alwayslink = True,
+)
+
+# Uses Fuchsia-only Zircon/FIDL headers and dependencies.
+fx_cc_library(
+    name = "unittests",
+    testonly = True,
+    srcs = ["llvm-unittest.cc"],
+    implementation_deps = [
+        ":llvm-no-main",
+        "//src/sys/fuzzing/common/testing",
+        "//zircon/system/ulib/sync",
+        "@com_google_googletest//:gtest",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/sys/fuzzing/realmfuzzer:__subpackages__"],
+    alwayslink = True,
 )

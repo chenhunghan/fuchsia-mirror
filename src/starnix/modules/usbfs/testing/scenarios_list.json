@@ -1,0 +1,16 @@
+[
+    "discovery_and_descriptors",
+    "sync_control_and_bulk",
+    "async_urb_basic",
+    "error_precedence_rdonly_and_ptrs",
+    "interface_claims_and_getdriver",
+    "config_interface_and_halt",
+    "control_recip_and_printer_quirk",
+    "urb_flags_and_cancellation",
+    "hotplug_disconnect_and_reconnect",
+    "compat_arch32_ioctls",
+    "fido_hid_ctap_interrupt_session",
+    "fido_hid_control_reports_and_cancel",
+    "fido_hid_pipelined_ring",
+    "fido_hid_compat32"
+]

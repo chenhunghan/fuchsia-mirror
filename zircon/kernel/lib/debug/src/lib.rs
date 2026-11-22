@@ -25,9 +25,7 @@ pub const DRIVER_OOPS_BANNER: &str = "\nDRIVER OOPS\n";
 // )
 
 /// Banner which starts every `DRIVER WARNING` message.
-// LINT.IfChange
 pub const DRIVER_WARN_BANNER: &str = "\nDRIVER WARNING\n";
-// LINT.ThenChange(//zircon/kernel/include/debug.h)
 
 /// Zero-sized [`core::fmt::Write`] adapter that writes directly to the kernel console.
 pub struct KernelConsoleWriter;
@@ -103,8 +101,8 @@ pub fn print_with_banner(banner: &str, args: core::fmt::Arguments<'_>) {
 /// ```
 #[macro_export]
 macro_rules! kernel_oops {
-    ($fmt:literal, $($arg:tt)*) => {
-        $crate::__kprint!(concat!("\nZIRCON KERNEL OOPS\n", $fmt), $($arg)*)
+    ($fmt:literal $(, $($arg:tt)*)?) => {
+        $crate::__kprint!(concat!("\nZIRCON KERNEL OOPS\n", $fmt) $(, $($arg)*)?)
     };
 }
 
@@ -122,8 +120,6 @@ macro_rules! driver_oops {
 
 /// Formats a message prefixed with [`DRIVER_WARN_BANNER`] into a stack buffer and emits it in a
 /// single console write.
-///
-/// Equivalent to C++ `DRIVER_WARN` in `<debug.h>`.
 #[macro_export]
 macro_rules! driver_warn {
     ($($arg:tt)*) => {

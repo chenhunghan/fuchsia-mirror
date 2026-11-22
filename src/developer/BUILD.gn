@@ -16,6 +16,7 @@ group("developer") {
     "fuchsia-criterion",
     "lib",
     "remote-control",
+    "zxsh",
   ]
 }
 
@@ -38,6 +39,7 @@ group("tests") {
     "sshd-host:tests",
     "sys_info:tests",
     "vsock-sshd-host:tests",
+    "zxsh:tests",
   ]
 }
 

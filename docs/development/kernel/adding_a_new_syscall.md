@@ -95,7 +95,7 @@ instead of `zx_`.  For now, the implementation should simply return
 Note: The `sys_` function's signature isn't necessarily the same as the `zx_`
 function's signature.  If you're unsure of the right `sys_` signature you run a
 build and check the resulting
-`$root_build_dir/fidling/gen/zircon/vdso/zx/zither/kernel/lib/syscalls/kernel.inc`
+`$root_build_dir/fidling/gen/zircon/vdso/zx/zither/kernel/lib/syscalls/syscall_sigs.rs`
 file.  Or check the build output for a linker error that tells you the missing
 `sys_` function's expected signature.
 
@@ -172,7 +172,7 @@ search rather than CL in gerrit. -->
 [fidlc-schema]: /tools/fidl/fidlc/schema.json
 [fidlc-types-tests]: /tools/fidl/fidlc/tests/types_tests.cc
 [fidlgen-types]: /tools/fidl/lib/fidlgen/types.go
-[fidlgen-ir]:/tools/fidl/fidlgen_rust/codegen/ir.go
+[fidlgen-ir]: /tools/fidl/fidlgen_rust/codegen/ir.go
 [zircon-types-header]: https://fuchsia-review.googlesource.com/c/fuchsia/+/1181176/9/zircon/system/public/zircon/types.h
 [api-summary]: https://fuchsia-review.googlesource.com/c/fuchsia/+/1181176/9/sdk/history/16/zx.api_summary.json
 [gen-syscalls-toc]: https://fuchsia-review.googlesource.com/c/fuchsia/+/1181176/9/tools/docsgen/gen_syscalls_toc.py

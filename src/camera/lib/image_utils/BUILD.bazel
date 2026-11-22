@@ -1,0 +1,134 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":blc_unittest",
+        ":hsv_generator_unittest",
+        ":image_format_rgba_unittest",
+        ":raw12_writer_unittest",
+    ],
+    visibility = ["//src/camera:__pkg__"],
+)
+
+fx_cc_library(
+    name = "blc",
+    srcs = ["blc.cc"],
+    hdrs = ["blc.h"],
+    visibility = ["//src/camera/lib:__pkg__"],
+    deps = [":raw12_writer"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "raw12_writer",
+    srcs = ["raw12_writer.cc"],
+    hdrs = [
+        "image_writer.h",
+        "raw12_writer.h",
+    ],
+    visibility = ["//src/camera/lib:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_hlcpp",
+        "//sdk/lib/fit-promise",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/fzl",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "hsv_color_source",
+    srcs = [
+        "color_source.cc",
+        "hsv_generator.cc",
+    ],
+    hdrs = [
+        "color_source.h",
+        "hsv_generator.h",
+    ],
+    visibility = ["//src/camera/lib:__pkg__"],
+    deps = [":image_format_rgba"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "image_format_rgba",
+    srcs = ["image_format_rgba.cc"],
+    hdrs = ["image_format_rgba.h"],
+    visibility = ["//src/camera/lib:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_hlcpp",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/image-format",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "blc_unittest_bin",
+    srcs = ["blc_unittest.cc"],
+    deps = [
+        ":blc",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "hsv_generator_unittest_bin",
+    srcs = ["hsv_generator_unittest.cc"],
+    deps = [
+        ":hsv_color_source",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "image_format_rgba_unittest_bin",
+    srcs = ["image_format_rgba_unittest.cc"],
+    deps = [
+        ":hsv_color_source",
+        ":image_format_rgba",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "raw12_writer_unittest_bin",
+    srcs = ["raw12_writer_unittest.cc"],
+    deps = [
+        ":raw12_writer",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_unittest_package(
+    name = "blc_unittest",
+    unit_tests = [":blc_unittest_bin"],
+)
+
+fx_unittest_package(
+    name = "hsv_generator_unittest",
+    unit_tests = [":hsv_generator_unittest_bin"],
+)
+
+fx_unittest_package(
+    name = "image_format_rgba_unittest",
+    unit_tests = [":image_format_rgba_unittest_bin"],
+)
+
+fx_unittest_package(
+    name = "raw12_writer_unittest",
+    unit_tests = [":raw12_writer_unittest_bin"],
+)

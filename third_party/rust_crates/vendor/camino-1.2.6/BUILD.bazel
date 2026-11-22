@@ -54,7 +54,6 @@ rust_library(
         ],
     ),
     crate_features = [
-        "proptest1",
         "serde1",
     ],
     crate_root = "src/lib.rs",
@@ -87,7 +86,6 @@ rust_library(
     version = "1.2.6",
     deps = [
         ":build_script_build",
-        "//third_party/rust_crates/vendor/proptest-1.11.0:proptest",
         "//third_party/rust_crates/vendor/serde_core-1.0.229:serde_core",
     ],
 )
@@ -112,7 +110,6 @@ cargo_build_script(
         ],
     ),
     crate_features = [
-        "proptest1",
         "serde1",
     ],
     crate_name = "build_script_build",

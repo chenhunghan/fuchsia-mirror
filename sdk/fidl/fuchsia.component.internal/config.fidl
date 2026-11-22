@@ -304,4 +304,9 @@ type ChildPolicyAllowlists = table {
     /// Allowlist entry monikers of component instances allowed to have the
     /// `on_terminate=REBOOT` in their `children` declaration.
     1: reboot_on_terminate vector<AllowlistEntryMoniker>:MAX_ALLOWLIST_SIZE;
+
+    /// Allowlist entry monikers of root-reachable static component instances
+    /// allowed to have `startup=EAGER` in their `children` declaration.
+    /// If unset, `eager` startup is unrestricted (e.g. in standalone test configs).
+    2: eager_startup vector<AllowlistEntryMoniker>:MAX_ALLOWLIST_SIZE;
 };

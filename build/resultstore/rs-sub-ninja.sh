@@ -3,6 +3,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+# DEPRECATED: rs-sub-ninja.sh is deprecated. subbuild.py now invokes
+# fuchsia-rsproxy-wrap.sh directly. This wrapper is retained temporarily
+# for legacy callers (such as Go fint build) until they are removed.
+# TODO(https://fxbug.dev/573624782): Delete after Go 'fint build' is deleted.
+
 # rs-sub-ninja.sh is a drop-in replacement for ninja that should be
 # used in sub-builds when resultstore is enabled.
 # This combines just rsproxy-wrap.sh and rsninja.sh.

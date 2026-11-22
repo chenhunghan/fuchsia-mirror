@@ -61,7 +61,11 @@ rustc_binary(
     # `concurrent_jobs.link_highmem` is synced to GN via `@bazel2gn:raw_attribute` above.
     # @bazel2gn:skip
     exec_properties = RBE_USE_LARGE_WORKER,
-    tags = ["manual"],
+    tags = [
+        # regex crate is large
+        "assert_no_deps=//third_party/rust_crates/vendor:regex",
+        "manual",
+    ],
     deps = [
         ":driver_index_config",
         "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",

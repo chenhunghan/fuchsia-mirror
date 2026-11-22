@@ -29,11 +29,8 @@ TEST(CrashTest, CrashFromSighandler) {
   helper.ExpectSignal(SIGSEGV);
   helper.OnlyWaitForForkedChildren();
   helper.RunInForkedProcess([] {
-    struct sigaction sa{};
-    sa.sa_handler = [](int signum) { *reinterpret_cast<volatile char*>(0x0) = 0; };
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    SAFE_SYSCALL(sigaction(SIGQUIT, &sa, nullptr));
+    test_helper::ScopedSigAction scoped_sigquit(
+        SIGQUIT, [](int signum) { *reinterpret_cast<volatile char*>(0x0) = 0; });
     raise(SIGQUIT);
   });
   ASSERT_TRUE(helper.WaitForChildren());

@@ -69,12 +69,7 @@ ProcessHandler::ProcessHandler(async_dispatcher_t* dispatcher, bool suspend_enab
     : dispatcher_(dispatcher),
       suspend_enabled_(suspend_enabled),
       log_moniker_(std::move(log_moniker)),
-      on_available_(std::move(on_available)) {
-  crash_reporter_.set_error_handler([this](const zx_status_t status) {
-    FX_PLOGS(WARNING, status) << "Lost connection to subprocess";
-    on_available_();
-  });
-}
+      on_available_(std::move(on_available)) {}
 
 ProcessHandler::~ProcessHandler() {
   if (subprocess_.is_valid()) {
@@ -82,8 +77,14 @@ ProcessHandler::~ProcessHandler() {
   }
 }
 
+void ProcessHandler::on_fidl_error(const fidl::UnbindInfo error) {
+  FX_PLOGS(WARNING, error.status()) << "Lost connection to subprocess";
+  crash_reporter_ = fidl::Client<fuchsia_exception_internal::CrashReporter>();
+  on_available_();
+}
+
 void ProcessHandler::Handle(zx::exception exception, zx::process process, zx::thread thread) {
-  if (!crash_reporter_.is_bound()) {
+  if (!crash_reporter_.is_valid()) {
     zx::channel client;
 
     // If we are not able to spawn a sub-process, we will have to lose the exception.
@@ -98,19 +99,30 @@ void ProcessHandler::Handle(zx::exception exception, zx::process process, zx::th
       return;
     }
 
-    crash_reporter_.Bind(std::move(client), dispatcher_);
+    crash_reporter_ =
+        fidl::Client(fidl::ClientEnd<fuchsia_exception_internal::CrashReporter>(std::move(client)),
+                     dispatcher_, this);
   }
 
-  crash_reporter_->Send(std::move(exception), std::move(process), std::move(thread),
-                        [this](const ::fidl::StringPtr moniker) {
-                          // Log |moniker| before calling |on_available_| because the lambda may
-                          // recurse.
-                          if (moniker) {
-                            log_moniker_(*moniker);
-                          }
+  crash_reporter_
+      ->Send({{
+          .exception = std::move(exception),
+          .crashed_process = std::move(process),
+          .crashed_thread = std::move(thread),
+      }})
+      .Then([this](fidl::Result<fuchsia_exception_internal::CrashReporter::Send>& result) {
+        if (result.is_error()) {
+          return;
+        }
 
-                          on_available_();
-                        });
+        // Log |moniker| before calling |on_available_| because the lambda may
+        // recurse.
+        if (result->moniker().has_value()) {
+          log_moniker_(*result->moniker());
+        }
+
+        on_available_();
+      });
 }
 
 }  // namespace exceptions

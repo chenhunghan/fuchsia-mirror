@@ -34,7 +34,7 @@ struct BufferKeyHash {
   }
 };
 
-// LLCPP synchronous server of a goldfish device-local Fuchsia sysmem Heap
+// FIDL wire synchronous server of a goldfish device-local Fuchsia sysmem Heap
 // interface.
 //
 // Each Heap service runs on its own thread and has its own async loop.

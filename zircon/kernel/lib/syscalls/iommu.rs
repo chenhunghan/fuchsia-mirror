@@ -44,6 +44,9 @@ pub fn sys_iommu_create(
 
     let (kernel_handle, rights) = IommuDispatcher::create(type_param, init_buf)?;
 
+    // If the handle cannot be installed, the dispatcher goes away without user mode ever having
+    // held it, and its destruction leaves the IOMMU as it was before the call
+    // (`Iommu::on_dispatcher_destroyed`). Nothing to undo here.
     *out = kernel_handle.make_and_add_handle(rights)?;
     Ok(())
 }

@@ -2,20 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# [START imports]
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component",
     "fx_component_manifest",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 
-# [END imports]
-
 package(default_applicable_licenses = ["//:license"])
 
-# [START executable]
 rustc_binary(
     name = "bin",
     srcs = ["src/main.rs"],
@@ -34,8 +31,6 @@ rustc_binary(
         "//third_party/rust_crates/vendor:futures",
     ],
 )
-
-# [END executable]
 
 fx_packaged_binary(
     name = "bin_packaged",
@@ -61,7 +56,6 @@ fx_component(
     deps = [":bin_packaged"],
 )
 
-# [START component]
 fx_component_manifest(
     name = "echo_server_cmp_manifest",
     component_name = "echo_server",
@@ -83,4 +77,26 @@ fx_component(
     ],
     deps = [":bin_packaged"],
 )
-# [END component]
+
+fx_component_manifest(
+    name = "echo_server_manifest",
+    component_name = "default",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/echo_server.cml",
+)
+
+fx_component(
+    name = "echo_server_component",
+    compiled_manifest = ":echo_server_manifest",
+    deps = [":bin_packaged"],
+)
+
+# Subpackaged component "echo_server#meta/default.cm"
+fx_package(
+    name = "echo_server",
+    components = [":echo_server_component"],
+    visibility = ["//examples/components/routing:__subpackages__"],
+)

@@ -10,7 +10,9 @@ pub mod tests {
         BinderObject, BinderObjectFlags, FlatBinderObject, Handle, LocalBinderObject,
         RefCountActions, SerializedBinderObject, StrongRefGuard, TransactionData,
     };
-    use crate::process::{BinderProcess, HandleTable};
+    use crate::process::{
+        ActiveTransaction, BinderProcess, HandleTable, RequestType, TransientTransactionState,
+    };
     use crate::resource_accessor::{
         RemoteIoctl, RemoteMemoryAccessor, RemoteResourceAccessor, ResourceAccessor,
     };
@@ -51,9 +53,10 @@ pub mod tests {
         WhatToMount, anon_fs,
     };
     use starnix_logging::log_warn;
+    use starnix_sync::WakeReason;
     use starnix_task_command::TaskCommand;
     use starnix_types::convert::IntoFidl;
-    use starnix_types::ownership::{OwnedRef, Releasable, Share, TempRef, WeakRef};
+    use starnix_types::ownership::{OwnedRef, Releasable, Share, TempRef, WeakRef, release_after};
     use starnix_types::user_buffer::UserBuffer;
     use starnix_uapi::auth::Credentials;
     use starnix_uapi::device_id::DeviceId;
@@ -73,8 +76,8 @@ pub mod tests {
         binder_fd_object, binder_freeze_info, binder_frozen_state_info, binder_frozen_status_info,
         binder_object_header, binder_transaction_data, binder_transaction_data__bindgen_ty_1,
         binder_transaction_data__bindgen_ty_2, binder_transaction_data__bindgen_ty_2__bindgen_ty_1,
-        binder_transaction_data_sg, binder_uintptr_t, errno, flat_binder_object,
-        transaction_flags_TF_ONE_WAY, uapi,
+        binder_transaction_data_sg, binder_uintptr_t, binder_write_read, errno, flat_binder_object,
+        transaction_flags_TF_DEFER_COMPLETE, transaction_flags_TF_ONE_WAY, uapi,
     };
     use static_assertions::const_assert;
     use std::cell::Cell;
@@ -139,6 +142,23 @@ pub mod tests {
                 device.create_process_and_thread(current_task.pid.clone(), &current_task.task);
 
             mmap_shared_memory(&device, current_task, &proc);
+            Self {
+                device: Arc::downgrade(device),
+                proc,
+                thread,
+                kernel: current_task.kernel().clone(),
+                task: None,
+            }
+        }
+
+        /// Returns a fixture for the current task without shared memory, as for a remote process
+        /// that has not mapped its VMO yet.
+        fn new_current_without_shared_memory(
+            current_task: &CurrentTask,
+            device: &BinderDevice,
+        ) -> Self {
+            let (proc, thread) =
+                device.create_process_and_thread(current_task.pid.clone(), &current_task.task);
             Self {
                 device: Arc::downgrade(device),
                 proc,
@@ -238,6 +258,28 @@ pub mod tests {
         );
         owner.lock().objects.insert(weak_ref_addr, object.clone());
         (object, guard)
+    }
+
+    fn handle_refcount_operation(
+        proc: &BinderProcess,
+        command: starnix_uapi::binder_driver_command_protocol,
+        handle: Handle,
+    ) -> Result<(), Errno> {
+        let mut actions = RefCountActions::default();
+        release_after!(actions, (), {
+            proc.handle_refcount_operation(command, handle, &mut actions)
+        })
+    }
+
+    fn handle_refcount_operation_done(
+        proc: &BinderProcess,
+        command: starnix_uapi::binder_driver_command_protocol,
+        object: LocalBinderObject,
+    ) -> Result<(), Errno> {
+        let mut actions = RefCountActions::default();
+        release_after!(actions, (), {
+            proc.handle_refcount_operation_done(command, object, &mut actions)
+        })
     }
 
     fn assert_flags_are_equivalent(f1: fbinder::FileFlags, f2: OpenFlags) {
@@ -979,6 +1021,72 @@ pub mod tests {
         let full_alloc =
             shared_memory.allocate_buffers(1024, 0, 0, 0).expect("full buffer allocate");
         assert_eq!(full_alloc.data_buffer.offset, 0);
+    }
+
+    #[fuchsia::test]
+    async fn external_vmo_buffers_stay_within_mapped_size() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let remote =
+                BinderProcessFixture::new_current_without_shared_memory(current_task, &device);
+            let page_size = *PAGE_SIZE as usize;
+            let vmo_size = 8 * page_size;
+            let mapped_size = 2 * page_size;
+            let mapped_address = 0x10000;
+            let vmo = zx::Vmo::create(vmo_size as u64).expect("Vmo::create");
+            remote
+                .proc
+                .map_external_vmo(vmo, mapped_address, Some(mapped_size as u64))
+                .expect("map_external_vmo");
+
+            let mut shared_memory = remote.lock_shared_memory();
+            assert_eq!(shared_memory.length, mapped_size);
+            // A buffer larger than the mapping does not fit, although the VMO is larger.
+            assert_matches!(shared_memory.allocate_buffers(mapped_size + 8, 0, 0, 0), Err(_));
+            // Buffers fill the mapping, and no more fit.
+            let buffer_size = page_size / 2;
+            let mut addresses = vec![];
+            for _ in 0..mapped_size / buffer_size {
+                let buffer = shared_memory
+                    .allocate_buffers(buffer_size, 0, 0, 0)
+                    .expect("allocate_buffers")
+                    .data_buffer;
+                assert!(buffer.offset + buffer_size <= mapped_size);
+                addresses.push((buffer.memory.user_address + buffer.offset).expect("address"));
+            }
+            assert_matches!(shared_memory.allocate_buffers(8, 0, 0, 0), Err(_));
+            let mapped_end = mapped_address as usize + mapped_size;
+            for address in addresses {
+                assert!(address.ptr() >= mapped_address as usize && address.ptr() < mapped_end);
+            }
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn external_vmo_rejects_invalid_mapped_size() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let remote =
+                BinderProcessFixture::new_current_without_shared_memory(current_task, &device);
+            let page_size = *PAGE_SIZE;
+            let vmo_size = 4 * page_size;
+            let vmo = zx::Vmo::create(vmo_size).expect("Vmo::create");
+            for mapped_size in [0, page_size + 1, vmo_size + page_size] {
+                let dup = vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate_handle");
+                assert_eq!(
+                    remote.proc.map_external_vmo(dup, 0x10000, Some(mapped_size)),
+                    Err(errno!(EINVAL)),
+                    "mapped_size: {mapped_size}"
+                );
+            }
+            assert!(remote.proc.shared_memory.lock().is_none());
+
+            // Without a size, as with `MapVmo`, the whole VMO is used.
+            remote.proc.map_external_vmo(vmo, 0x10000, None).expect("map_external_vmo");
+            assert_eq!(remote.lock_shared_memory().length, vmo_size as usize);
+        })
+        .await;
     }
 
     #[fuchsia::test]
@@ -4175,6 +4283,596 @@ pub mod tests {
         .await;
     }
 
+    /// Sends a two-way transaction from `sender` to a binder object owned by `receiver`, which
+    /// reads it.
+    fn receive_two_way_transaction(
+        current_task: &CurrentTask,
+        device: &BinderDevice,
+        sender: &BinderProcessFixture,
+        receiver: &BinderProcessFixture,
+    ) {
+        send_two_way_transaction(current_task, device, sender, receiver);
+        let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+        device
+            .handle_thread_read(
+                &receiver.context(current_task),
+                &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+            )
+            .expect("read transaction");
+    }
+
+    /// Sends a two-way transaction from `sender` to a binder object owned by `receiver`, which
+    /// reads it and replies to it with `flags`. On return, `receiver`'s thread has the
+    /// BR_TRANSACTION_COMPLETE of the reply queued.
+    fn reply_to_two_way_transaction(
+        current_task: &CurrentTask,
+        device: &BinderDevice,
+        sender: &BinderProcessFixture,
+        receiver: &BinderProcessFixture,
+        flags: u32,
+    ) {
+        receive_two_way_transaction(current_task, device, sender, receiver);
+        let reply = binder_transaction_data_sg {
+            transaction_data: binder_transaction_data {
+                code: 42,
+                flags,
+                ..binder_transaction_data::default()
+            },
+            buffers_size: 0,
+        };
+        device
+            .handle_reply(&receiver.context(current_task), &mut Vec::new(), reply)
+            .expect("handle_reply");
+    }
+
+    #[fuchsia::test]
+    async fn deferred_transaction_complete_is_read_with_next_command() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new_current(current_task, &device);
+            reply_to_two_way_transaction(
+                current_task,
+                &device,
+                &sender,
+                &receiver,
+                transaction_flags_TF_DEFER_COMPLETE,
+            );
+            assert_matches!(
+                receiver.thread.lock().command_queue.commands.front(),
+                Some(QueuedCommand { command: Command::DeferredTransactionComplete, .. })
+            );
+
+            // Queue the largest possible command for the receiving process.
+            receiver.proc.enqueue_command(largest_command(current_task, &sender).into());
+
+            // The buffer has exactly enough room for BR_TRANSACTION_COMPLETE followed by a command
+            // of `MAX_SIZE`, so both are returned by a single read.
+            let command_size = std::mem::size_of::<u32>();
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let bytes_read = device
+                .handle_thread_read(
+                    &receiver.context(current_task),
+                    &UserBuffer {
+                        address: read_buffer_addr,
+                        length: command_size + Command::MAX_SIZE,
+                    },
+                )
+                .expect("handle_thread_read");
+            assert_eq!(bytes_read, command_size + Command::MAX_SIZE);
+            let commands = current_task
+                .read_objects_to_array::<u32, 2>(UserRef::new(read_buffer_addr))
+                .expect("read commands");
+            assert_eq!(commands[0], uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE);
+            assert_eq!(commands[1], uapi::binder_driver_return_protocol_BR_TRANSACTION_SEC_CTX);
+            assert!(receiver.thread.lock().command_queue.is_empty());
+            assert!(receiver.proc.lock().command_queue.is_empty());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn deferred_transaction_complete_is_read_alone_if_wait_is_interrupted() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new_current(current_task, &device);
+            reply_to_two_way_transaction(
+                current_task,
+                &device,
+                &sender,
+                &receiver,
+                transaction_flags_TF_DEFER_COMPLETE,
+            );
+
+            // No other command is queued, so the read waits for the next command after the
+            // BR_TRANSACTION_COMPLETE. As the wait is interrupted by a pending signal, the
+            // BR_TRANSACTION_COMPLETE is returned alone rather than lost.
+            send_standard_signal(&current_task.task, SignalInfo::kernel(SIGUSR1));
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let bytes_read = device
+                .handle_thread_read(
+                    &receiver.context(current_task),
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("handle_thread_read");
+            assert_eq!(bytes_read, std::mem::size_of::<u32>());
+            let command: u32 =
+                current_task.read_object(UserRef::new(read_buffer_addr)).expect("read command");
+            assert_eq!(command, uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE);
+            assert!(receiver.thread.lock().command_queue.is_empty());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn deferred_transaction_complete_is_read_with_spawn_looper() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new_current(current_task, &device);
+
+            // The receiving thread is the main thread of a process that may have up to 2 auxiliary
+            // threads, and that has already requested one.
+            receiver.thread.lock().registration = RegistrationState::Main;
+            {
+                let mut receiver_proc = receiver.proc.lock();
+                receiver_proc.max_thread_count = 2;
+                receiver_proc.thread_requested = true;
+            }
+            reply_to_two_way_transaction(
+                current_task,
+                &device,
+                &sender,
+                &receiver,
+                transaction_flags_TF_DEFER_COMPLETE,
+            );
+
+            // Once the read waits for the next command after the BR_TRANSACTION_COMPLETE, the
+            // requested thread registers, so that the process may request another thread, and a
+            // oneway transaction wakes up the receiving thread.
+            let oneway = QueuedCommand::from(largest_command(current_task, &sender));
+            let thread = std::thread::spawn({
+                let task = current_task.weak_task();
+                let receiver_proc = WeakRef::<BinderProcess>::from(&receiver.proc);
+
+                move || {
+                    let task = task.upgrade().expect("task");
+                    while !task.read().is_blocked() {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    let receiver_proc = receiver_proc.upgrade().expect("receiver_proc");
+                    {
+                        let mut receiver_proc_state = receiver_proc.lock();
+                        receiver_proc_state.thread_requested = false;
+                        receiver_proc_state.auxiliary_threads_count += 1;
+                    }
+                    receiver_proc.enqueue_command(oneway);
+                }
+            });
+
+            // As the read waits for work, like a read that has not written anything yet, it
+            // requests a thread: it returns the BR_TRANSACTION_COMPLETE followed by the
+            // BR_SPAWN_LOOPER (4 + 4 bytes).
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let bytes_read = device
+                .handle_thread_read(
+                    &receiver.context(current_task),
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("handle_thread_read 1");
+            thread.join().expect("join");
+            assert_eq!(bytes_read, 4 + 4);
+            let commands = current_task
+                .read_objects_to_array::<u32, 2>(UserRef::new(read_buffer_addr))
+                .expect("read commands");
+            assert_eq!(commands[0], uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE);
+            assert_eq!(commands[1], uapi::binder_driver_return_protocol_BR_SPAWN_LOOPER);
+
+            // The next read returns the transaction.
+            let bytes_read = device
+                .handle_thread_read(
+                    &receiver.context(current_task),
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("handle_thread_read 2");
+            assert_eq!(bytes_read, Command::MAX_SIZE);
+            let command: u32 =
+                current_task.read_object(UserRef::new(read_buffer_addr)).expect("read command");
+            assert_eq!(command, uapi::binder_driver_return_protocol_BR_TRANSACTION_SEC_CTX);
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn deferred_transaction_complete_of_nested_reply_is_read_before_spawn_looper() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new_current(current_task, &device);
+
+            // The receiving thread is the main thread of a process that may have up to 2 auxiliary
+            // threads, and that has already requested one.
+            receiver.thread.lock().registration = RegistrationState::Main;
+            {
+                let mut receiver_proc = receiver.proc.lock();
+                receiver_proc.max_thread_count = 2;
+                receiver_proc.thread_requested = true;
+            }
+
+            // The receiving thread waits for the reply to its own transaction, and replies with
+            // TF_DEFER_COMPLETE to a nested transaction.
+            {
+                let mut receiver_thread = receiver.thread.lock();
+                receiver_thread.transactions.push(TransactionRole::Sender(TransactionSender {
+                    target_proc: sender.proc.identifier(),
+                    target_thread: None,
+                    is_alive: true,
+                    target_thread_handle: None,
+                    trace_id: fuchsia_trace::Id::new(),
+                }));
+                receiver_thread.transactions.push(TransactionRole::Receiver {
+                    peer: WeakBinderPeer::new(&sender.proc, &sender.thread),
+                    trace_id: fuchsia_trace::Id::new(),
+                });
+            }
+            let reply = binder_transaction_data_sg {
+                transaction_data: binder_transaction_data {
+                    code: 42,
+                    flags: transaction_flags_TF_DEFER_COMPLETE,
+                    ..binder_transaction_data::default()
+                },
+                buffers_size: 0,
+            };
+            device
+                .handle_reply(&receiver.context(current_task), &mut Vec::new(), reply)
+                .expect("handle_reply");
+
+            // Once the read waits for the next command after the BR_TRANSACTION_COMPLETE, the
+            // requested thread registers, so that the process may request another thread, and
+            // the receiving thread's own transaction fails with a BR_DEAD_REPLY.
+            let thread = std::thread::spawn({
+                let task = current_task.weak_task();
+                let receiver_proc = WeakRef::<BinderProcess>::from(&receiver.proc);
+                let receiver_thread = WeakRef::<BinderThread>::from(&receiver.thread);
+                let sender_identifier = sender.proc.identifier();
+
+                move || {
+                    let task = task.upgrade().expect("task");
+                    while !task.read().is_blocked() {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    {
+                        let receiver_proc = receiver_proc.upgrade().expect("receiver_proc");
+                        let mut receiver_proc_state = receiver_proc.lock();
+                        receiver_proc_state.thread_requested = false;
+                        receiver_proc_state.auxiliary_threads_count += 1;
+                    }
+                    let receiver_thread = receiver_thread.upgrade().expect("receiver_thread");
+                    generate_dead_replies_for_transactions(
+                        &mut receiver_thread.lock(),
+                        sender_identifier,
+                        None,
+                    );
+                }
+            });
+
+            // As the read waits for the outcome of the thread's own transaction rather than for
+            // work, it returns the BR_TRANSACTION_COMPLETE followed by the BR_DEAD_REPLY (4 + 4
+            // bytes), and does not request a thread in between.
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let bytes_read = device
+                .handle_thread_read(
+                    &receiver.context(current_task),
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("handle_thread_read 1");
+            thread.join().expect("join");
+            assert_eq!(bytes_read, 4 + 4);
+            let commands = current_task
+                .read_objects_to_array::<u32, 2>(UserRef::new(read_buffer_addr))
+                .expect("read commands");
+            assert_eq!(commands[0], uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE);
+            assert_eq!(commands[1], uapi::binder_driver_return_protocol_BR_DEAD_REPLY);
+            assert!(receiver.thread.lock().transactions.is_empty());
+
+            // The next read requests the thread (4 bytes).
+            let bytes_read = device
+                .handle_thread_read(
+                    &receiver.context(current_task),
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("handle_thread_read 2");
+            assert_eq!(bytes_read, 4);
+            let command: u32 =
+                current_task.read_object(UserRef::new(read_buffer_addr)).expect("read command");
+            assert_eq!(command, uapi::binder_driver_return_protocol_BR_SPAWN_LOOPER);
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn deferred_transaction_complete_is_not_deferred_if_write_increments_refcount() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new_current(current_task, &device);
+            receive_two_way_transaction(current_task, &device, &sender, &receiver);
+
+            // Give the receiver a handle to a binder object owned by the sender.
+            const OBJECT_ADDR: UserAddress = UserAddress::const_from(0x10);
+            let (_, guard) =
+                register_binder_object(&sender.proc, OBJECT_ADDR, (OBJECT_ADDR + 1u64).unwrap());
+            let handle: u32 = receiver
+                .proc
+                .lock()
+                .handles
+                .insert_for_transaction(guard, &mut RefCountActions::default_released())
+                .into();
+
+            // Like libbinder, acquire a strong reference on the handle and reply with
+            // TF_DEFER_COMPLETE in a single write.
+            let mut write_data = vec![];
+            write_data.extend(uapi::binder_driver_command_protocol_BC_ACQUIRE.as_bytes());
+            write_data.extend(handle.as_bytes());
+            write_data.extend(uapi::binder_driver_command_protocol_BC_REPLY.as_bytes());
+            write_data.extend(struct_with_union_into_bytes!(binder_transaction_data {
+                target.handle: 0,
+                cookie: 0,
+                code: 42,
+                flags: transaction_flags_TF_DEFER_COMPLETE,
+                sender_pid: 0,
+                sender_euid: 0,
+                data_size: 0,
+                offsets_size: 0,
+                data.ptr: binder_transaction_data__bindgen_ty_2__bindgen_ty_1::default(),
+            }));
+            let write_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            current_task.write_memory(write_buffer_addr, &write_data).expect("write commands");
+            let write_read_addr = map_object_anywhere(
+                current_task,
+                &binder_write_read {
+                    write_size: write_data.len() as u64,
+                    write_buffer: write_buffer_addr.ptr() as u64,
+                    ..binder_write_read::default()
+                },
+            );
+            device
+                .ioctl(
+                    current_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_WRITE_READ,
+                    write_read_addr.into(),
+                    Vec::new(),
+                )
+                .expect("BINDER_WRITE_READ ioctl");
+
+            // The BR_TRANSACTION_COMPLETE is not deferred, so that the write is consumed without
+            // waiting for an unrelated command.
+            assert_matches!(
+                receiver.thread.lock().command_queue.commands.front(),
+                Some(QueuedCommand { command: Command::TransactionComplete, .. })
+            );
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let bytes_read = device
+                .handle_thread_read(
+                    &receiver.context(current_task),
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("handle_thread_read");
+            assert_eq!(bytes_read, std::mem::size_of::<u32>());
+            let command: u32 =
+                current_task.read_object(UserRef::new(read_buffer_addr)).expect("read command");
+            assert_eq!(command, uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE);
+            assert!(receiver.thread.lock().command_queue.is_empty());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn deferred_transaction_complete_is_not_deferred_if_write_increments_refcount_and_fails()
+    {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new_current(current_task, &device);
+            receive_two_way_transaction(current_task, &device, &sender, &receiver);
+
+            // Give the receiver a handle to a binder object owned by the sender.
+            const OBJECT_ADDR: UserAddress = UserAddress::const_from(0x10);
+            let (_, guard) =
+                register_binder_object(&sender.proc, OBJECT_ADDR, (OBJECT_ADDR + 1u64).unwrap());
+            let handle: u32 = receiver
+                .proc
+                .lock()
+                .handles
+                .insert_for_transaction(guard, &mut RefCountActions::default_released())
+                .into();
+
+            // Acquire a strong reference on the handle and reply with TF_DEFER_COMPLETE in a single
+            // write, followed by an invalid command.
+            let mut write_data = vec![];
+            write_data.extend(uapi::binder_driver_command_protocol_BC_ACQUIRE.as_bytes());
+            write_data.extend(handle.as_bytes());
+            write_data.extend(uapi::binder_driver_command_protocol_BC_REPLY.as_bytes());
+            write_data.extend(struct_with_union_into_bytes!(binder_transaction_data {
+                target.handle: 0,
+                cookie: 0,
+                code: 42,
+                flags: transaction_flags_TF_DEFER_COMPLETE,
+                sender_pid: 0,
+                sender_euid: 0,
+                data_size: 0,
+                offsets_size: 0,
+                data.ptr: binder_transaction_data__bindgen_ty_2__bindgen_ty_1::default(),
+            }));
+            let consumed_size = write_data.len() as u64;
+            write_data.extend(0u32.as_bytes());
+            let write_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            current_task.write_memory(write_buffer_addr, &write_data).expect("write commands");
+            let write_read_addr = map_object_anywhere(
+                current_task,
+                &binder_write_read {
+                    write_size: write_data.len() as u64,
+                    write_buffer: write_buffer_addr.ptr() as u64,
+                    ..binder_write_read::default()
+                },
+            );
+            let err = device
+                .ioctl(
+                    current_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_WRITE_READ,
+                    write_read_addr.into(),
+                    Vec::new(),
+                )
+                .expect_err("BINDER_WRITE_READ ioctl");
+            assert_eq!(err, errno!(EINVAL));
+
+            // The commands before the invalid one are reported as consumed, so the
+            // BR_TRANSACTION_COMPLETE is not deferred either.
+            let write_read = current_task
+                .read_object(UserRef::<binder_write_read>::new(write_read_addr))
+                .expect("read binder_write_read");
+            assert_eq!(write_read.write_consumed, consumed_size);
+            assert_matches!(
+                receiver.thread.lock().command_queue.commands.front(),
+                Some(QueuedCommand { command: Command::TransactionComplete, .. })
+            );
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn deferred_transaction_complete_only_notifies_poll_waiters_once_undeferred() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new_current(current_task, &device);
+            receive_two_way_transaction(current_task, &device, &sender, &receiver);
+
+            // The receiving thread polls the binder file.
+            let poll_waiter = Waiter::new();
+            let _poll_wait_canceler = receiver.thread.lock().command_queue.wait_async_fd_events(
+                &poll_waiter,
+                FdEvents::POLLIN,
+                EventHandler::None,
+            );
+
+            // A reply sent with TF_DEFER_COMPLETE does not make the binder readable, so the poller
+            // is not notified.
+            let reply = binder_transaction_data_sg {
+                transaction_data: binder_transaction_data {
+                    code: 42,
+                    flags: transaction_flags_TF_DEFER_COMPLETE,
+                    ..binder_transaction_data::default()
+                },
+                buffers_size: 0,
+            };
+            device
+                .handle_reply(&receiver.context(current_task), &mut Vec::new(), reply)
+                .expect("handle_reply");
+            assert_eq!(
+                poll_waiter.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Err(errno!(ETIMEDOUT))
+            );
+
+            // Once the BR_TRANSACTION_COMPLETE is not deferred anymore, the binder is readable, and
+            // the poller is notified.
+            receiver.thread.lock().command_queue.undefer_transaction_complete();
+            assert_eq!(poll_waiter.wait_until(current_task, zx::MonotonicInstant::ZERO), Ok(()));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn deferred_transaction_complete_is_read_before_spawn_looper() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new_current(current_task, &device);
+
+            // The receiving thread is the main thread of a process that may have up to 2 auxiliary
+            // threads, and that has requested one while the thread receives a transaction.
+            receiver.thread.lock().registration = RegistrationState::Main;
+            {
+                let mut receiver_proc = receiver.proc.lock();
+                receiver_proc.max_thread_count = 2;
+                receiver_proc.thread_requested = true;
+            }
+            reply_to_two_way_transaction(
+                current_task,
+                &device,
+                &sender,
+                &receiver,
+                transaction_flags_TF_DEFER_COMPLETE,
+            );
+
+            // The requested thread registers, so that the process may request another thread
+            // before the receiving thread reads.
+            {
+                let mut receiver_proc = receiver.proc.lock();
+                receiver_proc.thread_requested = false;
+                receiver_proc.auxiliary_threads_count += 1;
+            }
+
+            // The deferred BR_TRANSACTION_COMPLETE is read first, then the read requests the thread
+            // as it waits for work (4 + 4 bytes).
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let bytes_read = device
+                .handle_thread_read(
+                    &receiver.context(current_task),
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("handle_thread_read");
+            assert_eq!(bytes_read, 4 + 4);
+            let commands = current_task
+                .read_objects_to_array::<u32, 2>(UserRef::new(read_buffer_addr))
+                .expect("read commands");
+            assert_eq!(commands[0], uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE);
+            assert_eq!(commands[1], uapi::binder_driver_return_protocol_BR_SPAWN_LOOPER);
+            assert!(receiver.thread.lock().command_queue.is_empty());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn two_way_transaction_outcome_is_read_before_spawn_looper_requested_on_entry() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new_current(current_task, &device);
+            reply_to_two_way_transaction(current_task, &device, &sender, &receiver, 0);
+
+            // The sending thread is the main thread of a process that may have up to 2 auxiliary
+            // threads, and that should request one.
+            sender.thread.lock().registration = RegistrationState::Main;
+            sender.proc.lock().max_thread_count = 2;
+            assert!(sender.proc.lock().should_request_thread(&sender.thread));
+
+            // As the read waits for the outcome of the transaction rather than for work, it
+            // returns the BR_TRANSACTION_COMPLETE followed by the BR_REPLY, and does not request a
+            // thread first.
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let bytes_read = device
+                .handle_thread_read(
+                    &sender.context(current_task),
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("handle_thread_read");
+            assert!(bytes_read > 4 + 4);
+            let commands = current_task
+                .read_objects_to_array::<u32, 2>(UserRef::new(read_buffer_addr))
+                .expect("read commands");
+            assert_eq!(commands[0], uapi::binder_driver_return_protocol_BR_TRANSACTION_COMPLETE);
+            assert_eq!(commands[1], uapi::binder_driver_return_protocol_BR_REPLY);
+            assert!(sender.thread.lock().transactions.is_empty());
+        })
+        .await;
+    }
+
     #[fuchsia::test]
     async fn two_way_transaction_outcome_is_read_before_spawn_looper() {
         spawn_kernel_and_run(async |current_task| {
@@ -6309,13 +7007,12 @@ pub mod tests {
             );
 
             // 2. Client drops its strong reference before owner reads AcquireRef.
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
-                    handle,
-                )
-                .unwrap();
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+                handle,
+            )
+            .unwrap();
 
             // Enqueue a subsequent command (TransactionComplete) so handle_thread_read has work
             // to return after discarding the cancelled AcquireRef.
@@ -6387,38 +7084,34 @@ pub mod tests {
             let return_proto: starnix_uapi::binder_driver_return_protocol =
                 current_task.read_object(read_buffer_addr.into()).unwrap();
             assert_eq!(return_proto, starnix_uapi::binder_driver_return_protocol_BR_ACQUIRE);
-            owner
-                .proc
-                .handle_refcount_operation_done(
-                    starnix_uapi::binder_driver_command_protocol_BC_ACQUIRE_DONE,
-                    local_obj,
-                )
-                .unwrap();
+            handle_refcount_operation_done(
+                &owner.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_ACQUIRE_DONE,
+                local_obj,
+            )
+            .unwrap();
 
             // 3. Client acquires weak ref (like BpBinder does).
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
-                    handle,
-                )
-                .unwrap();
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
+                handle,
+            )
+            .unwrap();
 
             // 4. Client drops both strong ref and weak ref.
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
-                    handle,
-                )
-                .unwrap();
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
-                    handle,
-                )
-                .unwrap();
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+                handle,
+            )
+            .unwrap();
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
+                handle,
+            )
+            .unwrap();
 
             // 5. Owner reads next command:
             // IncRef was transient (weak_count dropped to 0 before IncRef was read).
@@ -6469,13 +7162,12 @@ pub mod tests {
             // 2. Client drops its strong reference before owner reads AcquireRef.
             // strong_count becomes WaitingAck(0).
             let obj = owner.proc.lock().objects.get(&local_obj.weak_ref_addr).cloned().unwrap();
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
-                    handle,
-                )
-                .unwrap();
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+                handle,
+            )
+            .unwrap();
 
             // Client acquires a weak reference, simulating the race where inc_deferred() has
             // occurred (weak_count is NoRef(1)) while apply_deferred_refcounts has not yet run.
@@ -6514,13 +7206,12 @@ pub mod tests {
             deferred_actions.release(());
 
             // 5. Owner acknowledges INCREFS.
-            owner
-                .proc
-                .handle_refcount_operation_done(
-                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS_DONE,
-                    local_obj,
-                )
-                .unwrap();
+            handle_refcount_operation_done(
+                &owner.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_INCREFS_DONE,
+                local_obj,
+            )
+            .unwrap();
 
             // 6. Drop the weak guard. Now weak_count drops to 0, and the object is cleaned up.
             let mut drop_actions = RefCountActions::default();
@@ -6570,42 +7261,38 @@ pub mod tests {
 
             // 2. Client acquires a weak ref (IncRef queued on owner.proc) and owner acknowledges
             // BC_INCREFS_DONE (so weak_count is HasRef(1), while strong_count is still WaitingAck).
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
-                    handle,
-                )
-                .unwrap();
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
+                handle,
+            )
+            .unwrap();
             assert_matches!(
                 owner.proc.lock().command_queue.pop_front(),
                 Some(QueuedCommand { command: Command::IncRef(o), .. }) if o == local_obj
             );
-            owner
-                .proc
-                .handle_refcount_operation_done(
-                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS_DONE,
-                    local_obj,
-                )
-                .unwrap();
+            handle_refcount_operation_done(
+                &owner.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_INCREFS_DONE,
+                local_obj,
+            )
+            .unwrap();
 
             // 3. Client drops both strong ref and weak ref before owner reads AcquireRef.
             // strong_count becomes WaitingAck(0), and weak_count becomes HasRef(0) (deferring
             // DecRef until strong_count finishes waiting for ack).
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
-                    handle,
-                )
-                .unwrap();
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
-                    handle,
-                )
-                .unwrap();
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+                handle,
+            )
+            .unwrap();
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
+                handle,
+            )
+            .unwrap();
 
             // 4. Owner calls handle_thread_read:
             // AcquireRef is lazily cancelled, which unblocks weak_count's deferred DecRef and
@@ -6654,30 +7341,27 @@ pub mod tests {
                 .insert_for_transaction(guard, &mut RefCountActions::default_released());
 
             // 2. Client acquires weak ref (IncRef queued on owner.proc).
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
-                    handle,
-                )
-                .unwrap();
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
+                handle,
+            )
+            .unwrap();
 
             // 3. Client drops both strong ref and weak ref before owner reads either command.
             // Both strong_count and weak_count are now WaitingAck(0).
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
-                    handle,
-                )
-                .unwrap();
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
-                    handle,
-                )
-                .unwrap();
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+                handle,
+            )
+            .unwrap();
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
+                handle,
+            )
+            .unwrap();
 
             // Enqueue TransactionComplete after IncRef on the process command queue.
             owner.proc.lock().command_queue.push_back(Command::TransactionComplete.into());
@@ -7515,40 +8199,36 @@ pub mod tests {
             .handles
             .insert_for_transaction(guard, &mut RefCountActions::default_released());
         if with_pending_decref {
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
-                    handle,
-                )
-                .expect("BC_INCREFS");
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
+                handle,
+            )
+            .expect("BC_INCREFS");
             assert_matches!(
                 owner.proc.lock().command_queue.pop_front(),
                 Some(QueuedCommand { command: Command::IncRef(o), .. }) if o == local
             );
-            owner
-                .proc
-                .handle_refcount_operation_done(
-                    starnix_uapi::binder_driver_command_protocol_BC_INCREFS_DONE,
-                    local,
-                )
-                .expect("BC_INCREFS_DONE");
+            handle_refcount_operation_done(
+                &owner.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_INCREFS_DONE,
+                local,
+            )
+            .expect("BC_INCREFS_DONE");
         }
-        client
-            .proc
-            .handle_refcount_operation(
-                starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+        handle_refcount_operation(
+            &client.proc,
+            starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+            handle,
+        )
+        .expect("BC_RELEASE");
+        if with_pending_decref {
+            handle_refcount_operation(
+                &client.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
                 handle,
             )
-            .expect("BC_RELEASE");
-        if with_pending_decref {
-            client
-                .proc
-                .handle_refcount_operation(
-                    starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
-                    handle,
-                )
-                .expect("BC_DECREFS");
+            .expect("BC_DECREFS");
         }
     }
 
@@ -8448,6 +9128,827 @@ pub mod tests {
                 .filter(|q| matches!(q.command, Command::ReleaseRef(_)))
                 .count();
             assert_eq!(release_cmds_many, 12, "all 12 deduplicated objects must be released once");
+
+            // Verify that flushing multiple non-terminal refcount commands when multiple threads
+            // are available dispatches the entire batch to a single available thread instead of
+            // scattering commands across multiple idle threads.
+            let aux_task = current_task.clone_task_for_test(
+                (starnix_uapi::CLONE_VM
+                    | starnix_uapi::CLONE_FS
+                    | starnix_uapi::CLONE_FILES
+                    | starnix_uapi::CLONE_SIGHAND
+                    | starnix_uapi::CLONE_THREAD) as u64,
+                None,
+            );
+            let aux_thread =
+                proc.proc.find_or_register_thread(&aux_task).expect("register aux_thread");
+            {
+                let mut proc_state = proc.proc.lock();
+                proc_state.max_thread_count = 4;
+                proc.thread.lock().registration = RegistrationState::Main;
+                aux_thread
+                    .lock()
+                    .handle_looper_registration(&mut proc_state, RegistrationState::Auxiliary)
+                    .expect("register auxiliary looper");
+            }
+            proc.proc.lock().command_queue.clear();
+            proc.thread.lock().command_queue.commands.clear();
+            aux_thread.lock().command_queue.commands.clear();
+
+            // Empty `push_back_batch` must not notify `command_event` or `POLLIN` waiters.
+            let empty_poll_waiter = Waiter::new();
+            let _empty_poll_canceler = proc.thread.lock().command_queue.wait_async_fd_events(
+                &empty_poll_waiter,
+                FdEvents::POLLIN,
+                EventHandler::None,
+            );
+            let empty_wait_guard = proc.thread.lock().begin_wait();
+            proc.thread.lock().command_queue.push_back_batch(std::iter::empty());
+            assert_eq!(
+                empty_wait_guard.block_until(None, zx::MonotonicInstant::ZERO),
+                Err(WakeReason::DeadlineExpired)
+            );
+            assert_eq!(
+                empty_poll_waiter.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Err(errno!(ETIMEDOUT))
+            );
+            while proc.proc.available_threads.pop().is_some() {}
+            let _ = proc.thread.lock().is_available();
+
+            let poll_waiter_main = Waiter::new();
+            let _poll_canceler_main = proc.thread.lock().command_queue.wait_async_fd_events(
+                &poll_waiter_main,
+                FdEvents::POLLIN,
+                EventHandler::None,
+            );
+            let poll_waiter_aux = Waiter::new();
+            let _poll_canceler_aux = aux_thread.lock().command_queue.wait_async_fd_events(
+                &poll_waiter_aux,
+                FdEvents::POLLIN,
+                EventHandler::None,
+            );
+            let poll_waiter_proc = Waiter::new();
+            let _poll_canceler_proc = proc.proc.process_waiters.wait_async_fd_events(
+                &poll_waiter_proc,
+                FdEvents::POLLIN,
+                EventHandler::None,
+            );
+
+            let wait_guard_aux = aux_thread.lock().begin_wait();
+            let wait_guard_main = proc.thread.lock().begin_wait();
+            assert!(proc.thread.lock().is_available());
+            assert!(aux_thread.lock().is_available());
+
+            let (obj_batch_1, guard_batch_1) = register_binder_object(
+                &proc.proc,
+                UserAddress::const_from(0x300),
+                UserAddress::const_from(0x301),
+            );
+            let (obj_batch_2, guard_batch_2) = register_binder_object(
+                &proc.proc,
+                UserAddress::const_from(0x310),
+                UserAddress::const_from(0x311),
+            );
+            obj_batch_1
+                .ack_acquire(&mut RefCountActions::default_released())
+                .expect("ack_acquire 1");
+            obj_batch_2
+                .ack_acquire(&mut RefCountActions::default_released())
+                .expect("ack_acquire 2");
+
+            let mut batch_actions = RefCountActions::default();
+            guard_batch_1.release(&mut batch_actions);
+            guard_batch_2.release(&mut batch_actions);
+            batch_actions.release(());
+
+            // `proc.thread` entered `available_threads` most recently, so it sits at the top of
+            // the stack and must receive the entire batch and be the sole worker thread woken via
+            // `EventWaitGuard` and `POLLIN`.
+            assert_eq!(proc.thread.lock().command_queue.len(), 2);
+            assert_eq!(aux_thread.lock().command_queue.len(), 0);
+            assert!(proc.proc.lock().command_queue.is_empty());
+            assert!(!proc.proc.available_threads.is_empty());
+
+            assert_eq!(wait_guard_main.block_until(None, zx::MonotonicInstant::ZERO), Ok(()));
+
+            // Reading on `proc.thread` must serialize both `BR_RELEASE` commands in a single pass
+            // without `should_request_thread_locked` emitting `BR_SPAWN_LOOPER` while `aux_thread`
+            // remains in `available_threads`.
+            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let bytes_read = device
+                .handle_thread_read(
+                    &proc.context(current_task),
+                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                )
+                .expect("handle_thread_read batched releases");
+            let entry_size = std::mem::size_of::<uapi::binder_driver_return_protocol>()
+                + std::mem::size_of::<uapi::binder_ptr_cookie>();
+            assert_eq!(bytes_read, 2 * entry_size);
+            assert!(!proc.proc.lock().thread_requested);
+            assert!(proc.thread.lock().command_queue.is_empty());
+            assert!(!proc.proc.available_threads.is_empty());
+
+            let mut released_ptrs = Vec::new();
+            for idx in 0..2usize {
+                let cmd_addr = (read_buffer_addr + idx * entry_size).unwrap();
+                let cmd: u32 =
+                    current_task.read_object(UserRef::new(cmd_addr)).expect("read BR_RELEASE code");
+                assert_eq!(cmd, uapi::binder_driver_return_protocol_BR_RELEASE);
+                let payload_addr = (cmd_addr
+                    + std::mem::size_of::<uapi::binder_driver_return_protocol>())
+                .unwrap();
+                let ptr_cookie: uapi::binder_ptr_cookie = current_task
+                    .read_object(UserRef::new(payload_addr))
+                    .expect("read binder_ptr_cookie");
+                released_ptrs.push((ptr_cookie.ptr, ptr_cookie.cookie));
+            }
+            released_ptrs.sort_unstable();
+            assert_eq!(released_ptrs, vec![(0x300, 0x301), (0x310, 0x311)]);
+
+            assert_eq!(
+                wait_guard_aux.block_until(None, zx::MonotonicInstant::ZERO),
+                Err(WakeReason::DeadlineExpired)
+            );
+            assert_eq!(
+                poll_waiter_main.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Ok(())
+            );
+            assert_eq!(
+                poll_waiter_main.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Err(errno!(ETIMEDOUT))
+            );
+            assert_eq!(
+                poll_waiter_aux.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Err(errno!(ETIMEDOUT))
+            );
+            assert_eq!(
+                poll_waiter_proc.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Err(errno!(ETIMEDOUT))
+            );
+
+            aux_thread.release(current_task.kernel());
+            proc.proc.unregister_thread(current_task.kernel(), &aux_task.tid);
+            aux_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn enqueue_non_terminal_commands_stale_available_threads_fallback() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let device = BinderDevice::default();
+            let proc = BinderProcessFixture::new(current_task, &device);
+            proc.thread.lock().registration = RegistrationState::Main;
+
+            // Populate `available_threads` with both a dead `WeakRef` and a live thread that is
+            // not currently blocked in `begin_wait()`. `unregister_thread` removes the thread's
+            // entry from `available_threads`, so push `dead_weak` after unregistering it.
+            let dead_task = create_task(kernel, "dead_binder_worker");
+            let dead_thread =
+                proc.proc.find_or_register_thread(&dead_task.task).expect("register dead_thread");
+            let dead_weak = dead_thread.weak_self.clone();
+            dead_thread.release(kernel);
+            proc.proc.unregister_thread(kernel, &dead_task.tid);
+            proc.proc.available_threads.push(dead_weak);
+
+            proc.proc.available_threads.push(proc.thread.weak_self.clone());
+            assert!(!proc.proc.available_threads.is_empty());
+            assert!(!proc.thread.lock().is_available());
+
+            let (obj_1, guard_1) = register_binder_object(
+                &proc.proc,
+                UserAddress::const_from(0x400),
+                UserAddress::const_from(0x401),
+            );
+            let (obj_2, guard_2) = register_binder_object(
+                &proc.proc,
+                UserAddress::const_from(0x410),
+                UserAddress::const_from(0x411),
+            );
+            obj_1.ack_acquire(&mut RefCountActions::default_released()).expect("ack_acquire 1");
+            obj_2.ack_acquire(&mut RefCountActions::default_released()).expect("ack_acquire 2");
+            proc.proc.lock().command_queue.clear();
+            proc.thread.lock().command_queue.commands.clear();
+
+            let process_poll_waiter = Waiter::new();
+            let _process_poll_canceler = proc.proc.process_waiters.wait_async_fd_events(
+                &process_poll_waiter,
+                FdEvents::POLLIN,
+                EventHandler::None,
+            );
+            let thread_poll_waiter = Waiter::new();
+            let _thread_poll_canceler = proc.thread.lock().command_queue.wait_async_fd_events(
+                &thread_poll_waiter,
+                FdEvents::POLLIN,
+                EventHandler::None,
+            );
+
+            // Releasing the batch pops the stale entries while holding the process lock and falls
+            // back directly to `process.command_queue`, waking `process_waiters`.
+            let mut actions = RefCountActions::default();
+            guard_1.release(&mut actions);
+            guard_2.release(&mut actions);
+            actions.release(());
+
+            assert!(proc.proc.available_threads.is_empty());
+            assert!(proc.thread.lock().command_queue.is_empty());
+            assert_eq!(
+                thread_poll_waiter.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Err(errno!(ETIMEDOUT))
+            );
+            let mut queued_release_addrs: Vec<_> = proc
+                .proc
+                .lock()
+                .command_queue
+                .iter()
+                .map(|queued| match queued.command {
+                    Command::ReleaseRef(local) => local.weak_ref_addr,
+                    ref other => panic!("unexpected command on process queue: {other:?}"),
+                })
+                .collect();
+            queued_release_addrs.sort();
+            assert_eq!(
+                queued_release_addrs,
+                vec![obj_1.local.weak_ref_addr, obj_2.local.weak_ref_addr]
+            );
+            assert_eq!(
+                process_poll_waiter.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Ok(())
+            );
+
+            dead_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn ref_count_actions_release_empty_commands_preserves_waiters_and_available_threads() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let proc = BinderProcessFixture::new(current_task, &device);
+            proc.thread.lock().registration = RegistrationState::Main;
+
+            // Prepare two objects for the idle-worker sub-case:
+            // - `obj_idle_ack`: `ack_acquire` while `guard_idle_ack` is still held.
+            // - `obj_idle_wait`: releasing `guard_idle_wait` while `weak_count` is `WaitingAck(1)`.
+            let (obj_idle_ack, guard_idle_ack) = register_binder_object(
+                &proc.proc,
+                UserAddress::const_from(0x450),
+                UserAddress::const_from(0x451),
+            );
+            let (obj_idle_wait, guard_idle_wait) = register_binder_object(
+                &proc.proc,
+                UserAddress::const_from(0x460),
+                UserAddress::const_from(0x461),
+            );
+            obj_idle_wait
+                .ack_acquire(&mut RefCountActions::default_released())
+                .expect("ack_acquire idle_wait");
+            let mut setup_weak_actions = RefCountActions::default();
+            let weak_guard_idle_wait = obj_idle_wait.inc_weak(&mut setup_weak_actions);
+            setup_weak_actions.release(());
+
+            proc.proc.lock().command_queue.clear();
+            proc.thread.lock().command_queue.commands.clear();
+
+            // Sub-case 1: An idle worker is sleeping in `available_threads`. Flushing a live owner
+            // group that emits zero commands must return early without popping/orphaning the idle
+            // worker or firing `POLLIN` wakeups.
+            let thread_poll_waiter = Waiter::new();
+            let _thread_poll_canceler = proc.thread.lock().command_queue.wait_async_fd_events(
+                &thread_poll_waiter,
+                FdEvents::POLLIN,
+                EventHandler::None,
+            );
+            let process_poll_waiter = Waiter::new();
+            let _process_poll_canceler = proc.proc.process_waiters.wait_async_fd_events(
+                &process_poll_waiter,
+                FdEvents::POLLIN,
+                EventHandler::None,
+            );
+            let wait_guard = proc.thread.lock().begin_wait();
+            assert!(!proc.proc.available_threads.is_empty());
+            assert!(proc.thread.lock().is_available());
+
+            let mut idle_ack_actions = RefCountActions::default();
+            obj_idle_ack.ack_acquire(&mut idle_ack_actions).expect("ack_acquire idle_ack");
+            idle_ack_actions.release(());
+
+            assert!(!proc.proc.available_threads.is_empty());
+            assert!(proc.thread.lock().is_available());
+
+            let mut idle_release_actions = RefCountActions::default();
+            guard_idle_wait.release(&mut idle_release_actions);
+            idle_release_actions.release(());
+
+            assert!(!proc.proc.available_threads.is_empty());
+            assert!(proc.thread.lock().is_available());
+            assert!(proc.thread.lock().command_queue.is_empty());
+            assert!(proc.proc.lock().command_queue.is_empty());
+            assert_eq!(
+                wait_guard.block_until(None, zx::MonotonicInstant::ZERO),
+                Err(WakeReason::DeadlineExpired)
+            );
+            assert_eq!(
+                thread_poll_waiter.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Err(errno!(ETIMEDOUT))
+            );
+            assert_eq!(
+                process_poll_waiter.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Err(errno!(ETIMEDOUT))
+            );
+
+            // Transition to an empty `available_threads` list.
+            proc.proc.available_threads.remove(&proc.thread.weak_self);
+            assert!(!proc.thread.lock().is_available());
+            assert!(proc.proc.available_threads.is_empty());
+
+            // Sub-case 2: `available_threads` is empty with a `POLLIN` waiter registered on
+            // `process_waiters`. Flushing a live owner group that emits zero commands must not
+            // fire a spurious `POLLIN` wakeup on `process_waiters`.
+            let (obj_empty_ack, guard_empty_ack) = register_binder_object(
+                &proc.proc,
+                UserAddress::const_from(0x470),
+                UserAddress::const_from(0x471),
+            );
+            let (obj_empty_wait, guard_empty_wait) = register_binder_object(
+                &proc.proc,
+                UserAddress::const_from(0x480),
+                UserAddress::const_from(0x481),
+            );
+            obj_empty_wait
+                .ack_acquire(&mut RefCountActions::default_released())
+                .expect("ack_acquire empty_wait");
+            let mut setup_weak_actions_2 = RefCountActions::default();
+            let weak_guard_empty_wait = obj_empty_wait.inc_weak(&mut setup_weak_actions_2);
+            setup_weak_actions_2.release(());
+            proc.proc.lock().command_queue.clear();
+            assert!(proc.proc.available_threads.is_empty());
+
+            let empty_avail_poll_waiter = Waiter::new();
+            let _empty_avail_poll_canceler = proc.proc.process_waiters.wait_async_fd_events(
+                &empty_avail_poll_waiter,
+                FdEvents::POLLIN,
+                EventHandler::None,
+            );
+
+            let mut empty_ack_actions = RefCountActions::default();
+            obj_empty_ack.ack_acquire(&mut empty_ack_actions).expect("ack_acquire empty_ack");
+            empty_ack_actions.release(());
+
+            assert!(proc.proc.lock().command_queue.is_empty());
+            assert_eq!(
+                empty_avail_poll_waiter.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Err(errno!(ETIMEDOUT))
+            );
+
+            let mut empty_release_actions = RefCountActions::default();
+            guard_empty_wait.release(&mut empty_release_actions);
+            empty_release_actions.release(());
+
+            assert!(proc.proc.lock().command_queue.is_empty());
+            assert_eq!(
+                empty_avail_poll_waiter.wait_until(current_task, zx::MonotonicInstant::ZERO),
+                Err(errno!(ETIMEDOUT))
+            );
+
+            // Cleanly release remaining guards so all objects are forgotten before teardown.
+            let mut cleanup_actions = RefCountActions::default();
+            guard_idle_ack.release(&mut cleanup_actions);
+            obj_idle_wait.ack_incref(&mut cleanup_actions).expect("ack_incref idle_wait");
+            weak_guard_idle_wait.release(&mut cleanup_actions);
+            guard_empty_ack.release(&mut cleanup_actions);
+            obj_empty_wait.ack_incref(&mut cleanup_actions).expect("ack_incref empty_wait");
+            weak_guard_empty_wait.release(&mut cleanup_actions);
+            cleanup_actions.release(());
+            assert!(proc.proc.lock().objects.is_empty());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn ref_count_actions_release_skips_interleaved_dead_owner() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let mut owners = [
+                BinderProcessFixture::new(current_task, &device),
+                BinderProcessFixture::new(current_task, &device),
+                BinderProcessFixture::new(current_task, &device),
+            ];
+            // Sort by `owner.as_ptr()` so `owner_mid` is guaranteed to sit strictly between
+            // `owner_low` and `owner_high` when `RefCountActions::release` sorts and chunks.
+            owners.sort_by_key(|fixture| fixture.proc.weak_self.as_ptr() as usize);
+            let [owner_low, owner_mid, owner_high] = owners;
+            assert!(
+                (owner_low.proc.weak_self.as_ptr() as usize)
+                    < (owner_mid.proc.weak_self.as_ptr() as usize)
+            );
+            assert!(
+                (owner_mid.proc.weak_self.as_ptr() as usize)
+                    < (owner_high.proc.weak_self.as_ptr() as usize)
+            );
+
+            let (low_obj_1, low_guard_1) = register_binder_object(
+                &owner_low.proc,
+                UserAddress::const_from(0x100),
+                UserAddress::const_from(0x101),
+            );
+            let (low_obj_2, low_guard_2) = register_binder_object(
+                &owner_low.proc,
+                UserAddress::const_from(0x110),
+                UserAddress::const_from(0x111),
+            );
+            let (mid_obj_1, mid_guard_1) = register_binder_object(
+                &owner_mid.proc,
+                UserAddress::const_from(0x200),
+                UserAddress::const_from(0x201),
+            );
+            let (mid_obj_2, mid_guard_2) = register_binder_object(
+                &owner_mid.proc,
+                UserAddress::const_from(0x210),
+                UserAddress::const_from(0x211),
+            );
+            let (high_obj_1, high_guard_1) = register_binder_object(
+                &owner_high.proc,
+                UserAddress::const_from(0x300),
+                UserAddress::const_from(0x301),
+            );
+            let (high_obj_2, high_guard_2) = register_binder_object(
+                &owner_high.proc,
+                UserAddress::const_from(0x310),
+                UserAddress::const_from(0x311),
+            );
+
+            for obj in [&low_obj_1, &low_obj_2, &mid_obj_1, &mid_obj_2, &high_obj_1, &high_obj_2] {
+                obj.ack_acquire(&mut RefCountActions::default_released()).expect("ack_acquire");
+            }
+            owner_low.proc.lock().command_queue.clear();
+            owner_high.proc.lock().command_queue.clear();
+
+            // Tear down the middle owner process before releasing the interleaved batch.
+            drop(owner_mid);
+            assert!(mid_obj_1.owner.upgrade().is_none());
+            assert!(mid_obj_2.owner.upgrade().is_none());
+
+            let mut actions = RefCountActions::default();
+            high_guard_1.release(&mut actions);
+            mid_guard_1.release(&mut actions);
+            low_guard_1.release(&mut actions);
+            mid_guard_2.release(&mut actions);
+            high_guard_2.release(&mut actions);
+            low_guard_2.release(&mut actions);
+            actions.release(());
+
+            assert!(owner_low.proc.lock().find_object(&low_obj_1.local).is_none());
+            assert!(owner_low.proc.lock().find_object(&low_obj_2.local).is_none());
+            let low_released: BTreeMap<_, _> = owner_low
+                .proc
+                .lock()
+                .command_queue
+                .iter()
+                .filter_map(|queued| match queued.command {
+                    Command::ReleaseRef(local) => {
+                        Some((local.weak_ref_addr, local.strong_ref_addr))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(low_released.len(), 2);
+            assert!(low_released.contains_key(&low_obj_1.local.weak_ref_addr));
+            assert!(low_released.contains_key(&low_obj_2.local.weak_ref_addr));
+
+            assert!(owner_high.proc.lock().find_object(&high_obj_1.local).is_none());
+            assert!(owner_high.proc.lock().find_object(&high_obj_2.local).is_none());
+            let high_released: BTreeMap<_, _> = owner_high
+                .proc
+                .lock()
+                .command_queue
+                .iter()
+                .filter_map(|queued| match queued.command {
+                    Command::ReleaseRef(local) => {
+                        Some((local.weak_ref_addr, local.strong_ref_addr))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(high_released.len(), 2);
+            assert!(high_released.contains_key(&high_obj_1.local.weak_ref_addr));
+            assert!(high_released.contains_key(&high_obj_2.local.weak_ref_addr));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn process_teardown_releases_active_transactions_and_handles_across_dead_owner() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let device = BinderDevice::default();
+            let mut owners = [
+                BinderProcessFixture::new(current_task, &device),
+                BinderProcessFixture::new(current_task, &device),
+                BinderProcessFixture::new(current_task, &device),
+            ];
+            owners.sort_by_key(|fixture| fixture.proc.weak_self.as_ptr() as usize);
+            let [owner_low, owner_mid, owner_high] = owners;
+            let dying_client = BinderProcessFixture::new(current_task, &device);
+
+            // Register objects held via `dying_client.active_transactions` across `owner_low`,
+            // `owner_mid`, `owner_high`, and `dying_client` itself.
+            let (low_tx_obj, low_tx_guard) = register_binder_object(
+                &owner_low.proc,
+                UserAddress::const_from(0x500),
+                UserAddress::const_from(0x501),
+            );
+            let (mid_tx_obj, mid_tx_guard) = register_binder_object(
+                &owner_mid.proc,
+                UserAddress::const_from(0x510),
+                UserAddress::const_from(0x511),
+            );
+            let (high_tx_obj, high_tx_guard) = register_binder_object(
+                &owner_high.proc,
+                UserAddress::const_from(0x520),
+                UserAddress::const_from(0x521),
+            );
+            let (self_tx_obj, self_tx_guard) = register_binder_object(
+                &dying_client.proc,
+                UserAddress::const_from(0x530),
+                UserAddress::const_from(0x531),
+            );
+
+            // Register objects held via `dying_client.handles` (`HandleTable`) across `owner_low`,
+            // `owner_mid`, and `owner_high`.
+            let (low_handle_obj, low_handle_guard) = register_binder_object(
+                &owner_low.proc,
+                UserAddress::const_from(0x600),
+                UserAddress::const_from(0x601),
+            );
+            let (mid_handle_obj, mid_handle_guard) = register_binder_object(
+                &owner_mid.proc,
+                UserAddress::const_from(0x610),
+                UserAddress::const_from(0x611),
+            );
+            let (high_handle_obj, high_handle_guard) = register_binder_object(
+                &owner_high.proc,
+                UserAddress::const_from(0x620),
+                UserAddress::const_from(0x621),
+            );
+
+            for obj in [
+                &low_tx_obj,
+                &mid_tx_obj,
+                &high_tx_obj,
+                &self_tx_obj,
+                &low_handle_obj,
+                &mid_handle_obj,
+                &high_handle_obj,
+            ] {
+                obj.ack_acquire(&mut RefCountActions::default_released()).expect("ack_acquire");
+            }
+
+            let (low_handle, mid_handle, high_handle) = {
+                let mut client_state = dying_client.proc.lock();
+                let mut dummy_actions = RefCountActions::default_released();
+                let low_handle = client_state
+                    .handles
+                    .insert_for_transaction(low_handle_guard, &mut dummy_actions);
+                let mid_handle = client_state
+                    .handles
+                    .insert_for_transaction(mid_handle_guard, &mut dummy_actions);
+                let high_handle = client_state
+                    .handles
+                    .insert_for_transaction(high_handle_guard, &mut dummy_actions);
+                (low_handle, mid_handle, high_handle)
+            };
+
+            let mut transient_tx =
+                TransientTransactionState::new(dying_client.task(), &dying_client.proc);
+            transient_tx.push_guard(high_tx_guard);
+            transient_tx.push_guard(mid_tx_guard);
+            transient_tx.push_guard(low_tx_guard);
+            transient_tx.push_guard(self_tx_guard);
+            transient_tx.push_handle(low_handle);
+            transient_tx.push_handle(mid_handle);
+            transient_tx.push_handle(high_handle);
+            dying_client.proc.lock().active_transactions.insert(
+                UserAddress::const_from(0x700),
+                ActiveTransaction {
+                    request_type: RequestType::RequestResponse,
+                    is_pending: true,
+                    state: transient_tx.into_state(),
+                }
+                .into(),
+            );
+
+            // Make two worker threads available on `owner_high` so we also verify that
+            // `active_transactions` and `HandleTable` share a single `drop_actions` batch on the
+            // group ordered after the dead `owner_mid` chunk.
+            let high_aux_task = owner_high.task().clone_task_for_test(
+                (starnix_uapi::CLONE_VM
+                    | starnix_uapi::CLONE_FS
+                    | starnix_uapi::CLONE_FILES
+                    | starnix_uapi::CLONE_SIGHAND
+                    | starnix_uapi::CLONE_THREAD) as u64,
+                None,
+            );
+            let high_aux_thread = owner_high
+                .proc
+                .find_or_register_thread(&high_aux_task)
+                .expect("register high_aux_thread");
+            {
+                let mut high_state = owner_high.proc.lock();
+                owner_high.thread.lock().registration = RegistrationState::Main;
+                high_aux_thread
+                    .lock()
+                    .handle_looper_registration(&mut high_state, RegistrationState::Auxiliary)
+                    .expect("register high_aux_thread looper");
+            }
+
+            owner_low.proc.lock().command_queue.clear();
+            owner_high.proc.lock().command_queue.clear();
+            owner_high.thread.lock().command_queue.commands.clear();
+            high_aux_thread.lock().command_queue.commands.clear();
+
+            let high_wait_aux = high_aux_thread.lock().begin_wait();
+            let high_wait_main = owner_high.thread.lock().begin_wait();
+
+            // Kill `owner_mid` first so its chunk is already dead when `dying_client` tears down.
+            drop(owner_mid);
+            assert!(mid_tx_obj.owner.upgrade().is_none());
+            assert!(mid_handle_obj.owner.upgrade().is_none());
+
+            // Tear down `dying_client`, releasing both `active_transactions` and `HandleTable`.
+            drop(dying_client);
+
+            assert!(owner_low.proc.lock().find_object(&low_tx_obj.local).is_none());
+            assert!(owner_low.proc.lock().find_object(&low_handle_obj.local).is_none());
+            assert_eq!(owner_low.proc.lock().command_queue.len(), 2);
+
+            assert!(owner_high.proc.lock().find_object(&high_tx_obj.local).is_none());
+            assert!(owner_high.proc.lock().find_object(&high_handle_obj.local).is_none());
+            assert_eq!(owner_high.proc.lock().command_queue.len(), 0);
+            assert_eq!(owner_high.thread.lock().command_queue.len(), 2);
+            assert_eq!(high_aux_thread.lock().command_queue.len(), 0);
+            assert_eq!(high_wait_main.block_until(None, zx::MonotonicInstant::ZERO), Ok(()));
+            assert_eq!(
+                high_wait_aux.block_until(None, zx::MonotonicInstant::ZERO),
+                Err(WakeReason::DeadlineExpired)
+            );
+
+            high_aux_thread.release(kernel);
+            owner_high.proc.unregister_thread(kernel, &high_aux_task.tid);
+            high_aux_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn ref_count_actions_batch_commands_per_owner_process() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let owner = BinderProcessFixture::new(current_task, &device);
+
+            const NUM_OBJECTS: u64 = 6;
+            let register_objects = |base: u64| {
+                (0..NUM_OBJECTS)
+                    .map(|i| {
+                        let addr = base + i * 0x10;
+                        let (object, guard) = register_binder_object(
+                            &owner.proc,
+                            UserAddress::const_from(addr),
+                            UserAddress::const_from(addr + 1),
+                        );
+                        object
+                            .ack_acquire(&mut RefCountActions::default_released())
+                            .expect("ack_acquire");
+                        (object, guard)
+                    })
+                    .unzip::<_, _, Vec<_>, Vec<_>>()
+            };
+
+            // Make the owner thread available.
+            owner.thread.lock().registration = RegistrationState::Main;
+            let reader_guard = owner.thread.lock().begin_wait();
+
+            // Releasing all the objects at once delivers all the ReleaseRef commands to the
+            // single available thread, instead of only the first one.
+            let (objects, guards) = register_objects(0x1000);
+            let mut actions = RefCountActions::default();
+            for guard in guards {
+                guard.release(&mut actions);
+            }
+            actions.release(());
+            let released: Vec<LocalBinderObject> = owner
+                .thread
+                .lock()
+                .command_queue
+                .commands
+                .iter()
+                .map(|q| match q.command {
+                    Command::ReleaseRef(local) => local,
+                    ref command => panic!("unexpected command {command:?}"),
+                })
+                .collect();
+            assert_eq!(released.len(), objects.len());
+            for object in &objects {
+                assert!(released.contains(&object.local));
+                assert!(owner.proc.lock().find_object(&object.local).is_none());
+            }
+            assert!(owner.proc.lock().command_queue.is_empty());
+            assert!(owner.proc.available_threads.is_empty());
+            assert_eq!(reader_guard.block_until(None, zx::MonotonicInstant::ZERO), Ok(()));
+            while owner.thread.lock().command_queue.pop_front().is_some() {}
+
+            // Without an available thread, all the commands go to the process queue.
+            let (objects, guards) = register_objects(0x2000);
+            let mut actions = RefCountActions::default();
+            for guard in guards {
+                guard.release(&mut actions);
+            }
+            actions.release(());
+            assert!(owner.thread.lock().command_queue.is_empty());
+            let released: Vec<LocalBinderObject> = owner
+                .proc
+                .lock()
+                .command_queue
+                .iter()
+                .map(|q| match q.command {
+                    Command::ReleaseRef(local) => local,
+                    ref command => panic!("unexpected command {command:?}"),
+                })
+                .collect();
+            assert_eq!(released.len(), objects.len());
+            for object in &objects {
+                assert!(released.contains(&object.local));
+            }
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn ref_count_operations_sharing_actions_net_out() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let owner = BinderProcessFixture::new(current_task, &device);
+            let client = BinderProcessFixture::new(current_task, &device);
+
+            let local_obj = LocalBinderObject {
+                weak_ref_addr: UserAddress::from(0x7000),
+                strong_ref_addr: UserAddress::from(0x8000),
+            };
+            let guard = owner
+                .proc
+                .lock()
+                .find_or_register_object(&owner.thread, local_obj, BinderObjectFlags::empty())
+                .expect("find_or_register_object");
+            let handle = client
+                .proc
+                .lock()
+                .handles
+                .insert_for_transaction(guard, &mut RefCountActions::default_released());
+            handle_refcount_operation_done(
+                &owner.proc,
+                starnix_uapi::binder_driver_command_protocol_BC_ACQUIRE_DONE,
+                local_obj,
+            )
+            .expect("BC_ACQUIRE_DONE");
+            while owner.thread.lock().command_queue.pop_front().is_some() {}
+
+            // Like several commands in a single write buffer: a weak increment immediately
+            // followed by a weak decrement nets out, and no command is sent to the owner.
+            let mut actions = RefCountActions::default();
+            for command in [
+                starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
+                starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
+                starnix_uapi::binder_driver_command_protocol_BC_INCREFS,
+                starnix_uapi::binder_driver_command_protocol_BC_DECREFS,
+            ] {
+                client
+                    .proc
+                    .handle_refcount_operation(command, handle, &mut actions)
+                    .expect("refcount operation");
+            }
+            actions.release(());
+            assert!(owner.thread.lock().command_queue.is_empty());
+            assert!(owner.proc.lock().command_queue.is_empty());
+            assert!(owner.proc.lock().find_object(&local_obj).is_some());
+
+            // Releasing the last strong reference sends ReleaseRef and forgets the object.
+            let mut actions = RefCountActions::default();
+            client
+                .proc
+                .handle_refcount_operation(
+                    starnix_uapi::binder_driver_command_protocol_BC_RELEASE,
+                    handle,
+                    &mut actions,
+                )
+                .expect("BC_RELEASE");
+            actions.release(());
+            assert_matches!(
+                owner.proc.lock().command_queue.front(),
+                Some(QueuedCommand { command: Command::ReleaseRef(o), .. }) if *o == local_obj
+            );
+            assert!(owner.proc.lock().find_object(&local_obj).is_none());
         })
         .await;
     }
@@ -8870,18 +10371,13 @@ pub mod tests {
         let num_poppers = (num_cpus + 2).max(MIN_POPPERS);
 
         let mut role_overrides = RoleOverrides::new();
-        role_overrides.add(".*", "Blocking Thread", None, "fuchsia.memory-monitor.main");
-        role_overrides.add(".*", "RenderThread", None, "fuchsia.scenic.main");
-        role_overrides.add(
-            ".*",
-            "signaler_wave",
-            None,
-            "fuchsia.devices.usb.drivers.xhci.interrupter",
-        );
-        role_overrides.add(".*", "signaler_spin", None, "fuchsia.memory-monitor.main");
-        role_overrides.add(".*", "watchdog", None, "fuchsia.devices.usb.drivers.xhci.interrupter");
-        role_overrides.add(".*", "demoted", None, "fuchsia.cobalt.main");
-        role_overrides.add(".*", ".*", None, "fuchsia.async.loop");
+        role_overrides.add("fuchsia.memory-monitor.main").thread("Blocking Thread");
+        role_overrides.add("fuchsia.scenic.main").thread("RenderThread");
+        role_overrides.add("fuchsia.devices.usb.drivers.xhci.interrupter").thread("signaler_wave");
+        role_overrides.add("fuchsia.memory-monitor.main").thread("signaler_spin");
+        role_overrides.add("fuchsia.devices.usb.drivers.xhci.interrupter").thread("watchdog");
+        role_overrides.add("fuchsia.cobalt.main").thread("demoted");
+        role_overrides.add("fuchsia.async.loop");
         let scheduler =
             SchedulerManager::new(role_overrides.build().expect("build role overrides"));
 

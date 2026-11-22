@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component_manifest",
@@ -18,6 +19,19 @@ load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":sampler-config-tests"],
+    visibility = ["//src/diagnostics:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":sampler-config_host_test"],
+    visibility = ["//src/diagnostics:__pkg__"],
+)
 
 rustc_library(
     name = "sampler-config",
@@ -68,7 +82,6 @@ rustc_test(
 wrap_host_rust_test(
     name = "sampler-config_host_test",
     binary_name = "sampler-config_test",
-    visibility = ["//src/diagnostics:__pkg__"],
 )
 
 fx_packaged_binary(
@@ -105,5 +118,4 @@ fx_package(
 fx_test(
     name = "sampler-config-tests",
     package = ":sampler-config-tests-package",
-    visibility = ["//src/diagnostics:__pkg__"],
 )

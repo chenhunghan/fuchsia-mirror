@@ -6,19 +6,11 @@
 // https://opensource.org/licenses/MIT
 
 #include <lib/arch/asm.h>
-#include <arch/arm64/asm.h>
+#include <asm.h>
 #include <lib/arch/arm64/system-asm.h>
 
-#ifndef __has_feature
-#define __has_feature(x) 0
-#endif
-
-#if __has_feature(shadow_call_stack)
 // void arm64_context_switch(vaddr_t* old_sp, vaddr_t new_sp, vaddr_t new_tpidr,
 //                           uintptr_t** old_scsp, uintptr_t* new_scsp);
-#else
-// void arm64_context_switch(vaddr_t* old_sp, vaddr_t new_sp, vaddr_t new_tpidr);
-#endif
 FUNCTION(arm64_context_switch)
     /* The exclusive monitor is logically part of a thread's context.  Clear it to ensure the new
        thread does not complete the store half of a load-exclusive/store-exclusive started by the
@@ -47,10 +39,8 @@ FUNCTION(arm64_context_switch)
     /* load the new tpidr */
     msr  tpidr_el1, x2
 
-#if __has_feature(shadow_call_stack)
     str shadow_call_sp, [x3]
     mov shadow_call_sp, x4
-#endif
 
     /* restore new frame */
     ldr  x19, [sp] // don't restore x20, it's the percpu pointer

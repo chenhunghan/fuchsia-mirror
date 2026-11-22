@@ -47,7 +47,6 @@ fuchsia_driver_component("expose_component") {
     ":driver",
     ":expose_bind",
   ]
-  info = "meta/expose_info.json"
 }
 
 fuchsia_driver_component("no_expose_component") {
@@ -58,5 +57,4 @@ fuchsia_driver_component("no_expose_component") {
     ":driver",
     ":no_expose_bind",
   ]
-  info = "meta/no_expose_info.json"
 }

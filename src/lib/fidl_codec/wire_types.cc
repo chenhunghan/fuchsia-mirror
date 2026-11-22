@@ -796,7 +796,7 @@ std::unique_ptr<Value> UnionType::Decode(MessageDecoder* decoder, uint64_t offse
   if (decoder->GetValueAt(offset, &ordinal)) {
     if ((ordinal == 0) && !nullable_) {
       decoder->AddError() << std::hex << (decoder->absolute_offset() + offset) << std::dec
-                          << ": Null envelope for a non nullable extensible union\n";
+                          << ": Null envelope for a non nullable union\n";
       return std::make_unique<InvalidValue>();
     }
   }

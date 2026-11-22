@@ -5,7 +5,9 @@
 use crate::bpf::attachments::BpfSock;
 use crate::power::EbpfSuspendGuard;
 use crate::task::CurrentTask;
-use ebpf_api::{BpfSockContext, CurrentTaskContext, Map, MapValueRef, MapsContext};
+use ebpf_api::{
+    BpfSockContext, CurrentTaskContext, Map, MapValueRef, MapsContext, RingBufferReservations,
+};
 
 use starnix_uapi::{gid_t, pid_t, uid_t};
 
@@ -19,15 +21,22 @@ enum SuspendLockState<'a> {
 pub struct EbpfRunContextImpl<'a> {
     current_task: &'a CurrentTask,
 
-    // Must precede `map_refs` to ensure it's dropped after `base`.
-    suspend_lock_state: SuspendLockState<'a>,
-
     map_refs: Vec<MapValueRef<'a>>,
+
+    ringbuf_reservations: RingBufferReservations<'a>,
+
+    // Must be declared last so it is dropped after `map_refs`.
+    suspend_lock_state: SuspendLockState<'a>,
 }
 
 impl<'a> EbpfRunContextImpl<'a> {
     pub fn new(current_task: &'a CurrentTask) -> Self {
-        Self { current_task, suspend_lock_state: SuspendLockState::NotLocked(), map_refs: vec![] }
+        Self {
+            current_task,
+            map_refs: vec![],
+            ringbuf_reservations: RingBufferReservations::default(),
+            suspend_lock_state: SuspendLockState::NotLocked(),
+        }
     }
 }
 
@@ -45,6 +54,10 @@ impl<'a> MapsContext<'a> for EbpfRunContextImpl<'a> {
 
     fn add_value_ref(&mut self, map_ref: MapValueRef<'a>) {
         self.map_refs.push(map_ref)
+    }
+
+    fn ringbuf_reservations(&mut self) -> &mut RingBufferReservations<'a> {
+        &mut self.ringbuf_reservations
     }
 }
 

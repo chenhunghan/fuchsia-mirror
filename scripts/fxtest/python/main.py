@@ -28,10 +28,10 @@ import statusinfo
 import termout
 
 import args
+import bazel_tests
 import config
 import console
 import dataparse
-import debugger
 import environment
 import event
 import execution
@@ -74,6 +74,11 @@ def main() -> None:
         assert_no_selection(real_flags, "-pr replay")
         replay_mode = True
     elif real_flags.previous is not None:
+        if real_flags.profiler:
+            print(
+                "Failed to validate flags: --profiler is incompatible with --previous."
+            )
+            sys.exit(1)
         sys.exit(do_process_previous(real_flags))
 
     # No special modes, proceed with async execution.
@@ -524,6 +529,21 @@ class AsyncMain:
         self._package_server_event: asyncio.Event | None = None
         self._summary_val = summary.RunSummary()
         self._agent_log_dir: str | None = None
+        # Holds the merged tests.json when Bazel tests that aren't in the
+        # build's tests.json are selected. It's an attribute rather than a
+        # local because `test_list_tool` reads it after the build.
+        self._on_demand_tests_dir: tempfile.TemporaryDirectory[
+            str
+        ] | None = None
+        # Package manifests of on-demand Bazel device tests, which aren't in
+        # bazel_test_packages.list and must be published separately.
+        self._on_demand_package_manifests: list[str] = []
+        # Package manifests of GN entries replaced by `@//` Bazel twins,
+        # excluded from publishing so ffx doesn't see duplicate package paths.
+        self._replaced_package_manifests: set[str] = set()
+        # Map from selection argument to the exact Bazel test labels it
+        # resolved to, so selection matches only those labels without dldist.
+        self._exact_bazel_label_matches: dict[str, set[str]] = {}
         if flags.agent_output:
             import uuid
 
@@ -551,6 +571,11 @@ class AsyncMain:
             self._package_server_task = None
         if self._emu_instance_dir is not None:
             await self._teardown_emulator()
+        # Some unit tests construct AsyncMain via __new__ without __init__.
+        if getattr(self, "_on_demand_tests_dir", None) is not None:
+            assert self._on_demand_tests_dir is not None
+            self._on_demand_tests_dir.cleanup()
+            self._on_demand_tests_dir = None
 
     @property
     def _summary(self) -> summary.RunSummary:
@@ -771,6 +796,10 @@ class AsyncMain:
         # Load the list of tests to execute.
         try:
             tests = await self._load_test_list()
+            if flags.selection:
+                tests = await self._add_on_demand_bazel_tests(
+                    tests, flags.selection
+                )
         except Exception as e:
             recorder.emit_end(f"Failed to load tests: {e}")
             return 1
@@ -792,6 +821,7 @@ class AsyncMain:
                 flags.fuzzy,
                 recorder=recorder,
                 exact_match=flags.exact,
+                exact_label_matches=self._exact_bazel_label_matches,
             )
             # Mutate the selections based on the command line flags.
             selections.apply_flags(flags)
@@ -853,6 +883,27 @@ class AsyncMain:
         if flags.build and not await self._do_build(selections):
             await end_execution("Failed to build.")
             return 1
+
+        if not flags.build and self._on_demand_package_manifests:
+            on_demand_set = set(self._on_demand_package_manifests)
+            selected_manifests = {
+                m
+                for t in selections.selected
+                for m in (t.build.test.package_manifests or [])
+                if m in on_demand_set
+            }
+            missing_manifests = [
+                p
+                for p in selected_manifests
+                if not os.path.exists(os.path.join(exec_env.out_dir, p))
+            ]
+            if missing_manifests:
+                await end_execution(
+                    "On-demand Bazel test package manifests are missing from the "
+                    "build directory. Rerun without --no-build to build and "
+                    "export them."
+                )
+                return 1
 
         if flags.updateifinbase and self._has_tests_in_base(selections):
             recorder.emit_info_message(f"\nBuilding update package.")
@@ -982,7 +1033,11 @@ class AsyncMain:
 
         # Finally, run all selected tests.
         if not await self._run_all_tests(selections):
-            if not flags.debugger_will_attach() and not flags.host:
+            if (
+                not flags.debugger_will_attach()
+                and not flags.host
+                and not flags.profiler
+            ):
                 # Note: it is important that we put --break-on-failure before the rest of the command
                 # line arguments so that it is ensured that this fx test argument comes before any extra
                 # arguments are passed through to the test executable (e.g. after "--").
@@ -1097,6 +1152,142 @@ class AsyncMain:
                 f"tests.json and test-list.json are inconsistent: {e}"
             )
             raise e
+
+    async def _add_on_demand_bazel_tests(
+        self,
+        tests: list[test_list_file.Test],
+        selection_args: list[str],
+    ) -> list[test_list_file.Test]:
+        """Add selected Bazel tests that aren't in tests.json.
+
+        tests.json only has Bazel tests reachable from a GN
+        `bazel_test_suite()`, but any `fx_test()` or `host_test()` can be
+        built and run without one. This lets developers run a Bazel test by
+        label without first adding it to a suite in their `fx set` graph.
+
+        Returns:
+            The given tests plus any Bazel tests found for selection
+            arguments that look like Bazel labels missing from tests.json.
+        """
+        if self._flags.only_e2e:
+            return tests
+
+        recorder = self._recorder
+        exec_env = self._exec_env
+        assert exec_env is not None
+
+        # Include package and component labels so that selecting a GN
+        # package in a bazel2gn directory doesn't also look it up in Bazel.
+        known_labels = [
+            label
+            for t in tests
+            for label in (
+                t.build.test.label,
+                t.build.test.package_label,
+                t.build.test.component_label,
+            )
+            if label
+        ]
+        missing = bazel_tests.bazel_labels_missing_from_tests(
+            selection_args, known_labels, exec_env.fuchsia_dir
+        )
+        if not missing:
+            return tests
+        labels = list(dict.fromkeys(missing.values()))
+
+        recorder.emit_info_message(
+            f"\nSearching Bazel for tests that aren't in tests.json: {' '.join(labels)}"
+        )
+        client_args = [
+            os.path.join(exec_env.fuchsia_dir, "build", "api", "client"),
+            "--build-dir",
+            exec_env.out_dir,
+            "bazel_tests_json",
+        ]
+        if self._flags.host:
+            client_args.append("--test-os=host")
+        elif self._flags.device:
+            client_args.append("--test-os=fuchsia")
+        client_args.extend(["--", *labels])
+
+        # Show a short status line instead of the full client command line,
+        # which is mostly absolute paths and gets truncated anyway. The labels
+        # were already printed above.
+        group_id = recorder.emit_event_group("Searching Bazel for tests")
+        try:
+            result = await execution.run_command(
+                *client_args,
+                recorder=recorder,
+                parent=group_id,
+                quiet_mode=True,
+            )
+        finally:
+            recorder.emit_end(id=group_id)
+        if result is None or result.return_code != 0:
+            # The caller reports this as "Failed to load tests: <msg>", so
+            # don't also emit it as a warning here.
+            raise RuntimeError(
+                result.stderr.strip()
+                if result and result.stderr
+                else "Unknown error running bazel_tests_json"
+            )
+
+        new_entries: list[dict[str, typing.Any]] = json.loads(result.stdout)
+        matched_labels = {e["test"]["label"] for e in new_entries}
+
+        # Record exact label matches only for arguments we actually looked up
+        # in Bazel, so skipped args (like a bare `//pkg` or GN twin) still go
+        # through normal tests.json matching.
+        for raw_arg, normalized in missing.items():
+            canonical = f"@@{normalized}"
+            if canonical in matched_labels:
+                self._exact_bazel_label_matches[raw_arg] = {canonical}
+
+        if not new_entries:
+            return tests
+
+        for e in new_entries:
+            self._on_demand_package_manifests.extend(
+                e["test"].get("package_manifests", [])
+            )
+
+        # An explicit `@//` label can select the Bazel twin of a bazel2gn GN
+        # test that has the same name, and tests.json can't contain both, so
+        # the Bazel test replaces the GN one.
+        new_keys = {
+            (e["test"]["name"], e["test"].get("path")) for e in new_entries
+        }
+        entries: list[dict[str, typing.Any]] = []
+        with open(exec_env.test_json_file) as f:
+            for e in json.load(f):
+                if (e["test"]["name"], e["test"].get("path")) in new_keys:
+                    self._replaced_package_manifests.update(
+                        os.path.normpath(m)
+                        for m in e["test"].get("package_manifests", [])
+                    )
+                else:
+                    entries.append(e)
+        tests = [
+            t
+            for t in tests
+            if (t.build.test.name, t.build.test.path) not in new_keys
+        ]
+
+        self._on_demand_tests_dir = tempfile.TemporaryDirectory()
+        merged_path = os.path.join(self._on_demand_tests_dir.name, "tests.json")
+        with open(merged_path, "w") as f:
+            json.dump(entries + new_entries, f)
+        exec_env.test_json_file = merged_path
+
+        count = len(new_entries)
+        recorder.emit_info_message(
+            f"Found {count} test{'' if count == 1 else 's'} in Bazel"
+        )
+        new_tests = [
+            test_list_file.Test(tests_json_file.TestEntry.from_dict(e))  # type: ignore[attr-defined]
+            for e in new_entries
+        ]
+        return tests + new_tests
 
     async def _generate_test_list(
         self,
@@ -1308,6 +1499,29 @@ class AsyncMain:
                     + "Please pass --e2e to run e2e tests."
                 )
 
+        if flags.profiler:
+            # The profiler supports a single session, attached to a single
+            # component URL, so exactly one test execution can be profiled.
+            if len(selections.selected) != 1:
+                tests_str = "\n  ".join(
+                    test.name() for test in selections.selected
+                )
+                raise self._SelectionValidationError(
+                    f"--profiler requires selecting exactly one test, but {len(selections.selected)} matched:\n  {tests_str}\n"
+                    + "Narrow the selection, for example with --exact or --package."
+                )
+            selected_test = selections.selected[0]
+            if not selected_test.needs_device():
+                raise self._SelectionValidationError(
+                    f"--profiler cannot profile the host test {selected_test.name()}.\n"
+                    + "Select a device test, or an end-to-end test with --e2e."
+                )
+            if selected_test.is_e2e_test() and not flags.e2e:
+                raise self._SelectionValidationError(
+                    f"{selected_test.name()} is an e2e test, but the --e2e flag was not provided.\n"
+                    + "Please pass --e2e to profile e2e tests."
+                )
+
     def _validate_package_merkle_hashes(
         self,
         selections: selection_types.TestSelections,
@@ -1432,10 +1646,14 @@ class AsyncMain:
                 package_repo = package_repository.PackageRepository.from_env(
                     exec_env
                 )
+                # Bazel test packages aren't in GN's package lists; they're
+                # published from bazel_test_packages.list and on-demand
+                # manifests instead.
                 device_test_names = [
                     package_name
                     for test in tests.selected
-                    if (package_name := test.package_name()) is not None
+                    if not test.build.test.label.startswith("@@")
+                    and (package_name := test.package_name()) is not None
                 ]
 
                 missing_packages = sorted(
@@ -1477,7 +1695,15 @@ class AsyncMain:
                     ]
                 )
 
-        build_id = recorder.emit_build_start(targets=build_command_line)
+        # Bazel targets are built by separate `fx build` invocations below, but
+        # they still count as targets being refreshed.
+        build_id = recorder.emit_build_start(
+            targets=[
+                arg for arg in build_command_line if not arg.startswith("-")
+            ]
+            + build_bazel_host_targets
+            + build_bazel_device_targets
+        )
         recorder.emit_instruction_message("Use --no-build to skip building")
 
         recorder.emit_info_message("\nExecuting build.")
@@ -1533,9 +1759,29 @@ class AsyncMain:
             if not bazel_targets:
                 continue
 
+            # `fx build --fuchsia_platform` only exports the packages listed in
+            # bazel_test_packages.list, so ask it to also export the packages
+            # of selected tests that aren't in tests.json, which publishing and
+            # test_list_tool read.
+            export_args: list[str] = []
+            if build_flag == "--fuchsia_platform":
+                on_demand_set = set(self._on_demand_package_manifests)
+                export_args = [
+                    f"--export-test-package={m}"
+                    for m in sorted(
+                        {
+                            m
+                            for t in tests.selected
+                            if t.build.test.label in bazel_targets
+                            for m in (t.build.test.package_manifests or [])
+                            if m in on_demand_set
+                        }
+                    )
+                ]
+
             build_output = await run_build(
                 exec_env,
-                [build_flag, "--quiet"] + bazel_targets,
+                [build_flag, "--quiet"] + export_args + bazel_targets,
                 recorder=self._recorder,
                 parent=build_id,
                 abort_signal=self._end_execution_request_event,
@@ -1687,6 +1933,19 @@ class AsyncMain:
             manifest_list = list(
                 set(manifest_list).union(existing_bazel_manifests)
             )
+
+        if replaced := getattr(self, "_replaced_package_manifests", None):
+            manifest_list = [
+                m for m in manifest_list if os.path.normpath(m) not in replaced
+            ]
+
+        manifest_list = list(
+            set(manifest_list).union(
+                m
+                for m in self._on_demand_package_manifests
+                if os.path.isfile(os.path.join(exec_env.out_dir, m))
+            )
+        )
 
         package_manifest = {
             "content": {"manifests": sorted(manifest_list)},
@@ -1928,9 +2187,7 @@ class AsyncMain:
             return False
 
         device_environment: environment.DeviceEnvironment | None = None
-        if tests.has_device_test() and (
-            tests.has_e2e_test() or flags.use_test_pilot
-        ):
+        if tests.has_device_test():
             try:
                 device_environment = (
                     await execution.get_device_environment_from_exec_env(
@@ -2036,6 +2293,7 @@ class AsyncMain:
         debugger_ready: asyncio.Condition = asyncio.Condition()
 
         if flags.debugger_should_spawn():
+            import debugger
 
             async def on_debugger_ready() -> None:
                 # TODO(b/329317913): Emit a debugger event here.

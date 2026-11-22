@@ -73,7 +73,7 @@ ddorwin@google.com, fmil@google.com, jsankey@google.com, tjdetwiler@google.com
 
 ## Design
 
-### Access levels
+### Access levels {:#access-levels}
 
 Scopes of access to a clipboard in graphical shell environment can be
 categorized into three levels:
@@ -227,7 +227,7 @@ type ClipboardItemData = flexible resource union {
 };
 ```
 
-## Implementation
+## Implementation {:#implementation}
 
 This will happen in several stages:
 
@@ -294,7 +294,7 @@ clipboard, tricking the user into acting as a
 [confused deputy](https://en.wikipedia.org/wiki/Confused_deputy_problem) when
 pasting it.
 
-### Unauthorized access
+### Unauthorized access {:#unauthorized-access}
 
 As alluded to [above](#access-levels), a component may want to read from or
 write to the clipboard without authorization, or without user knowledge.
@@ -315,7 +315,7 @@ cases, we will have to reconsider whether unauthorized read attempts should
 silently return empty clipboard items instead of `ClipboardError.UNAUTHORIZED`,
 to reduce the information revealed about clipboard access.
 
-### `ViewRef` and focus validation
+### ViewRef and focus validation {:#viewref-and-focus-validation}
 
 The clipboard service relies on Scenic's
 [focus chain](/docs/development/graphics/scenic/concepts/focus_chain.md) system
@@ -331,9 +331,9 @@ some flaws:
     requires that at a minimum, the original owner of a `ViewRef` trust the
     recipient of the cloned `ViewRef`.)
 *   Focus changes are subject to
-    [race conditions](/docs/development/graphics/scenic/concepts/focus_chain.md#race_between_view_focus_event_and_focus_chain).
+    [race conditions](/docs/development/graphics/scenic/concepts/focus_chain.md#race-between-view-focus-event-and-focus-chain).
 
-### Security review outcome
+### Security review outcome {:#security-review-outcome}
 
 *   This MVP API is limited, which limits avenues for attack.
 *   We rely on the underlying FIDL deserialization to correctly validate UTF-8
@@ -437,7 +437,7 @@ able to:
 *   avoid restrictions that are too onerous for practical integration with
     existing runners
 
-## Future work
+## Future work {:#future-work}
 
 *   Provide a protocol for observing clipboard API events (reads and writes)
     that a system shell could use to show visual notifications when the
@@ -446,9 +446,9 @@ able to:
 *   Expand the set of supported data formats and payload sizes, particularly
     through the use of VMOs owned by the sending client.
 
-## Prior art and references
+## Prior art and references {:#prior-art-and-references}
 
-### Fuchsia
+### Fuchsia {:#fuchsia}
 
 Fuchsia previously had a
 [minimal clipboard API](https://fuchsia.googlesource.com/fuchsia/+/02930bf563b779128de0a25695432be8a6d0e5c2/sdk/fidl/fuchsia.modular/clipboard/clipboard.fidl),

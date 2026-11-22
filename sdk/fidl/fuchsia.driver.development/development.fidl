@@ -4,7 +4,6 @@
 
 library fuchsia.driver.development;
 
-using fuchsia.component.sandbox;
 using fuchsia.driver.framework;
 using fuchsia.power.broker;
 using fuchsia.url;
@@ -28,6 +27,20 @@ type NodePowerTokenOverride = resource struct {
     target_node string:NODE_MONIKER_MAX;
     /// Custom power element token event handle to associate with the target node.
     token zx.Handle:EVENT;
+};
+
+/// Identifies a target driver node by its component moniker and optional disambiguator.
+///
+/// Field values can be retrieved from `Manager.GetNodeInfo` or viewed by driver
+/// developers with `ffx driver node list -v` and `ffx driver node show`.
+@available(added=HEAD)
+type NodeTarget = table {
+    /// Required. Component moniker of the target node.
+    1: moniker string:NODE_MONIKER_MAX;
+
+    /// Optional. 16-character deterministic structural disambiguator of the
+    /// target node, used to disambiguate colliding monikers.
+    2: disambiguator string:16;
 };
 
 /// Interface for the driver development manager.
@@ -156,8 +169,11 @@ open protocol Manager {
     strict RestartWithDictionary(resource struct {
         /// Moniker of the node to restart with the dictionary.
         moniker string:NODE_MONIKER_MAX;
-        /// Dictionary to give to the drivers on and under the nodes.
-        dictionary fuchsia.component.sandbox.DictionaryRef;
+        /// Dictionary to give to the drivers on and under the nodes. It must reference a
+        /// dictionary created with `fuchsia.component.runtime/Capabilities.DictionaryCreate`.
+        /// Each driver that is started receives a shallow copy of the dictionary, taken when the
+        /// driver starts.
+        dictionary zx.Handle:<EVENTPAIR, zx.RIGHTS_BASIC>;
     }) -> (resource struct {
         /// The caller should keep this handle alive while the modified drivers are needed.
         /// Releasing this will reset the operation.
@@ -182,8 +198,9 @@ open protocol Manager {
     strict RestartWithDictionaryAndPowerDependencies(resource struct {
         /// Moniker of the node to restart with the dictionary and power dependencies.
         moniker string:NODE_MONIKER_MAX;
-        /// Dictionary to give to the drivers on and under the nodes.
-        dictionary fuchsia.component.sandbox.DictionaryRef;
+        /// Dictionary to give to the drivers on and under the nodes. See
+        /// `RestartWithDictionary` for the requirements on this handle.
+        dictionary zx.Handle:<EVENTPAIR, zx.RIGHTS_BASIC>;
         /// Custom power dependencies to give to the restarted node.
         power_dependencies
                 vector<fuchsia.power.broker.LevelDependency>:fuchsia.power.broker.MAX_DEPENDENCIES_IN_ADD_ELEMENT;
@@ -219,4 +236,39 @@ open protocol Manager {
         moniker string:NODE_MONIKER_MAX;
         request fuchsia.driver.framework.HealthCheckRequest;
     }) -> (fuchsia.driver.framework.HealthCheckResponse) error fuchsia.driver.framework.HealthCheckError;
+
+    /// Allows the driver node matching |target| and its descendants to
+    /// power down by removing the power dependencies that the AllDrivers element holds
+    /// on each bound leaf node in the subtree rooted at the node (or on the node itself
+    /// if it is a leaf).
+    ///
+    /// The driver remains suspended as long as |token| is held alive. Closing or dropping
+    /// the client end of |token| automatically resumes the driver subtree by restoring
+    /// its power dependencies. If the target node is restarted while suspended, its suspend
+    /// session is cancelled.
+    ///
+    /// Errors:
+    /// * `ZX_ERR_INTERNAL`: If an internal error occurred.
+    /// * `ZX_ERR_INVALID_ARGS`: If |target.moniker| is missing or empty, or if |target| matches
+    ///   multiple nodes and requires `disambiguator` to disambiguate.
+    /// * `ZX_ERR_NOT_FOUND`: If no node matches |target|, or a power
+    ///   dependency was not found in Power Broker.
+    /// * `ZX_ERR_BAD_STATE`: If the target node or a node in its subtree is
+    ///   not bound to a driver (for example, if the target or a descendant leaf
+    ///   driver is stopped, unbinding, or mid-restart).
+    /// * `ZX_ERR_NOT_SUPPORTED`: If driver suspend is not enabled on the
+    ///   system, or the target node is a hermetic power test node.
+    /// * `ZX_ERR_ACCESS_DENIED`: If modifying power dependencies is not
+    ///   authorized.
+    /// * `ZX_ERR_BAD_HANDLE`: If an invalid suspend session token handle was
+    ///   provided.
+    /// * `ZX_ERR_ALREADY_EXISTS`: If a suspend session is already running for
+    ///   the target node, an ancestor, or all leaf drivers in its subtree.
+    /// * `ZX_ERR_UNAVAILABLE`: If the system startup transition has not yet
+    ///   completed.
+    @available(added=HEAD)
+    flexible StartSuspendSession(resource struct {
+        target NodeTarget;
+        token zx.Handle:EVENTPAIR;
+    }) -> () error zx.Status;
 };

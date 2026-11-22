@@ -40,7 +40,7 @@ class TestDriverImpl final : public TestDriver, public LifecycleObserver {
   void Skip() final;
 
   // Return true if the test has been skipped.
-  bool IsSkipped() const override { return status_ == TestStatus::kSkipped; }
+  bool IsSkipped() const override { return skipped_; }
 
   // Return true if the is allowed to continue execution.
   bool Continue() const final;
@@ -64,12 +64,19 @@ class TestDriverImpl final : public TestDriver, public LifecycleObserver {
   // Reports after test execution completed with no failures.
   void OnTestSuccess(const TestCase& test_case, const TestInfo& test) final;
 
+  // Reports after all tests in a test case have run, after TearDownTestSuite.
+  void OnTestCaseEnd(const TestCase& test_case) final;
+
   // Resets the states for running new tests.
   void Reset();
 
   // Returns whether the current test has any failures so far. May be
   // called concurrently from multiple threads.
   bool CurrentTestHasAnyFailures() const { return current_test_has_any_failures_; }
+
+  // Returns whether the current test has any fatal failures so far. May be
+  // called concurrently from multiple threads.
+  bool CurrentTestHasFatalFailures() const { return current_test_has_fatal_failures_; }
 
   // Returns whether any test driven by this instance had any test failure.
   // This is not cleared on |TestDriverImpl::Reset|.
@@ -81,6 +88,7 @@ class TestDriverImpl final : public TestDriver, public LifecycleObserver {
 
  private:
   std::atomic<TestStatus> status_ = TestStatus::kFailed;
+  std::atomic<bool> skipped_ = false;
 
   std::atomic<bool> current_test_has_any_failures_ = false;
   std::atomic<bool> current_test_has_fatal_failures_ = false;
@@ -269,9 +277,8 @@ class Runner {
   // Returns true if the current test is skipped.
   bool IsSkipped() const { return test_driver_.IsSkipped(); }
 
-  // Returns true if the current test should be aborted. This happens as a result of a fatal
-  // failure.
-  bool CurrentTestHasFatalFailures() const { return !test_driver_.Continue(); }
+  // Returns true if the current test has had a fatal failure.  A skip is not a fatal failure.
+  bool CurrentTestHasFatalFailures() const { return test_driver_.CurrentTestHasFatalFailures(); }
 
   // Returns whether the current test has experienced any type of failure.
   bool CurrentTestHasFailures() const { return test_driver_.CurrentTestHasAnyFailures(); }
@@ -296,14 +303,16 @@ class Runner {
   void EnableAsserts() { test_driver_.EnableAsserts(); }
   void DisableAsserts() { test_driver_.DisableAsserts(); }
 
-  void PushTrace(zxtest::Message* trace) { scoped_traces_.push_back(trace); }
-  void PopTrace() { scoped_traces_.pop_back(); }
+  // The scoped traces are thread-local, not per-Runner.
+  static void PushTrace(SourceLocation location, std::string_view message);
+  static void PopTrace();
 
   std::span<zxtest::Message*> GetScopedTraces() { return scoped_traces_; }
 
  private:
   friend class RunnerTestPeer;
 
+  static thread_local std::vector<std::unique_ptr<zxtest::Message>> owned_scoped_traces_;
   static thread_local std::vector<zxtest::Message*> scoped_traces_;
 
   TestRef RegisterTest(std::string_view test_case_name, std::string_view test_name,

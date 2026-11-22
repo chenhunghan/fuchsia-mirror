@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library_headers(
+    name = "helper_headers",
+    hdrs = ["helpers.h"],
+    include_dir = ".",
+)
+
+fx_cc_library(
+    name = "helpers",
+    testonly = True,
+    srcs = ["helpers.cc"] + select({
+        "@platforms//cpu:arm64": ["arm64.S"],
+        "@platforms//cpu:riscv64": ["riscv64.S"],
+        "@platforms//cpu:x86_64": ["x64.S"],
+        "//conditions:default": [],
+    }),
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    visibility = [
+        "//src/zircon/tests/restricted-mode-shared/basic:__pkg__",
+        "//src/zircon/tests/restricted-mode-shared/stress:__pkg__",
+    ],
+    deps = [":helper_headers"],
+    alwayslink = True,
+)

@@ -58,9 +58,8 @@ TEST(JobControl, BackgroundProcessGroupDoNotUpdateOnDeath) {
   if (!test_helper::IsStarnix() && access("/dev/ptmx", F_OK) == -1) {
     GTEST_SKIP() << "Pseudoterminal not available, skipping...";
   }
+  test_helper::ScopedSigAction scoped_sigttou(SIGTTOU, SIG_IGN);
   test_helper::ForkHelper helper;
-
-  IgnoreSignal(SIGTTOU);
 
   helper.RunInForkedProcess([] {
     test_helper::ForkHelper helper;

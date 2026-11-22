@@ -4,59 +4,23 @@
 
 assert(is_fuchsia, "These targets are only compiled in the fuchsia toolchain.")
 
-# [START imports]
-import("//build/components.gni")
+import("//build/bazel/bazel_fuchsia_test_package.gni")
 
-# [END imports]
-
-# [START example_snippet]
-# [START executable]
-executable("bin") {
-  output_name = "echo_integration_test_cpp"
-  sources = [ "echo_integration_test.cc" ]
-  deps = [
-    "//examples/components/routing/fidl:echo_hlcpp",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
-    "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gtest",
-  ]
-  testonly = true
+# LINT.IfChange(echo_integration_test_cpp)
+bazel_fuchsia_test_package("echo_integration_test_cpp") {
+  bazel_config = "fuchsia_platform"
+  test_component_names = [ "echo_integration_test" ]
 }
 
-# [END executable]
+# LINT.ThenChange(BUILD.bazel:echo_integration_test_cpp)
 
-# [START component]
-fuchsia_component("echo_integration_test_component") {
-  testonly = true
-  component_name = "echo_integration_test"
-  manifest = "meta/echo_integration_test.cml"
-  deps = [ ":bin" ]
+# LINT.IfChange(subpackaged_echo_integration_test_cpp)
+bazel_fuchsia_test_package("subpackaged_echo_integration_test_cpp") {
+  bazel_config = "fuchsia_platform"
+  test_component_names = [ "default" ]
 }
 
-# [END component]
-
-# [START test_package]
-fuchsia_test_package("echo_integration_test_cpp") {
-  test_components = [ ":echo_integration_test_component" ]
-  deps = [ "//examples/components/routing/cpp/echo_server:echo_server_cmp" ]
-}
-
-# [END test_package]
-# [END example_snippet]
-
-fuchsia_test_component("subpackaged_echo_integration_test_cpp_component") {
-  manifest = "meta/subpackaged_echo_integration_test.cml"
-  component_name = "default"
-  deps = [ ":bin" ]
-}
-
-fuchsia_test_package("subpackaged_echo_integration_test_cpp") {
-  test_components = [ ":subpackaged_echo_integration_test_cpp_component" ]
-  subpackages = [ "//examples/components/routing/cpp/echo_server" ]
-}
+# LINT.ThenChange(BUILD.bazel:subpackaged_echo_integration_test_cpp)
 
 group("hermetic_tests") {
   testonly = true

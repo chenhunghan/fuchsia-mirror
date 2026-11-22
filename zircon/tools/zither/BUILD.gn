@@ -628,7 +628,6 @@ zither_golden_test("zx.test") {
       backend = "kernel"
       files = [
         "category.inc",
-        "kernel.inc",
         "kernel_wrappers.rs",
         "syscall_numbers.rs",
         "syscall_sigs.rs",

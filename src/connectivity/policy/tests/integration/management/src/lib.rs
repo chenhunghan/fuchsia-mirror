@@ -70,7 +70,7 @@ use packet_formats::testutil::parse_ip_packet;
 use packet_formats::udp::{UdpPacket, UdpPacketBuilder, UdpParseArgs};
 use packet_formats_dhcp::v6 as dhcpv6;
 use policy_testing_common::{
-    NetcfgOwnedDeviceArgs, add_device_to_devfs, verify_interface_added, with_netcfg_owned_device,
+    NetcfgOwnedDeviceArgs, publish_device_service, verify_interface_added, with_netcfg_owned_device,
 };
 use test_case::test_case;
 
@@ -205,8 +205,8 @@ async fn test_filtering_udp(
         name: String,
         port_class: fhardware_network::PortClass,
     ) -> (netemul::TestEndpoint<'a>, SocketAddr) {
-        // Install a new device via devfs so netcfg can pick it up and install filtering rules.
-        let ep = add_device_to_devfs(
+        // Install a new device into the realm so netcfg can pick it up and install filtering rules.
+        let ep = publish_device_service(
             network,
             realm,
             name,
@@ -600,48 +600,14 @@ async fn test_oir_interface_name_conflict_uninstall_existing(name: &str) {
         [fhardware_network::FrameType::Ethernet],
         [fhardware_network::FrameType::Ethernet],
         mac(),
+        None,
     )
     .await;
 
-    let (device_proxy, server_end) =
-        fidl::endpoints::create_endpoints::<fnetemul_network::DeviceProxy_Marker>();
-    let netdevice = netdevice.into_proxy();
-    let serve_device_fut = fasync::Task::spawn(async move {
-        let stream = server_end.into_stream();
-        stream
-            .for_each_concurrent(None, move |r| {
-                let netdevice = Clone::clone(&netdevice);
-                async move {
-                    match r.expect("device proxyrequest error") {
-                        fnetemul_network::DeviceProxy_Request::ServeDevice { req, .. } => {
-                            netdevice.clone(req).expect("failed to clone network device");
-                        }
-                        fnetemul_network::DeviceProxy_Request::ServeController { req, .. } => {
-                            let stream = req.into_stream();
-                            stream
-                                .for_each(|req| async move {
-                                    match req.expect("controller request error") {
-                                        fidl_fuchsia_device::ControllerRequest::GetTopologicalPath {
-                                            responder,
-                                        } => {
-                                            responder.send(Ok("unique_topopath_for_ep1"))
-                                                .expect("send topopath response")
-                                        }
-                                        _ => panic!("unknown controller request"),
-                                }
-                                })
-                                .await
-                        }
-                    }
-                }
-            })
-            .await
-    });
-
-    let endpoint_mount_path = netemul::devfs_device_path("ep1");
-    realm.add_raw_device(endpoint_mount_path.as_path(), device_proxy).await.unwrap_or_else(|e| {
-        panic!("add virtual device1 {}: {:?}", endpoint_mount_path.display(), e)
-    });
+    realm
+        .add_raw_device("ep1", netdevice)
+        .await
+        .unwrap_or_else(|e| panic!("add virtual device1 ep1: {e:?}"));
 
     let (orig_id, orig_name) = assert_matches!(
         interfaces_stream.select_next_some().await,
@@ -659,6 +625,7 @@ async fn test_oir_interface_name_conflict_uninstall_existing(name: &str) {
         [fhardware_network::FrameType::Ethernet],
         [fhardware_network::FrameType::Ethernet],
         mac(),
+        None,
     )
     .await;
 
@@ -681,17 +648,16 @@ async fn test_oir_interface_name_conflict_uninstall_existing(name: &str) {
     );
 
     // Add another device from the network manager with the same MAC address,
-    // but a different topological path. It shouldn't conflict with the existing
+    // but a different bus topology. It shouldn't conflict with the existing
     // interface and should get added alongside it (with a different name).
     let if2 = sandbox
         .create_endpoint_with("ep2", netemul::new_endpoint_config(netemul::DEFAULT_MTU, mac()))
         .await
         .expect("create ethx8");
-    let endpoint_mount_path = netemul::devfs_device_path("ep2");
-    let endpoint_mount_path = endpoint_mount_path.as_path();
-    realm.add_virtual_device(&if2, endpoint_mount_path).await.unwrap_or_else(|e| {
-        panic!("add virtual device2 {}: {:?}", endpoint_mount_path.display(), e)
-    });
+    realm
+        .add_virtual_device(&if2, "ep2")
+        .await
+        .unwrap_or_else(|e| panic!("add virtual device2 ep2: {e:?}"));
 
     let (_new_id, new_name) = assert_matches!(
         interfaces_stream.select_next_some().await,
@@ -706,7 +672,6 @@ async fn test_oir_interface_name_conflict_uninstall_existing(name: &str) {
     // NetCfg is still in the process of configuring them after adding them to
     // the Netstack, which causes spurious errors.
     realm.shutdown().await.expect("failed to shutdown realm");
-    serve_device_fut.await;
 }
 
 /// Tests that when a conflicting interface already exists with the same name,
@@ -792,11 +757,10 @@ async fn test_oir_interface_name_conflict_reject(
             .create_endpoint_with("ep1", netemul::new_endpoint_config(netemul::DEFAULT_MTU, MAC1))
             .await
             .expect("create x");
-        let endpoint_mount_path = netemul::devfs_device_path("ep1");
-        let endpoint_mount_path = endpoint_mount_path.as_path();
-        realm.add_virtual_device(&if1, endpoint_mount_path).await.unwrap_or_else(|e| {
-            panic!("add virtual device1 {}: {:?}", endpoint_mount_path.display(), e)
-        });
+        realm
+            .add_virtual_device(&if1, "ep1")
+            .await
+            .unwrap_or_else(|e| panic!("add virtual device1 ep1: {e:?}"));
         either::Either::Left(if1)
     } else {
         // Create an interface that the network manager does not know about that will conflict
@@ -828,11 +792,10 @@ async fn test_oir_interface_name_conflict_reject(
         .create_endpoint_with("ep2", netemul::new_endpoint_config(netemul::DEFAULT_MTU, MAC2))
         .await
         .expect("create x");
-    let endpoint_mount_path = netemul::devfs_device_path("ep2");
-    let endpoint_mount_path = endpoint_mount_path.as_path();
-    realm.add_virtual_device(&if2, endpoint_mount_path).await.unwrap_or_else(|e| {
-        panic!("add virtual device2 {}: {:?}", endpoint_mount_path.display(), e)
-    });
+    realm
+        .add_virtual_device(&if2, "ep2")
+        .await
+        .unwrap_or_else(|e| panic!("add virtual device2 ep2: {e:?}"));
 
     // No interfaces should be added or removed as a result of this new device.
     // The existing interface that is not managed by Netcfg will not be removed
@@ -925,11 +888,11 @@ async fn test_wlan_ap_dhcp_server(name: &str) {
             )
             .await
             .expect("create wlan ap");
-        let path = netemul::devfs_device_path(&format!("dhcp-server-ep-{}", offset));
+        let instance_name = format!("dhcp-server-ep-{}", offset);
         realm
-            .add_virtual_device(&wlan_ap, path.as_path())
+            .add_virtual_device(&wlan_ap, &instance_name)
             .await
-            .unwrap_or_else(|e| panic!("add WLAN AP virtual device {}: {:?}", path.display(), e));
+            .unwrap_or_else(|e| panic!("add WLAN AP virtual device {instance_name}: {e:?}"));
         wlan_ap.set_link_up(true).await.expect("set wlan ap link up");
 
         // Make sure the WLAN AP interface is added to the Netstack and is brought up with
@@ -1056,11 +1019,11 @@ async fn test_wlan_ap_dhcp_server(name: &str) {
             .create_endpoint(format!("host-dhcp-client-{}", offset))
             .await
             .expect("create host");
-        let path = netemul::devfs_device_path(&format!("dhcp-client-ep-{}", offset));
+        let instance_name = format!("dhcp-client-ep-{}", offset);
         realm
-            .add_virtual_device(&host, path.as_path())
+            .add_virtual_device(&host, &instance_name)
             .await
-            .unwrap_or_else(|e| panic!("add host virtual device {}: {:?}", path.display(), e));
+            .unwrap_or_else(|e| panic!("add host virtual device {instance_name}: {e:?}"));
         host.set_link_up(true).await.expect("set host link up");
         let host_id = fidl_fuchsia_net_interfaces_ext::wait_interface(
             event_stream.by_ref(),

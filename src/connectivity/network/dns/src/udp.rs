@@ -234,7 +234,7 @@ mod test {
         let server_name = test_name.clone();
         let server_fut = async move {
             let mut buf = [0u8; MAX_DNS_UDP_MESSAGE_LEN];
-            for _ in 0..SEND_RECV_TIMES {
+            loop {
                 let (read, src_addr) = server.recv_from(&mut buf).await.expect("receive DNS query");
                 let query = Message::from_vec(&buf[..read]).expect("deserialize DNS query");
                 assert_eq!(query.queries, [Query::query(server_name.clone(), RecordType::NULL)]);
@@ -254,7 +254,10 @@ mod test {
         let client_fut = async move {
             let mut query = Message::query();
             let _: &mut Message = query.add_query(Query::query(test_name, RecordType::NULL));
-            let mut stream = UdpClientStream::builder(server_addr, TestRuntime).build();
+            // Use a generous timeout to avoid flakes.
+            let mut stream = UdpClientStream::builder(server_addr, TestRuntime)
+                .with_timeout(Some(Duration::from_secs(60)))
+                .build();
 
             for _ in 0..SEND_RECV_TIMES {
                 let response = stream
@@ -268,7 +271,10 @@ mod test {
             }
         };
 
-        let ((), ()) = futures::future::join(server_fut, client_fut).await;
+        futures::select! {
+            () = server_fut.fuse() => unreachable!("server_fut never returns"),
+            () = client_fut.fuse() => {}
+        }
     }
 
     #[test]

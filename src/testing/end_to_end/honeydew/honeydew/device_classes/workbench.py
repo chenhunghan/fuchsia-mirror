@@ -32,7 +32,7 @@ class Workbench(fuchsia_device.FuchsiaDevice):
         return system_power_state_controller_using_usb_cli.SystemPowerStateControllerUsingUsbCli(
             device_name=self.device_name,
             ffx=self.ffx,
-            fuchsia_controller=self.fuchsia_controller,
+            usb=self.usb,
             device_logger=self,
             inspect=self,
             reboot_affordance=self,

@@ -4,7 +4,7 @@
 
 #include "src/developer/forensics/utils/utc_time_provider.h"
 
-#include <fuchsia/time/cpp/fidl.h>
+#include <fidl/fuchsia.time/cpp/fidl.h>
 #include <lib/zx/clock.h>
 #include <lib/zx/time.h>
 
@@ -13,6 +13,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "src/developer/forensics/feedback_data/constants.h"
 #include "src/developer/forensics/testing/unit_test_fixture.h"
 #include "src/developer/forensics/utils/utc_clock_ready_watcher.h"
 #include "src/lib/files/file.h"
@@ -23,6 +24,11 @@ namespace forensics {
 namespace {
 
 constexpr timekeeper::time_utc kTime((zx::hour(7) + zx::min(14) + zx::sec(52)).get());
+
+const UtcTimeProvider::UtcBootDifferencePaths kUtcBootDifferencePaths = {
+    .current_boot = feedback_data::kCurrentUtcBootDifferencePath,
+    .previous_boot = feedback_data::kPreviousUtcBootDifferencePath,
+};
 
 class UtcTimeProviderTest : public UnitTestFixture {
  public:
@@ -41,7 +47,7 @@ class UtcTimeProviderTest : public UnitTestFixture {
   void SignalLoggingQualityClock() {
     if (const zx_status_t status =
             clock_handle_.signal(/*clear_mask=*/0,
-                                 /*set_mask=*/fuchsia::time::SIGNAL_UTC_CLOCK_LOGGING_QUALITY);
+                                 /*set_mask=*/fuchsia_time::kSignalUtcClockLoggingQuality);
         status != ZX_OK) {
       FX_PLOGS(FATAL, status) << "Failed to achieve logging quality clock";
     }
@@ -70,13 +76,10 @@ TEST_F(UtcTimeProviderTest, Check_CurrentUtcBootDifference) {
 }
 
 TEST_F(UtcTimeProviderTest, Check_ReadsPreviousBootUtcBootDifference) {
-  ASSERT_TRUE(files::WriteFile("/cache/current_utc_monotonic_difference.txt", "1234"));
+  ASSERT_TRUE(files::WriteFile(feedback_data::kPreviousUtcBootDifferencePath, "1234"));
 
-  // |is_first_instance| is true because the previous UTC-boot difference should be read.
-  utc_provider_ = std::make_unique<UtcTimeProvider>(
-      utc_clock_ready_watcher_.get(), &clock_,
-      PreviousBootFile::FromCache(/*is_first_instance=*/true,
-                                  "current_utc_monotonic_difference.txt"));
+  utc_provider_ = std::make_unique<UtcTimeProvider>(utc_clock_ready_watcher_.get(), &clock_,
+                                                    kUtcBootDifferencePaths);
 
   const std::optional<zx::duration> previous_utc_boot_difference =
       utc_provider_->PreviousBootUtcBootDifference();
@@ -84,31 +87,30 @@ TEST_F(UtcTimeProviderTest, Check_ReadsPreviousBootUtcBootDifference) {
   ASSERT_TRUE(previous_utc_boot_difference.has_value());
   EXPECT_EQ(previous_utc_boot_difference.value().get(), 1234);
 
-  ASSERT_TRUE(files::DeletePath("/cache/curren_utc_monotonic_difference.txt", /*recursive=*/true));
-  ASSERT_TRUE(files::DeletePath("/tmp/curren_utc_monotonic_difference.txt", /*recursive=*/true));
+  ASSERT_TRUE(files::DeletePath(feedback_data::kCurrentUtcBootDifferencePath, /*recursive=*/false));
+  ASSERT_TRUE(
+      files::DeletePath(feedback_data::kPreviousUtcBootDifferencePath, /*recursive=*/false));
 }
 
 TEST_F(UtcTimeProviderTest, Check_WritesPreviousBootUtcBootDifference) {
   SignalLoggingQualityClock();
   RunLoopUntilIdle();
 
-  // |is_first_instance| is true because the previous UTC-boot difference should be read.
-  utc_provider_ = std::make_unique<UtcTimeProvider>(
-      utc_clock_ready_watcher_.get(), &clock_,
-      PreviousBootFile::FromCache(/*is_first_instance=*/true,
-                                  "current_utc_monotonic_difference.txt"));
+  utc_provider_ = std::make_unique<UtcTimeProvider>(utc_clock_ready_watcher_.get(), &clock_,
+                                                    kUtcBootDifferencePaths);
   RunLoopUntilIdle();
 
   const std::optional<zx::duration> utc_boot_difference = utc_provider_->CurrentUtcBootDifference();
   ASSERT_TRUE(utc_boot_difference.has_value());
 
   std::string content;
-  ASSERT_TRUE(files::ReadFileToString("/cache/current_utc_monotonic_difference.txt", &content));
+  ASSERT_TRUE(files::ReadFileToString(feedback_data::kCurrentUtcBootDifferencePath, &content));
 
   EXPECT_EQ(content, std::to_string(utc_boot_difference.value().get()));
 
-  ASSERT_TRUE(files::DeletePath("/cache/curren_utc_monotonic_difference.txt", /*recursive=*/true));
-  ASSERT_TRUE(files::DeletePath("/tmp/curren_utc_monotonic_difference.txt", /*recursive=*/true));
+  ASSERT_TRUE(files::DeletePath(feedback_data::kCurrentUtcBootDifferencePath, /*recursive=*/false));
+  ASSERT_TRUE(
+      files::DeletePath(feedback_data::kPreviousUtcBootDifferencePath, /*recursive=*/false));
 }
 
 TEST_F(UtcTimeProviderTest, Check_NotReadyOnClockStarted) {
@@ -122,7 +124,7 @@ TEST_F(UtcTimeProviderTest, Check_NotReadyOnClockStarted) {
 
 TEST_F(UtcTimeProviderTest, Check_NotReadyOnClockSynchronized) {
   ASSERT_EQ(clock_handle_.signal(
-                /*clear_mask=*/0, /*set_mask=*/fuchsia::time::SIGNAL_UTC_CLOCK_SYNCHRONIZED),
+                /*clear_mask=*/0, /*set_mask=*/fuchsia_time::kSignalUtcClockSynchronized),
             ZX_OK);
   RunLoopUntilIdle();
 

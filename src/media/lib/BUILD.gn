@@ -15,5 +15,8 @@ group("lib") {
 
 group("tests") {
   testonly = true
-  deps = [ "//src/media/lib/codec_impl:tests" ]
+  deps = [
+    "//src/media/lib/codec_impl:tests",
+    "//src/media/lib/extend_bits:tests",
+  ]
 }

@@ -15,24 +15,141 @@ use super::{
     PowerRebootFlags, power_cpu_off, power_cpu_on, power_get_cpu_state, power_opp_get,
     power_opp_get_domain_count, power_opp_set, power_reboot, power_shutdown,
 };
-#[cfg(not(target_arch = "x86_64"))]
-use crate::console::CMD_AVAIL_NORMAL;
-use crate::console::{CMD_AVAIL_ALWAYS, CmdArgs, static_command};
+use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
+use crate::kernel::percpu::PerCpu;
+use crate::kernel::scheduler::Scheduler;
+use crate::kernel::types::{
+    BOOT_CPU_ID, INVALID_CPU, SMP_MAX_CPUS, cpu_mask_t, cpu_num_t, remove_cpu_from_mask,
+};
 use core::ffi::{CStr, c_int};
 use debug::dprintf;
+use fbl::Array;
+use kprint::kprintln;
 use zx_status::Status;
+use zx_types::{ZX_CPU_PERF_LIMIT_TYPE_RATE, zx_cpu_perf_limit_t};
 
-unsafe extern "C" {
-    fn cpp_rppm_dump();
-    fn cpp_rppm_update_active_power_level(cpu: u32, power_level: u8) -> Result<(), Status>;
-    fn cpp_rppm_request_power_level_for_testing(cpu: u32, power_level: u8) -> bool;
-    fn cpp_rppm_get_active_power_level(cpu: u32, out_power_level: *mut u8) -> Result<(), Status>;
-    fn cpp_rppm_update_processing_limits(
-        cpu_mask: u64,
-        min_rate: u64,
-        max_rate: u64,
-    ) -> Result<(), Status>;
-    fn cpp_rppm_get_processor_count() -> usize;
+zr::static_assert!(SMP_MAX_CPUS <= cpu_mask_t::BITS as usize);
+
+/// Dumps all registered power domains and per-CPU power state to the kernel console.
+///
+/// # Safety
+///
+/// The caller must ensure that per-CPU state is initialized.
+unsafe fn rppm_dump() {
+    // SAFETY: `BOOT_CPU_ID` (`0`) is less than `PerCpu::processor_count()` (which is always at
+    // least `1`), and the caller guarantees that per-CPU state is initialized.
+    let power_domain_set =
+        unsafe { PerCpu::get(BOOT_CPU_ID) }.scheduler.get_power_domain_set_for_testing();
+    power_domain_set.dump();
+
+    kprintln!("");
+
+    PerCpu::for_each(|cpu, percpu| {
+        let snapshot = percpu.scheduler.power_state_snapshot();
+
+        kprintln!("CPU {:u}:", cpu);
+        kprintln!("  Power domain {}:", snapshot.domain_id.map_or(-1, i64::from));
+        kprintln!(
+            "  Current active power level {}.",
+            snapshot.active_power_level.map_or(-1, i32::from),
+        );
+        kprintln!(
+            "  Current idle state index {}.",
+            snapshot.idle_state_index.map_or(-1, i32::from),
+        );
+        kprintln!("  Active power coefficient {:u} nw", snapshot.active_power_coefficient_nw);
+        kprintln!("  Idle power {:u} nw", snapshot.idle_power_nw);
+    });
+}
+
+/// Updates the active power level reported to `cpu`'s scheduler.
+///
+/// # Safety
+///
+/// The caller must ensure that per-CPU state is initialized and that no [`Scheduler`]
+/// `queue_lock_` is held on the current CPU.
+unsafe fn rppm_update_active_power_level(cpu: cpu_num_t, power_level: u8) -> Result<(), Status> {
+    if (cpu as usize) >= PerCpu::processor_count() {
+        return Err(Status::INVALID_ARGS);
+    }
+    // SAFETY: `cpu < PerCpu::processor_count()` is checked above, and the caller guarantees that
+    // per-CPU state is initialized and no `Scheduler` `queue_lock_` is held on the current CPU.
+    Status::ok(unsafe { PerCpu::get(cpu).scheduler.update_active_power_level(power_level) })
+}
+
+/// Posts a test power level transition request through `cpu`'s scheduler.
+///
+/// # Safety
+///
+/// The caller must ensure that per-CPU state is initialized and that no [`Scheduler`]
+/// `queue_lock_` is held on the current CPU.
+unsafe fn rppm_request_power_level_for_testing(cpu: cpu_num_t, power_level: u8) -> bool {
+    if (cpu as usize) >= PerCpu::processor_count() {
+        return false;
+    }
+    // SAFETY: `cpu < PerCpu::processor_count()` is checked above, and the caller guarantees that
+    // per-CPU state is initialized and no `Scheduler` `queue_lock_` is held on the current CPU.
+    unsafe { PerCpu::get(cpu).scheduler.request_power_level_for_testing(power_level) }
+}
+
+/// Returns the current active power level of `cpu`'s scheduler, if set.
+///
+/// # Safety
+///
+/// The caller must ensure that per-CPU state is initialized.
+unsafe fn rppm_get_active_power_level(cpu: cpu_num_t) -> Option<u8> {
+    if (cpu as usize) >= PerCpu::processor_count() {
+        return None;
+    }
+    // SAFETY: `cpu < PerCpu::processor_count()` is checked above, and the caller guarantees that
+    // per-CPU state is initialized.
+    unsafe { PerCpu::get(cpu) }.scheduler.get_active_power_level()
+}
+
+/// Updates the processing rate limits for all CPUs selected in `cpu_mask_val`.
+///
+/// # Safety
+///
+/// The caller must ensure that per-CPU state is initialized and that no [`Scheduler`]
+/// `queue_lock_` is held on the current CPU.
+unsafe fn rppm_update_processing_limits(
+    cpu_mask_val: u64,
+    min_rate: u64,
+    max_rate: u64,
+) -> Result<(), Status> {
+    let processor_count = PerCpu::processor_count();
+    let max_cpu_mask = if processor_count >= 64 { u64::MAX } else { (1u64 << processor_count) - 1 };
+    if cpu_mask_val > max_cpu_mask {
+        return Err(Status::INVALID_ARGS);
+    }
+    let mut cpu_mask = cpu_mask_val as cpu_mask_t;
+    let cpu_count = cpu_mask.count_ones() as usize;
+
+    let mut limits =
+        Array::<zx_cpu_perf_limit_t>::try_new(cpu_count).map_err(|_| Status::NO_MEMORY)?;
+
+    for i in 0..cpu_count {
+        let cpu = remove_cpu_from_mask(&mut cpu_mask);
+        debug_assert!(cpu != INVALID_CPU);
+        kprintln!("Setting CPU{:u} rate limits: min={:u} max={:u}", cpu, min_rate, max_rate);
+        limits[i] = zx_cpu_perf_limit_t {
+            logical_cpu_number: cpu,
+            limit_type: ZX_CPU_PERF_LIMIT_TYPE_RATE,
+            min: min_rate,
+            max: max_rate,
+        };
+    }
+    debug_assert!(cpu_mask == 0);
+
+    // SAFETY: `PerCpu::processor_count() <= SMP_MAX_CPUS <= cpu_mask_t::BITS`, so
+    // `cpu_mask_val <= max_cpu_mask` guarantees `cpu_count <= processor_count` and every
+    // `logical_cpu_number` extracted from `cpu_mask` is `< processor_count`, and the caller
+    // guarantees that per-CPU state is initialized and no `Scheduler` `queue_lock_` is held on
+    // the current CPU.
+    unsafe {
+        Scheduler::update_processing_limits(&limits);
+    }
+    Ok(())
 }
 
 /// Helper function to safely read a null-terminated C string argument from `CmdArgs`.
@@ -51,8 +168,8 @@ unsafe fn arg_cstr(arg: &CmdArgs) -> Option<&CStr> {
 
 fn rppm_usage(cmd_name: &str) -> c_int {
     dprintf!(ALWAYS, "{cmd_name} dump\n");
-    dprintf!(ALWAYS, "{cmd_name} set-level <cpu id> <power level>\n");
-    dprintf!(ALWAYS, "{cmd_name} req-level <cpu id> <power level>\n");
+    dprintf!(ALWAYS, "{cmd_name} set-level <cpu id> <0-based active level index>\n");
+    dprintf!(ALWAYS, "{cmd_name} req-level <cpu id> <0-based active level index>\n");
     dprintf!(ALWAYS, "{cmd_name} get-level <cpu id>\n");
     dprintf!(ALWAYS, "{cmd_name} set-limit <cpu mask> <min rate> <max rate>\n");
     -1
@@ -62,14 +179,18 @@ fn rppm_usage(cmd_name: &str) -> c_int {
 ///
 /// # Safety
 ///
-/// If `argc > 0`, `argv` must point to a valid array of `CmdArgs` structures of length `argc`.
+/// The caller must ensure:
+/// - If `argc > 0`, `argv` points to a valid array of `CmdArgs` structures of length `argc`, and
+///   every non-null `arg_str` pointer in `argv[0..argc]` points to a valid null-terminated C
+///   string.
+/// - Per-CPU state is initialized, and no [`Scheduler`] `queue_lock_` is held on the current CPU.
 pub unsafe extern "C" fn rppm_console_cmd(argc: c_int, argv: *const CmdArgs, _flags: u32) -> c_int {
     if argc < 2 || argv.is_null() {
         dprintf!(ALWAYS, "not enough arguments\n");
         let cmd_name = if argc > 0 && !argv.is_null() {
             // SAFETY: Caller guarantees `argv` points to `argc` valid `CmdArgs`.
             let slice = unsafe { core::slice::from_raw_parts(argv, argc as usize) };
-            // SAFETY: Kernel console framework guarantees valid null-terminated strings for args.
+            // SAFETY: Caller guarantees non-null `arg_str` points to a valid C string.
             unsafe { arg_cstr(&slice[0]) }.and_then(|c| c.to_str().ok()).unwrap_or("rppm")
         } else {
             "rppm"
@@ -79,9 +200,9 @@ pub unsafe extern "C" fn rppm_console_cmd(argc: c_int, argv: *const CmdArgs, _fl
 
     // SAFETY: Verified `argv` is non-null and `argc >= 2`.
     let slice = unsafe { core::slice::from_raw_parts(argv, argc as usize) };
-    // SAFETY: Kernel console subsystem provides valid C string arguments.
+    // SAFETY: Caller guarantees non-null `arg_str` points to a valid C string.
     let cmd_name = unsafe { arg_cstr(&slice[0]) }.and_then(|c| c.to_str().ok()).unwrap_or("rppm");
-    // SAFETY: Kernel console subsystem provides valid C string arguments.
+    // SAFETY: Caller guarantees non-null `arg_str` points to a valid C string.
     let subcmd = match unsafe { arg_cstr(&slice[1]) } {
         Some(cstr) => cstr,
         None => {
@@ -91,9 +212,9 @@ pub unsafe extern "C" fn rppm_console_cmd(argc: c_int, argv: *const CmdArgs, _fl
     };
 
     if subcmd == c"dump" {
-        // SAFETY: Dumps registered power domain state to console.
+        // SAFETY: Caller guarantees per-CPU state is initialized.
         unsafe {
-            cpp_rppm_dump();
+            rppm_dump();
         }
         return 0;
     }
@@ -116,8 +237,7 @@ pub unsafe extern "C" fn rppm_console_cmd(argc: c_int, argv: *const CmdArgs, _fl
         return rppm_usage(cmd_name);
     }
 
-    // SAFETY: Querying CPU topology count from scheduler.
-    let processor_count = unsafe { cpp_rppm_get_processor_count() };
+    let processor_count = PerCpu::processor_count();
 
     if is_set_limit {
         let cpu_mask_arg = slice[2].arg_uint as u64;
@@ -134,8 +254,9 @@ pub unsafe extern "C" fn rppm_console_cmd(argc: c_int, argv: *const CmdArgs, _fl
         }
         let min_rate = slice[3].arg_uint as u64;
         let max_rate = slice[4].arg_uint as u64;
-        // SAFETY: Invokes processing limit update on scheduler with validated CPU mask.
-        let status = unsafe { cpp_rppm_update_processing_limits(cpu_mask_arg, min_rate, max_rate) };
+        // SAFETY: Caller guarantees per-CPU state is initialized and no `Scheduler` `queue_lock_`
+        // is held on the current CPU.
+        let status = unsafe { rppm_update_processing_limits(cpu_mask_arg, min_rate, max_rate) };
         return Status::result_into_raw(status);
     }
 
@@ -159,26 +280,28 @@ pub unsafe extern "C" fn rppm_console_cmd(argc: c_int, argv: *const CmdArgs, _fl
         let power_level = level_arg as u8;
 
         if is_set_level {
-            // SAFETY: Updating active power level for validated CPU number.
-            let status = unsafe { cpp_rppm_update_active_power_level(cpu_id as u32, power_level) };
+            // SAFETY: Caller guarantees per-CPU state is initialized and no `Scheduler`
+            // `queue_lock_` is held on the current CPU.
+            let status =
+                unsafe { rppm_update_active_power_level(cpu_id as cpu_num_t, power_level) };
             if let Err(status) = status {
                 dprintf!(ALWAYS, "Failed to set power level: {status}\n");
             } else {
                 dprintf!(ALWAYS, "Set CPU {cpu_id} to power level {power_level}\n");
             }
         } else if is_req_level {
-            // SAFETY: Requesting power level for validated CPU number.
+            // SAFETY: Caller guarantees per-CPU state is initialized and no `Scheduler`
+            // `queue_lock_` is held on the current CPU.
             let posted =
-                unsafe { cpp_rppm_request_power_level_for_testing(cpu_id as u32, power_level) };
+                unsafe { rppm_request_power_level_for_testing(cpu_id as cpu_num_t, power_level) };
             if posted {
                 dprintf!(ALWAYS, "CPU {cpu_id} request for power level {power_level} posted.\n");
             } else {
                 dprintf!(ALWAYS, "CPU {cpu_id} request for power level {power_level} ignored.\n");
-                let mut current_level = 0u8;
-                // SAFETY: Querying active power level with valid stack pointer.
-                let status =
-                    unsafe { cpp_rppm_get_active_power_level(cpu_id as u32, &mut current_level) };
-                if status.is_ok() {
+                // SAFETY: Caller guarantees per-CPU state is initialized.
+                if let Some(current_level) =
+                    unsafe { rppm_get_active_power_level(cpu_id as cpu_num_t) }
+                {
                     dprintf!(ALWAYS, "CPU {cpu_id} at power level {current_level}\n");
                 } else {
                     dprintf!(ALWAYS, "CPU {cpu_id} power level not set\n");
@@ -186,10 +309,8 @@ pub unsafe extern "C" fn rppm_console_cmd(argc: c_int, argv: *const CmdArgs, _fl
             }
         }
     } else if is_get_level {
-        let mut power_level = 0u8;
-        // SAFETY: Querying active power level with valid stack pointer.
-        let status = unsafe { cpp_rppm_get_active_power_level(cpu_id as u32, &mut power_level) };
-        if status.is_ok() {
+        // SAFETY: Caller guarantees per-CPU state is initialized.
+        if let Some(power_level) = unsafe { rppm_get_active_power_level(cpu_id as cpu_num_t) } {
             dprintf!(ALWAYS, "CPU {cpu_id} at power level {power_level}\n");
         } else {
             dprintf!(ALWAYS, "CPU {cpu_id} power level not set\n");
@@ -346,7 +467,7 @@ static_command!(
     c"rppm".as_ptr(),
     c"runtime processor power management commands".as_ptr(),
     rppm_console_cmd,
-    CMD_AVAIL_ALWAYS
+    CMD_AVAIL_NORMAL
 );
 
 #[cfg(not(target_arch = "x86_64"))]

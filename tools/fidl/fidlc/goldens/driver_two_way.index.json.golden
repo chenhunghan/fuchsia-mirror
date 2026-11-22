@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
       "data": "test.drivertwoway",
       "start_offset": 173,
       "end_offset": 190
@@ -25,7 +25,7 @@
           "name": "addend1",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
             "data": "addend1",
             "start_offset": 271,
             "end_offset": 278
@@ -38,7 +38,7 @@
           "name": "addend2",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
             "data": "addend2",
             "start_offset": 295,
             "end_offset": 302
@@ -57,7 +57,7 @@
           "name": "sum",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
             "data": "sum",
             "start_offset": 339,
             "end_offset": 342
@@ -74,7 +74,7 @@
       "identifier": "test.drivertwoway/TwoWay",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
         "data": "TwoWay",
         "start_offset": 230,
         "end_offset": 236
@@ -84,7 +84,7 @@
           "identifier": "Add",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/driver_two_way.test.fidl",
             "data": "Add",
             "start_offset": 250,
             "end_offset": 253

@@ -1228,6 +1228,9 @@ class EvilFakeHci : public FakeHci {
           case fdescriptor::DescriptorType::kDevice: {
             usb_device_descriptor_t* descriptor;
             request.Mmap(reinterpret_cast<void**>(&descriptor));
+            descriptor->b_length = sizeof(*descriptor);
+            descriptor->b_descriptor_type =
+                fidl::ToUnderlying(fdescriptor::DescriptorType::kDevice);
             descriptor->b_num_configurations = 2;
             descriptor->id_vendor = kVendorId;
             descriptor->id_product = kProductId;
@@ -1240,6 +1243,9 @@ class EvilFakeHci : public FakeHci {
           case fdescriptor::DescriptorType::kConfiguration: {
             usb_configuration_descriptor_t* descriptor;
             request.Mmap(reinterpret_cast<void**>(&descriptor));
+            descriptor->b_length = sizeof(*descriptor);
+            descriptor->b_descriptor_type =
+                fidl::ToUnderlying(fdescriptor::DescriptorType::kConfiguration);
             // Use the config descriptor lengths described in the constructor
             // arguments.
             descriptor->w_total_length =
@@ -1328,5 +1334,285 @@ TEST_F(EvilDeviceTest, GetConfigurationDescriptorDifferentSizesAreRejected) {
                                                kDeviceSpeed, timer, loop.dispatcher());
   auto result = device->Init(loop.dispatcher());
   ASSERT_EQ(result, ZX_ERR_IO);
+}
+
+// Fake HCI implementation that injects a configurable number of initial failures (EP0 STALLs,
+// truncated reads, or full-length replies carrying the wrong descriptor type) for each EP0 control
+// request issued during UsbDevice::Init (GET_DESCRIPTOR for the device descriptor, configuration
+// descriptor header, and full configuration descriptor before succeeding on subsequent attempts,
+// and SET_CONFIGURATION).
+class FlakyInitFakeHci : public FakeHci {
+ public:
+  FlakyInitFakeHci(async_dispatcher_t* dispatcher, size_t device_desc_failures,
+                   size_t config_header_failures, size_t config_full_failures,
+                   size_t set_config_failures)
+      : FakeHci(dispatcher),
+        device_desc_failures_(device_desc_failures),
+        config_header_failures_(config_header_failures),
+        config_full_failures_(config_full_failures),
+        set_config_failures_(set_config_failures) {}
+
+  void UsbHciRequestQueue(usb_request_t* usb_request_,
+                          const usb_request_complete_callback_t* complete_cb_) override {
+    usb::BorrowedRequest<void> request(usb_request_, *complete_cb_, sizeof(usb_request_t));
+    EXPECT_EQ(request.request()->header.ep_address, 0);
+    if (request.request()->header.ep_address != 0) {
+      request.Complete(ZX_ERR_INVALID_ARGS, 0);
+      return;
+    }
+
+    if (request.request()->setup.bm_request_type == kStandardDeviceIn &&
+        request.request()->setup.b_request ==
+            fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor)) {
+      auto type = usb_descriptor_type_from_w_value(request.request()->setup.w_value);
+      switch (type) {
+        case fdescriptor::DescriptorType::kDevice: {
+          device_desc_attempts_++;
+          void* mapped = nullptr;
+          request.Mmap(&mapped);
+          auto* descriptor = static_cast<usb_device_descriptor_t*>(mapped);
+          if (device_desc_attempts_ <= device_desc_failures_) {
+            // Inject distinct failure modes across successive attempts to ensure each failure
+            // class (truncated reads, garbage/mismatched descriptor type, and STALLs) is retried.
+            if (device_desc_attempts_ % 3 == 1) {
+              // Case 1: Truncated read (short transfer). Returns fewer bytes than the descriptor
+              // length.
+              request.Complete(ZX_OK, 4);
+              return;
+            } else if (device_desc_attempts_ % 3 == 2) {
+              // Case 2: Full-length reply carrying the wrong descriptor type (e.g. kConfiguration
+              // instead of kDevice).
+              memset(descriptor, 0, sizeof(*descriptor));
+              descriptor->b_length = sizeof(*descriptor);
+              descriptor->b_descriptor_type =
+                  fidl::ToUnderlying(fdescriptor::DescriptorType::kConfiguration);
+              request.Complete(ZX_OK, sizeof(*descriptor));
+              return;
+            } else {
+              // Case 3: Explicit STALL on EP0 (device rejects the request).
+              request.Complete(ZX_ERR_IO_REFUSED, 0);
+              return;
+            }
+          }
+          descriptor->b_length = sizeof(*descriptor);
+          descriptor->b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kDevice);
+          descriptor->b_num_configurations = 1;
+          descriptor->id_vendor = kVendorId;
+          descriptor->id_product = kProductId;
+          descriptor->b_device_class = kDeviceClass;
+          descriptor->b_device_sub_class = kDeviceSubclass;
+          descriptor->b_device_protocol = kDeviceProtocol;
+          request.Complete(ZX_OK, sizeof(*descriptor));
+          return;
+        }
+        case fdescriptor::DescriptorType::kConfiguration: {
+          static constexpr uint8_t kConfigWithInterface[18] = {
+              sizeof(usb_configuration_descriptor_t),
+              fidl::ToUnderlying(fdescriptor::DescriptorType::kConfiguration),
+              18,
+              0,  // wTotalLength = 18
+              1,  // bNumInterfaces = 1
+              1,  // bConfigurationValue = 1
+              0,
+              0x80,
+              50,
+              sizeof(usb_interface_descriptor_t),
+              fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
+              0,
+              0,
+              0,
+              0xff,
+              0,
+              0,
+              0,
+          };
+          if (request.request()->header.length == sizeof(usb_configuration_descriptor_t)) {
+            config_header_attempts_++;
+            if (config_header_attempts_ <= config_header_failures_) {
+              request.Complete(ZX_ERR_IO_REFUSED, 0);
+              return;
+            }
+          } else {
+            config_full_attempts_++;
+            if (config_full_attempts_ <= config_full_failures_) {
+              request.Complete(ZX_OK, sizeof(usb_configuration_descriptor_t));
+              return;
+            }
+          }
+          void* mapped;
+          request.Mmap(&mapped);
+          size_t copy_len =
+              std::min<size_t>(request.request()->header.length, sizeof(kConfigWithInterface));
+          memcpy(mapped, kConfigWithInterface, copy_len);
+          request.Complete(ZX_OK, copy_len);
+          return;
+        }
+        default:
+          break;
+      }
+    }
+
+    if (request.request()->setup.bm_request_type == kStandardDeviceOut &&
+        request.request()->setup.b_request ==
+            fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration)) {
+      set_config_attempts_++;
+      if (set_config_attempts_ <= set_config_failures_) {
+        request.Complete(ZX_ERR_IO_REFUSED, 0);
+        return;
+      }
+      request.Complete(ZX_OK, 0);
+      return;
+    }
+
+    request.Complete(ZX_ERR_INVALID_ARGS, 0);
+  }
+
+  size_t device_desc_attempts() const { return device_desc_attempts_; }
+  size_t config_header_attempts() const { return config_header_attempts_; }
+  size_t config_full_attempts() const { return config_full_attempts_; }
+  size_t set_config_attempts() const { return set_config_attempts_; }
+
+ private:
+  const size_t device_desc_failures_;
+  const size_t config_header_failures_;
+  const size_t config_full_failures_;
+  const size_t set_config_failures_;
+  size_t device_desc_attempts_ = 0;
+  size_t config_header_attempts_ = 0;
+  size_t config_full_attempts_ = 0;
+  size_t set_config_attempts_ = 0;
+};
+
+TEST_F(EvilDeviceTest, InitRetriesTransientDescriptorFailures) {
+  auto flaky_hci = std::make_unique<FlakyInitFakeHci>((*dispatcher_)->async_dispatcher(),
+                                                      /*device_desc_failures=*/2,
+                                                      /*config_header_failures=*/2,
+                                                      /*config_full_failures=*/2,
+                                                      /*set_config_failures=*/0);
+  fbl::RefPtr<FakeTimer> timer = fbl::MakeRefCounted<FakeTimer>();
+  timer->set_timeout_handler([=](sync_completion_t* completion, zx_duration_t duration) {
+    return sync_completion_wait(completion, duration);
+  });
+
+  std::shared_ptr<MockDevice> root = MockDevice::FakeRootParent();
+  auto endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_hci::UsbHci>();
+  ASSERT_OK(endpoints);
+  UsbDevice* raw_device = nullptr;
+  auto init_result = fdf::RunOnDispatcherSync((*dispatcher_)->async_dispatcher(), [&]() {
+    auto device = fbl::MakeRefCounted<UsbDevice>(
+        root.get(), ddk::UsbHciProtocolClient(flaky_hci->proto()), std::move(endpoints->client),
+        kDeviceId, kHubId, kDeviceSpeed, timer, (*dispatcher_)->async_dispatcher());
+    ASSERT_OK(device->Init((*dispatcher_)->async_dispatcher()));
+    raw_device = device.get();
+  });
+  ASSERT_TRUE(init_result.is_ok());
+  ASSERT_NOT_NULL(raw_device);
+
+  EXPECT_EQ(flaky_hci->device_desc_attempts(), 3u);
+  EXPECT_EQ(flaky_hci->config_header_attempts(), 3u);
+  EXPECT_EQ(flaky_hci->config_full_attempts(), 3u);
+  EXPECT_EQ(flaky_hci->set_config_attempts(), 1u);
+
+  auto remove_result = fdf::RunOnDispatcherSync((*dispatcher_)->async_dispatcher(), [&]() {
+    raw_device->DdkAsyncRemove();
+    mock_ddk::ReleaseFlaggedDevices(root.get());
+  });
+  ASSERT_TRUE(remove_result.is_ok());
+}
+
+TEST_F(EvilDeviceTest, InitDoesNotRetrySetConfigurationStall) {
+  // A STALL on SET_CONFIGURATION means the device rejected the configuration value, so Init()
+  // fails immediately instead of re-sending it.
+  auto flaky_hci = std::make_unique<FlakyInitFakeHci>((*dispatcher_)->async_dispatcher(),
+                                                      /*device_desc_failures=*/0,
+                                                      /*config_header_failures=*/0,
+                                                      /*config_full_failures=*/0,
+                                                      /*set_config_failures=*/1);
+  fbl::RefPtr<FakeTimer> timer = fbl::MakeRefCounted<FakeTimer>();
+  timer->set_timeout_handler([=](sync_completion_t* completion, zx_duration_t duration) {
+    return sync_completion_wait(completion, duration);
+  });
+
+  async::Loop loop{&kAsyncLoopConfigNeverAttachToThread};
+  std::shared_ptr<MockDevice> root = MockDevice::FakeRootParent();
+  auto endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_hci::UsbHci>();
+  ASSERT_OK(endpoints);
+  auto device = fbl::MakeRefCounted<UsbDevice>(
+      root.get(), ddk::UsbHciProtocolClient(flaky_hci->proto()), std::move(endpoints->client),
+      kDeviceId, kHubId, kDeviceSpeed, timer, loop.dispatcher());
+  ASSERT_EQ(device->Init(loop.dispatcher()), ZX_ERR_IO_REFUSED);
+  EXPECT_EQ(flaky_hci->set_config_attempts(), 1u);
+}
+
+TEST_F(EvilDeviceTest, InitFailsAfterExhaustingDescriptorRetries) {
+  auto flaky_hci = std::make_unique<FlakyInitFakeHci>((*dispatcher_)->async_dispatcher(),
+                                                      /*device_desc_failures=*/3,
+                                                      /*config_header_failures=*/0,
+                                                      /*config_full_failures=*/0,
+                                                      /*set_config_failures=*/0);
+  fbl::RefPtr<FakeTimer> timer = fbl::MakeRefCounted<FakeTimer>();
+  timer->set_timeout_handler([=](sync_completion_t* completion, zx_duration_t duration) {
+    return sync_completion_wait(completion, duration);
+  });
+
+  async::Loop loop{&kAsyncLoopConfigNeverAttachToThread};
+  std::shared_ptr<MockDevice> root = MockDevice::FakeRootParent();
+  auto endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_hci::UsbHci>();
+  ASSERT_OK(endpoints);
+  auto device = fbl::MakeRefCounted<UsbDevice>(
+      root.get(), ddk::UsbHciProtocolClient(flaky_hci->proto()), std::move(endpoints->client),
+      kDeviceId, kHubId, kDeviceSpeed, timer, loop.dispatcher());
+  ASSERT_EQ(device->Init(loop.dispatcher()), ZX_ERR_IO_REFUSED);
+  EXPECT_EQ(flaky_hci->device_desc_attempts(), 3u);
+}
+
+// Fake HCI that fails EP0 requests with a transfer error other than a STALL.
+class TransferErrorFakeHci : public FakeHci {
+ public:
+  explicit TransferErrorFakeHci(async_dispatcher_t* dispatcher, bool fail_only_set_config = false)
+      : FakeHci(dispatcher), fail_only_set_config_(fail_only_set_config) {}
+
+  void UsbHciRequestQueue(usb_request_t* usb_request_,
+                          const usb_request_complete_callback_t* complete_cb_) override {
+    if (fail_only_set_config_ &&
+        !(usb_request_->setup.bm_request_type == kStandardDeviceOut &&
+          usb_request_->setup.b_request ==
+              fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration))) {
+      FakeHci::UsbHciRequestQueue(usb_request_, complete_cb_);
+      return;
+    }
+    usb::BorrowedRequest<void> request(usb_request_, *complete_cb_, sizeof(usb_request_t));
+    attempts_++;
+    request.Complete(ZX_ERR_IO_INVALID, 0);
+  }
+
+  size_t attempts() const { return attempts_; }
+
+ private:
+  bool fail_only_set_config_ = false;
+  size_t attempts_ = 0;
+};
+
+TEST_F(EvilDeviceTest, InitDoesNotRetryNonStallTransferErrors) {
+  // Only STALLs are retried: other transfer errors can leave EP0 halted, and a retried request
+  // would never complete. Verify both descriptor reads and SET_CONFIGURATION fail immediately.
+  for (bool fail_only_set_config : {false, true}) {
+    auto error_hci = std::make_unique<TransferErrorFakeHci>((*dispatcher_)->async_dispatcher(),
+                                                            fail_only_set_config);
+    fbl::RefPtr<FakeTimer> timer = fbl::MakeRefCounted<FakeTimer>();
+    timer->set_timeout_handler([=](sync_completion_t* completion, zx_duration_t duration) {
+      return sync_completion_wait(completion, duration);
+    });
+
+    async::Loop loop{&kAsyncLoopConfigNeverAttachToThread};
+    std::shared_ptr<MockDevice> root = MockDevice::FakeRootParent();
+    auto endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_hci::UsbHci>();
+    ASSERT_OK(endpoints);
+    auto device = fbl::MakeRefCounted<UsbDevice>(
+        root.get(), ddk::UsbHciProtocolClient(error_hci->proto()), std::move(endpoints->client),
+        kDeviceId, kHubId, kDeviceSpeed, timer, loop.dispatcher());
+    ASSERT_EQ(device->Init(loop.dispatcher()), ZX_ERR_IO_INVALID);
+    EXPECT_EQ(error_hci->attempts(), 1u);
+  }
 }
 }  // namespace usb_bus

@@ -4,5 +4,4 @@
 
 group("hermetic_tests") {
   testonly = true
-  deps = [ "rust-bin:hermetic_tests" ]
 }

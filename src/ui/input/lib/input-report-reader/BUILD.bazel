@@ -16,8 +16,8 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//zircon/system/ulib/fbl",
         "@fuchsia_sdk//fidl/fuchsia.input.report:fuchsia.input.report_cpp",
+        "@fuchsia_sdk//pkg/fbl_deprecated",
         "@fuchsia_sdk//pkg/stdcompat",
         "@fuchsia_sdk//pkg/trace",
         "@fuchsia_sdk//pkg/zx",

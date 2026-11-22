@@ -45,31 +45,21 @@ void ensureWait(int pid, unsigned int waitFlags) {
 
 class SignalHelper {
  public:
-  SignalHelper() {
+  SignalHelper()
+      : usr1_action_(SIGUSR1, handler, SA_RESTART | SA_NOCLDSTOP),
+        chld_action_(SIGCHLD, handler, SA_RESTART | SA_NOCLDSTOP) {
     g_received_signals.clear();
     g_received_signals.reserve(10);
     g_bad_signal_code.store(0);
     errno = 0;
-
-    struct sigaction sa;
-    sa.sa_sigaction = handler;
-    sa.sa_flags = SA_SIGINFO | SA_RESTART | SA_NOCLDSTOP;
-
-    sigaction(SIGUSR1, &sa, &old_usr1_act_);
-    sigaction(SIGCHLD, &sa, &old_chld_act_);
-  }
-
-  ~SignalHelper() {
-    sigaction(SIGUSR1, &old_usr1_act_, nullptr);
-    sigaction(SIGCHLD, &old_chld_act_, nullptr);
   }
 
   SignalHelper(const SignalHelper &) = delete;
   SignalHelper &operator=(const SignalHelper &) = delete;
 
  private:
-  struct sigaction old_usr1_act_;
-  struct sigaction old_chld_act_;
+  test_helper::ScopedSigAction usr1_action_;
+  test_helper::ScopedSigAction chld_action_;
 };
 
 /*

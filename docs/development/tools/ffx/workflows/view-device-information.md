@@ -46,7 +46,7 @@ NAME                      SERIAL       TYPE       STATE      ADDRS/IP           
 fuchsia-5254-0063-5e7a    <unknown>    Unknown    Unknown    [172.16.241.43, fe80::7594:7308:4168:9fb1%brqemu]    0m8s    N
 ```
 
-## Get detailed information from a device
+## Get detailed information from a device {:#get-detailed-information-from-a-device}
 
 To get the detailed information of your target Fuchsia device,
 run the following command:

@@ -34,6 +34,7 @@ pub struct MetricsState {
     metrics_dir: PathBuf,
     pub(crate) invoker: Option<String>,
     pub(crate) is_new_internal_user: bool,
+    is_googler: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,7 +97,33 @@ impl MetricsState {
         disabled: bool,
         invoker: Option<String>,
     ) -> MetricsState {
-        let mut metrics = MetricsState::default();
+        Self::new_with_googler_status(
+            metrics_dir,
+            app_name,
+            build_version,
+            sdk_version,
+            ga_product_code,
+            ga4_product_code,
+            ga4_key,
+            disabled,
+            invoker,
+            is_googler(),
+        )
+    }
+
+    fn new_with_googler_status(
+        metrics_dir: &PathBuf,
+        app_name: String,
+        build_version: String,
+        sdk_version: String,
+        ga_product_code: String,
+        ga4_product_code: String,
+        ga4_key: String,
+        disabled: bool,
+        invoker: Option<String>,
+        is_googler: bool,
+    ) -> MetricsState {
+        let mut metrics = MetricsState { is_googler, ..MetricsState::default() };
         if disabled {
             metrics.status = MetricsStatus::Disabled;
             return metrics;
@@ -123,6 +150,9 @@ impl MetricsState {
             false => self.status = MetricsStatus::OptedOut,
         }
         write_opt_in_status(&self.metrics_dir, opt_in)?;
+        if self.is_googler {
+            write_analytics_status_internal(&self.metrics_dir, &self.status)?;
+        }
         match self.status {
             MetricsStatus::OptedOut => {
                 self.uuid = None;
@@ -150,8 +180,11 @@ impl MetricsState {
         }
 
         self.status = status;
-        if is_googler() {
+        if self.is_googler {
             write_analytics_status_internal(&self.metrics_dir, &self.status)?;
+            let opted_in =
+                matches!(self.status, MetricsStatus::OptedIn | MetricsStatus::OptedInEnhanced);
+            write_opt_in_status(&self.metrics_dir, opted_in)?;
         } else {
             // TODO unify optin state to one file
             if self.status == MetricsStatus::OptedInEnhanced {
@@ -190,7 +223,7 @@ impl MetricsState {
     }
 
     fn init_status(&mut self) {
-        if !is_googler() {
+        if !self.is_googler {
             self.init_status_for_non_googler()
         } else {
             self.init_status_for_googler()
@@ -257,6 +290,8 @@ impl MetricsState {
             }
             if self.status != MetricsStatus::OptedOut {
                 self.init_uuid();
+            } else if !matches!(read_opt_in_status(&self.metrics_dir), Ok(false)) {
+                let _ = write_opt_in_status(&self.metrics_dir, false);
             }
             return;
         }
@@ -325,6 +360,7 @@ impl Default for MetricsState {
             metrics_dir: PathBuf::from("/tmp"),
             invoker: None,
             is_new_internal_user: false,
+            is_googler: is_googler(),
         }
     }
 }
@@ -464,6 +500,7 @@ mod tests {
             metrics_dir: PathBuf::from("/tmp"),
             invoker: None,
             is_new_internal_user: false,
+            is_googler: false,
         };
     }
 
@@ -663,6 +700,130 @@ mod tests {
         assert_eq!(true, read_app_status(&dir, &APP_NAME)?);
 
         drop(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn googler_set_status_syncs_both_status_files()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let dir = create_tmp_metrics_dir()?;
+        write_opt_in_status(&dir, true)?;
+        let uuid = Uuid::new_v4();
+        write_uuid_file(&dir, &uuid.to_string())?;
+
+        let mut m = MetricsState::new_with_googler_status(
+            &dir,
+            String::from(APP_NAME),
+            String::from(BUILD_VERSION),
+            String::from(SDK_VERSION),
+            UNKNOWN_PROPERTY_ID.to_string(),
+            UNKNOWN_GA4_PRODUCT_CODE.to_string(),
+            UNKNOWN_GA4_KEY.to_string(),
+            false,
+            None,
+            true,
+        );
+
+        m.set_new_opt_in_status(MetricsStatus::OptedOut)?;
+        assert_eq!(read_analytics_status_internal(&dir)?, MetricsStatus::OptedOut);
+        assert_eq!(read_opt_in_status(&dir)?, false);
+        assert!(read_uuid_file(&dir).is_err());
+
+        m.set_new_opt_in_status(MetricsStatus::OptedInEnhanced)?;
+        assert_eq!(read_analytics_status_internal(&dir)?, MetricsStatus::OptedInEnhanced);
+        assert_eq!(read_opt_in_status(&dir)?, true);
+        assert!(read_uuid_file(&dir).is_ok());
+
+        m.set_opt_in_status(false)?;
+        assert_eq!(read_analytics_status_internal(&dir)?, MetricsStatus::OptedOut);
+        assert_eq!(read_opt_in_status(&dir)?, false);
+        assert!(read_uuid_file(&dir).is_err());
+
+        m.set_opt_in_status(true)?;
+        assert_eq!(read_analytics_status_internal(&dir)?, MetricsStatus::OptedIn);
+        assert_eq!(read_opt_in_status(&dir)?, true);
+        assert!(read_uuid_file(&dir).is_ok());
+
+        Ok(())
+    }
+
+    #[test]
+    fn googler_init_opted_out_heals_missing_or_stale_opt_in_file()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Case 1: analytics-status-internal is 0, analytics-status does not exist at all.
+        let dir_missing = create_tmp_metrics_dir()?;
+        write_analytics_status_internal(&dir_missing, &MetricsStatus::OptedOut)?;
+        assert!(read_opt_in_status(&dir_missing).is_err());
+
+        let m_missing = MetricsState::new_with_googler_status(
+            &dir_missing,
+            String::from(APP_NAME),
+            String::from(BUILD_VERSION),
+            String::from(SDK_VERSION),
+            UNKNOWN_PROPERTY_ID.to_string(),
+            UNKNOWN_GA4_PRODUCT_CODE.to_string(),
+            UNKNOWN_GA4_KEY.to_string(),
+            false,
+            None,
+            true,
+        );
+        assert_eq!(m_missing.status, MetricsStatus::OptedOut);
+        assert_eq!(read_opt_in_status(&dir_missing)?, false);
+
+        // Case 2: analytics-status-internal is 0, analytics-status is stale at 1.
+        let dir_stale = create_tmp_metrics_dir()?;
+        write_opt_in_status(&dir_stale, true)?;
+        write_analytics_status_internal(&dir_stale, &MetricsStatus::OptedOut)?;
+
+        let m_stale = MetricsState::new_with_googler_status(
+            &dir_stale,
+            String::from(APP_NAME),
+            String::from(BUILD_VERSION),
+            String::from(SDK_VERSION),
+            UNKNOWN_PROPERTY_ID.to_string(),
+            UNKNOWN_GA4_PRODUCT_CODE.to_string(),
+            UNKNOWN_GA4_KEY.to_string(),
+            false,
+            None,
+            true,
+        );
+        assert_eq!(m_stale.status, MetricsStatus::OptedOut);
+        assert_eq!(read_opt_in_status(&dir_stale)?, false);
+
+        Ok(())
+    }
+
+    #[test]
+    fn non_googler_set_new_opt_in_status_syncs_opt_in_status_file()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let dir = create_tmp_metrics_dir()?;
+        write_opt_in_status(&dir, true)?;
+        let uuid = Uuid::new_v4();
+        write_uuid_file(&dir, &uuid.to_string())?;
+
+        let mut m = MetricsState::new_with_googler_status(
+            &dir,
+            String::from(APP_NAME),
+            String::from(BUILD_VERSION),
+            String::from(SDK_VERSION),
+            UNKNOWN_PROPERTY_ID.to_string(),
+            UNKNOWN_GA4_PRODUCT_CODE.to_string(),
+            UNKNOWN_GA4_KEY.to_string(),
+            false,
+            None,
+            false,
+        );
+
+        m.set_new_opt_in_status(MetricsStatus::OptedOut)?;
+        assert_eq!(read_opt_in_status(&dir)?, false);
+        assert!(read_analytics_status_internal(&dir).is_err());
+        assert!(read_uuid_file(&dir).is_err());
+
+        m.set_new_opt_in_status(MetricsStatus::OptedIn)?;
+        assert_eq!(read_opt_in_status(&dir)?, true);
+        assert!(read_analytics_status_internal(&dir).is_err());
+        assert!(read_uuid_file(&dir).is_ok());
+
         Ok(())
     }
 

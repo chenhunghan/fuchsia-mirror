@@ -70,6 +70,12 @@
             to: [ "#runner" ],
         },
         {
+            protocol: [ "fuchsia.ui.input.internal.InputOwnership" ],
+            from: "parent",
+            to: [ "#runner" ],
+            availability: "optional",
+        },
+        {
             protocol: [ "fuchsia.element.GraphicalPresenter" ],
             from: "parent",
             to: [ "#debian_container" ],
@@ -79,6 +85,10 @@
         {
             protocol: [ "fuchsia.component.Realm" ],
             from: "#debian_container",
+        },
+        {
+            protocol: [ "fuchsia.input.injection.InputDeviceRegistry" ],
+            from: "#runner",
         },
     ],
     environments: [

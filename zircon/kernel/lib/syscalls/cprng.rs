@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::crypto::global_prng;
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use core::ops::{Deref, DerefMut};
 use explicit_memory::mandatory_memset;
@@ -13,12 +14,6 @@ use zx_types::{ZX_CPRNG_ADD_ENTROPY_MAX_LEN, ZX_CPRNG_DRAW_MAX_LEN};
 
 const MAX_CPRNG_DRAW: usize = ZX_CPRNG_DRAW_MAX_LEN;
 const MAX_CPRNG_SEED: usize = ZX_CPRNG_ADD_ENTROPY_MAX_LEN;
-
-unsafe extern "C" {
-    fn cpp_global_prng_is_thread_safe() -> bool;
-    fn cpp_global_prng_draw(buffer: *mut u8, len: usize);
-    fn cpp_global_prng_add_entropy(buffer: *const u8, len: usize);
-}
 
 struct ZeroOnDrop<'a, T>(&'a mut [T]);
 
@@ -55,11 +50,9 @@ pub fn sys_cprng_draw_once(buffer: UserOutPtr<u8>, len: usize) -> Result<(), Sta
     // Ensure we get rid of the stack copy of the random data as this function returns.
     let mut kernel_buf = ZeroOnDrop(&mut storage);
 
-    // SAFETY: `kernel_buf` points to valid stack memory with capacity of `MAX_CPRNG_DRAW` bytes.
-    unsafe {
-        assert!(cpp_global_prng_is_thread_safe());
-        cpp_global_prng_draw(kernel_buf.as_mut_ptr(), len);
-    }
+    let prng = global_prng::get_instance();
+    assert!(prng.is_thread_safe());
+    prng.draw(&mut kernel_buf[..len]);
 
     buffer.copy_slice_to_user(&kernel_buf[..len]).map_err(|_| Status::INVALID_ARGS)?;
     Ok(())
@@ -79,10 +72,6 @@ pub fn sys_cprng_add_entropy(buffer: UserInPtr<u8>, buffer_size: usize) -> Resul
         .copy_slice_from_user(&mut kernel_buf[..buffer_size])
         .map_err(|_| Status::INVALID_ARGS)?;
 
-    // SAFETY: `slice` has been initialized from userspace and has length `buffer_size`.
-    unsafe {
-        assert!(cpp_global_prng_is_thread_safe());
-        cpp_global_prng_add_entropy(slice.as_ptr(), buffer_size);
-    }
+    global_prng::add_entropy(slice);
     Ok(())
 }

@@ -127,6 +127,7 @@ unified_only = [
   "default-exception-handler",  # needs job tree w/o exception handler.
   "hotplug",
   "interrupt",
+  "ktrace",
   "next-vdso",
   "pager-writeback",
   "profile",
@@ -227,6 +228,7 @@ template("core_tests") {
                              "args",
                              "disabled",
                              "environments",
+                             "build_only",
                              "timeout",
                              "generate_cuckoo",
                            ])
@@ -336,7 +338,8 @@ if (current_cpu == "x64") {
     args = [ "kernel.wallclock=hpet" ]
 
     # NUC11 HPET is unreliable, do not include it, see https://chat.google.com/room/AAAAOlfJ3J8/S_Law3cxzwQ
-    environments = [ nuc7_env ]
+    # No other hardware environment is available, so this is build-only.
+    build_only = true
 
     # core-hpet test is taking longer than 14mins. Bump the timeout to 16mins
     # as a mitigation.

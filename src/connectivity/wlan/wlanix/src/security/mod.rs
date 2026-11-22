@@ -65,6 +65,10 @@ pub enum Credential {
     None,
     Password(Vec<u8>),
     SaePassword(Vec<u8>),
+    PskAndSae {
+        psk_passphrase: Vec<u8>,
+        sae_password: Vec<u8>,
+    },
     WepKey(WepKeys),
 }
 
@@ -74,8 +78,27 @@ impl Credential {
             Credential::None => "None",
             Credential::Password(_) => "Password",
             Credential::SaePassword(_) => "SAE password",
+            Credential::PskAndSae { .. } => "Password and SAE password",
             Credential::WepKey(_) => "WEP keys",
         }
+    }
+
+    pub fn set_psk_passphrase(&mut self, passphrase: Vec<u8>) {
+        *self = match std::mem::replace(self, Self::None) {
+            Self::SaePassword(sae_password) | Self::PskAndSae { sae_password, .. } => {
+                Self::PskAndSae { psk_passphrase: passphrase, sae_password }
+            }
+            _ => Self::Password(passphrase),
+        };
+    }
+
+    pub fn set_sae_password(&mut self, password: Vec<u8>) {
+        *self = match std::mem::replace(self, Self::None) {
+            Self::Password(psk_passphrase) | Self::PskAndSae { psk_passphrase, .. } => {
+                Self::PskAndSae { psk_passphrase, sae_password: password }
+            }
+            _ => Self::SaePassword(password),
+        };
     }
 }
 
@@ -136,15 +159,21 @@ fn bind_credential_to_protocol(
         },
         SecurityDescriptor::Wpa(wpa) => match wpa {
             WpaDescriptor::Wpa1 { .. } | WpaDescriptor::Wpa2 { .. } => match credential {
-                Credential::Password(passphrase) => Passphrase::try_from(passphrase.as_slice())
-                    .ok()
-                    .and_then(|passphrase| protocol.bind(Some(passphrase.into())).ok()),
+                Credential::Password(passphrase)
+                | Credential::PskAndSae { psk_passphrase: passphrase, .. } => {
+                    Passphrase::try_from(passphrase.as_slice())
+                        .ok()
+                        .and_then(|passphrase| protocol.bind(Some(passphrase.into())).ok())
+                }
                 _ => None,
             },
             WpaDescriptor::Wpa3 { .. } => match credential {
-                Credential::SaePassword(passphrase) => Passphrase::try_from(passphrase.as_slice())
-                    .ok()
-                    .and_then(|passphrase| protocol.bind(Some(passphrase.into())).ok()),
+                Credential::SaePassword(passphrase)
+                | Credential::PskAndSae { sae_password: passphrase, .. } => {
+                    Passphrase::try_from(passphrase.as_slice())
+                        .ok()
+                        .and_then(|passphrase| protocol.bind(Some(passphrase.into())).ok())
+                }
                 _ => None,
             },
         },
@@ -190,6 +219,7 @@ pub fn select_authentication_method(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert_matches::assert_matches;
     use wlan_common::security::wpa::{Authentication, WpaAuthenticator};
 
     #[test]
@@ -242,5 +272,81 @@ mod tests {
             method.unwrap(),
             SecurityAuthenticator::Wpa(WpaAuthenticator::Wpa2 { .. })
         ));
+    }
+
+    #[fuchsia::test]
+    fn test_credential_set_sae_and_psk_preserves_both() {
+        let mut sae_then_psk = Credential::None;
+        sae_then_psk.set_sae_password(b"sae_pass".to_vec());
+        sae_then_psk.set_psk_passphrase(b"psk_pass".to_vec());
+        assert_eq!(
+            sae_then_psk,
+            Credential::PskAndSae {
+                psk_passphrase: b"psk_pass".to_vec(),
+                sae_password: b"sae_pass".to_vec(),
+            }
+        );
+
+        let mut psk_then_sae = Credential::None;
+        psk_then_sae.set_psk_passphrase(b"psk_pass".to_vec());
+        psk_then_sae.set_sae_password(b"sae_pass".to_vec());
+        assert_eq!(
+            psk_then_sae,
+            Credential::PskAndSae {
+                psk_passphrase: b"psk_pass".to_vec(),
+                sae_password: b"sae_pass".to_vec(),
+            }
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_select_authentication_method_psk_and_sae() {
+        let wpa2 = SecurityDescriptor::Wpa(WpaDescriptor::Wpa2 {
+            cipher: None,
+            authentication: Authentication::Personal(()),
+        });
+        let wpa3 = SecurityDescriptor::Wpa(WpaDescriptor::Wpa3 {
+            cipher: None,
+            authentication: Authentication::Personal(()),
+        });
+        let credential = Credential::PskAndSae {
+            psk_passphrase: b"password123".to_vec(),
+            sae_password: b"password123".to_vec(),
+        };
+        let auto_upgrade_mask = Some(
+            fidl_wlanix::KeyMgmtMask::WPA_PSK
+                | fidl_wlanix::KeyMgmtMask::WPA_PSK_SHA256
+                | fidl_wlanix::KeyMgmtMask::SAE,
+        );
+
+        // Mixed WPA2/WPA3 AP -> prefers WPA3 (SAE).
+        assert_matches!(
+            select_authentication_method(
+                [wpa2.clone(), wpa3.clone()].into_iter().collect(),
+                &credential,
+                auto_upgrade_mask,
+            ),
+            Some(SecurityAuthenticator::Wpa(WpaAuthenticator::Wpa3 { .. }))
+        );
+
+        // WPA3-only AP -> selects WPA3 (SAE).
+        assert_matches!(
+            select_authentication_method(
+                [wpa3].into_iter().collect(),
+                &credential,
+                auto_upgrade_mask
+            ),
+            Some(SecurityAuthenticator::Wpa(WpaAuthenticator::Wpa3 { .. }))
+        );
+
+        // WPA2-only AP -> falls back to WPA2 (PSK).
+        assert_matches!(
+            select_authentication_method(
+                [wpa2].into_iter().collect(),
+                &credential,
+                auto_upgrade_mask
+            ),
+            Some(SecurityAuthenticator::Wpa(WpaAuthenticator::Wpa2 { .. }))
+        );
     }
 }

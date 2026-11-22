@@ -24,7 +24,6 @@ group("all") {
     ":escher",
     ":fidl",
     ":rust",
-    "//examples/benchmark",
     "//src/ui/examples",
   ]
 }

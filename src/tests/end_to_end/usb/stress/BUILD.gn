@@ -24,7 +24,7 @@ if (is_host) {
     test_data_deps =
         [ "//src/developer/ffx/plugins/inspect:ffx_inspect_tool_test_data" ]
     params = {
-      num_iterations = 10
+      num_iterations = 8
       disconnect_duration_sec = 10
 
       # Toggle the host's USB `authorized` attribute instead of using a
@@ -39,6 +39,7 @@ if (is_host) {
       # the DUT is still re-enumerating after the previous reconnect.
       bus_id_lookup_attempts = 10
       bus_id_lookup_timeout_sec = 15
+      test_case_prefix = "test_usb_virtual_disconnect"
     }
 
     environments = [ iris_env ]
@@ -119,10 +120,51 @@ if (is_host) {
       "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
       "//src/tests/end_to_end/usb/lib:usb_lib",
     ]
+
+    # The DWC3 IRQ check reads Inspect through `ffx inspect`.
+    test_data_deps =
+        [ "//src/developer/ffx/plugins/inspect:ffx_inspect_tool_test_data" ]
     params = {
       num_usb_disconnects = 100
       verify_mdns = true
       mdns_timeout_sec = 12
+
+      # Soaked on Iris in usb_disconnect_irq_storm_test; a DWC3 or PMIC IRQ
+      # spin-loop is most likely to show up over 100 replugs.
+      verify_no_irq_storm = true
+
+      # Vary both off-time (dwell) and connected-time (settle) across stratified
+      # buckets so 100 iterations sample short, medium, and long regimes evenly
+      # without locking into one phase of the DUT's periodic work. The seed and
+      # exact per-iteration draws are logged and recorded for replay.
+      dwell_ranges = [
+        [
+          "500ms",
+          "2s",
+        ],
+        [
+          "2s",
+          "8s",
+        ],
+        [
+          "8s",
+          "20s",
+        ],
+      ]
+      settle_delay_ranges = [
+        [
+          "0s",
+          "500ms",
+        ],
+        [
+          "1s",
+          "4s",
+        ],
+        [
+          "5s",
+          "15s",
+        ],
+      ]
     }
     local_config_source = "UsbDisconnectTestbed.yaml"
     environments = [ iris_env ]
@@ -189,6 +231,43 @@ if (is_host) {
     honeydew_config = _honeydew_config
   }
 
+  # Verifies that CDC and ADB still carry bulk data, and that no DWC3
+  # endpoint is left stuck, after every physical cable replug. A separate
+  # target so that it can soak on FYI before verify_traffic is enabled on
+  # usb_disconnect_test.
+  python_mobly_test("usb_disconnect_traffic_test") {
+    main_source = "test_usb_disconnect.py"
+    libraries = [
+      "//src/testing/end_to_end/honeydew",
+      "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
+      "//src/tests/end_to_end/usb/lib:usb_lib",
+    ]
+    test_data_deps =
+        [ "//src/developer/ffx/plugins/inspect:ffx_inspect_tool_test_data" ]
+    params = {
+      num_iterations = 10
+      verify_traffic = true
+      traffic_functions = [
+        "cdc",
+        "adb",
+      ]
+      traffic_size_mb = 5
+
+      # Assert the link comes back at HighSpeed after every reconnect.
+      expected_usb_link_speed = "high"
+
+      # Each case also moves traffic, so don't name it test_usb_disconnect_N.
+      test_case_prefix = "test_usb_disconnect_traffic"
+    }
+    local_config_source = "UsbDisconnectTestbed.yaml"
+    environments = [
+      iris_env,
+      sorrel_env,
+    ]
+    timeout_secs = 1800
+    honeydew_config = _honeydew_config
+  }
+
   python_mobly_test("cdc_stress_test") {
     main_source = "test_cdc_stress.py"
     libraries = [
@@ -240,11 +319,15 @@ if (is_host) {
       "//src/testing/end_to_end/honeydew",
       "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
     ]
+    test_data_deps = [
+      "//src/developer/ffx/plugins/inspect:ffx_inspect_tool_test_data",
+      "//src/developer/ffx/tools/driver:ffx_driver_tool_test_data",
+    ]
     params = {
       num_iterations = 10
     }
     environments = [ iris_env ]
-    timeout_secs = 420
+    timeout_secs = 720
     honeydew_config = _honeydew_config
   }
 
@@ -305,32 +388,69 @@ if (is_host) {
     timeout_secs = 700
   }
 
-  python_mobly_test("usb_soak_test") {
-    main_source = "test_usb_soak.py"
-    libraries = [
-      "//src/testing/end_to_end/honeydew",
-      "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
-      "//src/tests/end_to_end/usb/lib:usb_lib",
-    ]
-    test_data_deps = [
-      "//src/developer/ffx/plugins/inspect:ffx_inspect_tool_test_data",
-      "//src/developer/ffx/plugins/profile:ffx_profile_tool_test_data",
-    ]
+  template("_usb_soak_test") {
+    assert(defined(invoker.num_epochs), "num_epochs must be defined")
+    assert(defined(invoker.epoch_duration_sec),
+           "epoch_duration_sec must be defined")
+    assert(defined(invoker.timeout_secs), "timeout_secs must be defined")
 
-    # Only overrides parameters that differ from UsbSoakTest defaults;
-    # unlisted parameters (circuit_breaker_threshold, reconnect_between_epochs,
-    # reconnect_timeout_sec, require_adb, verify_no_irq_storm) use class
-    # defaults.
-    params = {
-      num_epochs = 3
-      epoch_duration_sec = 15
-      disconnect_duration_sec = 2
-      expected_usb_link_speed = "high"
+    python_mobly_test(target_name) {
+      forward_variables_from(invoker,
+                             [
+                               "testonly",
+                               "timeout_secs",
+                               "visibility",
+                             ])
+      main_source = "test_usb_soak.py"
+      libraries = [
+        "//src/testing/end_to_end/honeydew",
+        "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
+        "//src/tests/end_to_end/usb/lib:usb_lib",
+      ]
+      test_data_deps = [
+        "//src/developer/ffx/plugins/inspect:ffx_inspect_tool_test_data",
+        "//src/developer/ffx/plugins/profile:ffx_profile_tool_test_data",
+      ]
+
+      # Only overrides parameters that differ from UsbSoakTest defaults;
+      # unlisted parameters (circuit_breaker_threshold,
+      # reconnect_between_epochs, reconnect_timeout_sec, require_adb,
+      # verify_no_irq_storm) use class defaults.
+      params = {
+        num_epochs = invoker.num_epochs
+        epoch_duration_sec = invoker.epoch_duration_sec
+        if (defined(invoker.disconnect_duration_sec)) {
+          disconnect_duration_sec = invoker.disconnect_duration_sec
+        } else {
+          disconnect_duration_sec = 2
+        }
+        if (defined(invoker.reconnect_between_epochs)) {
+          reconnect_between_epochs = invoker.reconnect_between_epochs
+        }
+        expected_usb_link_speed = "high"
+      }
+      local_config_source = "UsbDisconnectTestbed.yaml"
+      environments = [ iris_env ]
+      honeydew_config = _honeydew_config
     }
-    local_config_source = "UsbDisconnectTestbed.yaml"
-    environments = [ iris_env ]
+  }
+
+  _usb_soak_test("usb_soak_test") {
+    num_epochs = 3
+    epoch_duration_sec = 15
     timeout_secs = 600
-    honeydew_config = _honeydew_config
+  }
+
+  _usb_soak_test("usb_soak_test_30m") {
+    num_epochs = 6
+    epoch_duration_sec = 300
+    timeout_secs = 3000
+  }
+
+  _usb_soak_test("usb_soak_test_1h") {
+    num_epochs = 12
+    epoch_duration_sec = 300
+    timeout_secs = 5400
   }
 }
 
@@ -351,10 +471,13 @@ group("tests") {
     ":usb_disconnect_irq_storm_test($host_toolchain)",
     ":usb_disconnect_stress_test($host_toolchain)",
     ":usb_disconnect_test($host_toolchain)",
+    ":usb_disconnect_traffic_test($host_toolchain)",
     ":usb_fastboot_loop_test($host_toolchain)",
     ":usb_mdns_hotplug_test($host_toolchain)",
     ":usb_reset_test($host_toolchain)",
     ":usb_soak_test($host_toolchain)",
+    ":usb_soak_test_1h($host_toolchain)",
+    ":usb_soak_test_30m($host_toolchain)",
     ":usb_virtual_disconnect_test($host_toolchain)",
     "zero_function:tests($host_toolchain)",
   ]

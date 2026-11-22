@@ -7,6 +7,7 @@
 #include <fidl/fuchsia.device/cpp/wire.h>
 #include <lib/component/incoming/cpp/protocol.h>
 
+#include <algorithm>
 #include <iostream>
 
 namespace {
@@ -32,6 +33,35 @@ std::pair<zx_status_t, uint32_t> CpuPerformanceDomain::GetOperatingPointCount() 
 std::pair<zx_status_t, uint64_t> CpuPerformanceDomain::GetNumLogicalCores() {
   auto resp = cpu_client_->GetNumLogicalCores();
   return std::make_pair(resp.status(), resp.status() == ZX_OK ? resp.value().count : 0);
+}
+
+std::tuple<zx_status_t, const std::vector<uint64_t>&> CpuPerformanceDomain::GetLogicalCoreIds() {
+  // A domain's cores don't change, so there's no need to fetch them again.
+  if (!cached_core_ids_.empty()) {
+    return std::make_tuple(ZX_OK, std::ref(cached_core_ids_));
+  }
+
+  const auto [count_status, count] = GetNumLogicalCores();
+  if (count_status != ZX_OK) {
+    cached_core_ids_.clear();
+    return std::make_tuple(count_status, std::ref(cached_core_ids_));
+  }
+
+  cached_core_ids_.reserve(count);
+  for (uint64_t i = 0; i < count; i++) {
+    auto resp = cpu_client_->GetLogicalCoreId(i);
+    if (resp.status() != ZX_OK) {
+      cached_core_ids_.clear();
+      return std::make_tuple(resp.status(), std::ref(cached_core_ids_));
+    }
+    // Distinct cores have distinct IDs, so a repeat means the driver doesn't report them.
+    if (std::ranges::find(cached_core_ids_, resp.value().id) != cached_core_ids_.end()) {
+      cached_core_ids_.clear();
+      return std::make_tuple(ZX_ERR_NOT_SUPPORTED, std::ref(cached_core_ids_));
+    }
+    cached_core_ids_.push_back(resp.value().id);
+  }
+  return std::make_tuple(ZX_OK, std::ref(cached_core_ids_));
 }
 
 std::pair<zx_status_t, uint64_t> CpuPerformanceDomain::GetRelativePerformance() {

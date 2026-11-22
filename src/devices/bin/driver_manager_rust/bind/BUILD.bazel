@@ -1,0 +1,58 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":driver-manager-bind-unittests"],
+    visibility = ["//src/devices/bin/driver_manager_rust:__pkg__"],
+)
+
+rustc_library(
+    name = "driver_manager_bind",
+    srcs = [
+        "src/bind_manager.rs",
+        "src/bind_node_set.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
+    visibility = [
+        "//src/devices/bin/driver_manager_rust/composite:__pkg__",
+        "//src/devices/bin/driver_manager_rust/core:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_rust",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
+        "//sdk/fidl/fuchsia.driver.index:fuchsia.driver.index_rust",
+        "//sdk/rust/zx",
+        "//src/devices/bin/driver_manager_rust/node:driver_manager_node",
+        "//src/devices/bin/driver_manager_rust/types:driver_manager_types",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "driver_manager_bind_test",
+    crate = ":driver_manager_bind",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "driver-manager-bind-unittests",
+    unit_tests = [":driver_manager_bind_test"],
+)

@@ -1,6 +1,7 @@
 // Copyright 2023 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+use fidl_fuchsia_developer_remotecontrol_common as fidl_fuchsia_developer_remotecontrol;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{fmt, io};
@@ -142,12 +143,12 @@ where
     }
 }
 
-impl Into<CompatibilityInfo> for DeviceConnectionInfo {
-    fn into(self) -> CompatibilityInfo {
+impl From<DeviceConnectionInfo> for CompatibilityInfo {
+    fn from(value: DeviceConnectionInfo) -> Self {
         CompatibilityInfo {
-            status: self.status,
-            platform_abi: self.platform_abi,
-            message: self.message,
+            status: value.status,
+            platform_abi: value.platform_abi,
+            message: value.message,
         }
     }
 }

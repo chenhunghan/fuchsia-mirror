@@ -31,7 +31,6 @@ fidl("fuchsia.memory.debug") {
   sources = [ "debug.fidl" ]
   sdk_area = "Diagnostics"
   sdk_category = "host_tool"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [ "//sdk/fidl/fuchsia.memorypressure" ]

@@ -209,7 +209,6 @@ fidl("fidl") {
   sources = [
     "testdata/empty.test.fidl",
     "testdata/types.test.fidl",
-    "testdata/xunionmigration.fidl",
   ]
 
   public_deps = [ "//zircon/vdso/zx" ]

@@ -1,0 +1,219 @@
+{
+    "name": "control_recip_and_printer_quirk",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 7,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd1",
+                "mode": "rdwr"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd1"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd2",
+                "mode": "rdwr"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd2"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "claimed": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_script_control",
+                "b_request": 0,
+                "action": {
+                    "reply": [
+                        0,
+                        4,
+                        80,
+                        82
+                    ]
+                }
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ok": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd2",
+                "bm_request_type": 161,
+                "b_request": 0,
+                "w_value": 0,
+                "w_index": 0,
+                "w_length": 4,
+                "timeout_ms": 2000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 4,
+                    "data": [
+                        0,
+                        4,
+                        80,
+                        82
+                    ],
+                    "canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd2",
+                "bm_request_type": 65,
+                "b_request": 9,
+                "w_value": 0,
+                "w_index": 0,
+                "w_length": 0,
+                "timeout_ms": 2000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 0,
+                    "canary_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd2",
+                "bm_request_type": 33,
+                "b_request": 2,
+                "w_value": 0,
+                "w_index": 0,
+                "w_length": 0,
+                "timeout_ms": 2000
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EBUSY"
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd1",
+                "bm_request_type": 192,
+                "b_request": 1,
+                "w_value": 0,
+                "w_index": 0,
+                "w_length": 4097,
+                "timeout_ms": 2000
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EINVAL"
+            }
+        },
+        {
+            "step": {
+                "type": "release_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "released": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd2"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        }
+    ]
+}

@@ -12,7 +12,7 @@
 
 #include <ktl/iterator.h>
 #include <phys/runtime/stack.h>
-#include <phys/symbolize.h>
+#include <phys/runtime/symbolize.h>
 
 #include "test-main.h"
 

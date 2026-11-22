@@ -182,39 +182,41 @@ void TouchSystem::Upgrade(UpgradeRequest& request, UpgradeCompleter::Sync& compl
   }
 
   {
-    const auto [_, success] = contenders_.emplace(
-        contender_id,
-        std::make_unique<TouchSourceWithLocalHit>(
-            view_ref_koid, std::move(endpoints->server),
-            /*respond*/
-            [this, contender_id](StreamId stream_id,
-                                 const std::vector<GestureResponse>& responses) {
-              RecordGestureDisambiguationResponse(stream_id, contender_id, responses);
-            },
-            /*error_handler*/
-            [this, contender_id, view_ref_koid] { EraseContender(contender_id, view_ref_koid); },
-            /*get_local_hit*/
-            [this](const view_tree::Snapshot& snapshot, const InternalTouchEvent& event) {
-              // Perform a semantic hit test to find the top view a11y cares about.
-              // TODO(https://fxbug.dev/42057941): If we have more than one TouchSourceWithLocalHit
-              // client, this hit test will be done multiple times per injectiom redundantly. We
-              // might need to improve this in the future, but as long as we're only expecting the
-              // one client this is fine.
-              const zx_koid_t top_koid =
-                  hit_tester_.TopHitTest(snapshot, event, /*semantic_hit_test*/ true);
-              glm::vec2 local_point = glm::vec2(0.f, 0.f);
-              if (top_koid != ZX_KOID_INVALID) {
-                const std::array<float, 9> top_view_from_viewport_transform =
-                    GetDestinationFromViewportTransform(snapshot, event, top_koid);
-                local_point = utils::TransformPointerCoords(
-                    event.position_in_viewport,
-                    utils::ColumnMajorMat3ArrayToMat4(top_view_from_viewport_transform));
-              }
-              return std::pair<zx_koid_t, std::array<float, 2>>{top_koid,
-                                                                {local_point.x, local_point.y}};
-            },
-            contender_inspector_));
+    auto contender = std::make_unique<TouchSourceWithLocalHit>(
+        view_ref_koid, std::move(endpoints->server),
+        /*respond*/
+        [this, contender_id](StreamId stream_id, const std::vector<GestureResponse>& responses) {
+          RecordGestureDisambiguationResponse(stream_id, contender_id, responses);
+        },
+        /*error_handler*/
+        [this, contender_id, view_ref_koid] { EraseContender(contender_id, view_ref_koid); },
+        /*get_local_hit*/
+        [this](const view_tree::Snapshot& snapshot, const InternalTouchEvent& event) {
+          // Perform a semantic hit test to find the top view a11y cares about.
+          // TODO(https://fxbug.dev/42057941): If we have more than one TouchSourceWithLocalHit
+          // client, this hit test will be done multiple times per injectiom redundantly. We
+          // might need to improve this in the future, but as long as we're only expecting the
+          // one client this is fine.
+          const zx_koid_t top_koid =
+              hit_tester_.TopHitTest(snapshot, event, /*semantic_hit_test*/ true);
+          glm::vec2 local_point = glm::vec2(0.f, 0.f);
+          if (top_koid != ZX_KOID_INVALID) {
+            const std::array<float, 9> top_view_from_viewport_transform =
+                GetDestinationFromViewportTransform(snapshot, event, top_koid);
+            local_point = utils::TransformPointerCoords(
+                event.position_in_viewport,
+                utils::ColumnMajorMat3ArrayToMat4(top_view_from_viewport_transform));
+          }
+          return std::pair<zx_koid_t, std::array<float, 2>>{top_koid,
+                                                            {local_point.x, local_point.y}};
+        },
+        contender_inspector_);
+    contender->SetBeginBatchCallback([this] { return ScopedTouchBatch(); });
+    const auto [it, success] = contenders_.emplace(contender_id, std::move(contender));
     FX_CHECK(success);
+    if (batch_depth_ > 0) {
+      it->second->SetBatchMode(true);
+    }
   }
   {
     const auto [_, success] = viewrefs_to_contender_ids_.emplace(view_ref_koid, contender_id);
@@ -259,20 +261,23 @@ void TouchSystem::RegisterTouchSource(
   // Note: These closure must'nt be called in the constructor, since they depend on the
   // |contenders_| map, which isn't filled until after construction completes.
   {
-    const auto [_, success] = contenders_.emplace(
-        contender_id, std::make_unique<TouchSource>(
-                          client_view_ref_koid, std::move(touch_source_server_end),
-                          /*respond*/
-                          [this, contender_id](StreamId stream_id,
-                                               const std::vector<GestureResponse>& responses) {
-                            RecordGestureDisambiguationResponse(stream_id, contender_id, responses);
-                          },
-                          /*error_handler*/
-                          [this, contender_id, client_view_ref_koid] {
-                            EraseContender(contender_id, client_view_ref_koid);
-                          },
-                          contender_inspector_));
+    auto contender = std::make_unique<TouchSource>(
+        client_view_ref_koid, std::move(touch_source_server_end),
+        /*respond*/
+        [this, contender_id](StreamId stream_id, const std::vector<GestureResponse>& responses) {
+          RecordGestureDisambiguationResponse(stream_id, contender_id, responses);
+        },
+        /*error_handler*/
+        [this, contender_id, client_view_ref_koid] {
+          EraseContender(contender_id, client_view_ref_koid);
+        },
+        contender_inspector_);
+    contender->SetBeginBatchCallback([this] { return ScopedTouchBatch(); });
+    const auto [it, success] = contenders_.emplace(contender_id, std::move(contender));
     FX_DCHECK(success);
+    if (batch_depth_ > 0) {
+      it->second->SetBatchMode(true);
+    }
   }
   {
     const auto [_, success] =
@@ -305,6 +310,9 @@ void TouchSystem::RegisterTouchSourceV2(
             },
             contender_inspector_));
     FX_DCHECK(success);
+    if (batch_depth_ > 0) {
+      it->second->SetBatchMode(true);
+    }
   }
   {
     const auto [it, success] =
@@ -406,6 +414,35 @@ void TouchSystem::InjectTouchEventHitTested(InternalTouchEvent event, StreamId s
   }
 
   UpdateGestureContest(snapshot, std::move(event), stream_id);
+}
+
+fit::deferred_action<fit::closure> TouchSystem::ScopedTouchBatch() {
+  BeginTouchBatch();
+  return fit::defer<fit::closure>([this] { EndTouchBatch(); });
+}
+
+void TouchSystem::BeginTouchBatch() {
+  if (batch_depth_++ == 0) {
+    for (auto& [_, contender] : contenders_) {
+      contender->SetBatchMode(true);
+    }
+  }
+}
+
+void TouchSystem::EndTouchBatch() {
+  FX_DCHECK(batch_depth_ > 0);
+  if (--batch_depth_ == 0) {
+    std::vector<ContenderId> contender_ids;
+    contender_ids.reserve(contenders_.size());
+    for (const auto& [id, _] : contenders_) {
+      contender_ids.push_back(id);
+    }
+    for (const ContenderId id : contender_ids) {
+      if (const auto it = contenders_.find(id); it != contenders_.end()) {
+        it->second->SetBatchMode(false);
+      }
+    }
+  }
 }
 
 static bool IsRootOrDirectChildOfRoot(zx_koid_t koid, const view_tree::Snapshot& snapshot) {
@@ -693,8 +730,11 @@ void TouchSystem::EraseContender(ContenderId contender_id, zx_koid_t view_ref_ko
 
   contenders_.erase(contender_it);
 
-  for (const auto stream_id : ongoing_streams) {
-    RecordGestureDisambiguationResponse(stream_id, contender_id, {GestureResponse::kNo});
+  if (!ongoing_streams.empty()) {
+    auto batch = ScopedTouchBatch();
+    for (const auto stream_id : ongoing_streams) {
+      RecordGestureDisambiguationResponse(stream_id, contender_id, {GestureResponse::kNo});
+    }
   }
 }
 

@@ -1,0 +1,133 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_cpp_elf_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":inspect_service_llcpp_tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+# Service tests (ie only FIDL)
+fx_cc_test_binary(
+    name = "inspect_service_llcpp_unittests_bin",
+    srcs = ["service_unittests.cc"],
+    # TODO(https://fxbug.dev/570694755): service_unittests.cc uses angled
+    # `#include <src/lib/...>`, which GN resolves via its root `-I` flag while
+    # Bazel only adds `-iquote .`.
+    copts = ["-I."],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_hlcpp",
+        "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/diagnostics/reader/cpp:archive_reader",
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//zircon/system/ulib/inspect",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "inspect_service_llcpp_unittests_bin_packaged",
+    testonly = True,
+    binary = ":inspect_service_llcpp_unittests_bin",
+    binary_name = "inspect_service_llcpp_unittests_bin",
+)
+
+fx_cc_binary(
+    name = "program_writing_inspect_bin",
+    srcs = ["program.cc"],
+    deps = [
+        ":config",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/inspect/component/cpp",
+        "//zircon/system/ulib/inspect",
+    ],
+)
+
+fx_packaged_binary(
+    name = "program_writing_inspect_bin_packaged",
+    binary = ":program_writing_inspect_bin",
+    binary_name = "program_writing_inspect_bin",
+)
+
+fx_component_manifest(
+    name = "program_writing_inspect_manifest",
+    component_name = "program",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/program.cml",
+)
+
+fx_component(
+    name = "program_writing_inspect",
+    compiled_manifest = ":program_writing_inspect_manifest",
+    deps = [":program_writing_inspect_bin_packaged"],
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+    name = "config",
+    cm_label = ":program_writing_inspect_manifest",
+)
+
+fx_component_manifest(
+    name = "service_tests_manifest",
+    testonly = True,
+    component_name = "service_tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/test.cml",
+)
+
+fx_test_component(
+    name = "service_tests",
+    compiled_manifest = ":service_tests_manifest",
+    deps = [":inspect_service_llcpp_unittests_bin_packaged"],
+)
+
+fx_package(
+    name = "inspect_service_llcpp_tests_package",
+    package_name = "inspect_service_llcpp_tests",
+    testonly = True,
+    components = [":program_writing_inspect"],
+    test_components = [":service_tests"],
+)
+
+fx_test(
+    name = "inspect_service_llcpp_tests",
+    package = ":inspect_service_llcpp_tests_package",
+)

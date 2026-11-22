@@ -44,7 +44,6 @@ fuchsia_cc_driver("aml-ram-driver") {
 
 fuchsia_driver_component("aml-ram") {
   dml_label = ":aml-ram-dml"
-  info = "meta/aml-ram-info.json"
   component_name = "aml-ram"
   deps = [ ":aml-ram-driver" ]
 }

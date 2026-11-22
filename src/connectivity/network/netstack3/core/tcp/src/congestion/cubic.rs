@@ -98,6 +98,15 @@ const FAST_CONVERGENCE_W_MAX: Ratio = Ratio::new(
 /// current value in a single RTT.
 const TARGET_LIMIT: Ratio = Ratio::new(3, 2).unwrap();
 
+/// Per RFC 9406 Section 4.3 (https://www.rfc-editor.org/rfc/rfc9406#section-4.3),
+/// non-paced TCP implementations SHOULD use `L = 8` as the maximum number of
+/// segments by which `cwnd` can grow from a single ACK during slow start
+/// (whereas paced implementations can use `L = infinity`).
+///
+/// TODO(https://fxbug.dev/585208356): Consider lifting this bound if TCP pacing
+/// is implemented.
+const SLOW_START_L: u32 = 8;
+
 /// Hosts [`FixedSeconds`] so that its invariant is upheld by construction.
 mod fixed_seconds {
     use super::*;
@@ -320,10 +329,34 @@ impl<I: Instant, const FAST_CONVERGENCE: bool> Cubic<I, FAST_CONVERGENCE> {
             // TODO(https://fxbug.dev/513208004): Implement the HyStart++ slow
             // start algorithm.
 
-            // Slow start, Per RFC 5681 (https://www.rfc-editor.org/rfc/rfc5681#page-6):
-            // we RECOMMEND that TCP implementations increase cwnd, per:
-            //   cwnd += min (N, SMSS)                      (2)
-            *cwnd = cwnd.saturating_add(u32::min(bytes_acked.get(), u32::from(*mss)));
+            // Slow start grows `cwnd` using appropriate byte counting:
+            //   cwnd += min(N, L * SMSS)
+            // where `N` is the number of newly acknowledged bytes (so ACK
+            // division cannot inflate `cwnd`):
+            // - RFC 5681 (https://www.rfc-editor.org/rfc/rfc5681#page-6)
+            //   recommends `L = 1`, which slows down window growth whenever
+            //   ACKs cover more than one segment (delayed ACKs, GRO, ACK
+            //   thinning).
+            // - RFC 3465 (https://www.rfc-editor.org/rfc/rfc3465#section-2.2)
+            //   caps `L` at `2`.
+            // - RFC 9406 Section 4.3
+            //   (https://www.rfc-editor.org/rfc/rfc9406#section-4.3) recommends
+            //   `L = 8` for non-paced TCP implementations, allowing coalesced
+            //   ACKs to grow `cwnd` appropriately while bounding unpaced burst
+            //   size.
+            //
+            // We use `L = 8` during the initial slow start (`ssthresh ==
+            // SSTHRESH_INIT`). Once `ssthresh` has been set (`ssthresh <
+            // SSTHRESH_INIT`), slow start is only re-entered following an RTO
+            // (`CongestionEvent::Timeout`), where RFC 3465 Section 2.2 requires
+            // `L = 1` since cumulative ACKs for previously transmitted data are
+            // common after a timeout.
+            let max_inc = if *ssthresh == CongestionControlParams::SSTHRESH_INIT {
+                SLOW_START_L * u32::from(*mss)
+            } else {
+                u32::from(*mss)
+            };
+            *cwnd = cwnd.saturating_add(bytes_acked.get().min(max_inc));
             if *cwnd <= *ssthresh {
                 return;
             }
@@ -809,6 +842,64 @@ mod tests {
 
         assert_eq!(params.ssthresh, expected_cwnd);
         assert_eq!(params.cwnd, expected_cwnd);
+    }
+
+    #[test_case(&[1, 1, 1, 1], 4; "single_mss_acks")]
+    #[test_case(&[2, 2], 4; "delayed_acks")]
+    #[test_case(&[4], 4; "stretch_ack")]
+    #[test_case(&[SLOW_START_L], SLOW_START_L; "at_l_limit")]
+    #[test_case(&[SLOW_START_L + 2], SLOW_START_L; "capped_at_l_limit")]
+    fn slow_start_appropriate_byte_counting(
+        acked_segments_per_ack: &[u32],
+        expected_total_growth_segments: u32,
+    ) {
+        let clock = FakeInstantCtx::default();
+        let mut cubic = Cubic::<_, true /* FAST_CONVERGENCE */>::default();
+        let mut params = CongestionControlParams::with_mss(DEFAULT_MSS);
+        let mss = u32::from(DEFAULT_MSS);
+        const RTT: Duration = Duration::from_millis(100);
+
+        let initial_cwnd = params.cwnd;
+        let mut expected_cwnd = initial_cwnd;
+        for &segments in acked_segments_per_ack {
+            let bytes_acked = segments * mss;
+            cubic.on_ack_u32(&mut params, bytes_acked, clock.now(), RTT);
+            expected_cwnd += segments.min(SLOW_START_L) * mss;
+            assert_eq!(params.cwnd, expected_cwnd);
+        }
+        assert_eq!(params.cwnd, initial_cwnd + expected_total_growth_segments * mss);
+    }
+
+    #[test]
+    fn post_rto_slow_start_uses_l_1() {
+        let clock = FakeInstantCtx::default();
+        let mut cubic = Cubic::<_, true /* FAST_CONVERGENCE */>::default();
+        let mut params = CongestionControlParams::with_mss(DEFAULT_MSS);
+        let mss = u32::from(DEFAULT_MSS);
+        const RTT: Duration = Duration::from_millis(100);
+
+        // Trigger an RTO with 6 segments in flight: ssthresh = floor(6 * 0.7) = 4, cwnd = 1.
+        cubic.on_congestion_event(&mut params, CongestionEvent::Timeout, 6 * mss);
+        assert_eq!(params.ssthresh, 4 * mss);
+        assert_eq!(params.cwnd, 1 * mss);
+
+        // Cumulative ACKs for multiple segments only grow cwnd by 1 * MSS per ACK.
+        cubic.on_ack_u32(&mut params, 5 * mss, clock.now(), RTT);
+        assert_eq!(params.cwnd, 2 * mss);
+
+        cubic.on_ack_u32(&mut params, 5 * mss, clock.now(), RTT);
+        assert_eq!(params.cwnd, 3 * mss);
+
+        // Reaching ssthresh = 4 * MSS on a large cumulative ACK stops at ssthresh
+        // without spilling pre-RTO bytes into congestion avoidance.
+        cubic.on_ack_u32(&mut params, 10 * mss, clock.now(), RTT);
+        assert_eq!(params.cwnd, 4 * mss);
+
+        // Once in congestion avoidance (`reno_w_est = 4 < cwnd_prior = 10`, so
+        // `alpha_cubic = 9/17`), normal byte counting resumes: `8 * MSS` acked
+        // exceeds `(17/9) * 4 * MSS` and grows cwnd by 1 * MSS on a single ACK.
+        cubic.on_ack_u32(&mut params, 8 * mss, clock.now(), RTT);
+        assert_eq!(params.cwnd, 5 * mss);
     }
 
     mod strategy {

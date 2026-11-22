@@ -25,7 +25,7 @@ Run as:
 
 ```
 fx run_graphics_metrics \
-    path/to/json_or_fxt/file \
+    path/to/trace/file \
     path/to/output/file.fuchsiaperf.json
 ```
 
@@ -62,73 +62,25 @@ RenderTotalAverage  Manual      11.583923586956521  milliseconds
 # Almost entirely copied from `run_suspend_metrics.py`.
 import argparse
 import pathlib
-import sys
-from typing import Any
+from collections.abc import Sequence
 
 from reporting import metrics
-from trace_processing import trace_importing, trace_model
 from trace_processing.metrics import scenic
 
 
-def PrintClientInfo(model: trace_model.Model) -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     """
-    Prints all of the client information for the GPU.
-    """
-
-    def FindProcessAndThread(
-        model: trace_model.Model, thread_id: int
-    ) -> tuple[Any, Any]:
-        for process in model.processes:
-            for thread in process.threads:
-                if thread.tid == thread_id:
-                    return (process, thread)
-        return (None, None)
-
-    gpu_process: Any = next(
-        filter(lambda p: "#gpu" in p.name, iter(model.processes))
-    )
-    for thread in gpu_process.threads:
-        words = thread.name.split()
-        if words[0] != "ConnectionThread":
-            continue
-        client_thread = int(words[1])
-        process, thread = FindProcessAndThread(model, client_thread)
-        if process:
-            print(f"Connection ID: {client_thread}")
-            print(f"    Process: {process.name}")
-            print(f"    Thread: {thread.name}")
-
-
-def main() -> None:
-    """
-    Takes in a trace file in JSON format and writes metrics in fuchsiaperf.json
-    format to `output_path`.
+    Takes in a trace file and writes metrics in fuchsiaperf.json format to
+    `output_path`.
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("path_to_trace", type=str)
     parser.add_argument("output_path", type=str)
-    parser.add_argument(
-        "--clients", action="store_true", help="Print GPU client info"
-    )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    if args.path_to_trace.endswith(".json"):
-        path_to_trace_json = args.path_to_trace
-    elif args.path_to_trace.endswith(".fxt"):
-        trace2json_path = pathlib.Path(sys.argv[0]).parent / "trace2json"
-        path_to_trace_json = trace_importing.convert_trace_file_to_json(
-            trace_path=args.path_to_trace,
-            trace2json_path=trace2json_path,
-        )
-    else:
-        raise Exception("trace must be in either fxt or json format")
-
-    model: trace_model.Model = trace_importing.create_model_from_file_path(
-        path_to_trace_json
+    trace_results = scenic.ScenicMetricsProcessor().process_metrics_with_fxt(
+        args.path_to_trace
     )
-    if args.clients:
-        PrintClientInfo(model)
-    trace_results = scenic.ScenicMetricsProcessor().process_metrics(model)
 
     metrics.TestCaseResult.write_fuchsiaperf_json(
         results=trace_results,

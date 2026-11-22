@@ -14,7 +14,7 @@ source_set("lib") {
     "system_monitor_renderer.h",
   ]
   public_deps = [
-    "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_hlcpp",
+    "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_cpp",
     "//sdk/fidl/fuchsia.element:fuchsia.element_cpp",
     "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_cpp",
     "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_cpp",
@@ -23,9 +23,7 @@ source_set("lib") {
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/stdcompat",
-    "//sdk/lib/sys/cpp",
     "//sdk/lib/syslog/cpp",
-    "//src/lib/fsl",
     "//src/lib/json_parser",
     "//src/lib/vulkan:vulkan_validation_layers",
     "//src/lib/vulkan/swapchain:image_pipe_swapchain_layer",

@@ -16,5 +16,6 @@ group("tests") {
   deps = [
     "bin:tests",
     "drivers/usb-adb-function:tests",
+    "testing/client:tests",
   ]
 }

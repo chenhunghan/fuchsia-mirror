@@ -142,5 +142,42 @@ TEST_F(ArmGicVisitorTest, TestInterruptProperty4) {
   EXPECT_EQ(static_cast<uint32_t>(IRQ8_MODE_FUCHSIA), static_cast<uint32_t>(*(*irq)[1].mode()));
 }
 
+TEST_F(ArmGicVisitorTest, TestSgiInterrupt) {
+  auto nodes = irq_tester()->GetPbusNodes("sample-device-5");
+  ASSERT_EQ(1lu, nodes.size());
+  auto irq = nodes[0].irq();
+  ASSERT_TRUE(irq);
+  ASSERT_EQ(1lu, irq->size());
+  ASSERT_TRUE((*irq)[0].irq().has_value());
+  ASSERT_TRUE((*irq)[0].irq()->irq().has_value());
+  EXPECT_EQ(static_cast<uint32_t>(IRQ9_SGI), (*irq)[0].irq()->irq().value());
+  EXPECT_EQ(static_cast<uint32_t>(IRQ9_MODE_FUCHSIA), static_cast<uint32_t>(*(*irq)[0].mode()));
+  ASSERT_TRUE((*irq)[0].name().has_value());
+  EXPECT_EQ("sgi-doorbell", *(*irq)[0].name());
+  EXPECT_TRUE(irq_tester()->GetPbusNodes("disabled-sgi-device").empty());
+}
+
+TEST(ArmGicDuplicateSgiTest, RejectDuplicateSgiCapability) {
+  auto tester = std::make_unique<ArmGicVisitorTester>("/pkg/test-data/duplicate-sgi.dtb");
+  // Walking the tree should fail with ZX_ERR_ALREADY_BOUND because both device-first@1
+  // and device-second@2 claim SGI 13.
+  EXPECT_EQ(ZX_ERR_ALREADY_BOUND, tester->manager()->Walk(*tester).status_value());
+}
+
+TEST(ArmGicInvalidSgiModeTest, RejectNonEdgeRisingSgiMode) {
+  auto tester = std::make_unique<ArmGicVisitorTester>("/pkg/test-data/invalid-sgi-mode.dtb");
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, tester->manager()->Walk(*tester).status_value());
+}
+
+TEST(ArmGicV2SgiTest, RejectSgiOnGicV2) {
+  auto tester = std::make_unique<ArmGicVisitorTester>("/pkg/test-data/gicv2-sgi.dtb");
+  EXPECT_EQ(ZX_ERR_NOT_SUPPORTED, tester->manager()->Walk(*tester).status_value());
+}
+
+TEST(ArmGicOutOfRangeSgiTest, RejectOutOfRangeSgiVector) {
+  auto tester = std::make_unique<ArmGicVisitorTester>("/pkg/test-data/out-of-range-sgi.dtb");
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, tester->manager()->Walk(*tester).status_value());
+}
+
 }  // namespace
 }  // namespace arm_gic_dt

@@ -8,7 +8,7 @@ import("//build/test.gni")
 test("weave_trait_updater_unittests") {
   sources = [ "trait_updater_impl_unittests.cc" ]
   deps = [
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/connectivity/weave/adaptation",
     "//src/connectivity/weave/lib/applets_loader",
     "//src/connectivity/weave/lib/core",

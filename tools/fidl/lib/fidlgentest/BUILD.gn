@@ -2,7 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/go/go_library.gni")
 import("//tools/fidl/lib/fidlgentest/fidlgentest_go_test.gni")
 
 group("tests") {
@@ -35,10 +34,16 @@ group("tests") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-go_library("fidlgentest") {
-  sources = [ "endtoendtest.go" ]
-  visibility = [ "*" ]
-  deps = [ "//tools/fidl/lib/fidlgen" ]
+if (is_host) {
+  go_library("fidlgentest") {
+    sources = [ "endtoendtest.go" ]
+    visibility = [
+      ":*",
+      "//tools/fidl/*",
+      "//zircon/tools/*",
+    ]
+    deps = [ "//tools/fidl/lib/fidlgen" ]
+  }
 }
 if (is_host) {
   fidlgentest_go_test("fidlgentest_lib_test") {

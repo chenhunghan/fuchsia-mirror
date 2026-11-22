@@ -1,29 +1,24 @@
-#!/usr/bin/env fuchsia-vendored-python
 # Copyright 2026 The Fuchsia Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Manages and isolates Google Cloud SDK credentials for the Fuchsia development environment.
-
-This module can be imported as a library by other Python scripts,
-or run directly as a standalone CLI tool with subcommands.
-"""
-import argparse
+"""Manages and isolates Google Cloud SDK credentials for the Fuchsia development environment."""
 import json
 import pathlib
 import sys
+from collections.abc import Sequence
 from typing import Any, TextIO
 
 from build.auth import apt, gcloud
 
 # Type alias representing a parsed JSON dictionary.
-JsonDict = dict[str, Any]
+_JsonDict = dict[str, Any]
 
 # Filename for the workspace-isolated credentials copy.
-ISOLATED_ADC_FILENAME = gcloud.ADC_SUBPATH.name
+_ISOLATED_ADC_FILENAME = gcloud.ADC_SUBPATH.name
 
 # Package name for Google Cloud SDK on APT-based package managers.
-GOOGLE_CLOUD_CLI_PACKAGE = "google-cloud-cli"
+_GOOGLE_CLOUD_CLI_PACKAGE = "google-cloud-cli"
 
 _SCRIPT = pathlib.Path(__file__)
 
@@ -32,14 +27,14 @@ class GcloudCredsError(Exception):
     """Base exception for all Google Cloud credentials management and isolation failures."""
 
 
-def msg(text: str, file: TextIO | None = None) -> None:
+def _msg(text: str, file: TextIO | None = None) -> None:
     """Print a message prefixed with the script's basename."""
     if file is None:
         file = sys.stdout
     print(f"[{_SCRIPT.name}] {text}", file=file)
 
 
-def mutate_adc_quota_project(adc_data: JsonDict, quota_project: str) -> bool:
+def _mutate_adc_quota_project(adc_data: _JsonDict, quota_project: str) -> bool:
     """Injects or modifies the quota_project_id in ADC JSON data if applicable.
 
     Returns True if the credentials type is 'authorized_user' and was updated,
@@ -90,16 +85,16 @@ def isolate_credentials(
             f"No Application Default Credentials file found at '{adc_src}'"
         )
 
-    adc_data: JsonDict = json.loads(adc_src.read_text())
+    adc_data: _JsonDict = json.loads(adc_src.read_text())
     if not isinstance(adc_data, dict):
         raise json.JSONDecodeError(
             "Credentials JSON is not a dictionary structure", "", 0
         )
 
     # Only isolate and modify standard user default credentials (authorized_user).
-    if mutate_adc_quota_project(adc_data, quota_project):
+    if _mutate_adc_quota_project(adc_data, quota_project):
         out_dir.mkdir(parents=True, exist_ok=True)
-        local_adc_path = out_dir / ISOLATED_ADC_FILENAME
+        local_adc_path = out_dir / _ISOLATED_ADC_FILENAME
         local_adc_path.write_text(json.dumps(adc_data, indent=2))
         local_adc_path.chmod(0o600)
         return local_adc_path
@@ -126,17 +121,19 @@ def isolate_credentials_safe(
     except GcloudCredsError as e:
         # Avoid printing warnings for missing files, which is normal for unauthenticated users.
         if "No Application Default Credentials file found" not in str(e):
-            msg(
+            _msg(
                 f"Warning: Failed to isolate RBE credentials: {e}",
                 file=sys.stderr,
             )
     except (OSError, json.JSONDecodeError) as e:
-        msg(f"Warning: Failed to isolate RBE credentials: {e}", file=sys.stderr)
+        _msg(
+            f"Warning: Failed to isolate RBE credentials: {e}", file=sys.stderr
+        )
 
     return None
 
 
-def ensure_gcloud_installed() -> None:
+def _ensure_gcloud_installed() -> None:
     """Verifies gcloud is in the PATH, prompting/installing if missing and available.
 
     Raises:
@@ -145,9 +142,9 @@ def ensure_gcloud_installed() -> None:
     if gcloud.path():
         return
 
-    if apt.exists(GOOGLE_CLOUD_CLI_PACKAGE):
+    if apt.exists(_GOOGLE_CLOUD_CLI_PACKAGE):
         try:
-            apt.install(GOOGLE_CLOUD_CLI_PACKAGE, interactive=True)
+            apt.install(_GOOGLE_CLOUD_CLI_PACKAGE, interactive=True)
             # Re-verify path after successful install
             if not gcloud.path():
                 raise GcloudCredsError(
@@ -166,141 +163,32 @@ def ensure_gcloud_installed() -> None:
     )
 
 
-def run_gcloud_login() -> None:
+def _run_gcloud_login(extra_args: Sequence[str] = ()) -> None:
     """Launches interactive Google Cloud Application Default Credentials login."""
-    ensure_gcloud_installed()
+    _ensure_gcloud_installed()
     try:
-        gcloud.login()
+        gcloud.login(extra_args)
     except RuntimeError as e:
-        raise GcloudCredsError(str(e))
+        raise GcloudCredsError(str(e)) from e
 
 
-def _cmd_isolate(args: argparse.Namespace) -> int:
-    """Executes the 'isolate' subcommand."""
+def ensure_oauth(
+    *,
+    force: bool = False,
+    out_dir: pathlib.Path | None = None,
+    quota_project: str | None = None,
+    gcloud_args: Sequence[str] = (),
+) -> pathlib.Path | None:
+    """Ensures valid gcloud ADC credentials and optionally returns an isolated copy."""
+    _ensure_gcloud_installed()
     adc_src = gcloud.resolve_global_adc_path()
-    if not adc_src.is_file():
-        # Silent clean exit when no credentials exist yet (fresh machine).
-        return 0
-    try:
-        local_adc = isolate_credentials(
-            out_dir=args.out_dir.resolve(),
-            quota_project=args.quota_project,
+    if force or not adc_src.is_file() or not gcloud.has_valid_adc_token():
+        _run_gcloud_login(gcloud_args)
+        adc_src = gcloud.get_default_adc_path()
+    if out_dir is not None and quota_project:
+        return isolate_credentials_safe(
+            out_dir=out_dir.resolve(),
+            quota_project=quota_project,
+            source_credentials_path=adc_src,
         )
-        if local_adc:
-            print(local_adc)
-        return 0
-    except Exception as e:
-        msg(f"Error: {e}", file=sys.stderr)
-        return 1
-
-
-def _cmd_login(args: argparse.Namespace) -> int:
-    """Executes the 'login' subcommand."""
-    try:
-        run_gcloud_login()
-        return 0
-    except Exception as e:
-        msg(f"Error: {e}", file=sys.stderr)
-        return 1
-
-
-def _cmd_ensure(args: argparse.Namespace) -> int:
-    """Executes the 'ensure' subcommand."""
-    adc_src = gcloud.resolve_global_adc_path()
-    if not adc_src.is_file():
-        if args.interactive:
-            try:
-                run_gcloud_login()
-            except Exception as e:
-                msg(f"Error: {e}", file=sys.stderr)
-                return 1
-        else:
-            msg(
-                "Error: No credentials found and --interactive is not set.",
-                file=sys.stderr,
-            )
-            return 1
-
-    # Credentials are now guaranteed to exist.
-    try:
-        local_adc = isolate_credentials(
-            out_dir=args.out_dir.resolve(),
-            quota_project=args.quota_project,
-        )
-        if local_adc:
-            print(local_adc)
-        return 0
-    except Exception as e:
-        msg(f"Error: {e}", file=sys.stderr)
-        return 1
-
-
-def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(
-        description="Manages and isolates Google Cloud SDK credentials for the Fuchsia development environment."
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # 1. Isolate Subcommand
-    isolate_parser = subparsers.add_parser(
-        "isolate",
-        help="Creates a copy of global user default credentials with overridden quota project.",
-    )
-    isolate_parser.add_argument(
-        "--out-dir",
-        type=pathlib.Path,
-        required=True,
-        help="Path to a writable shared output directory, typically '<fuchsia_dir>/out'.",
-    )
-    isolate_parser.add_argument(
-        "--quota-project",
-        required=True,
-        help="The Google Cloud quota project ID to write.",
-    )
-    isolate_parser.set_defaults(func=_cmd_isolate)
-
-    # 2. Login Subcommand
-    login_parser = subparsers.add_parser(
-        "login",
-        help="Runs 'gcloud auth application-default login' interactively.",
-    )
-    login_parser.set_defaults(func=_cmd_login)
-
-    # 3. Ensure Subcommand
-    ensure_parser = subparsers.add_parser(
-        "ensure",
-        help="Checks if ADC exists, prompts interactive login if missing, then isolates them.",
-    )
-    ensure_parser.add_argument(
-        "--out-dir",
-        type=pathlib.Path,
-        required=True,
-        help="Path to a writable shared output directory, typically '<fuchsia_dir>/out'.",
-    )
-    ensure_parser.add_argument(
-        "--quota-project",
-        required=True,
-        help="The Google Cloud quota project ID to write.",
-    )
-    ensure_parser.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Launch interactive gcloud login if credentials are missing.",
-    )
-    ensure_parser.set_defaults(func=_cmd_ensure)
-
-    # If no arguments are provided, default to displaying the help message
-    if not argv:
-        parser.print_help()
-        return 0
-
-    args = parser.parse_args(argv)
-    return args.func(args)
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except KeyboardInterrupt:
-        # Standard Unix SIGINT exit code (128 + 2) = 130
-        sys.exit(130)
+    return None

@@ -45,8 +45,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use storage_units::BlockSize;
 use types::{
-    Existence, Item, ItemRef, Key, Layer, LayerIterator, LayerKey, LayerWriter, MaybeContainsKey,
-    MergeType, MergeableKey, OrdLowerBound, Value,
+    Coalesce, Existence, Item, ItemRef, Key, Layer, LayerIterator, LayerKey, LayerWriter,
+    MaybeContainsKey, MergeType, MergeableKey, OrdLowerBound, Value,
 };
 
 pub use merge::Query;
@@ -55,9 +55,9 @@ const SKIP_LIST_LAYER_ITEMS: usize = 512;
 
 // For serialization.
 pub use persistent_layer::{
-    LayerHeader as PersistentLayerHeader, LayerHeaderV39 as PersistentLayerHeaderV39,
-    LayerInfo as PersistentLayerInfo, LayerInfoV39 as PersistentLayerInfoV39, SyncPersistentLayer,
-    layer_from_handle, open_layers,
+    BloomFilterOptions, LayerHeader as PersistentLayerHeader,
+    LayerHeaderV39 as PersistentLayerHeaderV39, LayerInfo as PersistentLayerInfo,
+    LayerInfoV39 as PersistentLayerInfoV39, SyncPersistentLayer, layer_from_handle, open_layers,
 };
 
 pub async fn layers_from_handles<K: Key, V: Value>(
@@ -158,12 +158,13 @@ impl Default for TreeCounters {
 #[fxfs_trace::trace]
 pub async fn compact_with_iterator<K: Key, V: Value, W: WriteBytes + Send>(
     mut iterator: impl LayerIterator<K, V>,
-    num_items: usize,
+    bloom_filter_options: Option<BloomFilterOptions>,
     writer: W,
     block_size: BlockSize,
     mut yielder: Option<impl Yielder>,
 ) -> Result<u64, Error> {
-    let mut writer = PersistentLayerWriter::<W, K, V>::new(writer, num_items, block_size).await?;
+    let mut writer =
+        PersistentLayerWriter::<W, K, V>::new(writer, bloom_filter_options, block_size).await?;
     while let Some(item_ref) = iterator.get() {
         debug!(item_ref:?; "compact: writing");
         writer.write(item_ref).await?;
@@ -411,7 +412,10 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
     }
 
     /// Merges the given item into the mutable layer.
-    pub fn merge_into(&self, item: Item<K, V>, lower_bound: &K) {
+    pub fn merge_into(&self, item: Item<K, V>, lower_bound: &K)
+    where
+        K: Coalesce<V>,
+    {
         let _measure = DurationMeasureScope::new(&crate::metrics::lsm_tree_metrics().merge_into);
 
         let key = if self.is_cacheable(&item.key) { Some(item.key.clone()) } else { None };
@@ -767,7 +771,7 @@ pub trait Yielder: Send {
 
 #[cfg(test)]
 mod tests {
-    use super::{LSMTree, Yielder, compact_with_iterator};
+    use super::{BloomFilterOptions, LSMTree, Yielder, compact_with_iterator};
     use crate::drop_event::DropEvent;
     use crate::lsm_tree::cache::{ObjectCache, ObjectCachePlaceholder, ObjectCacheResult};
     use crate::lsm_tree::merge::{ItemOp, MergeLayerIterator, MergeResult};
@@ -876,7 +880,7 @@ mod tests {
             let iter = merger.query(Query::FullScan).await.expect("create merger");
             compact_with_iterator(
                 iter,
-                items.len(),
+                Some(BloomFilterOptions { num_items: items.len() }),
                 Writer::new(&handle).await,
                 handle.block_size(),
                 Option::<NoOpYielder>::None,
@@ -1322,7 +1326,7 @@ mod tests {
             let iter = merger.query(Query::FullScan).await.expect("create merger");
             compact_with_iterator(
                 iter,
-                0,
+                None,
                 Writer::new(&handle).await,
                 handle.block_size(),
                 Option::<NoOpYielder>::None,

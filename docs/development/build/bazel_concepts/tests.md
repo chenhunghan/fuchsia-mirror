@@ -20,9 +20,9 @@ being buildable exclusively with Bazel, and additionally:
 
 - Aside from `environments` (which defaults to the build's default test
   environments), `build_only`, `max_log_severity` (which defaults to `WARN`),
-  `min_log_severity`, and `test_type` (for running in a non-hermetic test
-  realm such as `"starnix"` or `"system"`), test spec fields (timeouts, etc.)
-  cannot be customized per test yet.
+  `min_log_severity`, `parallel`, and `test_type` (for running in a
+  non-hermetic test realm such as `"starnix"` or `"system"`), test spec fields
+  (timeouts, etc.) cannot be customized per test yet.
 
 [fxbug.dev/564574581](https://fxbug.dev/564574581) tracks the remaining work for
 target tests in Bazel.
@@ -110,7 +110,7 @@ Hence, to define a Fuchsia-compatible host test in Bazel:
   with the current configuration. See
   [Bazel test compatibility](#bazel-test-compatibility) for more details.
 
-## Exporting Bazel host tests to `fx test` and infra builders
+## Exporting Bazel host tests to fx test and infra builders {#exporting-bazel-host-tests-to-fx-test-and-infra-builders}
 
 Defining the `host_xxx_test()` target alone will **NOT** make it visible to
 `fx test` and, more importantly, to infra builders.
@@ -187,9 +187,6 @@ During development, it is possible to build and run test targets once they are
 defined, before they are exported as described above. See the
 [Running tests directly with Bazel](#running-tests-directly-with-bazel) section
 below.
-
-Note: Bazel tests do not show up in `tests.json` if the `export_bazel_tests`
-GN argument is overridden to `false`.
 
 ### Best practices
 
@@ -613,16 +610,45 @@ publishes the package manifests listed in `bazel_test_packages.list` before
 running the test. A running package server and a connected device or emulator
 are required, exactly as for GN device tests.
 
+## Running Bazel tests that aren't in the GN build graph {#running-bazel-tests-that-arent-in-the-gn-build-graph}
+
+`fx test` can also run an `fx_test()` or `host_test()` that isn't in
+`tests.json`, either because it isn't in any `bazel_test_suite()` or because
+the GN targets that export it aren't included in your `fx set` build graph, if
+you pass its Bazel label:
+
+```posix-terminal
+fx test //src/foo/bar:bar_tests
+```
+
+If a label isn't in `tests.json` and is in a directory with a `BUILD.bazel`
+file, `fx test` queries Bazel for the test details, then builds, publishes, and
+runs it as usual. In a directory with both `BUILD.gn` and `BUILD.bazel` where
+the GN target is already in `tests.json`, prefix the label with `@//` (for
+example `fx test @//src/foo/bar:bar_tests`) to select the Bazel target instead
+of the GN one. Target patterns (like `//src/foo/...` or `//src/foo:all`) and
+`test_suite()` targets aren't supported.
+
+This only works when you select a test by its Bazel label. Tests that aren't
+in the GN build graph can't be selected by package URL (such as
+`fuchsia-pkg://fuchsia.com/bar_tests#meta/bar_test.cm`), test name, or fuzzy
+match, because `fx test` only knows those for tests that are in `tests.json`.
+
+Infra builders only run tests in `tests.json`, so tests still need to be
+exported to the GN build graph to run in presubmit and postsubmit.
+
 ## Running Fuchsia Bazel host tests
 
 ### Local testing
 
 #### Running tests with `fx test`
 
-To run Bazel host tests with `fx test`, they **MUST** be exported by following
-the instructions in the
+To run Bazel host tests with `fx test` by name, they **MUST** be exported by
+following the instructions in the
 [Exporting Bazel host tests to `fx test` and infra builders](#exporting-bazel-host-tests-to-fx-test-and-infra-builders)
-section above.
+section above. Tests that aren't in the GN build graph can only be run by
+Bazel label, as described in
+[Running Bazel tests that aren't in the GN build graph](#running-bazel-tests-that-arent-in-the-gn-build-graph).
 
 After the tests are exported, use `fx test --host <name_or_label>` to build and
 run a Bazel host test locally, same as with GN-defined host tests.
@@ -767,7 +793,7 @@ and `llvm-profdata` then resolves these binaries via `.symbol-index.json`.
 
 ### FAQ
 
-#### Bazel test compatibility
+#### Bazel test compatibility {#bazel-test-compatibility}
 
 If any test in a `test_suite()` (or any of its dependencies) is incompatible
 with the current configuration (e.g., using `target_compatible_with`), that test

@@ -38,6 +38,7 @@ python_library("assembly") {
     "package_copier.py",
     "package_manifest.py",
   ]
+  imports = [ ".." ]
   visibility = [
     ":*",
     "//build/assembly/*",
@@ -49,4 +50,5 @@ python_library("assembly") {
     "//build/python/modules/depfile",
     "//build/python/modules/serialization",
   ]
+  enable_mypy = false
 }

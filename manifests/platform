@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <manifest>
+  <!-- LINT.IfChange(platform_imports) -->
   <imports>
     <localimport file="third_party/all"/>
     <localimport file="prebuilts"/>
   </imports>
+  <!-- LINT.ThenChange(//tools/devshell/sync:platform_imports) -->
   <projects>
     <project name="fuchsia"
              path="."
@@ -11,6 +13,7 @@
              gerrithost="https://fuchsia-review.googlesource.com"
              githooks="integration/git-hooks"/>
   </projects>
+  <!-- LINT.IfChange(platform_hooks) -->
   <hooks>
     <hook name="install-environment"
           project="fuchsia"
@@ -34,4 +37,5 @@
           project="fuchsia"
           action="tools/build/scripts/extract_pathspec_wheel.sh"/>
   </hooks>
+  <!-- LINT.ThenChange(//tools/devshell/sync:platform_hooks) -->
 </manifest>

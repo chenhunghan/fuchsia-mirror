@@ -26,6 +26,7 @@ use std::num::NonZero;
 use std::ops::DerefMut;
 use std::sync::Arc;
 
+use crate::power::SuspendResumeManagerHandle;
 use starnix_logging::{log_error, log_info, log_warn};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::{ENOENT, error};
@@ -442,13 +443,17 @@ pub struct GenericNetlinkWorkerParams<S: Sender<GenericMessage>> {
 pub async fn run_generic_netlink_worker<S: Sender<GenericMessage>>(
     params: GenericNetlinkWorkerParams<S>,
     enable_nl80211: bool,
+    suspend_resume_manager: SuspendResumeManagerHandle,
 ) {
     // Initialize supported families on the worker, so that they shares an
     // executor with the main netlink future.
     let nl80211_family = if enable_nl80211 {
         // This boolean is tied to availability of the Wlanix protocol, so this
         // operation will always succeed unless our product config is invalid.
-        Some(nl80211::Nl80211Family::new().expect("Failed to connect to Nl80211 netlink family"))
+        Some(
+            nl80211::Nl80211Family::new(suspend_resume_manager)
+                .expect("Failed to connect to Nl80211 netlink family"),
+        )
     } else {
         None
     };

@@ -78,6 +78,68 @@
             ]
         },
         {
+            "name": "BoundsTest.AuditAndPermissiveFlagsNotBounded",
+            "audit_expectations": [
+                "avc:  denied  { write } for scontext=test_u:test_r:test_bounds_audit_child_s:s0 tcontext=test_u:object_r:test_bounds_audit_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { read } for scontext=test_u:test_r:test_bounds_permissive_parent_s:s0 tcontext=test_u:object_r:test_bounds_audit_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "BoundsTest.ExtendedPermissionsPerDomainNotBounded",
+            "audit_expectations": [
+                "avc:  denied  { ioctl } for ioctlcmd=0xabce scontext=test_u:test_r:test_bounds_xperm_parent_s:s0 tcontext=test_u:object_r:test_bounds_xperm_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { ioctl } for ioctlcmd=0xabcd scontext=test_u:test_r:test_bounds_xperm_child_s:s0 tcontext=test_u:object_r:test_bounds_xperm_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "BoundsTest.MlsConstrainAppliedAcrossBounds",
+            "audit_expectations": [
+                "avc:  denied  { write } for scontext=test_u:test_r:test_bounds_mls_child_s:s0 tcontext=test_u:object_r:test_bounds_mls_file_t:s1:c0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "BoundsTest.MultiLevelMultithreadedDyntransition",
+            "audit_expectations": []
+        },
+        {
+            "name": "BoundsTest.MultiLevelNoNewPrivsExecveTransition",
+            "audit_expectations": []
+        },
+        {
+            "name": "BoundsTest.MultiLevelNosuidMountExecveTransition",
+            "audit_expectations": []
+        },
+        {
+            "name": "BoundsTest.PairedSourceAndTargetBounds",
+            "audit_expectations": [
+                "avc:  denied  { read } for scontext=test_u:test_r:test_bounds_parent_s:s0 tcontext=test_u:object_r:test_bounds_child_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "BoundsTest.SourceConstrainAppliedAcrossBounds",
+            "audit_expectations": [
+                "avc:  denied  { read } for scontext=test_u:test_r:test_bounds_constrain_child_s:s0 tcontext=test_u:object_r:test_bounds_constrain_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { append } for scontext=test_u:test_r:test_bounds_constrain_child_s:s0 tcontext=test_u:object_r:test_bounds_constrain_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { read } for scontext=test_u:test_r:test_bounds_constrain_deep_s:s0 tcontext=test_u:object_r:test_bounds_constrain_deep_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "BoundsTest.StandaloneTargetBoundsNotEnforced",
+            "audit_expectations": [
+                "avc:  denied  { read } for scontext=test_u:test_r:test_bounds_unbounded_s:s0 tcontext=test_u:object_r:test_bounds_parent_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "BoundsTest.TargetConstrainAppliedAcrossBounds",
+            "audit_expectations": [
+                "avc:  denied  { read } for scontext=test_u:test_r:test_bounds_constrain_t2_child_s:s0 tcontext=test_u:object_r:test_bounds_constrain_target_child_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "BoundsTest.UnequalDepthPairedBounds",
+            "audit_expectations": []
+        },
+        {
             "name": "BpfCapabilityAuditTestSuite/BpfCapabilityAuditTest.MapCreate/both",
             "audit_expectations": []
         },
@@ -323,6 +385,110 @@
             "audit_expectations": [
                 "avc:  denied  { getcap } for scontext=test_u:test_r:test_deny_setcap_self_t:s0 tcontext=test_u:test_r:test_deny_setcap_self_t:s0 tclass=process permissive=1",
                 "avc:  denied  { setcap } for scontext=test_u:test_r:test_deny_setcap_self_t:s0 tcontext=test_u:test_r:test_deny_setcap_self_t:s0 tclass=process permissive=1"
+            ]
+        },
+        {
+            "name": "CapabilitiesTest/PrctlCapbsetDropTest.Drop/Denied",
+            "audit_expectations": [
+                "avc:  denied  { setpcap } for capability=8  scontext=test_u:test_r:test_deny_setpcap_t:s0 tcontext=test_u:test_r:test_deny_setpcap_t:s0 tclass=capability permissive=0"
+            ]
+        },
+        {
+            "name": "CapabilitiesTest/SetTimeOfDayTest.InvalidTimezone/Denied",
+            "audit_expectations": [
+                "avc:  denied  { sys_time } for capability=25  scontext=test_u:test_r:test_deny_sys_time_t:s0 tcontext=test_u:test_r:test_deny_sys_time_t:s0 tclass=capability permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.BooleanOperatorsAndNestedExpressions",
+            "audit_expectations": [
+                "avc:  denied  { read } for scontext=test_constraints_u1:test_constraints_r2:test_constraints_bool_regular_s:s0 tcontext=test_constraints_u1:test_constraints_r1:test_constraints_bool_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { read } for scontext=test_constraints_u1:test_constraints_r1:test_constraints_bool_override_s:s0 tcontext=test_constraints_u3:test_constraints_r2:test_constraints_bool_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.CommonVsClassSpecificAndUnconstrainedPermissions",
+            "audit_expectations": [
+                "avc:  denied  { read } for scontext=test_constraints_u2:test_constraints_r2:test_constraints_dir_s:s0 tcontext=test_constraints_u1:test_constraints_r1:test_constraints_dir_t:s0 tclass=dir permissive=0",
+                "avc:  denied  { rmdir } for scontext=test_constraints_u2:test_constraints_r2:test_constraints_dir_s:s0 tcontext=test_constraints_u1:test_constraints_r1:test_constraints_dir_t:s0 tclass=dir permissive=0",
+                "avc:  denied  { rmdir } for scontext=test_constraints_u1:test_constraints_r2:test_constraints_dir_s:s0 tcontext=test_constraints_u1:test_constraints_r1:test_constraints_dir_t:s0 tclass=dir permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.MlsConstrainDominance",
+            "audit_expectations": [
+                "avc:  denied  { write } for scontext=test_constraints_u1:test_r:test_constraints_mls_dom_s:s1:c0,c1 tcontext=test_constraints_u1:object_r:test_constraints_mls_dom_file_t:s1:c0 tclass=file permissive=0",
+                "avc:  denied  { read } for scontext=test_constraints_u1:test_r:test_constraints_mls_dom_s:s0:c0-s2:c0,c1 tcontext=test_constraints_u1:object_r:test_constraints_mls_dom_file_t:s1:c0 tclass=file permissive=0",
+                "avc:  denied  { write } for scontext=test_constraints_u1:test_r:test_constraints_mls_dom_s:s0:c0-s0:c0,c1 tcontext=test_constraints_u1:object_r:test_constraints_mls_dom_file_t:s1:c0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.MlsConstrainEqualityAndInequality",
+            "audit_expectations": [
+                "avc:  denied  { write } for scontext=test_constraints_u1:test_r:test_constraints_mls_eq_s:s0:c0 tcontext=test_constraints_u1:object_r:test_constraints_mls_eq_file_t:s0:c0 tclass=file permissive=0",
+                "avc:  denied  { write } for scontext=test_constraints_u1:test_r:test_constraints_mls_eq_s:s0:c0-s1:c0 tcontext=test_constraints_u1:object_r:test_constraints_mls_eq_file_t:s0:c0-s1:c0 tclass=file permissive=0",
+                "avc:  denied  { read } for scontext=test_constraints_u1:test_r:test_constraints_mls_eq_s:s0 tcontext=test_constraints_u1:object_r:test_constraints_mls_eq_file_t:s0:c0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.MlsConstrainIncomparableLevels",
+            "audit_expectations": [
+                "avc:  denied  { read } for scontext=test_constraints_u1:test_r:test_constraints_mls_incomp_s:s0:c1 tcontext=test_constraints_u1:object_r:test_constraints_mls_incomp_file_t:s0:c0 tclass=file permissive=0",
+                "avc:  denied  { write } for scontext=test_constraints_u1:test_r:test_constraints_mls_incomp_s:s0:c0,c1 tcontext=test_constraints_u1:object_r:test_constraints_mls_incomp_file_t:s0:c0 tclass=file permissive=0",
+                "avc:  denied  { read } for scontext=test_constraints_u1:test_r:test_constraints_mls_incomp_s:s1:c1 tcontext=test_constraints_u1:object_r:test_constraints_mls_incomp_file_t:s0:c0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.MultipleConstraintsOnSamePermission",
+            "audit_expectations": [
+                "avc:  denied  { link } for scontext=test_constraints_u2:test_r:test_constraints_multi_ok_s:s0 tcontext=test_constraints_u1:object_r:test_constraints_multi_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { link } for scontext=test_constraints_u1:test_r:test_constraints_multi_bad_type_s:s0 tcontext=test_constraints_u1:object_r:test_constraints_multi_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.RoleAttributeEqualityAndInequality",
+            "audit_expectations": [
+                "avc:  denied  { read } for scontext=test_constraints_u1:test_constraints_r1:test_constraints_role_s:s0 tcontext=test_constraints_u1:test_constraints_r1:test_constraints_role_ne_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { setattr } for scontext=test_constraints_u1:test_constraints_r2:test_constraints_role_s:s0 tcontext=test_constraints_u1:test_constraints_r1:test_constraints_role_eq_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.RoleNameSets",
+            "audit_expectations": [
+                "avc:  denied  { write } for scontext=test_constraints_u1:test_constraints_r2:test_constraints_role_set_s:s0 tcontext=test_constraints_u1:test_constraints_r2:test_constraints_role_set_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { write } for scontext=test_constraints_u1:test_constraints_r2:test_constraints_role_set_s:s0 tcontext=test_constraints_u1:test_constraints_r3:test_constraints_role_set_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { read } for scontext=test_constraints_u1:test_constraints_r3:test_constraints_role_set_s:s0 tcontext=test_constraints_u1:test_constraints_r1:test_constraints_role_set_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { read } for scontext=test_constraints_u1:test_r:test_constraints_role_set_s:s0 tcontext=test_constraints_u1:test_constraints_r1:test_constraints_role_set_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.TypeAndAttributeNameSets",
+            "audit_expectations": [
+                "avc:  denied  { read } for scontext=test_u:test_r:test_constraints_type_attr_s:s0 tcontext=test_u:object_r:test_constraints_type_blocked_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { read } for scontext=test_u:test_r:test_constraints_type_unlisted_s:s0 tcontext=test_u:object_r:test_constraints_type_ok_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.TypeAttributeEqualityAndInequality",
+            "audit_expectations": [
+                "avc:  denied  { write } for scontext=test_u:test_r:test_constraints_same_type_t:s0 tcontext=test_u:object_r:test_constraints_same_type_t:s0 tclass=file permissive=0",
+                "avc:  denied  { append } for scontext=test_u:test_r:test_constraints_same_type_t:s0 tcontext=test_u:object_r:test_constraints_diff_type_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.UserAttributeEqualityAndInequality",
+            "audit_expectations": [
+                "avc:  denied  { read } for scontext=test_constraints_u1:test_r:test_constraints_user_s:s0 tcontext=test_constraints_u1:object_r:test_constraints_user_ne_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { lock } for scontext=test_constraints_u2:test_r:test_constraints_user_s:s0 tcontext=test_constraints_u1:object_r:test_constraints_user_eq_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ConstraintsTest.UserNameSets",
+            "audit_expectations": [
+                "avc:  denied  { write } for scontext=test_constraints_u2:test_r:test_constraints_user_set_s:s0 tcontext=test_constraints_u3:object_r:test_constraints_user_set_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { write } for scontext=test_constraints_u2:test_r:test_constraints_user_set_s:s0 tcontext=test_u:object_r:test_constraints_user_set_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { read } for scontext=test_constraints_u3:test_r:test_constraints_user_set_s:s0 tcontext=test_constraints_u1:object_r:test_constraints_user_set_file_t:s0 tclass=file permissive=0",
+                "avc:  denied  { read } for scontext=test_u:test_r:test_constraints_user_set_s:s0 tcontext=test_constraints_u1:object_r:test_constraints_user_set_file_t:s0 tclass=file permissive=0"
             ]
         },
         {
@@ -1329,6 +1495,18 @@
             ]
         },
         {
+            "name": "OverlayFsTest.KillprivDeniedIfMounterLacksSetattr",
+            "audit_expectations": [
+                "avc:  denied  { setattr } for name=\"file\" dev=\"tmpfs\" ino=230 scontext=test_u:test_r:test_overlayfs_mounter_t:s0 tcontext=test_u:object_r:test_overlay_mounter_no_setattr_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "OverlayFsTest.KillprivDeniedIfMounterLacksSetfcap",
+            "audit_expectations": [
+                "avc:  denied  { setfcap } for capability=31  scontext=test_u:test_r:test_overlayfs_mounter_no_setfcap_t:s0 tcontext=test_u:test_r:test_overlayfs_mounter_no_setfcap_t:s0 tclass=capability permissive=0"
+            ]
+        },
+        {
             "name": "OverlayFsTest.MknodRequiresCallerCapability",
             "audit_expectations": [
                 "avc:  denied  { mknod } for capability=27  scontext=test_u:test_r:test_overlayfs_caller_no_mknod_t:s0 tcontext=test_u:test_r:test_overlayfs_caller_no_mknod_t:s0 tclass=capability permissive=0"
@@ -1357,6 +1535,12 @@
             "audit_expectations": [
                 "avc:  denied  { getattr } for name=\"file\" dev=\"tmpfs\" ino=174 scontext=test_u:test_r:test_overlayfs_mounter_t:s0 tcontext=test_u:object_r:test_overlay_mounter_no_getattr_file_t:s0 tclass=file permissive=0",
                 "avc:  denied  { getattr } for name=\"file\" dev=\"tmpfs\" ino=174 scontext=test_u:test_r:test_overlayfs_mounter_t:s0 tcontext=test_u:object_r:test_overlay_mounter_no_getattr_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "OverlayFsTest.UpperSetattrChecksRespectForce",
+            "audit_expectations": [
+                "avc:  denied  { setattr } for name=\"file\" dev=\"tmpfs\" ino=196 scontext=test_u:test_r:test_overlayfs_mounter_t:s0 tcontext=test_u:object_r:test_overlay_mounter_no_setattr_file_t:s0 tclass=file permissive=0"
             ]
         },
         {
@@ -2068,6 +2252,24 @@
             ]
         },
         {
+            "name": "ProcFs/ProcTaskTransitionTest.UpdatesAndRetainsLabelsAcrossLifecycle/Dynamic",
+            "audit_expectations": [
+                "avc:  denied  { read } for path=\"/proc/status\" dev=\"proc\" ino=1 scontext=test_u:test_r:test_procfs_initial_t:s0 tcontext=test_u:test_r:test_procfs_dyntransition_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ProcFs/ProcTaskTransitionTest.UpdatesAndRetainsLabelsAcrossLifecycle/Exec",
+            "audit_expectations": [
+                "avc:  denied  { read } for path=\"/proc/status\" dev=\"proc\" ino=1 scontext=test_u:test_r:test_procfs_initial_t:s0 tcontext=test_u:test_r:test_procfs_exec_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "ProcFsTest.ProcTaskTidNodesReflectBoundedThreadLabel",
+            "audit_expectations": [
+                "avc:  denied  { read } for path=\"/proc/status\" dev=\"proc\" ino=1 scontext=test_u:test_r:test_procfs_unbounded_t:s0 tcontext=test_u:test_r:test_procfs_bounded_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
             "name": "PtraceTest.PtraceAttachAllowed",
             "audit_expectations": [
                 "avc:  denied  { rlimitinh } for scontext=test_u:test_r:test_ptrace_parent_allow_t:s0 tcontext=test_u:test_r:test_ptrace_child_t:s0 tclass=process permissive=0",
@@ -2180,6 +2382,18 @@
             ]
         },
         {
+            "name": "SchedTest/SchedSysNiceTest.MissingTargetCapRequiresSysNice/SchedSetaffinityDenied",
+            "audit_expectations": [
+                "avc:  denied  { sys_nice } for capability=23  scontext=test_u:test_r:test_sched_child_no_sys_nice_t:s0 tcontext=test_u:test_r:test_sched_child_no_sys_nice_t:s0 tclass=capability permissive=0"
+            ]
+        },
+        {
+            "name": "SchedTest/SchedSysNiceTest.MissingTargetCapRequiresSysNice/SetpriorityDenied",
+            "audit_expectations": [
+                "avc:  denied  { sys_nice } for capability=23  scontext=test_u:test_r:test_sched_child_no_sys_nice_t:s0 tcontext=test_u:test_r:test_sched_child_no_sys_nice_t:s0 tclass=capability permissive=0"
+            ]
+        },
+        {
             "name": "SeLinuxFsNull.HasPolicyDevnullContext",
             "audit_expectations": [
                 "avc:  denied  { getattr } for name=\"null\" dev=\"selinuxfs\" ino=23 scontext=system_u:unconfined_r:unconfined_t:s0 tcontext=system_u:object_r:devnull_t:s0 tclass=chr_file permissive=1"
@@ -2228,18 +2442,19 @@
             ]
         },
         {
-            "name": "SocketPeerSecTest.UnixDomainStream",
+            "name": "SocketPeerSecTests/SocketPeerSecConnectedTest.UnixDomain/SOCK_STREAM",
             "audit_expectations": [
                 "avc:  denied  { create } for scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:test_r:socket_test_peer_t:s0 tclass=unix_stream_socket permissive=1",
-                "avc:  denied  { getattr } for name=\"UNIX-STREAM\" dev=\"sockfs\" ino=945 scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:test_r:socket_test_peer_t:s0 tclass=unix_stream_socket permissive=1",
+                "avc:  denied  { getattr } for name=\"UNIX-STREAM\" dev=\"sockfs\" ino=1461 scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:test_r:socket_test_peer_t:s0 tclass=unix_stream_socket permissive=1",
                 "avc:  denied  { getopt } for scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:test_r:socket_test_peer_t:s0 tclass=unix_stream_socket permissive=1",
                 "avc:  denied  { getopt } for scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:test_r:unix_stream_socket_test_t:s0 tclass=unix_stream_socket permissive=1",
                 "avc:  denied  { bind } for scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:test_r:socket_test_peer_t:s0 tclass=unix_stream_socket permissive=1",
-                "avc:  denied  { listen } for path=\"/tmp/unix_domain_stream_test\" scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:test_r:socket_test_peer_t:s0 tclass=unix_stream_socket permissive=1",
+                "avc:  denied  { listen } for path=\"/tmp/testdirUiMOLk/listener\" scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:test_r:socket_test_peer_t:s0 tclass=unix_stream_socket permissive=1",
                 "avc:  denied  { connect } for scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:test_r:unix_stream_socket_test_t:s0 tclass=unix_stream_socket permissive=1",
-                "avc:  denied  { write } for name=\"unix_domain_stream_test\" dev=\"tmpfs\" ino=6 scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:object_r:sock_file_test_t:s0 tclass=sock_file permissive=1",
-                "avc:  denied  { connectto } for path=\"/tmp/unix_domain_stream_test\" scontext=test_u:test_r:unix_stream_socket_test_t:s0 tcontext=test_u:test_r:socket_test_peer_t:s0 tclass=unix_stream_socket permissive=1",
-                "avc:  denied  { accept } for path=\"/tmp/unix_domain_stream_test\" scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:test_r:socket_test_peer_t:s0 tclass=unix_stream_socket permissive=1"
+                "avc:  denied  { write } for name=\"listener\" dev=\"tmpfs\" ino=7 scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:object_r:sock_file_test_t:s0 tclass=sock_file permissive=1",
+                "avc:  denied  { connectto } for path=\"/tmp/testdirUiMOLk/listener\" scontext=test_u:test_r:unix_stream_socket_test_t:s0 tcontext=test_u:test_r:socket_test_peer_t:s0 tclass=unix_stream_socket permissive=1",
+                "avc:  denied  { accept } for path=\"/tmp/testdirUiMOLk/listener\" scontext=test_u:test_r:socket_test_t:s0 tcontext=test_u:test_r:socket_test_peer_t:s0 tclass=unix_stream_socket permissive=1",
+                "avc:  denied  { unlink } for name=\"listener\" dev=\"tmpfs\" ino=7 scontext=system_u:unconfined_r:unconfined_t:s0 tcontext=test_u:object_r:sock_file_test_t:s0 tclass=sock_file permissive=1"
             ]
         },
         {
@@ -2670,6 +2885,30 @@
             "audit_expectations": [
                 "avc:  denied  { write } for name=\"proc_test_file_aFfZIv\" dev=\"tmpfs\" ino=5 scontext=test_u:test_r:test_xattr_user_nowrite_t:s0 tcontext=test_u:object_r:test_xattr_access_file_t:s0 tclass=file permissive=0",
                 "avc:  denied  { setattr } for name=\"proc_test_file_aFfZIv\" dev=\"tmpfs\" ino=5 scontext=test_u:test_r:test_xattr_user_nosetattr_t:s0 tcontext=test_u:object_r:test_xattr_access_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "XattrTest/CapabilityXattrTest.Remove/capsetfcap_nosetattr",
+            "audit_expectations": [
+                "avc:  denied  { setattr } for name=\"proc_test_file_xxdNoz\" dev=\"tmpfs\" ino=21 scontext=test_u:test_r:test_xattr_capsetfcap_nosetattr_t:s0 tcontext=test_u:object_r:test_xattr_access_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "XattrTest/CapabilityXattrTest.Remove/nocapsetfcap",
+            "audit_expectations": [
+                "avc:  denied  { setfcap } for capability=31  scontext=test_u:test_r:test_xattr_nocapsetfcap_t:s0 tcontext=test_u:test_r:test_xattr_nocapsetfcap_t:s0 tclass=capability permissive=0"
+            ]
+        },
+        {
+            "name": "XattrTest/CapabilityXattrTest.Set/capsetfcap_nosetattr",
+            "audit_expectations": [
+                "avc:  denied  { setattr } for name=\"proc_test_file_mlyehg\" dev=\"tmpfs\" ino=18 scontext=test_u:test_r:test_xattr_capsetfcap_nosetattr_t:s0 tcontext=test_u:object_r:test_xattr_access_file_t:s0 tclass=file permissive=0"
+            ]
+        },
+        {
+            "name": "XattrTest/CapabilityXattrTest.Set/nocapsetfcap",
+            "audit_expectations": [
+                "avc:  denied  { setfcap } for capability=31  scontext=test_u:test_r:test_xattr_nocapsetfcap_t:s0 tcontext=test_u:test_r:test_xattr_nocapsetfcap_t:s0 tclass=capability permissive=0"
             ]
         }
     ]

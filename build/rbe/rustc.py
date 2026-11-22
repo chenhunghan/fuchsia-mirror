@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import AbstractSet
 
-import cl_utils
+from build.rbe import cl_utils
 
 _RUSTC_FUSED_FLAGS = ["-C", "-L", "-Z"]
 
@@ -287,21 +287,20 @@ class _ScanDepsCommandTransformer(object):
 
     @property
     def _replacement_emit_args(self) -> Sequence[str]:
-        # Remove outputs like emit=link.
-        if self.emit_metadata:
-            # Need to tell the compiler driver that we are only interested
-            # in the deps needed for generating metadata.
-            return [
-                f"--emit=metadata,dep-info={self.depfile_name}",
-                "-Z",
-                "binary-dep-depinfo",
-            ]
-        else:
-            return [
-                f"--emit=dep-info={self.depfile_name}",
-                "-Z",
-                "binary-dep-depinfo",
-            ]
+        # Remove outputs like emit=link and emit=metadata.
+        # When dep-info is the only requested output, rustc writes the depfile
+        # right after macro expansion and name resolution (which is when all
+        # source files and extern crates get loaded), and exits early,
+        # skipping type-checking and metadata generation entirely.
+        # This is several times faster than --emit=metadata,dep-info and
+        # yields the same set of dependencies.  When emit_metadata is set,
+        # externs are still rewritten to .rmeta, so the scanned deps match
+        # what metadata generation would have used.
+        return [
+            f"--emit=dep-info={self.depfile_name}",
+            "-Z",
+            "binary-dep-depinfo",
+        ]
 
     def _rustc_dep_only_command_impl(
         self, command_tokens: Iterable[str]
@@ -471,7 +470,8 @@ def rustc_dep_only_command(
     Args:
       command_tokens: original rustc command
       emit_metadata: if True, command is expected to generate
-        separate metadata.
+        separate metadata, so --extern .rlib paths are rewritten
+        to their .rmeta siblings where those exist.
       depfile_name: name of the new depfile to emit (different
         from the depfile in the original command).
 

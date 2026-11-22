@@ -11,9 +11,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <deque>
 #include <fstream>
+#include <iterator>
+#include <vector>
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
@@ -56,8 +60,24 @@ fit::result<int, ssize_t> ReceiveNetlinkMessage(int fd, void* buf, size_t len, b
   return fit::ok(received);
 }
 
+fit::result<int, ssize_t> ReceiveNetlinkMessage(int fd,
+                                                std::deque<std::vector<char>>& buffered_messages,
+                                                void* buf, size_t len, bool wait) {
+  if (!buffered_messages.empty()) {
+    const auto& msg = buffered_messages.front();
+    size_t copy_len = std::min(len, msg.size());
+    if (copy_len > 0) {
+      memcpy(buf, msg.data(), copy_len);
+    }
+    buffered_messages.pop_front();
+    return fit::ok(static_cast<ssize_t>(copy_len));
+  }
+  return ReceiveNetlinkMessage(fd, buf, len, wait);
+}
+
 // Helper to register the calling process as the audit daemon on a given socket.
-fit::result<int> RegisterAsAuditDaemon(int fd, pid_t pid) {
+fit::result<int> RegisterAsAuditDaemon(int fd, pid_t pid,
+                                       std::deque<std::vector<char>>* buffered_messages) {
   audit_request req;
   char buf[NETLINK_BUF_SIZE]{};
 
@@ -74,48 +94,9 @@ fit::result<int> RegisterAsAuditDaemon(int fd, pid_t pid) {
     return send_res.take_error();
   }
 
-  auto recv_res = ReceiveNetlinkMessage(fd, buf, sizeof(buf));
-  if (recv_res.is_error()) {
-    return recv_res.take_error();
-  }
-
-  if (recv_res.value() < NLMSG_HDRLEN) {
-    return fit::error(EINVAL);
-  }
-
-  auto* nlh = reinterpret_cast<struct nlmsghdr*>(buf);
-  if (nlh->nlmsg_type != NLMSG_ERROR) {
-    return fit::error(EBADMSG);
-  }
-
-  auto* err = reinterpret_cast<struct nlmsgerr*>(NLMSG_DATA(nlh));
-  if (err->error) {
-    return fit::error(-err->error);
-  }
-  return fit::ok();
-}
-
-// Helper to unregister the current audit daemon.
-fit::result<int> UnregisterAuditDaemon(int fd) {
-  audit_request req;
-  char buf[NETLINK_BUF_SIZE]{};
-
-  memset(&req, 0, sizeof(req));
-  req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(req.status));
-  req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
-  req.nlh.nlmsg_seq = 1;
-  req.nlh.nlmsg_type = AUDIT_SET;
-
-  // Setting pid to 0 releases the daemon registration.
-  req.status.pid = 0;
-  req.status.mask = AUDIT_STATUS_PID;
-
-  auto send_res = SendNetlinkMessage(fd, &req, req.nlh.nlmsg_len);
-  if (send_res.is_error()) {
-    return send_res.take_error();
-  }
-
   struct nlmsghdr* nlh;
+  ssize_t bytes_received = 0;
+  std::deque<std::vector<char>> pending;
   do {
     auto recv_res = ReceiveNetlinkMessage(fd, buf, sizeof(buf));
     if (recv_res.is_error()) {
@@ -124,16 +105,32 @@ fit::result<int> UnregisterAuditDaemon(int fd) {
     if (recv_res.value() < NLMSG_HDRLEN) {
       return fit::error(EINVAL);
     }
-
+    bytes_received = recv_res.value();
     nlh = reinterpret_cast<struct nlmsghdr*>(buf);
+    // Preserve non-ACK audit messages flushed onto `fd` once the kernel associates it with `pid`
+    // before the `NLMSG_ERROR` ACK is dequeued.
+    if (nlh->nlmsg_type != NLMSG_ERROR && buffered_messages != nullptr) {
+      size_t msg_len = std::min(static_cast<size_t>(bytes_received), sizeof(buf));
+      pending.emplace_back(buf, buf + msg_len);
+    }
   } while (nlh->nlmsg_type != NLMSG_ERROR);
 
+  if (bytes_received < static_cast<ssize_t>(NLMSG_LENGTH(sizeof(struct nlmsgerr)))) {
+    return fit::error(EBADMSG);
+  }
   auto* err = reinterpret_cast<struct nlmsgerr*>(NLMSG_DATA(nlh));
   if (err->error) {
     return fit::error(-err->error);
   }
+  if (buffered_messages != nullptr) {
+    buffered_messages->insert(buffered_messages->end(), std::make_move_iterator(pending.begin()),
+                              std::make_move_iterator(pending.end()));
+  }
   return fit::ok();
 }
+
+// Helper to unregister the current audit daemon.
+fit::result<int> UnregisterAuditDaemon(int fd) { return RegisterAsAuditDaemon(fd, /*pid=*/0); }
 
 // Helper to query the current audit status from the kernel via AUDIT_GET.
 fit::result<int, audit_utils::audit_status> GetAuditStatus(int fd) {
@@ -150,6 +147,7 @@ fit::result<int, audit_utils::audit_status> GetAuditStatus(int fd) {
 
   char buf[NETLINK_BUF_SIZE]{};
   struct nlmsghdr* nlh;
+  ssize_t bytes_received = 0;
   do {
     auto recv_res = ReceiveNetlinkMessage(fd, buf, sizeof(buf));
     if (recv_res.is_error()) {
@@ -158,7 +156,7 @@ fit::result<int, audit_utils::audit_status> GetAuditStatus(int fd) {
     if (recv_res.value() < static_cast<ssize_t>(NLMSG_LENGTH(0))) {
       return fit::error(EINVAL);
     }
-
+    bytes_received = recv_res.value();
     nlh = reinterpret_cast<struct nlmsghdr*>(buf);
     if (nlh->nlmsg_type == NLMSG_ERROR) {
       if (recv_res.value() < static_cast<ssize_t>(NLMSG_LENGTH(sizeof(struct nlmsgerr)))) {
@@ -168,14 +166,16 @@ fit::result<int, audit_utils::audit_status> GetAuditStatus(int fd) {
       return fit::error(-err->error);
     }
   } while (nlh->nlmsg_type != AUDIT_GET);
-  if (NLMSG_PAYLOAD(nlh, 0) < sizeof(std::declval<audit_utils::audit_status>().mask) +
-                                  sizeof(std::declval<audit_utils::audit_status>().enabled) +
-                                  sizeof(std::declval<audit_utils::audit_status>().failure) +
-                                  sizeof(std::declval<audit_utils::audit_status>().pid) +
-                                  sizeof(std::declval<audit_utils::audit_status>().rate_limit) +
-                                  sizeof(std::declval<audit_utils::audit_status>().backlog_limit) +
-                                  sizeof(std::declval<audit_utils::audit_status>().lost) +
-                                  sizeof(std::declval<audit_utils::audit_status>().backlog)) {
+  if (nlh->nlmsg_len < NLMSG_SPACE(0) || bytes_received < static_cast<ssize_t>(nlh->nlmsg_len)) {
+    return fit::error(EBADMSG);
+  }
+  constexpr size_t kMinAuditStatusSize =
+      sizeof(audit_utils::audit_status::mask) + sizeof(audit_utils::audit_status::enabled) +
+      sizeof(audit_utils::audit_status::failure) + sizeof(audit_utils::audit_status::pid) +
+      sizeof(audit_utils::audit_status::rate_limit) +
+      sizeof(audit_utils::audit_status::backlog_limit) + sizeof(audit_utils::audit_status::lost) +
+      sizeof(audit_utils::audit_status::backlog);
+  if (NLMSG_PAYLOAD(nlh, 0) < kMinAuditStatusSize) {
     return fit::error(EBADMSG);
   }
 
@@ -225,6 +225,10 @@ fit::result<int> SendUserAuditMessage(int fd, int seq, const std::string& messag
 
   auto* ack_nlh = reinterpret_cast<struct nlmsghdr*>(ack_buf);
   if (ack_nlh->nlmsg_type != NLMSG_ERROR) {
+    return fit::error(EBADMSG);
+  }
+
+  if (recv_res.value() < static_cast<ssize_t>(NLMSG_LENGTH(sizeof(struct nlmsgerr)))) {
     return fit::error(EBADMSG);
   }
 

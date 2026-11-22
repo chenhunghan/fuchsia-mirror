@@ -130,11 +130,11 @@ TEST_F(AcpiManagerTest, TestDevicesOnPciBus) {
   ASSERT_EQ(builder->GetBusId(), 0);
 
   // Check that pci_init was called with the correct bus:device.function.
-  std::vector<pci_bdf_t> bdfs = acpi::test::GetAcpiBdfs();
+  std::vector<ACPI_PCI_ID> bdfs = acpi::test::GetAcpiBdfs();
   ASSERT_EQ(bdfs.size(), 1);
-  ASSERT_EQ(bdfs[0].bus_id, 0);
-  ASSERT_EQ(bdfs[0].device_id, 1);
-  ASSERT_EQ(bdfs[0].function_id, 2);
+  ASSERT_EQ(bdfs[0].Bus, 0);
+  ASSERT_EQ(bdfs[0].Device, 1);
+  ASSERT_EQ(bdfs[0].Function, 2);
 }
 
 TEST_F(AcpiManagerTest, TestDeviceOnPciBusWithNoAdr) {

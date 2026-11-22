@@ -6,8 +6,8 @@ use crate::subsystems::prelude::*;
 use anyhow::{Context, Result, anyhow, bail};
 use assembly_config_capabilities::{Config, ConfigNestedValueType, ConfigValueType};
 use assembly_config_schema::platform_settings::swd_config::{
-    OtaConfigs, PolicyConfig, PolicyLabels, SwdConfig, SwdTrustStore, UpdateChecker,
-    VerificationFailureAction,
+    DEFAULT_DELIVERY_BLOB_TYPE, OtaConfigs, PolicyConfig, PolicyLabels, SwdConfig, SwdTrustStore,
+    UpdateChecker, VerificationFailureAction,
 };
 use assembly_constants::FileEntry;
 use assembly_images_config::VolumeConfig;
@@ -119,9 +119,7 @@ impl DefineSubsystemConfiguration<(&SwdConfig, &VolumeConfig)> for SwdSubsystemC
             "fuchsia.pkgcache.EnableUpgradablePackages",
             Config::new(ConfigValueType::Bool, subsystem_config.enable_upgradable_packages.into()),
         )?;
-        let use_driver_blob_paging = matches!(volume_config, VolumeConfig::Fxfs)
-            && (subsystem_config.use_driver_blob_paging
-                || context.board_config.filesystems.fxfs.use_driver_blob_paging);
+        let use_driver_blob_paging = matches!(volume_config, VolumeConfig::Fxfs);
         builder.set_config_capability(
             "fuchsia.pkgcache.UseDriverBlobPaging",
             Config::new(ConfigValueType::Bool, use_driver_blob_paging.into()),
@@ -139,6 +137,22 @@ impl DefineSubsystemConfiguration<(&SwdConfig, &VolumeConfig)> for SwdSubsystemC
         builder.set_config_capability(
             "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
             Config::new(ConfigValueType::Int32, post_commit_gc_earliest_boot_seconds.into()),
+        )?;
+
+        let delivery_blob_type =
+            subsystem_config.delivery_blob_type.unwrap_or(DEFAULT_DELIVERY_BLOB_TYPE);
+        match (delivery_blob_type, volume_config) {
+            (1 | 2, _) | (3, VolumeConfig::Fxfs) => {}
+            (3, VolumeConfig::Fvm(_)) => {
+                bail!("delivery_blob_type 3 is only supported with Fxfs");
+            }
+            _ => {
+                bail!("Invalid delivery_blob_type {delivery_blob_type}; expected 1, 2, or 3");
+            }
+        }
+        builder.set_config_capability(
+            "fuchsia.pkgresolver.DeliveryBlobType",
+            Config::new(ConfigValueType::Uint32, delivery_blob_type.into()),
         )?;
 
         let manifest_public_keys = if subsystem_config.ota_manifest_public_keys.is_empty()
@@ -677,6 +691,99 @@ mod tests {
             let mut builder: ConfigurationBuilderImpl = Default::default();
             let config =
                 SwdConfig { post_commit_gc_earliest_boot_seconds: Some(300), ..Default::default() };
+            assert!(
+                SwdSubsystemConfig::define_configuration(
+                    &context,
+                    &(&config, &VolumeConfig::Fxfs),
+                    &mut builder,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_delivery_blob_type_config() {
+        let context = ConfigurationContext {
+            feature_set_level: &FeatureSetLevel::Standard,
+            build_type: &BuildType::Eng,
+            board_config: &Default::default(),
+            gendir: Default::default(),
+            resource_dir: Default::default(),
+            developer_only_options: Default::default(),
+        };
+
+        // Default: None -> Uint32(1)
+        {
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            let config = SwdConfig::default();
+            SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&config, &VolumeConfig::Fxfs),
+                &mut builder,
+            )
+            .unwrap();
+            let completed_config = builder.build();
+            assert_eq!(
+                completed_config
+                    .configuration_capabilities
+                    .get("fuchsia.pkgresolver.DeliveryBlobType"),
+                Some(&Config::new(ConfigValueType::Uint32, 1.into())),
+            );
+        }
+
+        // Configured: Some(2) -> Uint32(2)
+        {
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            let config = SwdConfig { delivery_blob_type: Some(2), ..Default::default() };
+            SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&config, &VolumeConfig::Fxfs),
+                &mut builder,
+            )
+            .unwrap();
+            let completed_config = builder.build();
+            assert_eq!(
+                completed_config
+                    .configuration_capabilities
+                    .get("fuchsia.pkgresolver.DeliveryBlobType"),
+                Some(&Config::new(ConfigValueType::Uint32, 2.into())),
+            );
+        }
+
+        // Configured: Some(3) is valid on Fxfs, rejected on FVM/Blobfs.
+        {
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            let config = SwdConfig { delivery_blob_type: Some(3), ..Default::default() };
+            SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&config, &VolumeConfig::Fxfs),
+                &mut builder,
+            )
+            .unwrap();
+            assert_eq!(
+                builder
+                    .build()
+                    .configuration_capabilities
+                    .get("fuchsia.pkgresolver.DeliveryBlobType"),
+                Some(&Config::new(ConfigValueType::Uint32, 3.into())),
+            );
+
+            let mut fvm_builder: ConfigurationBuilderImpl = Default::default();
+            assert!(
+                SwdSubsystemConfig::define_configuration(
+                    &context,
+                    &(&config, &VolumeConfig::Fvm(Default::default())),
+                    &mut fvm_builder,
+                )
+                .is_err()
+            );
+        }
+
+        // Invalid values (0 / Reserved and >= 4) are rejected.
+        for invalid in [0, 4] {
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            let config = SwdConfig { delivery_blob_type: Some(invalid), ..Default::default() };
             assert!(
                 SwdSubsystemConfig::define_configuration(
                     &context,

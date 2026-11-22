@@ -30,8 +30,9 @@
         {
             protocol: [
                 "fuchsia.fxfs.BlobCreator",
-                "fuchsia.fxfs.BlobReader",
                 "fuchsia.recovery.android.Updater",
+                "fuchsia.storage.block.Mapper",
+                "fuchsia.storage.mapping.MappingProvider",
             ],
         },
     ],
@@ -93,7 +94,6 @@
         },
         {
             protocol: [
-                "fuchsia.boot.Arguments",
                 "fuchsia.metrics.MetricEventLoggerFactory",
                 "fuchsia.net.http.Loader",
                 "fuchsia.paver.Paver",
@@ -112,7 +112,8 @@
         {
             protocol: [
                 "fuchsia.fxfs.BlobCreator",
-                "fuchsia.fxfs.BlobReader",
+                "fuchsia.storage.block.Mapper",
+                "fuchsia.storage.mapping.MappingProvider",
             ],
             from: "self",
             to: "#pkg-recovery",
@@ -120,6 +121,7 @@
         },
         {
             config: [
+                "fuchsia.pkgcache.UseDriverBlobPaging",
                 "fuchsia.system-updater.ManifestPublicKeys",
                 "fuchsia.system.base_merkle",
             ],

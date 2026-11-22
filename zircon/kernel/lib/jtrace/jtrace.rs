@@ -20,21 +20,15 @@ pub use jtrace_bindings::{
     UseLargeEntries, UseMonoTimestamps,
 };
 use kprint::kformat;
-use libc::stdio::FILE;
 use zx_types::{zx_duration_t, zx_koid_t, zx_ticks_t, zx_time_t};
 
 use crate::arch_rs::vm::is_kernel_address;
+use crate::io::stdout_write_unbuffered;
 use crate::kernel::types::cpu_num_t;
 use crate::platform_rs::timer::{zx_msec, zx_sec, zx_usec};
 use crate::vm::vm_aspace::VmAspace;
 
 use self::jtrace_internal::{AlignedBuffer, Config, Header, JTrace, TraceHooks, UNKNOWN_TID};
-
-unsafe extern "C" {
-    // Defined in //zircon/kernel/lib/io.
-    #[allow(non_upper_case_globals)]
-    static gStdoutUnbuffered: FILE;
-}
 
 const PERSISTENT_RAM_ALLOCATION_GRANULARITY: usize =
     zr::parse_usize(env!("PERSISTENT_RAM_ALLOCATION_GRANULARITY"))
@@ -322,7 +316,7 @@ struct ProductionTraceHooks;
 
 impl ProductionTraceHooks {
     /// Renders a single trace entry into a 256-byte buffer and writes it directly
-    /// to unbuffered stdout (`gStdoutUnbuffered.write`) instead of rendering into
+    /// to unbuffered stdout ([`stdout_write_unbuffered`]) instead of rendering into
     /// the current thread's linebuffer, which is too short to hold an entire
     /// large entry on a single line (and expanding every thread's linebuffer just
     /// for `jtrace` would waste memory across all threads).
@@ -459,17 +453,11 @@ impl ProductionTraceHooks {
 
 impl TraceHooks for ProductionTraceHooks {
     fn print_warning(&self, msg: &[u8]) {
-        // SAFETY: `gStdoutUnbuffered` is a C++ global `FILE` that is never reassigned.
-        unsafe {
-            gStdoutUnbuffered.write(msg);
-        }
+        stdout_write_unbuffered(msg);
     }
 
     fn print_info(&self, msg: &[u8]) {
-        // SAFETY: `gStdoutUnbuffered` is a C++ global `FILE` that is never reassigned.
-        unsafe {
-            gStdoutUnbuffered.write(msg);
-        }
+        stdout_write_unbuffered(msg);
     }
 
     #[sanitize(address = "off")]

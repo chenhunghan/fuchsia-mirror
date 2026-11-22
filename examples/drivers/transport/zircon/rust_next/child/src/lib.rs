@@ -43,7 +43,7 @@ impl Driver for ZirconTransportChild {
         Ok(Self { node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!(
             "ZirconTransportChild::stop() was invoked. Use this function to do any cleanup needed."
         );

@@ -170,12 +170,13 @@ Err Breakpoint::Settings::SetStorageValue(const std::string& key, SettingValue v
   } else if (key == ClientSettings::Breakpoint::kSize) {
     // Validate the size. Providing the error here and failing to set is more clear to the user than
     // getting a set error back asynchronously from the backend.
-    if (Err err = BreakpointSettings::ValidateSize(bp_->session()->arch(), settings.type,
-                                                   value.get_int());
+    uint32_t byte_size = static_cast<uint32_t>(value.get_int());
+    if (Err err =
+            BreakpointSettings::ValidateSize(bp_->session()->arch(), settings.type, byte_size);
         err.has_error())
       return err;
 
-    settings.byte_size = value.get_int();
+    settings.byte_size = byte_size;
   } else if (key == ClientSettings::Breakpoint::kCondition) {
     settings.condition = value.get_string();
   } else {

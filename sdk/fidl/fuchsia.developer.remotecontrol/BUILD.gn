@@ -35,7 +35,6 @@ fidl("fuchsia.developer.remotecontrol") {
   ]
   sdk_area = "Developer"
   sdk_category = "host_tool"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [

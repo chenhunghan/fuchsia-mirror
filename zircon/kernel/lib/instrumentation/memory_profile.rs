@@ -37,12 +37,7 @@ pub(super) unsafe fn memory_profile_vmo() -> InstrumentationDataVmo {
 
     let mut mapped_vmo = KernelMappedVmo::new();
     mapped_vmo
-        .init(
-            VmObjectPaged::into_vm_object(vmo),
-            /*offset=*/ 0,
-            buf_size,
-            b"memory-profile-live-data",
-        )
+        .init(VmObjectPaged::into_vm_object(vmo), /*offset=*/ 0, buf_size)
         .expect("KernelMappedVmo::init");
     // SAFETY: `MEM_PROF_LIVE_DATA` is private to this module and only initialized here, and the
     // caller guarantees `memory_profile_vmo` is called at most once.

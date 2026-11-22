@@ -7,15 +7,13 @@
 TEST(SwBreakpointTest, Int3CompactGeneratesSIGTRAP) {
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([] {
-    struct sigaction segv_act;
-    segv_act.sa_sigaction = [](int signo, siginfo_t* info, void* ucontext) {
-      if (signo == SIGTRAP) {
-        _exit(EXIT_SUCCESS);
-      }
-      _exit(EXIT_FAILURE);
-    };
-    segv_act.sa_flags = SA_SIGINFO;
-    SAFE_SYSCALL(sigaction(SIGTRAP, &segv_act, nullptr));
+    test_helper::ScopedSigAction scoped_sigtrap(SIGTRAP,
+                                                [](int signo, siginfo_t* info, void* ucontext) {
+                                                  if (signo == SIGTRAP) {
+                                                    _exit(EXIT_SUCCESS);
+                                                  }
+                                                  _exit(EXIT_FAILURE);
+                                                });
     __builtin_debugtrap();
     ADD_FAILURE() << "Expected to generate SIGTRAP.";
     exit(EXIT_FAILURE);

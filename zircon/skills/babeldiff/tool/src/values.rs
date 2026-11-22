@@ -1,3 +1,7 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 //! Named constants the changed files define, so a value check can compare
 //! what `PIC1` and `PIC1_COMMAND` stand for rather than how they are
 //! spelled, and the words of the C++ comments in those files, so a Rust

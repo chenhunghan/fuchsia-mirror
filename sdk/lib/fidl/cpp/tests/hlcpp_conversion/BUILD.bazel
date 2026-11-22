@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "fidl_hlcpp_conversion_tests_bin",
+    srcs = [
+        "bits_conversion_test.cc",
+        "enum_conversion_multi_library_test.cc",
+        "enum_conversion_test.cc",
+        "protocol_endpoint_conversion_test.cc",
+        "protocol_handler_conversion_test.cc",
+        "struct_conversion_test.cc",
+        "table_conversion_test.cc",
+        "union_conversion_test.cc",
+    ],
+    # test-parity-allow-manual: packaged in :fidl_hlcpp_conversion_tests
+    tags = ["manual"],
+    deps = [
+        "//sdk/lib/fidl/cpp/tests/hlcpp_conversion/fidl:test.enums.abc_cpp_hlcpp_conversion",
+        "//sdk/lib/fidl/cpp/tests/hlcpp_conversion/fidl:test.enums.xyz_cpp_hlcpp_conversion",
+        "//sdk/lib/fidl/cpp/tests/hlcpp_conversion/fidl:test.protocols_cpp_hlcpp_conversion",
+        "//sdk/testing/fidl/protocols_tests:test.protocol.connector_cpp",
+        "//sdk/testing/fidl/protocols_tests:test.protocol.connector_cpp_hlcpp_conversion",
+        "//sdk/testing/fidl/types_tests:test.types_cpp_hlcpp_conversion",
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/zx",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_hlcpp_conversion_tests",
+    unit_tests = [":fidl_hlcpp_conversion_tests_bin"],
+    visibility = ["//sdk/lib:__pkg__"],
+)

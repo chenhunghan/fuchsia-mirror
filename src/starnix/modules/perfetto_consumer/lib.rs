@@ -27,7 +27,7 @@ use starnix_core::task::dynamic_thread_spawner::SpawnRequestBuilder;
 use starnix_core::task::tracing::PidKoidSession;
 use starnix_core::task::{ArgNameAndValue, CurrentTask, Kernel};
 use starnix_core::vfs::FsString;
-use starnix_logging::{CATEGORY_ATRACE, log_debug, log_error, log_info, log_warn};
+use starnix_logging::{log_debug, log_error, log_info, log_warn};
 use starnix_perfetto_trace_decoder::{
     decode_enable_tracing_response, decode_read_buffers_response, decode_trace, encode_trace,
 };
@@ -185,6 +185,11 @@ impl StopReplies {
     }
 }
 
+// The trace categories that enable Android tracing are defined in this file, because this module
+// is the only code that checks them. A category that the code refers to by name has a
+// `CATEGORY_*` constant. The atrace categories are only listed in `ALL_ATRACE_CATEGORIES`, which
+// is their definition, so they have no constants.
+
 /// Supported Android Atrace categories and their corresponding Fuchsia trace category strings.
 /// Each entry is `(android_atrace_category_name, fuchsia_trace_category)`.
 const ALL_ATRACE_CATEGORIES: &[(&str, &str)] = &[
@@ -228,16 +233,13 @@ fn build_ftrace_config<F>(mut is_category_enabled: F) -> Option<FtraceConfig>
 where
     F: FnMut(&'static str) -> bool,
 {
-    let blanket_enabled = is_category_enabled(CATEGORY_ATRACE);
-    let apps_enabled = blanket_enabled || is_category_enabled(CATEGORY_ATRACE_APPS);
-
-    let mut atrace_categories =
-        Vec::with_capacity(if blanket_enabled { ALL_ATRACE_CATEGORIES.len() + 1 } else { 0 });
+    let mut atrace_categories = Vec::new();
     for &(atrace_name, fuchsia_cat) in ALL_ATRACE_CATEGORIES {
-        if blanket_enabled || is_category_enabled(fuchsia_cat) {
+        if is_category_enabled(fuchsia_cat) {
             atrace_categories.push(atrace_name.to_string());
         }
     }
+    let apps_enabled = is_category_enabled(CATEGORY_ATRACE_APPS);
     if apps_enabled {
         atrace_categories.push("app".to_string());
     }
@@ -252,6 +254,78 @@ where
             buffer_size_kb: Some(2048),
             atrace_categories,
             atrace_apps,
+            ..Default::default()
+        })
+    }
+}
+
+/// Trace category that enables Perfetto's `track_event` data source.
+const CATEGORY_PERFETTO_TRACK_EVENT: &str = "starnix:perfetto:track_event";
+
+/// Trace category that enables Perfetto's SurfaceFlinger frame/frametimeline data sources.
+const CATEGORY_PERFETTO_SURFACEFLINGER: &str = "starnix:perfetto:surfaceflinger";
+
+/// Builds the Perfetto `TraceConfig` based on enabled Fuchsia trace categories.
+///
+/// Returns `None` if neither any `starnix:perfetto:*` category nor any `starnix:atrace:*` category
+/// is enabled, so that unrelated trace sessions (e.g. `starnix:meta`) do not start an Android
+/// Perfetto consumer session.
+fn build_trace_config<F>(mut is_category_enabled: F) -> Option<TraceConfig>
+where
+    F: FnMut(&'static str) -> bool,
+{
+    let ftrace_config = build_ftrace_config(&mut is_category_enabled);
+    let track_event_enabled = is_category_enabled(CATEGORY_PERFETTO_TRACK_EVENT);
+    let surfaceflinger_enabled = is_category_enabled(CATEGORY_PERFETTO_SURFACEFLINGER);
+
+    let mut data_sources = Vec::new();
+    if track_event_enabled {
+        data_sources.push(DataSource {
+            config: Some(DataSourceConfig {
+                name: Some("track_event".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+    if surfaceflinger_enabled {
+        data_sources.push(DataSource {
+            config: Some(DataSourceConfig {
+                name: Some("android.surfaceflinger.frame".to_string()),
+                target_buffer: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        data_sources.push(DataSource {
+            config: Some(DataSourceConfig {
+                name: Some("android.surfaceflinger.frametimeline".to_string()),
+                target_buffer: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+    if let Some(ftrace_config) = ftrace_config {
+        data_sources.push(DataSource {
+            config: Some(DataSourceConfig {
+                name: Some("linux.ftrace".to_string()),
+                ftrace_config: Some(ftrace_config),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+    if data_sources.is_empty() {
+        None
+    } else {
+        Some(TraceConfig {
+            buffers: vec![BufferConfig {
+                size_kb: Some(PERFETTO_BUFFER_SIZE_KB),
+                fill_policy: Some(FillPolicy::Discard.into()),
+                ..Default::default()
+            }],
+            data_sources,
             ..Default::default()
         })
     }
@@ -322,11 +396,32 @@ impl CallbackState {
         self.session = None;
     }
 
+    /// Handles a change of the trace-engine state. This is the entry point that the trace
+    /// observer uses. It checks trace categories with `fuchsia_trace::category_enabled`.
     fn on_state_change(
         &mut self,
         new_state: TraceState,
         current_task: &CurrentTask,
     ) -> Result<(), anyhow::Error> {
+        self.on_state_change_with_category_check(new_state, current_task, category_enabled)
+    }
+
+    /// Implements `on_state_change()`, with `is_category_enabled` deciding which trace
+    /// categories count as enabled. Only `TraceState::Started` consults it.
+    ///
+    /// The category check is a parameter so that unit tests can choose the enabled categories.
+    /// The trace session that the tests run (`testing::TraceSession`) enables none of the
+    /// categories this module checks, so with `category_enabled` every `Started` in a test
+    /// would skip Perfetto tracing.
+    fn on_state_change_with_category_check<F>(
+        &mut self,
+        new_state: TraceState,
+        current_task: &CurrentTask,
+        is_category_enabled: F,
+    ) -> Result<(), anyhow::Error>
+    where
+        F: FnMut(&'static str) -> bool,
+    {
         let prev_state = self.prev_state;
         self.prev_state = new_state;
         log_debug!(
@@ -372,57 +467,25 @@ impl CallbackState {
                     log_info!("No trace context for Started; not enabling Perfetto tracing yet");
                     return Ok(());
                 };
+
+                // Only start an Android Perfetto consumer session if a `starnix:perfetto:*` or
+                // `starnix:atrace:*` category is enabled. Other `starnix:*` categories (such as
+                // `starnix:meta` enabled by `fuchsia_probes`) should not trigger a parasitic
+                // Perfetto session. Check after acquiring `prolonged_context` so the category
+                // query is pinned to the active session. If gated off, `prolonged_context` drops
+                // immediately without being stored in `self.prolonged_context`.
+                let Some(trace_config) = build_trace_config(is_category_enabled) else {
+                    log_debug!(
+                        "Neither starnix:perfetto:* nor any starnix:atrace:* category is \
+                         enabled; skipping Perfetto tracing"
+                    );
+                    return Ok(());
+                };
                 let connection = self.connection(current_task)?;
-                // A fixed set of data sources that may be of interest. As demand for other sources
-                // is found, add them here, and it may become worthwhile to allow this set to be
-                // configurable per trace session.
-                let mut data_sources = vec![
-                    DataSource {
-                        config: Some(DataSourceConfig {
-                            name: Some("track_event".to_string()),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    DataSource {
-                        config: Some(DataSourceConfig {
-                            name: Some("android.surfaceflinger.frame".to_string()),
-                            target_buffer: Some(0),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    DataSource {
-                        config: Some(DataSourceConfig {
-                            name: Some("android.surfaceflinger.frametimeline".to_string()),
-                            target_buffer: Some(0),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                ];
-                if let Some(ftrace_config) = build_ftrace_config(category_enabled) {
-                    data_sources.push(DataSource {
-                        config: Some(DataSourceConfig {
-                            name: Some("linux.ftrace".to_string()),
-                            ftrace_config: Some(ftrace_config),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    });
-                }
                 let enable_request = connection.enable_tracing(
                     current_task,
                     EnableTracingRequest {
-                        trace_config: Some(TraceConfig {
-                            buffers: vec![BufferConfig {
-                                size_kb: Some(PERFETTO_BUFFER_SIZE_KB),
-                                fill_policy: Some(FillPolicy::Discard.into()),
-                                ..Default::default()
-                            }],
-                            data_sources,
-                            ..Default::default()
-                        }),
+                        trace_config: Some(trace_config),
                         attach_notification_only: None,
                     },
                 )?;
@@ -847,12 +910,13 @@ mod tests {
     use starnix_uapi::open_flags::OpenFlags;
     use starnix_uapi::vfs::FdEvents;
 
-    // The first five tests below run `CallbackState::on_state_change()` with `/nonexistent/...`
-    // so every attempt to connect to Perfetto fails, exercising the skip, retry, and cleanup paths
-    // without a Perfetto endpoint. `stopping_drains_deferred_enable_and_free_buffers_replies` then
-    // injects a `UnixSocket` pair via `Consumer::from_file` to cover `Started` (enabling Perfetto
-    // tracing and holding the prolonged context) and `Stopping` (flushing, disabling tracing and
-    // waiting for the deferred `EnableTracing` reply before reading buffers, reading and freeing
+    // The first tests below run `CallbackState::on_state_change_with_category_check()` (and
+    // `on_state_change()`) with `/nonexistent/...` so every attempt to connect to Perfetto fails,
+    // exercising the category-gating, skip, retry, and cleanup paths without a Perfetto endpoint.
+    // `stopping_drains_deferred_enable_and_free_buffers_replies` then injects a `UnixSocket` pair
+    // via `Consumer::from_file` to cover `Started` (enabling Perfetto tracing and holding the
+    // prolonged context) and `Stopping` (flushing, disabling tracing, waiting for the deferred
+    // `EnableTracing` reply before reading buffers, reading and freeing
     // buffers, draining the `FreeBuffers` reply, and releasing the context) end-to-end.
 
     #[fuchsia::test]
@@ -874,7 +938,11 @@ mod tests {
                 TraceState::Stopping,
                 TraceState::Stopped,
             ] {
-                if let Err(e) = callback_state.on_state_change(state, current_task) {
+                if let Err(e) =
+                    callback_state.on_state_change_with_category_check(state, current_task, |cat| {
+                        cat == CATEGORY_PERFETTO_TRACK_EVENT
+                    })
+                {
                     panic!("{state:?}: {e:?}");
                 }
                 assert_eq!(callback_state.prev_state, state);
@@ -899,7 +967,11 @@ mod tests {
                 assert!(ProlongedContext::acquire().is_none(), "a trace session is running");
                 // A Started read while the session was still starting, before trace-engine made
                 // the context count nonzero.
-                if let Err(e) = callback_state.on_state_change(TraceState::Started, current_task) {
+                if let Err(e) = callback_state.on_state_change_with_category_check(
+                    TraceState::Started,
+                    current_task,
+                    |cat| cat == CATEGORY_PERFETTO_TRACK_EVENT,
+                ) {
                     panic!("first Started: {e:?}");
                 }
                 assert!(
@@ -918,7 +990,11 @@ mod tests {
             // enable Perfetto tracing, which fails to connect. Only that attempt can return an
             // error, so the error shows that this Started got past `ProlongedContext::acquire()`.
             assert!(
-                callback_state.on_state_change(TraceState::Started, current_task).is_err(),
+                callback_state
+                    .on_state_change_with_category_check(TraceState::Started, current_task, |cat| {
+                        cat == CATEGORY_PERFETTO_TRACK_EVENT
+                    })
+                    .is_err(),
                 "second Started didn't try to enable Perfetto tracing"
             );
             assert!(callback_state.prolonged_context.is_none(), "second Started kept the context");
@@ -945,7 +1021,11 @@ mod tests {
             for state in
                 [TraceState::Started, TraceState::Stopped, TraceState::Started, TraceState::Stopped]
             {
-                if let Err(e) = callback_state.on_state_change(state, current_task) {
+                if let Err(e) =
+                    callback_state.on_state_change_with_category_check(state, current_task, |cat| {
+                        cat == CATEGORY_PERFETTO_TRACK_EVENT
+                    })
+                {
                     panic!("{state:?}: {e:?}");
                 }
                 assert!(callback_state.prolonged_context.is_some(), "{state:?}: dropped context");
@@ -981,7 +1061,11 @@ mod tests {
             // Perfetto tracing, which fails to connect. Only that attempt can return an error,
             // so the error shows that this Started got past `ProlongedContext::acquire()`.
             assert!(
-                callback_state.on_state_change(TraceState::Started, current_task).is_err(),
+                callback_state
+                    .on_state_change_with_category_check(TraceState::Started, current_task, |cat| {
+                        cat == CATEGORY_PERFETTO_TRACK_EVENT
+                    })
+                    .is_err(),
                 "Started after Stopping didn't try to enable Perfetto tracing"
             );
             assert!(
@@ -1004,7 +1088,11 @@ mod tests {
             // Started acquires a context, then fails to connect, so Perfetto tracing isn't
             // enabled and the context must not be kept.
             assert!(
-                callback_state.on_state_change(TraceState::Started, current_task).is_err(),
+                callback_state
+                    .on_state_change_with_category_check(TraceState::Started, current_task, |cat| {
+                        cat == CATEGORY_PERFETTO_TRACK_EVENT
+                    })
+                    .is_err(),
                 "Started connected to Perfetto"
             );
             assert!(callback_state.prolonged_context.is_none(), "Started kept the context");
@@ -1031,6 +1119,7 @@ mod tests {
             .expect("new_pair");
 
             let mut server_conn = perfetto::IpcConnection::new(server_file.clone());
+            let server_file_check = server_file.clone();
             let mut server_reader = perfetto::FrameReader::new(server_file);
 
             // Queue BindServiceReply (`request_id = 1`) before `Consumer::from_file` reads it.
@@ -1083,7 +1172,9 @@ mod tests {
             // Session 1: deferred `EnableTracing` reply arrives during the `Flush` wait, before
             // `DisableTracing` is sent.
             callback_state
-                .on_state_change(TraceState::Started, current_task)
+                .on_state_change_with_category_check(TraceState::Started, current_task, |cat| {
+                    cat == CATEGORY_PERFETTO_TRACK_EVENT
+                })
                 .expect("first Started should succeed");
             assert!(callback_state.prolonged_context.is_some());
             assert_eq!(callback_state.enable_request, Some(2));
@@ -1159,11 +1250,31 @@ mod tests {
                 .on_state_change(TraceState::Stopped, current_task)
                 .expect("Stopped should succeed");
 
+            // Unrelated session (e.g. `starnix:meta` only) while `CallbackState` already holds an
+            // open consumer connection: must not send any IPC frames and must keep the connection.
+            for state in [TraceState::Started, TraceState::Stopping, TraceState::Stopped] {
+                callback_state
+                    .on_state_change_with_category_check(state, current_task, |cat| {
+                        cat == "starnix:meta"
+                    })
+                    .unwrap_or_else(|e| panic!("unrelated {state:?}: {e:?}"));
+                assert!(callback_state.prolonged_context.is_none());
+                assert!(callback_state.connection.is_some());
+                let server_events =
+                    server_file_check.query_events(current_task).expect("query_events");
+                assert!(
+                    !server_events.contains(FdEvents::POLLIN),
+                    "server socket received unexpected IPC frames during unrelated {state:?}: {server_events:?}"
+                );
+            }
+
             // Session 2 (reusing the same consumer connection): `will_notify_on_stop` data sources
             // finish stopping after `DisableTracingResponse`, so the deferred `EnableTracing`
             // reply arrives after `DisableTracingResponse` and unblocks `ReadBuffers`.
             callback_state
-                .on_state_change(TraceState::Started, current_task)
+                .on_state_change_with_category_check(TraceState::Started, current_task, |cat| {
+                    cat == CATEGORY_PERFETTO_TRACK_EVENT
+                })
                 .expect("second Started should succeed");
             assert!(callback_state.prolonged_context.is_some());
             assert_eq!(callback_state.enable_request, Some(7));
@@ -1228,28 +1339,10 @@ mod tests {
     }
 
     #[fuchsia::test]
-    fn test_blanket_category_enables_all() {
-        let ftrace_config = build_ftrace_config(|cat| cat == CATEGORY_ATRACE)
+    fn test_wildcard_atrace_enables_all() {
+        let ftrace_config = build_ftrace_config(|cat| cat.starts_with("starnix:atrace:"))
             .expect("expected ftrace_config to be Some");
         assert_eq!(ftrace_config.ftrace_events, vec!["ftrace/print".to_string()]);
-        assert_eq!(ftrace_config.atrace_categories.len(), ALL_ATRACE_CATEGORIES.len() + 1);
-        for &(atrace_name, _) in ALL_ATRACE_CATEGORIES {
-            assert!(
-                ftrace_config.atrace_categories.iter().any(|c| c == atrace_name),
-                "missing category: {atrace_name}"
-            );
-        }
-        assert!(ftrace_config.atrace_categories.iter().any(|c| c == "app"));
-        assert_eq!(ftrace_config.atrace_apps, vec!["*".to_string()]);
-    }
-
-    #[fuchsia::test]
-    fn test_blanket_and_granular_combined_no_duplicates() {
-        let enabled: std::collections::HashSet<&str> =
-            [CATEGORY_ATRACE, "starnix:atrace:am", "starnix:atrace:gfx", CATEGORY_ATRACE_APPS]
-                .into();
-        let ftrace_config = build_ftrace_config(|cat| enabled.contains(cat))
-            .expect("expected ftrace_config to be Some");
         assert_eq!(ftrace_config.atrace_categories.len(), ALL_ATRACE_CATEGORIES.len() + 1);
         for &(atrace_name, _) in ALL_ATRACE_CATEGORIES {
             assert_eq!(
@@ -1297,6 +1390,165 @@ mod tests {
     #[fuchsia::test]
     fn test_no_categories_enabled() {
         assert!(build_ftrace_config(|_| false).is_none());
+    }
+
+    #[fuchsia::test]
+    fn test_build_trace_config_skips_unrelated_categories() {
+        for cat in [
+            "kernel:meta",
+            "starnix:meta",
+            "starnix",
+            "starnix:atrace",
+            "starnix:atrace:unknown",
+            "starnix:perfetto",
+            "starnix:perfetto:unknown",
+        ] {
+            assert!(
+                build_trace_config(|c| c == cat).is_none(),
+                "{cat}: expected trace_config to be None"
+            );
+        }
+        assert!(build_trace_config(|_| false).is_none());
+    }
+
+    #[fuchsia::test]
+    fn test_build_trace_config_data_sources() {
+        let cases: &[(&str, &[&str], &[&str], Option<&[&str]>)] = &[
+            ("track_event only", &[CATEGORY_PERFETTO_TRACK_EVENT], &["track_event"], None),
+            (
+                "surfaceflinger only",
+                &[CATEGORY_PERFETTO_SURFACEFLINGER],
+                &["android.surfaceflinger.frame", "android.surfaceflinger.frametimeline"],
+                None,
+            ),
+            (
+                "perfetto wildcard",
+                &[CATEGORY_PERFETTO_TRACK_EVENT, CATEGORY_PERFETTO_SURFACEFLINGER],
+                &[
+                    "track_event",
+                    "android.surfaceflinger.frame",
+                    "android.surfaceflinger.frametimeline",
+                ],
+                None,
+            ),
+            ("atrace only", &["starnix:atrace:gfx"], &["linux.ftrace"], Some(&["gfx"])),
+            (
+                "perfetto wildcard and atrace",
+                &[
+                    CATEGORY_PERFETTO_TRACK_EVENT,
+                    CATEGORY_PERFETTO_SURFACEFLINGER,
+                    "starnix:atrace:gfx",
+                ],
+                &[
+                    "track_event",
+                    "android.surfaceflinger.frame",
+                    "android.surfaceflinger.frametimeline",
+                    "linux.ftrace",
+                ],
+                Some(&["gfx"]),
+            ),
+        ];
+
+        for &(label, enabled_cats, expected_names, expected_atrace) in cases {
+            let enabled: std::collections::HashSet<&str> = enabled_cats.iter().copied().collect();
+            let config = build_trace_config(|cat| enabled.contains(cat))
+                .unwrap_or_else(|| panic!("{label}: expected trace_config to be Some"));
+            let names: Vec<_> = config
+                .data_sources
+                .iter()
+                .filter_map(|ds| ds.config.as_ref()?.name.as_deref())
+                .collect();
+            assert_eq!(names, expected_names, "{label}: data source names mismatch");
+
+            let ftrace_ds = config.data_sources.iter().find(|ds| {
+                ds.config.as_ref().and_then(|c| c.name.as_deref()) == Some("linux.ftrace")
+            });
+            match expected_atrace {
+                None => assert!(ftrace_ds.is_none(), "{label}: unexpected linux.ftrace"),
+                Some(expected_cats) => {
+                    let ftrace_config = ftrace_ds
+                        .unwrap_or_else(|| panic!("{label}: expected linux.ftrace data source"))
+                        .config
+                        .as_ref()
+                        .unwrap()
+                        .ftrace_config
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{label}: expected ftrace_config"));
+                    assert_eq!(
+                        ftrace_config.atrace_categories,
+                        expected_cats.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+                        "{label}: atrace_categories mismatch"
+                    );
+                }
+            }
+        }
+    }
+
+    #[fuchsia::test]
+    async fn started_without_perfetto_or_atrace_category_skips_perfetto() {
+        spawn_kernel_and_run(async |current_task| {
+            let _session = TraceSession::start();
+            // Nothing listens on this path, so any attempt to connect to Perfetto fails.
+            let mut callback_state = CallbackState::new("/nonexistent/perfetto-consumer".into());
+
+            // Only `starnix:meta` is enabled (e.g. by `fuchsia_probes`). `Started`, repeated
+            // `Started`, `Stopping`, and `Stopped` must all succeed without touching Perfetto or
+            // retaining a prolonged context.
+            for state in [
+                TraceState::Started,
+                TraceState::Started,
+                TraceState::Stopping,
+                TraceState::Stopped,
+            ] {
+                callback_state
+                    .on_state_change_with_category_check(state, current_task, |cat| {
+                        cat == "starnix:meta"
+                    })
+                    .unwrap_or_else(|e| panic!("{state:?}: {e:?}"));
+                assert_eq!(callback_state.prev_state, state);
+                assert!(callback_state.connection.is_none(), "{state:?}: connected to Perfetto");
+                assert!(callback_state.prolonged_context.is_none(), "{state:?}: holds a context");
+                assert!(callback_state.session.is_none(), "{state:?}: opened a pid/koid session");
+            }
+
+            // Exercise the production `on_state_change` -> `fuchsia_trace::category_enabled` entry
+            // point while `TraceSession::start()` has no `starnix:perfetto:*` or `starnix:atrace*`
+            // categories enabled.
+            callback_state
+                .on_state_change(TraceState::Started, current_task)
+                .expect("on_state_change Started should skip Perfetto");
+            assert!(callback_state.connection.is_none());
+            assert!(callback_state.prolonged_context.is_none());
+            callback_state
+                .on_state_change(TraceState::Stopped, current_task)
+                .expect("on_state_change Stopped should succeed");
+
+            // Subsequent sessions with `starnix:perfetto:*` or `starnix:atrace:*` enabled must
+            // attempt to enable Perfetto tracing (failing here only because no daemon listens on
+            // the test socket path).
+            for enabled_cat in [CATEGORY_PERFETTO_TRACK_EVENT, "starnix:atrace:gfx"] {
+                assert!(
+                    callback_state
+                        .on_state_change_with_category_check(
+                            TraceState::Started,
+                            current_task,
+                            |cat| cat == enabled_cat,
+                        )
+                        .is_err(),
+                    "Started with {enabled_cat} didn't try to enable Perfetto tracing"
+                );
+                assert!(
+                    callback_state.prolonged_context.is_none(),
+                    "Started with {enabled_cat} kept the context after connect failure"
+                );
+                callback_state
+                    .on_state_change_with_category_check(TraceState::Stopped, current_task, |_| {
+                        false
+                    })
+                    .expect("Stopped should succeed");
+            }
+        })
+        .await;
     }
 
     #[fuchsia::test]

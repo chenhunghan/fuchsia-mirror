@@ -68,7 +68,6 @@ fuchsia_cc_driver("aml-meson-power-driver") {
 
 fuchsia_driver_component("aml-meson-power") {
   dml_label = ":aml-meson-power-dml"
-  info = "meta/aml-meson-power-info.json"
   component_name = "aml-meson-power"
   deps = [ ":aml-meson-power-driver" ]
 }

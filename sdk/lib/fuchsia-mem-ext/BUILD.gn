@@ -48,6 +48,7 @@ if (is_fuchsia) {
       "//vendor/google/*",
     ]
     public_deps = [
+      "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
       "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
       "//sdk/lib/stdcompat",
       "//zircon/system/ulib/zx",

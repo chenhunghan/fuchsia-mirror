@@ -5,7 +5,7 @@
 use crate::security;
 use crate::task::{
     CurrentTask, EventHandler, Kernel, MountsWriteToken, TaskContainer, WaitCanceler, Waiter,
-    register_delayed_call,
+    confirm_fs_syscall_trace_if, register_delayed_call,
 };
 use crate::time::utc;
 use crate::vfs::fs_args::MountParams;
@@ -37,7 +37,7 @@ use starnix_uapi::mount_flags::{
 use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::unmount_flags::UnmountFlags;
 use starnix_uapi::vfs::{FdEvents, ResolveFlags};
-use starnix_uapi::{NAME_MAX, errno, error};
+use starnix_uapi::{errno, error};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -1556,13 +1556,12 @@ impl NamespaceNode {
         mode: FileMode,
         dev: DeviceId,
     ) -> Result<(NamespaceNode, CreationStatus), Errno> {
-        let owner = current_task.current_fscred();
         let mode = current_task.fs().apply_umask(mode);
         let (entry, status) = self.entry.get_or_create_entry(
             current_task,
             &self.mount,
             name,
-            |dir, mount, name| dir.create_node(current_task, mount, name, mode, dev, owner),
+            |dir, mount, name| dir.create_node(current_task, mount, name, mode, dev),
         )?;
         Ok((self.with_new_entry(entry), status))
     }
@@ -1583,11 +1582,10 @@ impl NamespaceNode {
         mode: FileMode,
         dev: DeviceId,
     ) -> Result<NamespaceNode, Errno> {
-        let owner = current_task.current_fscred();
         let mode = current_task.fs().apply_umask(mode);
         let entry =
             self.entry.create_entry(current_task, &self.mount, name, |dir, mount, name| {
-                dir.create_node(current_task, mount, name, mode, dev, owner)
+                dir.create_node(current_task, mount, name, mode, dev)
             })?;
         Ok(self.with_new_entry(entry))
     }
@@ -1601,10 +1599,9 @@ impl NamespaceNode {
         name: &FsStr,
         target: &FsStr,
     ) -> Result<NamespaceNode, Errno> {
-        let owner = current_task.current_fscred();
         let entry =
             self.entry.create_entry(current_task, &self.mount, name, |dir, mount, name| {
-                dir.create_symlink(current_task, mount, name, target, owner)
+                dir.create_symlink(current_task, mount, name, target)
             })?;
         Ok(self.with_new_entry(entry))
     }
@@ -1620,13 +1617,11 @@ impl NamespaceNode {
         mode: FileMode,
         flags: OpenFlags,
     ) -> Result<NamespaceNode, Errno> {
-        let owner = current_task.current_fscred();
         let mode = current_task.fs().apply_umask(mode);
         Ok(self.with_new_entry(self.entry.create_tmpfile(
             current_task,
             &self.mount,
             mode,
-            owner,
             flags,
         )?))
     }
@@ -1656,14 +1651,7 @@ impl NamespaceNode {
     ) -> Result<NamespaceNode, Errno> {
         let dir_entry =
             self.entry.create_entry(current_task, &self.mount, name, |dir, mount, name| {
-                let node = dir.create_node(
-                    current_task,
-                    mount,
-                    name,
-                    mode,
-                    DeviceId::NONE,
-                    current_task.current_fscred(),
-                )?;
+                let node = dir.create_node(current_task, mount, name, mode, DeviceId::NONE)?;
                 if let Some(unix_socket) = socket.downcast_socket::<UnixSocket>() {
                     unix_socket.bind_socket_to_node(&socket, socket_address, &node)?;
                 } else {
@@ -1774,6 +1762,7 @@ impl NamespaceNode {
             if !node.entry.node.is_lnk() || context.symlink_mode == SymlinkMode::NoFollow {
                 break;
             }
+            confirm_fs_syscall_trace_if(|| node.entry.node.fs().is_storage_backed());
             node = match node.resolve_symlink(current_task, context)? {
                 ResolvedSymlink::Path(link_directory, link_target) => {
                     current_task.lookup_path(context, link_directory, link_target.as_ref())?
@@ -1822,13 +1811,9 @@ impl NamespaceNode {
         context: &mut LookupContext,
         mut basenames: &[&FsStr],
     ) -> Result<NamespaceNode, Errno> {
-        for name in basenames {
-            if name.len() > NAME_MAX as usize {
-                return error!(ENAMETOOLONG);
-            }
-        }
-
-        let mut current_namespace_node = self.clone();
+        let mut current_namespace_node = scopeguard::guard(self.clone(), |node| {
+            confirm_fs_syscall_trace_if(|| node.entry.node.fs().is_storage_backed());
+        });
 
         while basenames.len() > 0 {
             if !current_namespace_node.entry.node.is_dir() {
@@ -1853,7 +1838,7 @@ impl NamespaceNode {
                     ResolveBase::None => current_task.fs().root(),
                     ResolveBase::Beneath(node) => {
                         // Do not allow traversal out of the 'node'.
-                        if current_namespace_node == *node {
+                        if *current_namespace_node == *node {
                             return error!(EXDEV);
                         }
                         current_task.fs().root()
@@ -1862,9 +1847,10 @@ impl NamespaceNode {
                 };
 
                 // Make sure this can't escape a chroot.
-                if current_namespace_node != root {
-                    current_namespace_node =
-                        current_namespace_node.parent().unwrap_or(current_namespace_node)
+                if *current_namespace_node != root {
+                    if let Some(parent) = current_namespace_node.parent() {
+                        *current_namespace_node = parent;
+                    }
                 }
                 if context.resolve_flags.contains(ResolveFlags::NO_XDEV)
                     && current_namespace_node.mount != self.mount
@@ -1890,7 +1876,7 @@ impl NamespaceNode {
                         basename,
                     )?,
                 );
-                current_namespace_node =
+                *current_namespace_node =
                     current_namespace_node.resolve_child(current_task, context, child)?;
                 basenames = &basenames[1..];
                 continue;
@@ -1911,15 +1897,15 @@ impl NamespaceNode {
             for entry in precomputed_entries {
                 basenames = &basenames[1..];
                 let child = current_namespace_node.with_new_entry(entry?);
-                current_namespace_node =
+                *current_namespace_node =
                     current_namespace_node.resolve_child(current_task, context, child.clone())?;
-                if current_namespace_node != child {
+                if *current_namespace_node != child {
                     break;
                 }
             }
         }
 
-        Ok(current_namespace_node)
+        Ok(scopeguard::ScopeGuard::into_inner(current_namespace_node))
     }
 
     /// Traverse up a child-to-parent link in the namespace.
@@ -2233,7 +2219,7 @@ impl NamespaceNode {
         //   The aforementioned transformations of the effective IDs are not
         //   performed ... if ... the underlying filesystem is mounted nosuid
         //   (the MS_NOSUID flag for mount(2)).
-        if self.mount.flags().contains(MountFlags::NOSUID) {
+        if self.entry.node.has_no_privileges() || self.mount.flags().contains(MountFlags::NOSUID) {
             return;
         }
         self.entry.node.info().apply_suid_and_sgid(creds)

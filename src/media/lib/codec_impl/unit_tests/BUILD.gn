@@ -47,7 +47,9 @@ source_set("codec_impl_tests") {
   ]
 
   deps = [
-    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_hlcpp",
+    "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_cpp",
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp_testing",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//src/lib/testing/loop_fixture",
@@ -65,12 +67,11 @@ cc_test_executable("decryptor_adapter_tests_bin") {
   sources = [ "test_decryptor_adapter.cc" ]
 
   deps = [
-    "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_hlcpp",
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/fit",
+    "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/inspect/testing/cpp",
-    "//sdk/lib/sys/cpp",
     "//src/lib/fsl",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/loop_fixture:gtest",

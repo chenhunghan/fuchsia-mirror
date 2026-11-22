@@ -29,12 +29,12 @@ const auto kV2Metadata =
 
 }
 
-TEST(PrimitiveInXUnionInStruct, Success) {
+TEST(PrimitiveInUnionInStruct, Success) {
   // clang-format off
   const auto expected = std::vector<uint8_t>{
       0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // length of "before"
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  // "before" is present
-      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // xunion header
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // union header
       0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x01, 0x00,  // inline envelope content
       0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // length of "after"
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  // "after" is present
@@ -49,9 +49,9 @@ TEST(PrimitiveInXUnionInStruct, Success) {
   int32_t integer = 0xdeadbeef;
   // encode
   {
-    llcpp_misc::wire::InlineXUnionInStruct input;
+    llcpp_misc::wire::InlineUnionInStruct input;
     input.before = fidl::StringView::FromExternal(before);
-    input.xu = llcpp_misc::wire::SampleXUnion::WithI(integer);
+    input.xu = llcpp_misc::wire::SampleUnion::WithI(integer);
     input.after = fidl::StringView::FromExternal(after);
     fidl::OwnedEncodeResult encoded = fidl::StandaloneEncode(input);
     ASSERT_TRUE(encoded.message().ok());
@@ -63,31 +63,31 @@ TEST(PrimitiveInXUnionInStruct, Success) {
   // decode
   {
     std::vector<uint8_t> encoded_bytes = expected;
-    fit::result result = fidl::StandaloneInplaceDecode<llcpp_misc::wire::InlineXUnionInStruct>(
+    fit::result result = fidl::StandaloneInplaceDecode<llcpp_misc::wire::InlineUnionInStruct>(
         fidl::EncodedMessage::Create(encoded_bytes), kV2Metadata);
     ASSERT_TRUE(result.is_ok());
-    const llcpp_misc::wire::InlineXUnionInStruct& msg = result.value().value();
+    const llcpp_misc::wire::InlineUnionInStruct& msg = result.value().value();
     ASSERT_STREQ(msg.before.begin(), &before[0]);
     ASSERT_EQ(msg.before.size(), before.size());
     ASSERT_STREQ(msg.after.begin(), &after[0]);
     ASSERT_EQ(msg.after.size(), after.size());
-    ASSERT_EQ(msg.xu.Which(), llcpp_misc::wire::SampleXUnion::Tag::kI);
+    ASSERT_EQ(msg.xu.Which(), llcpp_misc::wire::SampleUnion::Tag::kI);
     const int32_t& i = msg.xu.i();
     ASSERT_EQ(i, integer);
   }
 }
 
-TEST(PrimitiveInXUnion, Success) {
+TEST(PrimitiveInUnion, Success) {
   // clang-format off
   const auto expected = std::vector<uint8_t>{
-      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // xunion header
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // union header
       0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x01, 0x00,  // inline envelope content
   };
   // clang-format on
   int32_t integer = 0xdeadbeef;
   // encode
   {
-    auto xu = llcpp_misc::wire::SampleXUnion::WithI(integer);
+    auto xu = llcpp_misc::wire::SampleUnion::WithI(integer);
     fidl::OwnedEncodeResult encoded = fidl::StandaloneEncode(xu);
     ASSERT_TRUE(encoded.message().ok());
     auto bytes = encoded.message().CopyBytes();
@@ -98,18 +98,18 @@ TEST(PrimitiveInXUnion, Success) {
   // decode
   {
     std::vector<uint8_t> encoded_bytes = expected;
-    fit::result result = fidl::StandaloneInplaceDecode<llcpp_misc::wire::SampleXUnion>(
+    fit::result result = fidl::StandaloneInplaceDecode<llcpp_misc::wire::SampleUnion>(
         fidl::EncodedMessage::Create(encoded_bytes), kV2Metadata);
     ASSERT_TRUE(result.is_ok());
-    const llcpp_misc::wire::SampleXUnion& xu = result.value().value();
-    ASSERT_EQ(xu.Which(), llcpp_misc::wire::SampleXUnion::Tag::kI);
+    const llcpp_misc::wire::SampleUnion& xu = result.value().value();
+    ASSERT_EQ(xu.Which(), llcpp_misc::wire::SampleUnion::Tag::kI);
     const int32_t& i = xu.i();
     ASSERT_EQ(i, integer);
   }
 }
 
-TEST(InlineXUnionInStruct, FailToEncodeAbsentXUnion) {
-  llcpp_misc::wire::InlineXUnionInStruct input = {};
+TEST(InlineUnionInStruct, FailToEncodeAbsentUnion) {
+  llcpp_misc::wire::InlineUnionInStruct input = {};
   std::string empty_str = "";
   input.before = fidl::StringView::FromExternal(empty_str);
   input.after = fidl::StringView::FromExternal(empty_str);
@@ -121,12 +121,12 @@ TEST(InlineXUnionInStruct, FailToEncodeAbsentXUnion) {
   EXPECT_EQ(encoded.message().status(), ZX_ERR_INVALID_ARGS);
 }
 
-TEST(InlineXUnionInStruct, FailToDecodeAbsentXUnion) {
+TEST(InlineUnionInStruct, FailToDecodeAbsentUnion) {
   // clang-format off
   std::vector<uint8_t> encoded_bytes = std::vector<uint8_t>{
       0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // length of "before"
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  // "before" is present
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // null xunion header
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // null union header
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // num bytes; num handles
       0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // length of "after"
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  // "after" is present
@@ -136,7 +136,7 @@ TEST(InlineXUnionInStruct, FailToDecodeAbsentXUnion) {
       0x00, 0x00, 0x00,                                // 3 bytes of padding
   };
   // clang-format on
-  fit::result result = fidl::StandaloneInplaceDecode<llcpp_misc::wire::InlineXUnionInStruct>(
+  fit::result result = fidl::StandaloneInplaceDecode<llcpp_misc::wire::InlineUnionInStruct>(
       fidl::EncodedMessage::Create(encoded_bytes), kV2Metadata);
   EXPECT_FALSE(result.is_ok());
   // TODO(https://fxbug.dev/42110793): Test a reason enum instead of comparing strings.
@@ -144,12 +144,12 @@ TEST(InlineXUnionInStruct, FailToDecodeAbsentXUnion) {
   EXPECT_EQ(result.error_value().status(), ZX_ERR_INVALID_ARGS);
 }
 
-TEST(InlineXUnionInStruct, FailToDecodeZeroOrdinalXUnion) {
+TEST(InlineUnionInStruct, FailToDecodeZeroOrdinalUnion) {
   // clang-format off
   std::vector<uint8_t> encoded_bytes = std::vector<uint8_t>{
       0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // length of "before"
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  // "before" is present
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // null xunion header
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // null union header
       0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // num bytes; num handles
       0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // length of "after"
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  // "after" is present
@@ -160,7 +160,7 @@ TEST(InlineXUnionInStruct, FailToDecodeZeroOrdinalXUnion) {
       0x00, 0x00, 0x00,                                // 3 bytes of padding
   };
   // clang-format on
-  fit::result result = fidl::StandaloneInplaceDecode<llcpp_misc::wire::InlineXUnionInStruct>(
+  fit::result result = fidl::StandaloneInplaceDecode<llcpp_misc::wire::InlineUnionInStruct>(
       fidl::EncodedMessage::Create(encoded_bytes), kV2Metadata);
   EXPECT_FALSE(result.is_ok());
   // TODO(https://fxbug.dev/42110793): Test a reason enum instead of comparing strings.
@@ -168,14 +168,14 @@ TEST(InlineXUnionInStruct, FailToDecodeZeroOrdinalXUnion) {
   EXPECT_EQ(result.error_value().status(), ZX_ERR_INVALID_ARGS);
 }
 
-// The xunion ordinal hashing algorithm generates 32 bit values. But if it did
+// The union ordinal hashing algorithm generates 32 bit values. But if it did
 // generate values bigger than that, they would decode successfully
-TEST(InlineXUnionInStruct, SuccessLargeXUnionOrdinal) {
+TEST(InlineUnionInStruct, SuccessLargeUnionOrdinal) {
   // clang-format off
   auto encoded_bytes = std::vector<uint8_t>{
       0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // length of "before"
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  // "before" is present
-      0x53, 0x76, 0x31, 0x6f, 0xaa, 0xaa, 0xaa, 0xaa,  // xunion header
+      0x53, 0x76, 0x31, 0x6f, 0xaa, 0xaa, 0xaa, 0xaa,  // union header
       0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // num bytes; num handles
       0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // length of "after"
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  // "after" is present
@@ -188,7 +188,7 @@ TEST(InlineXUnionInStruct, SuccessLargeXUnionOrdinal) {
       0x00, 0x00, 0x00,                                // 3 bytes of padding
   };
   // clang-format on
-  fit::result result = fidl::StandaloneInplaceDecode<llcpp_misc::wire::InlineXUnionInStruct>(
+  fit::result result = fidl::StandaloneInplaceDecode<llcpp_misc::wire::InlineUnionInStruct>(
       fidl::EncodedMessage::Create(encoded_bytes), kV2Metadata);
   ASSERT_TRUE(result.is_ok());
 }
@@ -211,9 +211,9 @@ TEST(ComplexTable, Success) {
       0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // #5: num bytes; num handles
       0x0d, 0xf0, 0xad, 0x8b, 0xcd, 0xab, 0xcd, 0xab,  // SimpleTable.x: 0xabcdabcd8badf00d
       0xd1, 0xf1, 0xd1, 0xf1, 0x78, 0x56, 0x34, 0x12,  // SimpleTable.y: 0x12345678f1d1f1d1
-      // SampleXUnion
-      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // xunion header
-      0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x01, 0x00,  // SampleXUnion.i: 0xdeadbeef
+      // SampleUnion
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // union header
+      0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x01, 0x00,  // SampleUnion.i: 0xdeadbeef
       // vector<string>
       0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // length of string vector
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  // string vector data present
@@ -231,14 +231,14 @@ TEST(ComplexTable, Success) {
   std::string after("after");
   int64_t table_x = 0xabcdabcd8badf00d;
   int64_t table_y = 0x12345678f1d1f1d1;
-  int32_t xunion_i = 0xdeadbeef;
+  int32_t union_i = 0xdeadbeef;
   // encode
   {
     fidl::Arena allocator;
     llcpp_misc::wire::SimpleTable simple_table(allocator);
     simple_table.set_x(allocator, table_x).set_y(allocator, table_y);
-    llcpp_misc::wire::SampleXUnion xu;
-    xu = llcpp_misc::wire::SampleXUnion::WithI(xunion_i);
+    llcpp_misc::wire::SampleUnion xu;
+    xu = llcpp_misc::wire::SampleUnion::WithI(union_i);
     fidl::StringView strings_vector[]{
         fidl::StringView::FromExternal(before),
         fidl::StringView::FromExternal(after),
@@ -267,9 +267,9 @@ TEST(ComplexTable, Success) {
     ASSERT_TRUE(msg.simple().has_y());
     ASSERT_EQ(msg.simple().y(), table_y);
     ASSERT_TRUE(msg.has_u());
-    ASSERT_EQ(msg.u().Which(), llcpp_misc::wire::SampleXUnion::Tag::kI);
+    ASSERT_EQ(msg.u().Which(), llcpp_misc::wire::SampleUnion::Tag::kI);
     const int32_t& i = msg.u().i();
-    ASSERT_EQ(i, xunion_i);
+    ASSERT_EQ(i, union_i);
     ASSERT_TRUE(msg.has_strings());
     ASSERT_EQ(msg.strings().size(), 2u);
     ASSERT_STREQ(msg.strings()[0].begin(), &before[0]);

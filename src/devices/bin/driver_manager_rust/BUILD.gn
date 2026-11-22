@@ -66,7 +66,7 @@ _driver_manager_common = {
     "shutdown:driver_manager_shutdown",
     "utils:driver_manager_utils",
     "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
     "//sdk/fidl/fuchsia.driver.index:fuchsia.driver.index_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_rust",
@@ -76,7 +76,7 @@ _driver_manager_common = {
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-fs",
-    "//src/performance/memory/scudo:rust",
+    "//src/memory/lib/scudo:rust",
     "//src/sys/lib/library_loader",
     "//src/sys/lib/stdout-to-debuglog/rust",
     "//third_party/rust_crates:anyhow",
@@ -103,7 +103,7 @@ rustc_binary("driver_manager_rust_with_heapdump") {
   forward_variables_from(_driver_manager_common, "*")
   configs += configs_to_add
   features = [ "heapdump" ]
-  deps += [ "//src/performance/memory/heapdump/instrumentation:rust" ]
+  deps += [ "//src/memory/heapdump/instrumentation:rust" ]
 }
 
 fuchsia_unittest_package("driver-manager-rust-unittests") {

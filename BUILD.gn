@@ -9,8 +9,7 @@ import("//build/board.gni")
 import("//build/compiled_action.gni")
 import("//build/config/build_api_module.gni")
 import("//build/config/compiler.gni")
-import("//build/drivers/check_included_drivers.gni")
-import("//build/drivers/create_all_drivers_doc.gni")
+import("//build/drivers/assert_driver_components.gni")
 import("//build/images/args.gni")
 import("//build/info/info.gni")
 import("//build/prebuilt/cipd_prebuilt.gni")
@@ -1609,6 +1608,7 @@ build_api_module("tool_paths") {
     "//src/storage/bin/fvm($host_toolchain)",
     "//third_party/cobalt/src/bin/config_change_validator/src:bin($host_toolchain)",
     "//third_party/cobalt/src/bin/config_parser/src:bin($host_toolchain)",
+    "//tools/directory_owners($host_toolchain)",
     "//tools/doc_checker($host_toolchain)",
     "//tools/fidl:fidl-lint($host_toolchain)",
     "//tools/fidl:fidlfmt($host_toolchain)",
@@ -1636,7 +1636,8 @@ group("tool_paths.metadata") {
     # Unified python build orchestrator
     "//build/scripts/main_build.py",
 
-    # drop-in replacement for ninja that is wrapped with rsproxy for ResultStore
+    # DEPRECATED: drop-in replacement for ninja used by legacy callers.
+    # TODO(https://fxbug.dev/573624782): Delete after Go 'fint build' is deleted.
     "//build/resultstore/rs-sub-ninja.sh",
 
     # reclient is using fairly generic names (bootstrap, dumpstats). We may
@@ -1939,9 +1940,9 @@ build_api_module("rust_target_mapping") {
   deps = [ "//:default" ]
 }
 
-# Check that all of the drivers included in the image and packages.
-# are components and in the all-drivers-list
-check_included_drivers("drivers-check") {
+# Check that all of the drivers included in the image and packages are used
+# through driver components.
+assert_driver_components("drivers-check") {
   testonly = true
   deps = [
     "//build/images",
@@ -2566,6 +2567,7 @@ group("root_targets") {
 
     # The Bazel SDK test suite running against the in-tree @fuchsia_sdk
     # repository.
+    "//build/bazel/bazel_sdk:bazel_sdk_oot_tests",
     "//build/bazel/bazel_sdk:bazel_sdk_tests",
 
     # Tests of platform Bazel rules, macros, and migrated targets.
@@ -2594,7 +2596,6 @@ group("root_targets") {
 
     # It must be possible to run the versioning scripts without them being part
     # of the default build.
-    "//scripts/versioning($host_toolchain)",
 
     # To allow multi-products builds to define products that can be build with
     # fx build

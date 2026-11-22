@@ -18,11 +18,9 @@ from honeydew.affordances.power.system_power_state_controller import (
 from honeydew.affordances.power.system_power_state_controller import (
     system_power_state_controller_using_usb_cli,
 )
+from honeydew.affordances.usb import usb as usb_affordance
 from honeydew.transports.ffx import errors as ffx_errors
 from honeydew.transports.ffx import ffx as ffx_transport
-from honeydew.transports.fuchsia_controller import (
-    fuchsia_controller as fc_transport,
-)
 from mobly import signals
 
 _DEVICE_NAME: str = "fuchsia-usb-device"
@@ -90,7 +88,7 @@ class SystemPowerStateControllerUsingUsbCliTests(
 
         self.mock_ffx = mock.MagicMock(spec=ffx_transport.FFX)
         self.mock_ffx.run.return_value = _CAPABILITY_OUTPUT
-        self.mock_fc = mock.MagicMock(spec=fc_transport.FuchsiaController)
+        self.mock_usb = mock.MagicMock(spec=usb_affordance.USB)
         self.mock_device_logger = mock.AsyncMock(
             spec=affordances_capable.FuchsiaDeviceLogger
         )
@@ -105,7 +103,7 @@ class SystemPowerStateControllerUsingUsbCliTests(
         self.controller = system_power_state_controller_using_usb_cli.SystemPowerStateControllerUsingUsbCli(
             device_name=_DEVICE_NAME,
             ffx=self.mock_ffx,
-            fuchsia_controller=self.mock_fc,
+            usb=self.mock_usb,
             device_logger=self.mock_device_logger,
             inspect=self.mock_inspect,
             reboot_affordance=self.mock_reboot_affordance,
@@ -118,7 +116,7 @@ class SystemPowerStateControllerUsingUsbCliTests(
             system_power_state_controller_using_usb_cli.SystemPowerStateControllerUsingUsbCli(
                 device_name=_DEVICE_NAME,
                 ffx=self.mock_ffx,
-                fuchsia_controller=self.mock_fc,
+                usb=self.mock_usb,
                 device_logger=self.mock_device_logger,
                 inspect=self.mock_inspect,
                 reboot_affordance=self.mock_reboot_affordance,
@@ -131,7 +129,7 @@ class SystemPowerStateControllerUsingUsbCliTests(
             system_power_state_controller_using_usb_cli.SystemPowerStateControllerUsingUsbCli(
                 device_name=_DEVICE_NAME,
                 ffx=self.mock_ffx,
-                fuchsia_controller=self.mock_fc,
+                usb=self.mock_usb,
                 device_logger=self.mock_device_logger,
                 inspect=self.mock_inspect,
                 reboot_affordance=self.mock_reboot_affordance,
@@ -362,8 +360,7 @@ class SystemPowerStateControllerUsingUsbCliTests(
             ),
         )
 
-        self.mock_fc.before_usb_disconnect.assert_called_once()
-        self.mock_ffx.notify_intentional_disconnect.assert_called_once()
+        self.mock_usb.before_disconnect.assert_called_once()
         mock_start_cable_breaker.assert_called_once_with(
             self.controller, duration=15
         )
@@ -372,7 +369,7 @@ class SystemPowerStateControllerUsingUsbCliTests(
             self.controller, proc=mock_proc
         )
         self.mock_reboot_affordance.wait_for_online.assert_awaited_once()
-        self.mock_fc.after_usb_reconnect.assert_called_once()
+        self.mock_usb.after_connect.assert_called_once()
 
     @mock.patch.object(
         system_power_state_controller_using_usb_cli.SystemPowerStateControllerUsingUsbCli,
@@ -409,7 +406,7 @@ class SystemPowerStateControllerUsingUsbCliTests(
         mock_start_cable_breaker.assert_called_once()
         mock_cleanup_proc.assert_called_once()
         self.mock_reboot_affordance.wait_for_online.assert_awaited_once()
-        self.mock_fc.after_usb_reconnect.assert_called_once()
+        self.mock_usb.after_connect.assert_called_once()
 
     @mock.patch.object(
         system_power_state_controller_using_usb_cli.SystemPowerStateControllerUsingUsbCli,

@@ -5,6 +5,8 @@
 #define SRC_CONNECTIVITY_WEAVE_ADAPTATION_PLATFORM_MANAGER_IMPL_H_
 
 #include <BuildConfig.h>
+#include <fidl/fuchsia.io/cpp/markers.h>
+#include <lib/fidl/cpp/wire/channel.h>
 #include <lib/sys/cpp/component_context.h>
 
 #include "generic_platform_manager_impl_fuchsia.h"
@@ -30,6 +32,17 @@ class NL_DLL_EXPORT PlatformManagerImpl final
   void ShutdownWeaveStack();
   sys::ComponentContext* GetComponentContextForProcess();
   void SetComponentContextForProcess(std::unique_ptr<sys::ComponentContext> context);
+
+  // Sets the process component context from natural directory endpoints.
+  //
+  // If |outgoing_dir| is valid, it is served on |dispatcher| if non-null, or
+  // else on the dispatcher previously configured via |SetDispatcher| (falling
+  // back to the current thread's default dispatcher if neither is set). Callers
+  // relying on the stored dispatcher must ensure |SetDispatcher| has been
+  // called with a live dispatcher prior to calling this method.
+  void SetComponentContextForProcess(fidl::ClientEnd<fuchsia_io::Directory> incoming_svc,
+                                     fidl::ServerEnd<fuchsia_io::Directory> outgoing_dir = {},
+                                     async_dispatcher_t* dispatcher = nullptr);
 
   // Sets the dispatcher to which tasks will be posted.
   //
@@ -68,7 +81,7 @@ class NL_DLL_EXPORT PlatformManagerImpl final
 
   static PlatformManagerImpl sInstance;
   std::unique_ptr<sys::ComponentContext> context_;
-  async_dispatcher_t* dispatcher_;
+  async_dispatcher_t* dispatcher_ = nullptr;
   InetLayer::FuchsiaPlatformData platform_data_;
 };
 

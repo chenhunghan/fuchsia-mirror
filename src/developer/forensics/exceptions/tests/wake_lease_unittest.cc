@@ -9,7 +9,6 @@
 #include <fidl/fuchsia.power.system/cpp/fidl.h>
 #include <fidl/fuchsia.power.system/cpp/test_base.h>
 #include <lib/async/cpp/executor.h>
-#include <lib/fidl/cpp/binding.h>
 #include <lib/fidl/cpp/wire/channel.h>
 #include <lib/fpromise/promise.h>
 #include <lib/syslog/cpp/macros.h>

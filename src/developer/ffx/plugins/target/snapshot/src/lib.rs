@@ -17,6 +17,7 @@ use fho::{Error, FfxMain, FfxTool, Result, bug, return_bug, return_user_error, u
 use futures::stream::{FuturesOrdered, StreamExt};
 use gcs::error::GcsError;
 use pbms::{AuthFlowChoice, handle_new_access_token};
+use safe_string::TermSafe;
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::env::temp_dir;
@@ -175,9 +176,13 @@ fn format_annotation(previous_key: &String, new_key: &String, new_value: &String
         // Build the formatted line from the key segment and append it to the output.
         let indentation: String = (0..idx).map(|_| "    ").collect();
         let end_of_key = new_key_vec.len() - 1 == idx;
+        let key_segment = TermSafe::from_str_escaped(new_key_vec[idx]);
         let line = match end_of_key {
-            false => format!("{}{}\n", indentation, new_key_vec[idx]),
-            true => format!("{}{}: {}\n", indentation, new_key_vec[idx], new_value),
+            false => format!("{}{}\n", indentation, key_segment),
+            true => {
+                let value = TermSafe::from_str_escaped(new_value);
+                format!("{}{}: {}\n", indentation, key_segment, value)
+            }
         };
         output.push_str(&line);
     }
@@ -497,6 +502,49 @@ mod test {
         hardware\n\
         \x20   board\n\
         \x20       name: default-board\n"
+        );
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_annotations_sanitizes_control_characters() -> Result<()> {
+        let env = ffx_config::test_env().build().expect("test env");
+        let client = fdomain_local::local_client_empty();
+        let annotation_vec: Vec<Annotation> = vec![
+            annotation!("build.\x1b[31mboard\x1b[0m", "x64\x1b[2J"),
+            annotation!(
+                "hardware\x1b]0;pwned\x07.board.name",
+                "default\r\n\t\0\x7f\u{009b}2J-board"
+            ),
+        ];
+        let annotations = Annotations { annotations2: Some(annotation_vec), ..Default::default() };
+        let data_provider_proxy = setup_fake_data_provider_server(client, annotations);
+
+        let tool = SnapshotTool {
+            cmd: SnapshotCommand { output_file: None, dump_annotations: true, upload: false },
+            data_provider_proxy,
+            context: env.context.clone(),
+        };
+        let buffers = TestBuffers::default();
+        let writer = VerifiedMachineWriter::<CommandStatus>::new_test(None, &buffers);
+
+        tool.main(writer).await?;
+        let output = buffers.into_stdout_str();
+
+        assert!(!output.contains('\x1b'));
+        assert!(!output.contains('\x07'));
+        assert!(!output.contains('\r'));
+        assert!(!output.contains('\0'));
+        assert!(!output.contains('\x7f'));
+        assert!(!output.contains('\u{009b}'));
+
+        assert_eq!(
+            output,
+            "build\n\
+        \x20   \\u{1b}[31mboard\\u{1b}[0m: x64\\u{1b}[2J\n\
+        hardware\\u{1b}]0;pwned\\u{7}\n\
+        \x20   board\n\
+        \x20       name: default\\r\\n\\t\\u{0}\\u{7f}\\u{9b}2J-board\n\n"
         );
         Ok(())
     }

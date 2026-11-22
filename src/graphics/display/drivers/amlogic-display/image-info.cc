@@ -6,6 +6,7 @@
 
 #include <fidl/fuchsia.hardware.amlogiccanvas/cpp/wire.h>
 #include <lib/driver/logging/cpp/logger.h>
+#include <lib/zx/result.h>
 
 namespace amlogic_display {
 

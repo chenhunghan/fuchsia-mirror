@@ -88,8 +88,7 @@ members and prospective customers before being submitted as an RFC.
 In order to make this feature work, we need to define:
 
 * [syntax for child components to opt-in to parent overrides](#mutability)
-* [rules for resolving configuration in the presence of schema version
-  skew](#version-skew)
+* rules for resolving configuration in the presence of schema version skew
 * [precedence of parent-provided values compared to other sources of
   configuration](#precedence)
 * [API(s) that allow parent components to actually pass values at

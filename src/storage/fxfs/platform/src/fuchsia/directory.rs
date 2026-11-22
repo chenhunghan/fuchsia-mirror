@@ -8,7 +8,7 @@ use crate::fuchsia::errors::map_to_status;
 use crate::fuchsia::file::{FlushType, FxFile};
 use crate::fuchsia::node::{FxNode, GetResult, OpenedNode};
 use crate::fuchsia::symlink::FxSymlink;
-use crate::fuchsia::volume::{FxVolume, RootDir};
+use crate::fuchsia::volume::{FxVolume, PurgeAction, RootDir};
 use anyhow::{Error, bail};
 use either::{Left, Right};
 use fidl::endpoints::ServerEnd;
@@ -413,8 +413,9 @@ impl FxDirectory {
         if self.directory.lookup(&name).await.map_err(map_to_status)?.is_some() {
             return Err(zx::Status::ALREADY_EXISTS);
         }
+        let now = Timestamp::now();
         self.directory
-            .insert_child(&mut transaction, &name, source_id, kind.clone())
+            .insert_child_with_timestamp(&mut transaction, &name, source_id, kind.clone(), now)
             .await
             .map_err(map_to_status)?;
         if is_unnamed_temporary {
@@ -425,6 +426,10 @@ impl FxDirectory {
         } else {
             store.adjust_refs(&mut transaction, source_id, 1).await.map_err(map_to_status)?;
         }
+        store
+            .update_attributes(&mut transaction, source_id, None, Some(now))
+            .await
+            .map_err(map_to_status)?;
         transaction
             .commit_with_callback(|_| {
                 transaction_callback();
@@ -451,19 +456,31 @@ impl FxDirectory {
         if self.is_deleted() {
             return Err(zx::Status::ACCESS_DENIED);
         }
+        if self.directory().dir_type().is_encrypted()
+            && self
+                .directory()
+                .get_fscrypt_key()
+                .await
+                .map_err(map_to_status)?
+                .into_cipher()
+                .is_none()
+        {
+            return Err(zx::Status::ACCESS_DENIED);
+        }
 
         let mut transaction = replace_context.transaction;
         let actual_dst_name = replace_context.dst_name.as_deref().unwrap_or(name).to_owned();
 
         if let Some((dst_id, dst_descriptor)) = replace_context.dst_id_and_descriptor.as_ref() {
-            if *dst_id == source_id {
-                return Ok(());
-            }
             if !matches!(dst_descriptor, ObjectDescriptor::File | ObjectDescriptor::Symlink) {
                 return Err(zx::Status::NOT_FILE);
             }
+            if *dst_id == source_id && actual_dst_name == name {
+                return Ok(());
+            }
         }
 
+        let now = Timestamp::now();
         let store = self.store();
         if is_unnamed_temporary {
             // Move object out from the graveyard and place into dir. Since we are moving the
@@ -473,6 +490,10 @@ impl FxDirectory {
         } else {
             store.adjust_refs(&mut transaction, source_id, 1).await.map_err(map_to_status)?;
         }
+        store
+            .update_attributes(&mut transaction, source_id, None, Some(now))
+            .await
+            .map_err(map_to_status)?;
 
         let replace_result = directory::replace_child_with_object(
             &mut transaction,
@@ -480,27 +501,34 @@ impl FxDirectory {
             (self.directory(), name),
             0,
             false,
-            Timestamp::now(),
+            now,
         )
         .await
         .map_err(map_to_status)?;
 
         let is_replacement = replace_context.dst_id_and_descriptor.is_some();
-        transaction
+        let purge_id = transaction
             .commit_with_callback(|_| {
                 transaction_callback();
                 if is_replacement {
                     self.did_remove(&actual_dst_name);
                 }
+                let purge_id = if let ReplacedChild::Object(id) = replace_result {
+                    match self.volume().mark_to_be_purged_if_open(id) {
+                        PurgeAction::PurgeNow => Some(id),
+                        PurgeAction::Defer => None,
+                    }
+                } else {
+                    None
+                };
                 self.did_add(name, None);
+                purge_id
             })
             .await
             .map_err(map_to_status)?;
 
-        if let ReplacedChild::Object(id) = replace_result {
-            if let Err(e) =
-                self.volume().maybe_purge_file(id, replace_context.truncate_guard.as_ref()).await
-            {
+        if let Some(id) = purge_id {
+            if let Err(e) = self.store().purge(id, replace_context.truncate_guard.as_ref()).await {
                 warn!(error:? = e; "Failed to purge replaced file during link_into");
             }
         }
@@ -745,35 +773,40 @@ impl FxDirectory {
         };
         let moved_node = moved_node.unwrap();
 
-        transaction
+        let purge_id = transaction
             .commit_with_callback(|_| {
                 moved_node.set_parent(self.clone());
                 src_dir.did_remove(&actual_src_name);
 
-                match replace_result {
-                    ReplacedChild::None => {}
-                    ReplacedChild::ObjectWithRemainingLinks(..)
-                    | ReplacedChild::Object(_)
-                    | ReplacedChild::Purged(_) => {
+                let purge_id = match replace_result {
+                    ReplacedChild::None => None,
+                    ReplacedChild::ObjectWithRemainingLinks(..) | ReplacedChild::Purged(_) => {
                         self.did_remove(&actual_dst_name);
+                        None
+                    }
+                    ReplacedChild::Object(id) => {
+                        self.did_remove(&actual_dst_name);
+                        match self.volume().mark_to_be_purged_if_open(id) {
+                            PurgeAction::PurgeNow => Some(id),
+                            PurgeAction::Defer => None,
+                        }
                     }
                     ReplacedChild::Directory(id) => {
                         let store = self.store();
                         store.filesystem().queue_tombstone_object(store.store_object_id(), id);
                         self.did_remove(&actual_dst_name);
                         self.volume().mark_directory_deleted(id);
+                        None
                     }
-                }
+                };
                 self.did_add(dst, Some(moved_node));
+                purge_id
             })
             .await
             .map_err(map_to_status)?;
 
-        if let ReplacedChild::Object(id) = replace_result {
-            self.volume()
-                .maybe_purge_file(id, truncate_guard.as_ref())
-                .await
-                .map_err(map_to_status)?;
+        if let Some(id) = purge_id {
+            self.store().purge(id, truncate_guard.as_ref()).await.map_err(map_to_status)?;
         }
         Ok(())
     }
@@ -882,15 +915,20 @@ impl MutableDirectory for FxDirectory {
                     .map_err(map_to_status)?;
             }
             ReplacedChild::Object(id) => {
-                transaction
-                    .commit_with_callback(|_| self.did_remove(&actual_dst_name))
+                let purge_action = transaction
+                    .commit_with_callback(|_| {
+                        self.did_remove(&actual_dst_name);
+                        self.volume().mark_to_be_purged_if_open(id)
+                    })
                     .await
                     .map_err(map_to_status)?;
 
                 // If purging fails, we should still return success, since the file will appear
                 // unlinked at this point anyways.  The file should be cleaned up on a later mount.
-                if let Err(e) = self.volume().maybe_purge_file(id, truncate_guard.as_ref()).await {
-                    warn!(error:? = e; "Failed to purge file");
+                if purge_action == PurgeAction::PurgeNow {
+                    if let Err(e) = self.store().purge(id, truncate_guard.as_ref()).await {
+                        warn!(error:? = e; "Failed to purge file");
+                    }
                 }
             }
             ReplacedChild::Directory(id) => {
@@ -6272,6 +6310,102 @@ mod tests {
         assert_watch_event(&mut watcher, WatchEvent::ADD_FILE, "FOO").await;
 
         close_file_checked(tmpfile).await;
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_casefold_link_into_self_replace_case_only() {
+        let fixture = TestFixture::new().await;
+        let (dir, mut watcher) = set_up_casefold_dir_with_files(&fixture, "dir", &["foo"]).await;
+
+        let file = open_file_checked(
+            &dir,
+            "foo",
+            fio::Flags::PROTOCOL_FILE | fio::PERM_READABLE | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        file::write(&file, b"hello").await.expect("write failed");
+
+        let dst_token = dir.get_token().await.expect("FIDL call failed").expect("get_token failed");
+        file.link_into(
+            dst_token,
+            "FOO",
+            &fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("link_into FIDL call failed")
+        .map_err(zx::Status::err_from_raw)
+        .expect("link_into failed");
+
+        assert_watch_event(&mut watcher, WatchEvent::REMOVE_FILE, "foo").await;
+        assert_watch_event(&mut watcher, WatchEvent::ADD_FILE, "FOO").await;
+
+        let entries = fuchsia_fs::directory::readdir(&dir).await.expect("readdir failed");
+        assert_eq!(
+            entries,
+            vec![fuchsia_fs::directory::DirEntry {
+                name: "FOO".to_string(),
+                kind: fuchsia_fs::directory::DirentKind::File,
+            }]
+        );
+
+        let (_, immutable_attrs) = file
+            .get_attributes(fio::NodeAttributesQuery::LINK_COUNT)
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("get_attributes failed");
+        assert_eq!(immutable_attrs.link_count, Some(1));
+
+        let reopened = open_file_checked(
+            &dir,
+            "FOO",
+            fio::Flags::PROTOCOL_FILE | fio::PERM_READABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        assert_eq!(file::read(&reopened).await.expect("read failed"), b"hello");
+        close_file_checked(reopened).await;
+
+        // Also verify case-only self-replacement when the file has multiple hard links.
+        let dst_token = dir.get_token().await.expect("FIDL call failed").expect("get_token failed");
+        file.link_into(dst_token, "other", &fio::LinkIntoOptions::default())
+            .await
+            .expect("link_into FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("link_into failed");
+        assert_watch_event(&mut watcher, WatchEvent::ADD_FILE, "other").await;
+
+        let dst_token = dir.get_token().await.expect("FIDL call failed").expect("get_token failed");
+        file.link_into(
+            dst_token,
+            "Foo",
+            &fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("link_into FIDL call failed")
+        .map_err(zx::Status::err_from_raw)
+        .expect("link_into failed");
+        assert_watch_event(&mut watcher, WatchEvent::REMOVE_FILE, "FOO").await;
+        assert_watch_event(&mut watcher, WatchEvent::ADD_FILE, "Foo").await;
+
+        let (_, immutable_attrs) = file
+            .get_attributes(fio::NodeAttributesQuery::LINK_COUNT)
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("get_attributes failed");
+        assert_eq!(immutable_attrs.link_count, Some(2));
+
+        close_file_checked(file).await;
+        fxfs::fsck::fsck(fixture.fs().clone()).await.expect("fsck failed");
         fixture.close().await;
     }
 

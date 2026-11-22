@@ -60,13 +60,13 @@ class IntelDsp : public codecs::IntelHDACodecDriverBase {
   zx_status_t Suspend(uint8_t requested_state, bool enable_wake, uint8_t suspend_reason,
                       uint8_t* out_state) override final;
 
-  // ZX_PROTOCOL_IHDA_CODEC Interface
-  zx_status_t CodecGetDispatcherChannel(zx_handle_t* remote_endpoint_out);
-
  private:
   // Accessor for our mapped registers
   MMIO_PTR adsp_registers_t* regs() const;
   MMIO_PTR adsp_fw_registers_t* fw_regs() const;
+
+  // Returns the codec driver channel used by IntelHDACodecDriverBase.
+  zx::result<zx::channel> CodecGetDispatcherChannel();
 
   zx::result<> SetupDspDevice();
   zx::result<> InitializeDsp();

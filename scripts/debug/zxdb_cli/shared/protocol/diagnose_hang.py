@@ -35,7 +35,7 @@ class ClassifiedThread(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    thread_id: int = Field(description="Thread KOID.")
+    thread_id: int = Field(description="Sequential DAP thread ID.")
     name: str = Field(description="Thread name.")
     classification: ThreadHangClassification = Field(
         description=(

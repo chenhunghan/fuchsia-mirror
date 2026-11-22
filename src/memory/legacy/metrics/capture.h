@@ -22,7 +22,7 @@
 
 #include <ffl/fixed.h>
 
-#include "src/performance/memory/scudo/mallopt.h"
+#include "src/memory/lib/scudo/mallopt.h"
 
 class TestMonitor;
 

@@ -31,18 +31,23 @@ library_headers("headers") {
 }
 
 source_set("power-management") {
-  sources = [ "energy_model_ffi.cc" ]
   public_deps = [ ":headers" ]
-  deps = [ "//zircon/system/ulib/fbl" ]
   if (is_kernel) {
-    sources += [ "pdev_power_level_controller_ffi.cc" ]
-    deps += [
+    sources = [
+      "energy_model_ffi.cc",
+      "pdev_power_level_controller_ffi.cc",
+    ]
+    deps = [
       ":power-management-rs",
       "//zircon/kernel/dev/pdev/power",
       "//zircon/kernel/lib/ktl",
+      "//zircon/system/ulib/fbl",
     ]
   } else {
-    deps += [ ":power-management-userspace-rs" ]
+    deps = [
+      ":energy-model-ffi-cpp",
+      ":power-management-userspace-rs",
+    ]
   }
 }
 
@@ -62,8 +67,10 @@ if (is_kernel) {
       "//sdk/rust/zx-status",
       "//sdk/rust/zx-types",
       "//src/lib/ffl",
+      "//src/lib/kprint",
       "//src/lib/ksync",
       "//src/lib/zr",
+      "//third_party/rust_crates:bitflags",
       "//zircon/kernel/lib/boot-options:boot-options-rs",
       "//zircon/kernel/lib/debug",
       "//zircon/system/ulib/fbl/rust:fbl",
@@ -71,6 +78,15 @@ if (is_kernel) {
     test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
   }
 } else {
+  source_set("energy-model-ffi-cpp") {
+    sources = [ "energy_model_ffi.cc" ]
+    public_deps = [ ":headers" ]
+    deps = [ "//zircon/system/ulib/fbl" ]
+    if (is_fuchsia) {
+      public_configs = [ "//build/config/fuchsia:dynamic_cpp_standard_library" ]
+    }
+  }
+
   rustc_staticlib("power-management-userspace-rs") {
     edition = "2024"
     source_root = "mod.rs"
@@ -83,21 +99,31 @@ if (is_kernel) {
       "power_state_ffi.rs",
     ]
     features = [ "userspace" ]
+    with_unit_tests = true
     deps = [
       "//sdk/rust/zx-status",
       "//sdk/rust/zx-types",
       "//src/lib/ffl",
       "//src/lib/zr",
+      "//third_party/rust_crates:bitflags",
       "//zircon/system/ulib/fbl/rust:fbl",
     ]
+    test_deps = [ ":energy-model-ffi-cpp" ]
+  }
+
+  fuchsia_unittest_package("power-management-rust-unittests-package") {
+    package_name = "power-management-rust-unittests"
+    deps = [ ":power-management-userspace-rs_test" ]
   }
 }
 
 group("tests") {
   testonly = true
   deps = [
+    ":power-management-rust-unittests-package($default_toolchain)",
     ":power-management-unittests($host_toolchain)",
     ":power-management-unittests-package",
+    ":power-management-userspace-rs_test($host_toolchain)",
   ]
 }
 
@@ -123,9 +149,7 @@ if (is_kernel) {
 test("power-management-unittests") {
   sources = [
     "bandwidth-reservation-cache-test.cc",
-    "energy-model-test.cc",
     "power-state-test.cc",
-    "test-helper.cc",
   ]
   deps = [
     ":power-management",

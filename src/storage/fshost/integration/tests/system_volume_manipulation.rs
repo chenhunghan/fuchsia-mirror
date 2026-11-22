@@ -9,6 +9,7 @@
 //! to apply a system update or flash a new system image.
 
 pub mod config;
+use blob_pager_and_verifier::BlobPagerAndVerifier;
 use block_client::RemoteBlockClient;
 use config::{blob_fs_type, data_fs_spec, data_fs_type, new_builder, volumes_spec};
 use device_watcher::recursive_wait;
@@ -17,8 +18,9 @@ use fidl_fuchsia_fshost as ffshost;
 use fidl_fuchsia_fxfs as ffxfs;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_storage_block as fblock;
+use fidl_fuchsia_storage_mapping as fmapping;
 use fshost_test_fixture::disk_builder::{
-    Disk, expected_fxblob_volumes, list_all_fxfs_volumes, test_blob_hash,
+    Disk, TEST_BLOB_CONTENTS, expected_fxblob_volumes, list_all_fxfs_volumes, test_blob_hash,
 };
 use fshost_test_fixture::{TestFixture, write_blob};
 use fuchsia_async as fasync;
@@ -112,13 +114,14 @@ async fn mount_system_blob_volume() {
             .unwrap();
 
     // We should still be able to read our test blob back.
-    let blob_reader =
-        connect_to_protocol_at_dir_root::<ffxfs::BlobReaderMarker>(&blob_svc).unwrap();
-    blob_reader
-        .get_vmo(test_blob_hash().as_bytes().try_into().unwrap())
+    let blob_pager = create_blob_pager(&blob_exposed_dir).await;
+    let vmo = blob_pager
+        .create_vmo(test_blob_hash().as_bytes().try_into().unwrap())
         .await
-        .unwrap()
         .expect("missing test blob");
+    let mut buf = vec![0; TEST_BLOB_CONTENTS.len()];
+    vmo.read(&mut buf, 0).unwrap();
+    assert_eq!(buf.as_slice(), &TEST_BLOB_CONTENTS);
 
     // Make sure we can create & write a blob with the BlobCreator.
     let data = "Hello, world!".as_bytes();
@@ -128,7 +131,7 @@ async fn mount_system_blob_volume() {
     let hash = hash.as_bytes().try_into().unwrap();
 
     // Ensure we can read the blob back.
-    let vmo = blob_reader.get_vmo(hash).await.unwrap().unwrap();
+    let vmo = blob_pager.create_vmo(hash).await.unwrap();
     let mut buff = vec![];
     buff.resize(data.len(), 0);
     vmo.read(&mut buff, 0).unwrap();
@@ -175,9 +178,8 @@ async fn mount_system_blob_volume_with_format() {
     let hash = hash.as_bytes().try_into().unwrap();
 
     // Ensure we can read the blob back.
-    let blob_reader =
-        connect_to_protocol_at_dir_root::<ffxfs::BlobReaderMarker>(&blob_svc).unwrap();
-    let vmo = blob_reader.get_vmo(hash).await.unwrap().unwrap();
+    let blob_pager = create_blob_pager(&blob_exposed_dir).await;
+    let vmo = blob_pager.create_vmo(hash).await.unwrap();
     let mut buff = vec![];
     buff.resize(data.len(), 0);
     vmo.read(&mut buff, 0).unwrap();
@@ -235,18 +237,18 @@ async fn mount_system_blob_volume_lifecycle() {
             .await
             .unwrap();
 
-    // Make sure the BlobReader is working and being served.
+    // Make sure the BlobCreator is working and being served.
     let hash = test_blob_hash();
     let hash = hash.as_bytes().try_into().unwrap();
-    let blob_reader =
-        connect_to_protocol_at_dir_root::<ffxfs::BlobReaderMarker>(&blob_svc).unwrap();
-    blob_reader.get_vmo(hash).await.unwrap().expect("missing blob");
+    let blob_creator =
+        connect_to_protocol_at_dir_root::<ffxfs::BlobCreatorMarker>(&blob_svc).unwrap();
+    assert_eq!(blob_creator.needs_overwrite(hash).await.unwrap(), Ok(false));
 
     // Ensure we shut the filesystem down when we close (or drop) the last connection to the exposed
-    // directory. The BlobReader service should start failing soon afterwards.
+    // directory. The BlobCreator service should start failing soon afterwards.
     blob_exposed_dir.close().await.unwrap().expect("close failed");
     loop {
-        if let Err(e) = blob_reader.get_vmo(hash).await {
+        if let Err(e) = blob_creator.needs_overwrite(hash).await {
             assert!(e.is_closed());
             break;
         }
@@ -303,17 +305,24 @@ async fn mount_system_blob_volume_handles_concurrency() {
         .await
         .unwrap()
         .expect("MountSystemBlobVolume unexpectedly failed");
-    let blob_reader =
-        connect_to_protocol_at_dir_svc::<ffxfs::BlobReaderMarker>(&blob_exposed_dir).unwrap();
-    for hash in hashes {
-        blob_reader
-            .get_vmo(hash.as_bytes().try_into().unwrap())
-            .await
-            .unwrap()
-            .expect("blob missing");
+    let blob_pager = create_blob_pager(&blob_exposed_dir).await;
+    for (hash, data) in hashes.into_iter().zip(blob_data) {
+        let vmo =
+            blob_pager.create_vmo(hash.as_bytes().try_into().unwrap()).await.expect("blob missing");
+        let mut buf = vec![0; data.len()];
+        vmo.read(&mut buf, 0).unwrap();
+        assert_eq!(buf.as_slice(), data.as_bytes());
     }
 
     fixture.tear_down().await;
+}
+
+async fn create_blob_pager(blob_exposed_dir: &fio::DirectoryProxy) -> BlobPagerAndVerifier {
+    let mapping_provider =
+        connect_to_protocol_at_dir_svc::<fmapping::MappingProviderMarker>(blob_exposed_dir)
+            .unwrap();
+    let mapper = connect_to_protocol_at_dir_svc::<fblock::MapperMarker>(blob_exposed_dir).unwrap();
+    BlobPagerAndVerifier::new(&mapping_provider, &mapper).await.unwrap()
 }
 
 /// Helper function that creates a new fxfs system image containing a single blob volume with
@@ -383,31 +392,19 @@ async fn verify_installed_fxblob_system(disk: Disk) {
     fixture.check_test_data_file().await;
     fixture.check_fs_type("blob", blob_fs_type()).await;
 
-    let reader = connect_to_protocol_at_dir_root::<ffxfs::BlobReaderMarker>(
-        fixture.realm.root.get_exposed_dir(),
-    )
-    .expect("failed to connect to the BlobReader");
-
     // The original blob should be missing.
     assert_eq!(
-        reader
-            .get_vmo(&test_blob_hash().into())
-            .await
-            .unwrap()
-            .map_err(zx::Status::err_from_raw)
-            .expect_err("old blob should be gone"),
+        fixture.get_blob_vmo(&test_blob_hash().into()).await.expect_err("old blob should be gone"),
         zx::Status::NOT_FOUND
     );
 
     // We should be able to find and read the blobs we installed.
     for data in TEST_BLOBS {
         let hash = fuchsia_merkle::root_from_slice(data);
-        let vmo = reader
-            .get_vmo(&hash.as_bytes().try_into().unwrap())
+        let vmo = fixture
+            .get_blob_vmo(&hash.as_bytes().try_into().unwrap())
             .await
-            .unwrap()
-            .map_err(zx::Status::err_from_raw)
-            .expect("GetVmo failed");
+            .expect("get_blob_vmo failed");
         let mut buf = vec![0; data.len()];
         vmo.read(&mut buf, 0).unwrap();
         assert_eq!(buf.as_slice(), data);

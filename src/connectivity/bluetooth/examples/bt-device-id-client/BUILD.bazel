@@ -67,7 +67,6 @@ fx_component(
 
 fx_package(
     name = "bt-device-id-client",
-    package_name = "bt-device-id-client",
     components = [":component"],
 )
 

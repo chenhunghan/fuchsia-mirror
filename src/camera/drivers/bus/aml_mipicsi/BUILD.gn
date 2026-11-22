@@ -39,11 +39,16 @@ source_set("aml_mipi_driver_source") {
     "aml_mipi_debug.cc",
     "aml_mipi_regs.h",
   ]
-  deps = [ "//src/devices/lib/driver" ]
+  deps = [
+    "//sdk/lib/async-default",
+    "//src/devices/lib/driver",
+  ]
   public_deps = [
-    "//sdk/banjo/fuchsia.hardware.mipicsi:fuchsia.hardware.mipicsi_banjo_cpp",
+    "//sdk/fidl/fuchsia.hardware.mipicsi:fuchsia.hardware.mipicsi_cpp",
+    "//sdk/lib/component/outgoing/cpp",
     "//sdk/lib/driver/mmio/cpp",
     "//sdk/lib/driver/platform-device/cpp",
+    "//src/devices/lib/driver:driver_runtime",
     "//src/lib/ddk",
     "//src/lib/ddk:ddk-metadata-headers",
     "//src/lib/ddktl",
@@ -69,7 +74,6 @@ fuchsia_driver_component("aml_mipicsi_driver") {
     ":aml_mipi_bind",
     ":aml_mipicsi_driver-driver",
   ]
-  info = "meta/aml_mipicsi_driver-info.json"
 }
 
 fuchsia_driver_package("driver_package") {
@@ -85,6 +89,7 @@ test("aml_mipi_test") {
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/async_patterns/testing/cpp",
+    "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/component/outgoing/cpp",
     "//sdk/lib/driver/fake-platform-device/cpp",
     "//src/devices/testing/fake-mmio-reg",
@@ -95,6 +100,11 @@ test("aml_mipi_test") {
 
 fuchsia_unittest_package("aml_mipi_test_package") {
   deps = [ ":aml_mipi_test" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
 }
 
 group("aml_mipicsi") {

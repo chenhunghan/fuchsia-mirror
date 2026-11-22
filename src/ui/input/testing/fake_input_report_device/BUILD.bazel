@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "fake_input_report_device",
+    testonly = True,
+    srcs = [
+        "fake.cc",
+        "reports_reader.cc",
+    ],
+    hdrs = [
+        "fake.h",
+        "reports_reader.h",
+    ],
+    visibility = [
+        "//src/ui/tests/integration_input_tests/touch:__pkg__",
+        "//src/ui/tests/integration_input_tests/virtual-keyboard:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.input.report:fuchsia.input.report_hlcpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//src/ui/input/lib/hid-input-report",
+        "//zircon/system/ulib/fbl",
+    ],
+    alwayslink = True,
+)

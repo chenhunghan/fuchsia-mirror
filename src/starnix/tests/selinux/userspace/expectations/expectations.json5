@@ -37,6 +37,10 @@
                 // TODO: Support reading pre-policy procattrs in Starnix.
                 "ProcAttrTest.PrePolicyAttrs",
 
+                // TODO: https://fxbug.dev/585154013 - Report the initial SID name via `SO_PEERSEC`
+                // before policy load.
+                "SocketPeerSecTest.PrePolicyLoad",
+
                 // TODO: https://fxbug.dev/568759264 - Cache tracer credentials at ptrace
                 // attachment time for capability checks on exec.
                 "PtraceTest.PtraceExecVanillaCapCheckUsesCachedCreds",

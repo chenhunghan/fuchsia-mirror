@@ -7,9 +7,11 @@
 
 #include <fidl/fuchsia.hardware.adb/cpp/fidl.h>
 #include <lib/sync/cpp/completion.h>
+#include <zircon/compiler.h>
 
 #include <map>
 #include <memory>
+#include <mutex>
 
 #include "service-manager.h"
 #include "src/developer/adb/third_party/adb/adb-base.h"
@@ -46,6 +48,7 @@ class Adb : public AdbBase {
   zx_status_t Reset();
 
   // AdbDaemonBase functions
+  async_dispatcher_t* dispatcher() const override { return dispatcher_; }
   bool SendUsbPacket(uint8_t* buf, size_t len) override;
   zx::result<zx::socket> GetServiceSocket(std::string_view service_name,
                                           std::string_view args) override;
@@ -64,8 +67,16 @@ class Adb : public AdbBase {
   // for the next packet.
   void ReceiveCallback(fidl::WireUnownedResult<fuchsia_hardware_adb::UsbAdbImpl::Receive>& result);
 
+  // Returns a clone of |impl_| that callers can make FIDL calls on without holding |impl_lock_|.
+  fidl::WireSharedClient<fuchsia_hardware_adb::UsbAdbImpl> GetImpl();
+
   async_dispatcher_t* dispatcher_;
-  fidl::WireSharedClient<fuchsia_hardware_adb::UsbAdbImpl> impl_;
+  // |impl_| is reassigned and torn down on the thread that calls Reset(), while the transport
+  // write thread sends packets and |dispatcher_| issues Receive() calls on it, so access to the
+  // variable itself is guarded by |impl_lock_|.
+  std::mutex impl_lock_;
+  fidl::WireSharedClient<fuchsia_hardware_adb::UsbAdbImpl> impl_ __TA_GUARDED(impl_lock_);
+  std::shared_ptr<libsync::Completion> impl_teardown_ __TA_GUARDED(impl_lock_);
   fidl::ClientEnd<fuchsia_hardware_adb::Device> device_client_;
 
   // Handle to the third party library implementation of ADB protocol.
@@ -81,7 +92,6 @@ class Adb : public AdbBase {
   // completely received, copied_len_ should be 0.
   size_t copied_len_ = 0;
 
-  std::shared_ptr<libsync::Completion> impl_teardown_;
   ServiceManager service_manager_;
 };
 

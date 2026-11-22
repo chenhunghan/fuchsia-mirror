@@ -5,6 +5,7 @@
 #include "src/developer/debug/zxdb/symbols/dwarf_die_ref.h"
 
 #include <sstream>
+#include <unordered_set>
 
 #include <gtest/gtest.h>
 
@@ -90,5 +91,33 @@ TEST(DwarfDieRef, Output) {
   ss_type << DwarfDieRef::Type(0x1234);
   EXPECT_EQ("offset 0x1234 (.debug_types)", ss_type.str());
 }
+
+namespace {
+
+TEST(DwarfDieRef, Hash) {
+  DwarfDieRef empty;
+  DwarfDieRef main_zero = DwarfDieRef::Main(0);
+  DwarfDieRef type_zero = DwarfDieRef::Type(0);
+  DwarfDieRef main_ref = DwarfDieRef::Main(0x10);
+  DwarfDieRef type_ref = DwarfDieRef::Type(0x10);
+
+  std::hash<DwarfDieRef> hasher;
+  EXPECT_NE(hasher(empty), hasher(main_zero));
+  EXPECT_NE(hasher(empty), hasher(type_zero));
+  EXPECT_NE(hasher(main_zero), hasher(type_zero));
+  EXPECT_NE(hasher(main_ref), hasher(type_ref));
+  EXPECT_EQ(hasher(main_ref), hasher(DwarfDieRef::Main(0x10)));
+
+  std::unordered_set<DwarfDieRef> refs;
+  EXPECT_TRUE(refs.insert(empty).second);
+  EXPECT_TRUE(refs.insert(main_zero).second);
+  EXPECT_TRUE(refs.insert(type_zero).second);
+  EXPECT_TRUE(refs.insert(main_ref).second);
+  EXPECT_TRUE(refs.insert(type_ref).second);
+  EXPECT_FALSE(refs.insert(DwarfDieRef::Main(0x10)).second);
+  EXPECT_EQ(5u, refs.size());
+}
+
+}  // namespace
 
 }  // namespace zxdb

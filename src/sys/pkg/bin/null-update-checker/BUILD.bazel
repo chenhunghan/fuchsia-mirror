@@ -56,7 +56,6 @@ rustc_binary(
     ],
 )
 
-# @bazel2gn:skip
 fx_packaged_binary(
     name = "null_update_checker_packaged_bin",
     binary = ":bin",
@@ -78,12 +77,12 @@ fx_component_manifest(
 fx_component(
     name = "component",
     compiled_manifest = ":manifest",
+    visibility = ["//src/sys/pkg/tests/null-update-checker:__pkg__"],
     deps = [
         ":null_update_checker_packaged_bin",
     ],
 )
 
-# @bazel2gn:skip
 fx_package(
     name = "package",
     package_name = "null-update-checker",

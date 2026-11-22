@@ -37,10 +37,6 @@ E2eTest::E2eTest() {
   FfxDebugAgentBridge* bridge = FfxDebugAgentBridge::Get();
   FX_CHECK(bridge) << "debug_agent bridge failed to initialize.";
   socket_path_ = bridge->GetDebugAgentSocketPath();
-
-  Err e = ConnectToDebugAgent();
-  FX_CHECK(e.ok()) << e.msg();
-  FX_CHECK(session().IsConnected()) << "Not connected to DebugAgent.";
 }
 
 E2eTest::~E2eTest() {
@@ -48,8 +44,10 @@ E2eTest::~E2eTest() {
   console_->Quit();
   console_.reset();
 
-  Err e = session_->Disconnect();
-  FX_CHECK(e.ok()) << e.msg();
+  if (session_->IsConnected()) {
+    Err e = session_->Disconnect();
+    FX_CHECK(e.ok()) << e.msg();
+  }
 
   session_->breakpoint_observers().RemoveObserver(this);
   session_->component_observers().RemoveObserver(this);
@@ -57,6 +55,14 @@ E2eTest::~E2eTest() {
   session_->thread_observers().RemoveObserver(this);
 
   session_.reset();
+}
+
+void E2eTest::SetUp() {
+  TestWithLoop::SetUp();
+
+  Err e = ConnectToDebugAgent();
+  ASSERT_TRUE(e.ok()) << e.msg();
+  ASSERT_TRUE(session().IsConnected()) << "Not connected to DebugAgent.";
 }
 
 Err E2eTest::ConnectToDebugAgent() {

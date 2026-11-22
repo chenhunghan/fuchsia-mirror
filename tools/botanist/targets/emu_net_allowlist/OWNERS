@@ -1,0 +1,5 @@
+# Changes to the emulator internet allowlist must be approved by Fuchsia
+# Security. See b/572812980.
+set noparent
+
+include /src/security/OWNERS

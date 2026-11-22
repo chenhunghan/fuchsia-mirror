@@ -214,60 +214,6 @@ TEST_F(CreateWithTypeStreamSocketTest, InvalidInfo) {
   AssertChannelClosed();
 }
 
-class CreateWithTypeDatagramSocketTest : public CreateWithTypeBaseWithSocketTest {
- public:
-  const zxio_datagram_prelude_size_t& prelude_size() const { return prelude_size_; }
-
- private:
-  zxio_datagram_prelude_size_t prelude_size_{};
-};
-
-TEST_F(CreateWithTypeDatagramSocketTest, InvalidStorage) {
-  const zx_handle_t socket_handle = socket().release();
-  const zx_handle_t channel_handle = channel().release();
-  ASSERT_STATUS(zxio_create_with_type(nullptr, ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET, socket_handle,
-                                      &info(), &prelude_size(), channel_handle),
-                ZX_ERR_INVALID_ARGS);
-  AssertSocketClosed();
-  AssertChannelClosed();
-}
-
-TEST_F(CreateWithTypeDatagramSocketTest, InvalidSocket) {
-  const zx_handle_t channel_handle = channel().release();
-  ASSERT_STATUS(zxio_create_with_type(&storage(), ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET,
-                                      ZX_HANDLE_INVALID, &info(), &prelude_size(), channel_handle),
-                ZX_ERR_INVALID_ARGS);
-  AssertChannelClosed();
-}
-
-TEST_F(CreateWithTypeDatagramSocketTest, InvalidInfo) {
-  const zx_handle_t socket_handle = socket().release();
-  const zx_handle_t channel_handle = channel().release();
-  ASSERT_STATUS(zxio_create_with_type(&storage(), ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET, socket_handle,
-                                      nullptr, &prelude_size(), channel_handle),
-                ZX_ERR_INVALID_ARGS);
-  AssertSocketClosed();
-  AssertChannelClosed();
-}
-
-TEST_F(CreateWithTypeDatagramSocketTest, PreludeSize) {
-  const zx_handle_t socket_handle = socket().release();
-  const zx_handle_t channel_handle = channel().release();
-  ASSERT_STATUS(zxio_create_with_type(&storage(), ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET, socket_handle,
-                                      &info(), nullptr, channel_handle),
-                ZX_ERR_INVALID_ARGS);
-  AssertSocketClosed();
-  AssertChannelClosed();
-}
-
-TEST_F(CreateWithTypeDatagramSocketTest, InvalidChannel) {
-  const zx_handle_t socket_handle = socket().release();
-  ASSERT_STATUS(zxio_create_with_type(&storage(), ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET, socket_handle,
-                                      &info(), &prelude_size(), ZX_HANDLE_INVALID),
-                ZX_ERR_INVALID_ARGS);
-  AssertSocketClosed();
-}
-
 class CreateWithTypePipeTest : public CreateWithTypeBaseWithSocketTest {};
 
 TEST_F(CreateWithTypePipeTest, InvalidStorage) {

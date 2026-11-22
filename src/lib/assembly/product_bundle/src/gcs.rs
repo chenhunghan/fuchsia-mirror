@@ -250,7 +250,7 @@ impl GcsFetcher for HttpGcsFetcher {
 impl GcsFetcher for std::collections::HashMap<&str, Vec<u8>> {
     fn fetch(&self, _: &str, o: &str, r: ByteRange) -> Result<(u64, Vec<u8>), GcsError> {
         assert!(!(o.ends_with(".zip") && matches!(r, None | Some((Some(0), _)))));
-        let d = &self[o];
+        let d = self.get(o).ok_or_else(|| GcsError(o.into(), "not found".into()))?;
         let slice = match r {
             None => &d[..],
             Some((None, m)) => &d[d.len().saturating_sub(m as usize)..],

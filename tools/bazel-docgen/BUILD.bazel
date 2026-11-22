@@ -6,8 +6,19 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
 load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
+load("//build/bazel/rules/testing:golden_test.bzl", "golden_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":bazel_docgen_lib_tests",
+        ":bazeldoc_golden_tests",
+    ],
+    visibility = ["//tools:__pkg__"],
+)
 
 go_library(
     name = "proto_lib",
@@ -42,7 +53,6 @@ host_go_test(
     name = "bazel_docgen_lib_tests",
     srcs = ["markdown_renderer_test.go"],
     embed = [":bazel_docgen_lib"],
-    visibility = ["//tools:__pkg__"],
 )
 
 go_library(
@@ -61,4 +71,38 @@ go_binary_host_tool(
     name = "bin",
     embed = [":main"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+_GOLDEN_FILES = [
+    "FooInfo.md",
+    "README.md",
+    "_toc.yaml",
+    "empty_function.md",
+    "empty_repo.md",
+    "example_rule.md",
+    "some_function.md",
+]
+
+genrule(
+    name = "generate_goldens",
+    testonly = True,
+    srcs = ["//tools/bazel-docgen/testdata:test_lib.textproto"],
+    outs = _GOLDEN_FILES,
+    cmd = " ".join([
+        "$(location :bin)",
+        "--proto $(location //tools/bazel-docgen/testdata:test_lib.textproto)",
+        "--out_dir $(RULEDIR)",
+        # This should match the golden files.
+        "--base_path some/path",
+    ]),
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tools = [":bin"],
+)
+
+golden_test(
+    name = "bazeldoc_golden_tests",
+    goldens = {
+        "goldens/%s.golden" % f: ":%s" % f
+        for f in _GOLDEN_FILES
+    },
 )

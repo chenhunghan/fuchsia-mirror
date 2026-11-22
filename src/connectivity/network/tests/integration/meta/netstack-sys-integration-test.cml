@@ -5,7 +5,6 @@
     include: [
         "//src/connectivity/network/tests/integration/common/client.shard.cml",
         "//src/lib/testing/expectation/meta/client.shard.cml",
-        "sys/component/realm_builder.shard.cml",
         "syslog/client.shard.cml",
     ],
     program: {

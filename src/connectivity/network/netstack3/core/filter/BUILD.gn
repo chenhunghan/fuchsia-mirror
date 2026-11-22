@@ -2,21 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/bazel/bazel_test_suite.gni")
-
-bazel_test_suite("netstack3-filter-test") {
-  target_tests = [
-    "//src/connectivity/network/netstack3/core/filter:netstack3-filter-test",
-  ]
-  host_tests = [ "//src/connectivity/network/netstack3/core/filter:netstack3-filter-host-test" ]
-}
-
 group("tests") {
   testonly = true
-  public_deps = [
-    ":netstack3-filter-test",
-    "tests",
-  ]
+  public_deps = [ "tests" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##

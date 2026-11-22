@@ -62,6 +62,7 @@
 #include "src/developer/debug/zxdb/console/commands/verb_sym_search.h"
 #include "src/developer/debug/zxdb/console/commands/verb_sym_stat.h"
 #include "src/developer/debug/zxdb/console/commands/verb_sys_info.h"
+#include "src/developer/debug/zxdb/console/commands/verb_tracepoint.h"
 #include "src/developer/debug/zxdb/console/commands/verb_until.h"
 #include "src/developer/debug/zxdb/console/commands/verb_up.h"
 #include "src/developer/debug/zxdb/console/commands/verb_watch.h"
@@ -157,6 +158,7 @@ const std::map<Verb, VerbRecord>& GetVerbs() {
     all_verbs[Verb::kSysInfo] = GetSysInfoVerbRecord();
     all_verbs[Verb::kStackData] = GetStackDataVerbRecord();
     all_verbs[Verb::kStackUsage] = GetStackUsageVerbRecord();
+    all_verbs[Verb::kTrace] = GetTraceVerbRecord();
     all_verbs[Verb::kUntil] = GetUntilVerbRecord();
     all_verbs[Verb::kUp] = GetUpVerbRecord();
     all_verbs[Verb::kWatch] = GetWatchVerbRecord();

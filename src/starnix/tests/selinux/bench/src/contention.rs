@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 //! Multi-threaded contention benchmarks for [`SecurityServer`] and [`ConcurrentAccessCache`].
+//!
+//! See `//src/starnix/tests/selinux/bench/README.md` for how to interpret these metrics.
 
 use crate::{
     POPULATED_SID_TABLE_SIZE, context_with_category_id, new_populated_security_server,
@@ -441,10 +443,12 @@ fn concurrent_access_cache_get_contended_bench(group: &mut BenchmarkGroup<'_, Wa
     };
 
     let keys: Vec<AccessQueryArgs> = (1..=CACHE_WORKING_SET_SIZE)
-        .map(|index| AccessQueryArgs {
-            source_sid: SecurityId(NonZeroU32::new(index).unwrap()),
-            target_sid: SecurityId(NonZeroU32::new(index + 1).unwrap()),
-            target_class: KernelClass::Process,
+        .map(|index| {
+            AccessQueryArgs::new(
+                SecurityId(NonZeroU32::new(index).unwrap()),
+                SecurityId(NonZeroU32::new(index + 1).unwrap()),
+                KernelClass::Process,
+            )
         })
         .collect();
 
@@ -480,11 +484,11 @@ fn concurrent_access_cache_get_contended_bench(group: &mut BenchmarkGroup<'_, Wa
                             let miss_index = step / CACHE_MISS_PERIOD;
                             let dynamic_sid =
                                 worker_miss_base + ((miss_index as u32) % CACHE_MISS_SID_COUNT);
-                            AccessQueryArgs {
-                                source_sid: SecurityId(NonZeroU32::new(dynamic_sid).unwrap()),
-                                target_sid: SecurityId(NonZeroU32::new(dynamic_sid + 1).unwrap()),
-                                target_class: KernelClass::File,
-                            }
+                            AccessQueryArgs::new(
+                                SecurityId(NonZeroU32::new(dynamic_sid).unwrap()),
+                                SecurityId(NonZeroU32::new(dynamic_sid + 1).unwrap()),
+                                KernelClass::File,
+                            )
                         } else {
                             keys_ref[step % keys_ref.len()].clone()
                         };

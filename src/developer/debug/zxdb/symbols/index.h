@@ -53,6 +53,11 @@ class Index {
   // Dumps the file index to the stream for debugging.
   void DumpFileIndex(std::ostream& out) const;
 
+  // Indexes only source files from the line tables of all compilation units in the given binary.
+  // This does not scan DIEs or populate the symbol tree, making it suitable for use when
+  // .debug_names is available.
+  void IndexSourceFiles(DwarfBinary& binary);
+
   // Takes a fully-qualified name with namespaces and classes and template parameters and returns
   // the list of symbols which match exactly.
   //
@@ -94,6 +99,7 @@ class Index {
   void IndexSkeletonCompileUnit(const DwarfUnit& unit, const llvm::DWARFDie& unit_die,
                                 UnitIndex unit_index);
   void IndexCompileUnitSourceFiles(const DwarfUnit& unit, UnitIndex unit_index);
+  void IndexUnitSourceFiles(DwarfBinary& binary, UnitIndex unit_index);
 
   // Populates the file_name_index_ given a now-unchanging files_ map.
   void IndexFileNames();

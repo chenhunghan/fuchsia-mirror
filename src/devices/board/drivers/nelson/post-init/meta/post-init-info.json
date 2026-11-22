@@ -1,9 +1,0 @@
-{
-    "short_description": "Nelson board driver, post-init",
-    "manufacturer": "",
-    "families": [],
-    "models": [],
-    "areas": [
-        "Board"
-    ]
-}

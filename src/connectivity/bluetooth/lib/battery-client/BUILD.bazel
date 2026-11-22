@@ -53,6 +53,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "battery-client-tests",
-    package_name = "battery-client-tests",
     unit_tests = [":battery-client_test"],
 )

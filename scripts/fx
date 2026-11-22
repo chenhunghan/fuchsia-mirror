@@ -4,8 +4,10 @@
 # found in the LICENSE file.
 
 # Capture the start_time as early as possible to best reflect the user
-# experienced start time.
-declare -r start_time="${EPOCHREALTIME/./}"
+# experienced start time (inheriting the entry timestamp from scripts/fx when
+# present and unsetting it so nested fx calls measure their own duration).
+declare -r start_time="${_FX_START_TIME_MICROS:-${EPOCHREALTIME/./}}"
+unset _FX_START_TIME_MICROS
 
 function help_options {
   cat <<END
@@ -275,15 +277,67 @@ fi
 #   //src/developer/ffx/scripts/ffx,
 # )
 
+if [[ -n "${_FX_TEST_FUCHSIA_DIR:-}" ]]; then
+  fuchsia_dir="${_FX_TEST_FUCHSIA_DIR}"
+fi
+
 # If `fx` is run in a plain OSS fuchsia.git clone without a Jiri checkout,
-# synchronize local dependencies via `fx sync`.
-if [[ -e "${fuchsia_dir}/.git" ]] && [[ ! -e "${fuchsia_dir}/.jiri_root" || -d "${fuchsia_dir}/.fxsync" ]] && [[ -x "${fuchsia_dir}/tools/devshell/sync" ]]; then
+# synchronize local dependencies via `fx sync`. _FX_SYNC_RAN lets nested fx
+# invocations and the `fx sync` subcommand itself skip a redundant second run.
+if [[ "${_FX_LEGACY_FALLBACK:-0}" != "1" ]] && [[ -z "${_FX_SYNC_RAN:-}" ]] && [[ -e "${fuchsia_dir}/.git" ]] && [[ ! -e "${fuchsia_dir}/.jiri_root" || -d "${fuchsia_dir}/.fxsync" ]] && [[ -x "${fuchsia_dir}/tools/devshell/sync" ]]; then
   "${fuchsia_dir}/tools/devshell/sync" || exit $?
+  export _FX_SYNC_RAN=1
 fi
 
 # This line allows commands to find other scripts even if they have not
 # run `source scripts/fx-env.sh`
-export PATH="${script_dir}:$PATH"
+case ":${PATH:-}:" in
+  *":${script_dir}:"*) ;;
+  *) export PATH="${script_dir}${PATH:+:${PATH}}" ;;
+esac
+
+# Experimental opt-in (FX_PYTHON_CLI=1) to dispatch through the Python front
+# door (tools/devshell/fx_cli/main.py). Unregistered commands re-exec this
+# script with _FX_LEGACY_FALLBACK=1 to run the bash dispatcher below.
+if [[ "${_FX_LEGACY_FALLBACK:-0}" != "1" ]]; then
+  unset _FX_PRE_RESOLVED_CMD _FX_PRE_RESOLVED_KIND _FX_PRE_RESOLVED_VENDOR _FX_PRE_RESOLVED_EXEC _FX_PRE_RESOLVED_MODE
+fi
+if [[ "${_FX_LEGACY_FALLBACK:-0}" == "1" ]]; then
+  unset _FX_LEGACY_FALLBACK
+elif [[ "${FX_PYTHON_CLI:-0}" != "0" ]]; then
+  case "${OSTYPE:-}" in
+    darwin*) _host_os="mac" ;;
+    *) _host_os="linux" ;;
+  esac
+  case "${MACHTYPE:-}" in
+    aarch64*|arm64*) _host_cpu="arm64" ;;
+    *) _host_cpu="x64" ;;
+  esac
+  _py3_bin="${fuchsia_dir}/prebuilt/third_party/python3/${_host_os}-${_host_cpu}/bin/python3"
+  _main_py="${fuchsia_dir}/tools/devshell/fx_cli/main.py"
+  unset _host_os _host_cpu
+  if [[ -x "${_py3_bin}" && -f "${_main_py}" ]]; then
+    _fuchsia_out_dir="${FUCHSIA_OUT_DIR:-${fuchsia_dir}/out}"
+    if command -v setfattr >/dev/null 2>&1; then
+      { [[ -d "${_fuchsia_out_dir}" ]] || mkdir -p "${_fuchsia_out_dir}"; } 2>/dev/null &&
+        setfattr -n casfs.exclude -v 1 "${_fuchsia_out_dir}" 2>/dev/null || true
+    fi
+    # Clear inherited Python runtime overrides before launching vendored Python
+    # so the Python front door runs cleanly even when fx is invoked from an
+    # external Python environment (e.g. a Bazel py_test or virtualenv).
+    if [[ "${PYTHONHOME:-}:${PYTHONPATH:-}" == *"/_fx_host_tools/"* ]]; then
+      unset PYTHONPATH
+    fi
+    unset PYTHONHOME PYTHONSAFEPATH
+    export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${_fuchsia_out_dir}/_build_caches/__pycache__}"
+    unset _fuchsia_out_dir
+    export FUCHSIA_DIR="${fuchsia_dir}"
+    export _FX_START_TIME_MICROS="${start_time}"
+    _FX_BASH_VERSION="${BASH_VERSION:-}" _FX_ZSH_VERSION="${ZSH_VERSION:-}" \
+      exec "${_py3_bin}" -S "${_main_py}" "$@"
+  fi
+  unset _py3_bin _main_py
+fi
 
 declare -r vars_sh="${fuchsia_dir}/tools/devshell/lib/vars.sh"
 # shellcheck disable=SC1090
@@ -336,13 +390,16 @@ while [[ $# -ne 0 ]]; do
         fx-error "$error_message"
         exit 1
       fi
-      # Remove trailing slash, as it can impede other checks elsewhere in the code.
-      export _FX_BUILD_DIR="${1%/}"
-      if [[ "$_FX_BUILD_DIR" == //* ]]; then
-        _FX_BUILD_DIR="${fuchsia_dir}/${_FX_BUILD_DIR#//}"
+      # Remove trailing slashes, as they can impede other checks elsewhere in the code.
+      _FX_BUILD_DIR="${1%"${1##*[!/]}"}"
+      if [[ "${_FX_BUILD_DIR}" == //* ]]; then
+        _FX_BUILD_DIR="${_FX_BUILD_DIR#"${_FX_BUILD_DIR%%[!/]*}"}"
+        _FX_BUILD_DIR="${fuchsia_dir}/${_FX_BUILD_DIR}"
       else
         export FUCHSIA_BUILD_DIR_FROM_FX="${_FX_BUILD_DIR}"
       fi
+      export _FX_BUILD_DIR
+      unset FUCHSIA_BUILD_DIR
       ;;
     --disable)
       if [[ $# -lt 2 ]]; then
@@ -427,7 +484,8 @@ while [[ $# -ne 0 ]]; do
       shift
       break
       ;;
-    help|--help)
+    help|--help|-h)
+      unset _FX_PRE_RESOLVED_CMD _FX_PRE_RESOLVED_KIND _FX_PRE_RESOLVED_VENDOR _FX_PRE_RESOLVED_EXEC _FX_PRE_RESOLVED_MODE
       if [[ "$2" =~ ^\-\-full ]]; then
         shift
         fullhelp "$@"
@@ -486,6 +544,7 @@ _raw_command_path=""
 _find_status=1
 _dispatch_info="$(resolve_fx_command_dispatch "${command_name}")"
 _dispatch_rc=$?
+unset _FX_PRE_RESOLVED_CMD _FX_PRE_RESOLVED_KIND _FX_PRE_RESOLVED_VENDOR _FX_PRE_RESOLVED_EXEC _FX_PRE_RESOLVED_MODE
 if [[ ${_dispatch_rc} -eq 2 ]]; then
   exit 2
 elif [[ ${_dispatch_rc} -eq 0 ]]; then
@@ -549,7 +608,13 @@ if [[ ${_find_status} -ne 0 || ${#command_path[@]} -eq 0 || ! -x "${command_path
   exit 1
 fi
 
+# LINT.IfChange(fx_command_metrics_dispatch)
 metrics-init "${command_name}" "$*"
+
+_has_batched_metrics=0
+if declare -F track-command-start >/dev/null 2>&1; then
+  _has_batched_metrics=1
+fi
 
 # For each optional feature, force the existence of the FUCHSIA_DISABLE_* env
 # variable. This is needed so that non-bash code can reliably use this
@@ -558,7 +623,9 @@ for f in $(list_optional_features); do
   _disabled_env_name="$(get_disable_feature_env_name "${f}")"
   is_feature_enabled "$f"
   export "${_disabled_env_name}"=$?
-  track-feature-status "${f}" "${_disabled_env_name}" &
+  if [[ "${_has_batched_metrics}" -eq 0 ]]; then
+    track-feature-status "${f}" "${_disabled_env_name}" &
+  fi
 done
 
 export FX_ENTRY_CMD="$command_name"
@@ -574,7 +641,13 @@ fi
 
 mkdir -p "${FX_CACHE_DIR}"
 
-track-command-execution "${metric_name}" "$@" &
+if [[ "${_has_batched_metrics}" -eq 1 ]]; then
+  if [[ "${METRICS_LEVEL:-0}" -ne 0 ]]; then
+    track-command-start "${command_name}" "$@" </dev/null >/dev/null 2>&1 &
+  fi
+else
+  track-command-execution "${metric_name}" "$@" &
+fi
 "${command_path[@]}" "$@"
 declare -r retval=$?
 
@@ -593,13 +666,16 @@ if [ -z "${iterative}" ]; then
     # is-remote-workflow-device returns 0 for true and 1 for false
     # analytics requires it to be the opposite
     local is_remote=0
-    if [[ "${METRICS_LEVEL}" -ne 0 ]] && is-remote-workflow-device; then
+    if [[ "${METRICS_LEVEL:-0}" -ne 0 ]] && is-remote-workflow-device; then
       is_remote=1
     fi
     track-command-finished "${start_time}" "${end_time}" "${retval}" "${command_name}" "${is_remote}" "$@"
   }
-  _track-command-finished-in-background "$@" </dev/null >/dev/null 2>&1 &
+  if [[ "${_has_batched_metrics}" -eq 0 || "${METRICS_LEVEL:-0}" -ne 0 ]]; then
+    _track-command-finished-in-background "$@" </dev/null >/dev/null 2>&1 &
+  fi
   exit ${retval}
+# LINT.ThenChange(//tools/devshell/fx_cli/metrics.py)
 elif which inotifywait >/dev/null; then
   monitor_source_changes() {
     # Watch everything except out/ and files/directories beginning with "."

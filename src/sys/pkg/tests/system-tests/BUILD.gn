@@ -5,7 +5,6 @@
 import("//build/host.gni")
 import("//build/images/vbmeta.gni")
 import("//build/testing/host_test_data.gni")
-import("//src/developer/ffx/config.gni")
 import("//src/sys/pkg/tests/system-tests/system-tests.gni")
 
 if (is_host) {
@@ -20,19 +19,15 @@ if (is_host) {
   non_go_deps = [
     ":test_tools",
     "//src/developer/ffx:test_data",
+    "//src/developer/ffx/plugins/component:ffx_component_tool_test_data",
+    "//src/developer/ffx/plugins/emulator:ffx_emulator_tool_test_data",
     "//src/developer/ffx/plugins/inspect:ffx_inspect_tool_test_data",
     "//src/developer/ffx/plugins/log:ffx_log_tool_test_data",
     "//src/developer/ffx/plugins/package:ffx_package_tool_test_data",
     "//src/developer/ffx/plugins/product:ffx_product_tool_test_data",
+    "//src/developer/ffx/plugins/product_bundle:ffx_product_bundle_tool_test_data",
+    "//src/developer/ffx/plugins/repository:ffx_repository_tool_test_data",
   ]
-  if (ffx_build_dual_mode_plugins_as_subtools) {
-    non_go_deps += [
-      "//src/developer/ffx/plugins/component:ffx_component_tool_test_data",
-      "//src/developer/ffx/plugins/emulator:ffx_emulator_tool_test_data",
-      "//src/developer/ffx/plugins/product_bundle:ffx_product_bundle_tool_test_data",
-      "//src/developer/ffx/plugins/repository:ffx_repository_tool_test_data",
-    ]
-  }
 
   if (use_vbmeta) {
     host_test_data("test_avb_atx_metadata") {
@@ -109,15 +104,11 @@ if (is_linux) {
     environments = [
       # These are disabled on NUCs to preserve hardware capacity.
       #{
-      #  dimensions = {
-      #    device_type = "Intel NUC Kit NUC7i5DNHE"
-      #  }
+      #  dimensions = nuc11_env.dimensions
       #  tags = [ "e2e-isolated" ]
       #},
       {
-        dimensions = {
-          device_type = "GCE"
-        }
+        dimensions = gce_env.dimensions
         tags = [ "e2e-isolated" ]
       },
     ]
@@ -129,15 +120,7 @@ if (is_linux) {
   system_test_recovery_suite("workstation-release-recovery") {
     environments = [
       {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC7i5DNHE"
-        }
-        tags = [ "e2e-isolated-recovery" ]
-      },
-      {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC11TNHv5"
-        }
+        dimensions = nuc11_env.dimensions
         tags = [ "e2e-isolated-recovery" ]
       },
     ]
@@ -149,15 +132,7 @@ if (is_linux) {
   system_test_reboot_suite("workstation-release-reboot-longevity") {
     environments = [
       {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC7i5DNHE"
-        }
-        tags = [ "e2e-isolated-longevity" ]
-      },
-      {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC11TNHv5"
-        }
+        dimensions = nuc11_env.dimensions
         tags = [ "e2e-isolated-longevity" ]
       },
     ]
@@ -173,15 +148,11 @@ if (is_linux) {
     environments = [
       # These are disabled on NUCs to preserve hardware capacity.
       #{
-      #  dimensions = {
-      #    device_type = "Intel NUC Kit NUC7i5DNHE"
-      #  }
+      #  dimensions = nuc11_env.dimensions
       #  tags = [ "e2e-isolated" ]
       #},
       {
-        dimensions = {
-          device_type = "GCE"
-        }
+        dimensions = gce_env.dimensions
         tags = [ "e2e-isolated" ]
       },
     ]
@@ -199,15 +170,7 @@ if (is_linux) {
 
     environments = [
       {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC7i5DNHE"
-        }
-        tags = [ "e2e-isolated-longevity" ]
-      },
-      {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC11TNHv5"
-        }
+        dimensions = nuc11_env.dimensions
         tags = [ "e2e-isolated-longevity" ]
       },
     ]
@@ -223,15 +186,7 @@ if (is_linux) {
     installer = "omaha"
     environments = [
       {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC7i5DNHE"
-        }
-        tags = [ "e2e-isolated-omaha" ]
-      },
-      {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC11TNHv5"
-        }
+        dimensions = nuc11_env.dimensions
         tags = [ "e2e-isolated-omaha" ]
       },
     ]
@@ -248,7 +203,7 @@ group("e2e_tests") {
     "//src/testing/sl4f",
 
     # The run-emu scripts depend on make-fuchsia-vol being compiled to work.
-    "//tools/make-fuchsia-vol($host_toolchain)",
+    "//tools/make-fuchsia-vol:host",
 
     # TODO(https://fxbug.dev/42055411) Re-enable these tests when they can be made blocking.
     ":workstation-release-reboot($host_toolchain)",

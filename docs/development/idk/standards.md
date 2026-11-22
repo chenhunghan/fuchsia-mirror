@@ -30,7 +30,7 @@ The Fuchsia IDK does not depend on the _Google Test_ library because the
 for the _Google Test_ library are not compatible with the model used by the
 Fuchsia IDK.
 
-## Fuchsia System Interface
+## Fuchsia System Interface {:#fuchsia-system-interface}
 
 The Fuchsia System Interface is defined in [Fuchsia System
 Interface](/docs/concepts/kernel/system.md). Generally speaking, the binary interface to the system
@@ -79,11 +79,13 @@ Note that `libc` is a client library (not a system library).
 
 ### Stability and Packaging
 
-Only the [Fuchsia System Interface](#fuchsia_system_interface) is ABI stable. Client libraries are
+Only the [Fuchsia System Interface](#fuchsia-system-interface) is ABI stable.
+Client libraries are
 neither API nor ABI stable. Binaries and libraries must be built against the same IDK version as the
 client libraries they are linked with.
 
-All libraries a program links beyond the [Fuchsia System Interface](#fuchsia_system_interface),
+All libraries a program links beyond the [Fuchsia System
+Interface](#fuchsia-system-interface),
 including client libraries, must be included inside the program's package. Dynamic libraries should
 be placed in the `lib` directory of the program's package.
 

@@ -228,7 +228,12 @@ fn main() -> Result<()> {
             .filter_map(|p| {
                 if p.set.is_in_blobs_assuming_standard_mode() { Some(&p.package) } else { None }
             })
-            .chain(aib.drivers.iter().filter(|d| d.set == PackageSet::Base).map(|d| &d.package))
+            .chain(
+                aib.drivers
+                    .iter()
+                    .filter(|d| d.set.is_in_blobs_assuming_standard_mode())
+                    .map(|d| &d.package),
+            )
             .collect();
 
         let bootfs_package_names = bootfs_package_manifests

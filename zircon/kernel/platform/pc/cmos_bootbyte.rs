@@ -48,8 +48,7 @@ fn cmos_write(mut addr: u8, val: u8) {
 ///
 /// If `reason` is <= 255, it is stored as the boot reason (masked with default boot attempts).
 /// If `reason` > 255, it defaults to [`RTC_BOOT_NORMAL`].
-#[unsafe(no_mangle)]
-pub extern "C" fn bootbyte_set_reason(reason: u64) {
+pub fn bootbyte_set_reason(reason: u64) {
     // set boot reason, clamp to be in range of a uint8_t, default to RTC_BOOT_NORMAL
     let mut val: u8 = if reason <= 255 { reason as u8 } else { RTC_BOOT_NORMAL };
 

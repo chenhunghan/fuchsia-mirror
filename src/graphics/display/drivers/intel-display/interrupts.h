@@ -8,8 +8,8 @@
 #include <fuchsia/hardware/intelgpucore/c/banjo.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async/cpp/irq.h>
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/mmio/cpp/mmio.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/fit/function.h>
 #include <lib/sync/cpp/completion.h>
 #include <lib/zx/interrupt.h>

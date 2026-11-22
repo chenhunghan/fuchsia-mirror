@@ -17,7 +17,7 @@ use starnix_sync::{
 };
 use starnix_uapi::errors::Errno;
 use starnix_uapi::signals::SIGKILL;
-use starnix_uapi::{errno, error, pid_t};
+use starnix_uapi::{errno, error};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map, hash_map};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -51,6 +51,30 @@ impl ControllerType {
             Self::Memory => "memory",
             Self::Freezer => "freezer",
             Self::Blkio => "blkio",
+        }
+    }
+
+    /// Returns the controller name in the cgroup v2 hierarchy, or `None` if the controller is not
+    /// exposed in `cgroup.controllers` / `cgroup.subtree_control` (`freezer` is a core v2
+    /// interface and `cpuacct` is merged into `cpu`).
+    pub fn v2_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Cpu => Some("cpu"),
+            Self::Cpuset => Some("cpuset"),
+            Self::Memory => Some("memory"),
+            Self::Blkio => Some("io"),
+            Self::Cpuacct | Self::Freezer => None,
+        }
+    }
+
+    /// Parses a cgroup v2 controller name from `cgroup.subtree_control`.
+    pub fn from_v2_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "cpu" => Ok(Self::Cpu),
+            "cpuset" => Ok(Self::Cpuset),
+            "memory" => Ok(Self::Memory),
+            "io" => Ok(Self::Blkio),
+            _ => Err(()),
         }
     }
 }
@@ -208,6 +232,8 @@ pub struct CgroupFreezerState {
     /// the freezer state of its ancestors. A cgroup is considered frozen if either itself or any
     /// of its ancestors is frozen.
     pub effective_freezer_state: FreezerState,
+    /// Total monotonic duration this cgroup has spent in the frozen state.
+    pub frozen_duration: zx::MonotonicDuration,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -217,8 +243,30 @@ pub struct CpusetControllerState {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FreezerControllerState {
-    pub self_freezer_state: FreezerState,
-    pub inherited_freezer_state: FreezerState,
+    self_freezer_state: FreezerState,
+    inherited_freezer_state: FreezerState,
+    /// Start of the current frozen interval, if the cgroup is effectively frozen. The interval is
+    /// open until the cgroup becomes effectively thawed.
+    frozen_start_time: Option<zx::MonotonicInstant>,
+    /// Frozen time accumulated so far, exact as of the last `refresh_frozen_duration()` call.
+    /// Does not include the portion of the current interval since that call.
+    total_frozen_duration: zx::MonotonicDuration,
+}
+
+impl FreezerControllerState {
+    /// Folds the elapsed portion of the current frozen interval (if any) into
+    /// `total_frozen_duration`, restarts the interval from now, and returns the updated total.
+    ///
+    /// Safe to call at any point: mid-freeze it refreshes the running total; at thaw time the
+    /// caller clears `frozen_start_time` afterwards to close the interval.
+    fn refresh_frozen_duration(&mut self) -> zx::MonotonicDuration {
+        if let Some(start) = self.frozen_start_time {
+            let now = zx::MonotonicInstant::get();
+            self.total_frozen_duration += (now - start).max(zx::MonotonicDuration::ZERO);
+            self.frozen_start_time = Some(now);
+        }
+        self.total_frozen_duration
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,7 +332,7 @@ pub trait CgroupOps: Send + Sync + 'static {
     fn remove_child(&self, name: &FsStr) -> Result<CgroupHandle, Errno>;
 
     /// Return all pids that belong to this cgroup.
-    fn get_pids(&self, kernel: &Kernel) -> Vec<pid_t>;
+    fn get_pids(&self, kernel: &Kernel) -> Vec<Pid>;
 
     /// Kills all processes in the cgroup and its descendants.
     fn kill(&self);
@@ -297,6 +345,29 @@ pub trait CgroupOps: Send + Sync + 'static {
 
     /// Returns cpuset ops if cpuset controller is supported.
     fn cpuset(&self) -> Option<&dyn CpusetOps>;
+
+    /// Returns the cgroup v2 controllers available to this cgroup (`cgroup.controllers`).
+    /// Errors with `ENODEV` if the cgroup has been deleted.
+    fn get_available_controllers(&self) -> Result<BTreeSet<ControllerType>, Errno>;
+
+    /// Returns the cgroup v2 controllers enabled for this cgroup's immediate children
+    /// (`cgroup.subtree_control`). Errors with `ENODEV` if the cgroup has been deleted.
+    fn get_subtree_control(&self) -> Result<BTreeSet<ControllerType>, Errno>;
+
+    /// Enables and disables cgroup v2 controllers for this cgroup's immediate children
+    /// (`cgroup.subtree_control`). Callers must ensure `enable` and `disable` are disjoint.
+    ///
+    /// Errors with:
+    /// - `ENODEV` if the cgroup has been deleted.
+    /// - `ENOENT` if any controller in `enable` is not available to this cgroup.
+    /// - `EBUSY` if `enable` is non-empty on a populated non-root cgroup (no-internal-process
+    ///   constraint), or if any controller in `disable` is still enabled in a child's
+    ///   `subtree_control`.
+    fn update_subtree_control(
+        &self,
+        enable: &BTreeSet<ControllerType>,
+        disable: &BTreeSet<ControllerType>,
+    ) -> Result<(), Errno>;
 }
 
 /// `CgroupPidTable` contains the mapping of `ThreadGroup` (by pid) to non-root cgroup.
@@ -539,15 +610,11 @@ impl CgroupOps for CgroupRoot {
         Ok(children.get_children())
     }
 
-    fn get_pids(&self, kernel: &Kernel) -> Vec<pid_t> {
-        let controlled_pids: HashSet<pid_t> = self
-            .pid_table
-            .lock()
-            .keys()
-            .filter_map(|v| v.get_thread_group().ok().map(|tg| tg.leader.id))
-            .collect();
-        let kernel_pids = kernel.pids.process_ids();
-        kernel_pids.into_iter().filter(|pid| !controlled_pids.contains(pid)).collect()
+    fn get_pids(&self, kernel: &Kernel) -> Vec<Pid> {
+        let mut kernel_pids = kernel.pids.process_ids();
+        let controlled_pids = self.pid_table.lock();
+        kernel_pids.retain(|pid| !controlled_pids.contains_key(pid));
+        kernel_pids
     }
 
     fn kill(&self) {
@@ -565,6 +632,25 @@ impl CgroupOps for CgroupRoot {
     fn cpuset(&self) -> Option<&dyn CpusetOps> {
         if self.controllers.contains(&ControllerType::Cpuset) { Some(self) } else { None }
     }
+
+    fn get_available_controllers(&self) -> Result<BTreeSet<ControllerType>, Errno> {
+        Ok(self.controllers.iter().copied().filter(|c| c.v2_name().is_some()).collect())
+    }
+
+    fn get_subtree_control(&self) -> Result<BTreeSet<ControllerType>, Errno> {
+        Ok(self.children.lock().subtree_control.clone())
+    }
+
+    fn update_subtree_control(
+        &self,
+        enable: &BTreeSet<ControllerType>,
+        disable: &BTreeSet<ControllerType>,
+    ) -> Result<(), Errno> {
+        if !enable.is_subset(&self.get_available_controllers()?) {
+            return error!(ENOENT);
+        }
+        self.children.lock().update_subtree_control(enable, disable)
+    }
 }
 
 impl CpusetOps for CgroupRoot {
@@ -576,17 +662,28 @@ impl CpusetOps for CgroupRoot {
 }
 
 #[derive(Debug, Default)]
-struct CgroupChildren(BTreeMap<FsString, CgroupHandle>);
+struct CgroupChildren {
+    children: BTreeMap<FsString, CgroupHandle>,
+
+    /// Controllers enabled in `cgroup.subtree_control` for immediate children.
+    subtree_control: BTreeSet<ControllerType>,
+}
+
 impl CgroupChildren {
     fn insert_child(&mut self, name: FsString, child: CgroupHandle) -> Result<CgroupHandle, Errno> {
-        let btree_map::Entry::Vacant(child_entry) = self.0.entry(name) else {
+        let btree_map::Entry::Vacant(child_entry) = self.children.entry(name) else {
             return error!(EEXIST);
         };
+        // This allow_subclass is safe because the lock is being acquired
+        // in a strictly top-down traversal of the Cgroup tree (from parent
+        // to child), so no lock ordering cycles can be formed.
+        let _token = allow_subclass();
+        child.state.lock().available_controllers = self.subtree_control.clone();
         Ok(child_entry.insert(child).clone())
     }
 
     fn remove_child(&mut self, name: &FsStr) -> Result<CgroupHandle, Errno> {
-        let btree_map::Entry::Occupied(child_entry) = self.0.entry(name.into()) else {
+        let btree_map::Entry::Occupied(child_entry) = self.children.entry(name.into()) else {
             return error!(ENOENT);
         };
         let child = child_entry.get();
@@ -613,15 +710,15 @@ impl CgroupChildren {
     }
 
     fn get_child(&self, name: &FsStr) -> Option<CgroupHandle> {
-        self.0.get(name).cloned()
+        self.children.get(name).cloned()
     }
 
     fn get_children(&self) -> Vec<CgroupHandle> {
-        self.0.values().cloned().collect()
+        self.children.values().cloned().collect()
     }
 
     fn count_descendants(&self) -> u64 {
-        self.0
+        self.children
             .values()
             .map(|child| {
                 1 + {
@@ -634,13 +731,66 @@ impl CgroupChildren {
             })
             .sum()
     }
+
+    fn update_subtree_control(
+        &mut self,
+        enable: &BTreeSet<ControllerType>,
+        disable: &BTreeSet<ControllerType>,
+    ) -> Result<(), Errno> {
+        let mut new_subtree_control = self.subtree_control.clone();
+        for controller in enable {
+            new_subtree_control.insert(*controller);
+        }
+        for controller in disable {
+            new_subtree_control.remove(controller);
+        }
+        if new_subtree_control == self.subtree_control {
+            return Ok(());
+        }
+
+        let children = self.get_children();
+        if !disable.is_empty() {
+            // Per https://docs.kernel.org/admin-guide/cgroup-v2.html#controlling-controllers:
+            // "A controller can't be disabled if one or more children have it enabled."
+            // Remove disabled controllers from each child's `available_controllers` under the
+            // same child lock acquisition that checks `child.subtree_control`, so a child cannot
+            // concurrently enable a controller while its parent is disabling it.
+            for (i, child) in children.iter().enumerate() {
+                let _token = allow_subclass();
+                let mut child_state = child.state.lock();
+                if !child_state.children.subtree_control.is_disjoint(disable) {
+                    drop(child_state);
+                    for prev_child in &children[..i] {
+                        let _token = allow_subclass();
+                        prev_child.state.lock().available_controllers =
+                            self.subtree_control.clone();
+                    }
+                    return error!(EBUSY);
+                }
+                child_state.available_controllers.retain(|c| !disable.contains(c));
+            }
+        }
+
+        // Apply newly enabled controllers only after `disable` has been validated across all
+        // children, so no child can observe and enable a newly added controller before a sibling
+        // rejects the update with `EBUSY`.
+        if !enable.is_empty() {
+            for child in &children {
+                let _token = allow_subclass();
+                child.state.lock().available_controllers = new_subtree_control.clone();
+            }
+        }
+
+        self.subtree_control = new_subtree_control;
+        Ok(())
+    }
 }
 
 impl Deref for CgroupChildren {
     type Target = BTreeMap<FsString, CgroupHandle>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.children
     }
 }
 
@@ -657,6 +807,10 @@ struct CgroupState {
 
     /// Wait queue to thaw all blocked tasks in this cgroup.
     wait_queue: WaitQueue,
+
+    /// Controllers enabled in the parent's `cgroup.subtree_control` and available to this cgroup
+    /// in `cgroup.controllers`.
+    available_controllers: BTreeSet<ControllerType>,
 
     /// Controller-specific state.
     controllers: HashMap<ControllerType, ControllerState>,
@@ -739,10 +893,21 @@ impl CgroupState {
         }
     }
 
-    fn add_process(&mut self, thread_group: &ThreadGroup) -> Result<(), Errno> {
+    fn can_add_process(&self) -> Result<(), Errno> {
         if self.deleted {
             return error!(ENOENT);
         }
+        // Per https://docs.kernel.org/admin-guide/cgroup-v2.html#no-internal-process-constraint:
+        // "Non-root cgroups can distribute domain resources to their children only when they don't
+        // have any processes of their own."
+        if !self.children.subtree_control.is_empty() {
+            return error!(EBUSY);
+        }
+        Ok(())
+    }
+
+    fn add_process(&mut self, thread_group: &ThreadGroup) -> Result<(), Errno> {
+        self.can_add_process()?;
         self.processes.insert(thread_group.leader.clone());
 
         if self.get_effective_freezer_state() == FreezerState::Frozen {
@@ -771,6 +936,9 @@ impl CgroupState {
         if prev_effective_freezer_state == FreezerState::Frozen {
             return;
         }
+        if let Some(freezer) = self.freezer_mut() {
+            freezer.frozen_start_time = Some(zx::MonotonicInstant::get());
+        }
 
         for pid in self.processes.iter() {
             let Ok(thread_group) = pid.get_thread_group() else {
@@ -794,6 +962,11 @@ impl CgroupState {
             freezer.inherited_freezer_state = inherited_freezer_state;
         }
         if self.get_effective_freezer_state() == FreezerState::Thawed {
+            if let Some(freezer) = self.freezer_mut() {
+                // Close the current frozen interval.
+                freezer.refresh_frozen_duration();
+                freezer.frozen_start_time = None;
+            }
             self.wait_queue.notify_all();
             for child in self.children.get_children() {
                 // This allow_subclass is safe because the lock is being acquired
@@ -898,6 +1071,7 @@ impl Cgroup {
                 processes: Default::default(),
                 deleted: false,
                 wait_queue: Default::default(),
+                available_controllers: Default::default(),
                 controllers,
             }),
             weak_self: weak.clone(),
@@ -947,11 +1121,17 @@ impl Cgroup {
                 if !std::ptr::eq(self, entry.get().as_ptr()) {
                     // If thread_group is in another cgroup, we need to remove it first.
                     track_stub!(TODO("https://fxbug.dev/383374687"), "check permissions");
+                    self.state.lock().can_add_process()?;
                     if let Some(other_cgroup) = entry.get().upgrade() {
                         other_cgroup.state.lock().remove_process(thread_group)?;
                     }
 
-                    self.state.lock().add_process(thread_group)?;
+                    if let Err(e) = self.state.lock().add_process(thread_group) {
+                        if let Some(other_cgroup) = entry.get().upgrade() {
+                            let _ = other_cgroup.state.lock().add_process(thread_group);
+                        }
+                        return Err(e);
+                    }
                     entry.insert(self.weak_self.clone());
                 }
             }
@@ -998,9 +1178,7 @@ impl CgroupOps for Cgroup {
                 let _pid_table = self.move_process_into_cgroup(&root, task.thread_group())?;
                 set_task_cpuset_path(task, &cpuset_path)
             } else {
-                if self.state.lock().deleted {
-                    return error!(ENOENT);
-                }
+                self.state.lock().can_add_process()?;
                 set_task_cpuset_path(task, &cpuset_path)
             };
             if changed {
@@ -1026,6 +1204,9 @@ impl CgroupOps for Cgroup {
         let _token = allow_subclass();
         if let Some(freezer) = new_child.state.lock().freezer_mut() {
             freezer.inherited_freezer_state = effective_freezer;
+            if effective_freezer == FreezerState::Frozen {
+                freezer.frozen_start_time = Some(zx::MonotonicInstant::get());
+            }
         }
         state.children.insert_child(name.into(), new_child)
     }
@@ -1051,14 +1232,10 @@ impl CgroupOps for Cgroup {
         Ok(state.children.get_children())
     }
 
-    fn get_pids(&self, _kernel: &Kernel) -> Vec<pid_t> {
+    fn get_pids(&self, _kernel: &Kernel) -> Vec<Pid> {
         let mut state = self.state.lock();
         state.update_processes();
-        state
-            .processes
-            .iter()
-            .filter_map(|v| v.get_thread_group().ok().map(|tg| tg.leader.id))
-            .collect()
+        state.processes.iter().cloned().collect()
     }
 
     fn kill(&self) {
@@ -1093,15 +1270,68 @@ impl CgroupOps for Cgroup {
     fn cpuset(&self) -> Option<&dyn CpusetOps> {
         if self.is_controller_supported(ControllerType::Cpuset) { Some(self) } else { None }
     }
+
+    fn get_available_controllers(&self) -> Result<BTreeSet<ControllerType>, Errno> {
+        let state = self.state.lock();
+        if state.deleted {
+            return error!(ENODEV);
+        }
+        Ok(state.available_controllers.clone())
+    }
+
+    fn get_subtree_control(&self) -> Result<BTreeSet<ControllerType>, Errno> {
+        let state = self.state.lock();
+        if state.deleted {
+            return error!(ENODEV);
+        }
+        Ok(state.children.subtree_control.clone())
+    }
+
+    fn update_subtree_control(
+        &self,
+        enable: &BTreeSet<ControllerType>,
+        disable: &BTreeSet<ControllerType>,
+    ) -> Result<(), Errno> {
+        // Hold `pid_table` when enabling controllers so `move_process_into_cgroup` cannot migrate a
+        // process into or out of `self` mid-check (`CgroupPidTableLock => CgroupStateLock`).
+        let root;
+        let _pid_table = if !enable.is_empty() {
+            root = self.root()?;
+            Some(root.pid_table.lock())
+        } else {
+            None
+        };
+        let mut state = self.state.lock();
+        if state.deleted {
+            return error!(ENODEV);
+        }
+        if !enable.is_subset(&state.available_controllers) {
+            return error!(ENOENT);
+        }
+        // Per https://docs.kernel.org/admin-guide/cgroup-v2.html#no-internal-process-constraint:
+        // "Non-root cgroups can distribute domain resources to their children only when they don't
+        // have any processes of their own."
+        if !enable.is_empty() {
+            state.update_processes();
+            if !state.processes.is_empty() {
+                return error!(EBUSY);
+            }
+        }
+        state.children.update_subtree_control(enable, disable)
+    }
 }
 
 impl FreezerOps for Cgroup {
     fn get_freezer_state(&self) -> CgroupFreezerState {
-        let state = self.state.lock();
-        let self_freezer_state = state.freezer().map(|f| f.self_freezer_state).unwrap_or_default();
+        let mut state = self.state.lock();
+        let (self_freezer_state, frozen_duration) = state
+            .freezer_mut()
+            .map(|f| (f.self_freezer_state, f.refresh_frozen_duration()))
+            .unwrap_or_default();
         CgroupFreezerState {
             self_freezer_state,
             effective_freezer_state: state.get_effective_freezer_state(),
+            frozen_duration,
         }
     }
 
@@ -1119,8 +1349,16 @@ impl FreezerOps for Cgroup {
     fn thaw(&self) {
         fuchsia_trace::duration!(CATEGORY_STARNIX, "CgroupThaw");
         let mut state = self.state.lock();
+        // Capture the effective state before updating `self_freezer_state`, since
+        // `propagate_thaw()` relies on the new self state to compute the effective state.
+        let prev_effective_freezer_state = state.get_effective_freezer_state();
         if let Some(freezer) = state.freezer_mut() {
             freezer.self_freezer_state = FreezerState::Thawed;
+        }
+        // Already effectively thawed: descendants already hold a Thawed inherited state and
+        // no frozen interval is open, so there is nothing to account for or propagate.
+        if prev_effective_freezer_state == FreezerState::Thawed {
+            return;
         }
         let inherited_freezer_state =
             state.freezer().map(|f| f.inherited_freezer_state).unwrap_or_default();
@@ -1185,7 +1423,7 @@ mod test {
             let process = current_task.clone_task_for_test(0, Some(SIGCHLD));
             cgroup.add_process(process.thread_group()).expect("add process to cgroup");
             cgroup.freeze();
-            assert_eq!(cgroup.get_pids(&kernel).first(), Some(process.get_pid()).as_ref());
+            assert_eq!(cgroup.get_pids(&kernel).first(), Some(&process.pid));
             assert_eq!(root.get_cgroup(&process.pid).unwrap().as_ptr(), Arc::as_ptr(&cgroup));
 
             let thread = process.clone_task_for_test(
@@ -1290,6 +1528,110 @@ mod test {
             assert!(exited_worker.read().kernel_signals_for_test().is_empty());
 
             cgroup.thaw();
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn cgroup_subtree_control_and_no_internal_process_constraint() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let root = &kernel.cgroups.cgroup2;
+            let empty = BTreeSet::new();
+            let memory_set = BTreeSet::from([ControllerType::Memory]);
+            let cpu_memory_set = BTreeSet::from([ControllerType::Cpu, ControllerType::Memory]);
+
+            assert_eq!(
+                root.get_available_controllers().expect("get root controllers"),
+                BTreeSet::from([
+                    ControllerType::Cpu,
+                    ControllerType::Cpuset,
+                    ControllerType::Memory,
+                    ControllerType::Blkio,
+                ])
+            );
+            assert!(root.get_subtree_control().expect("get root subtree_control").is_empty());
+
+            let parent = root.new_child("parent".into()).expect("create parent");
+            assert!(parent.get_available_controllers().expect("get parent controllers").is_empty());
+
+            // Cannot enable unavailable controller in child before parent enables it, while
+            // disabling an already-disabled (and unavailable) controller is a no-op.
+            assert_eq!(parent.update_subtree_control(&memory_set, &empty), error!(ENOENT));
+            parent
+                .update_subtree_control(&empty, &memory_set)
+                .expect("disabling unavailable controller is a no-op");
+
+            // Root can enable controllers in subtree_control, propagating availability to child.
+            root.update_subtree_control(&cpu_memory_set, &empty)
+                .expect("enable cpu and memory on root");
+            assert_eq!(
+                root.get_subtree_control().expect("get root subtree_control"),
+                cpu_memory_set
+            );
+            assert_eq!(
+                parent.get_available_controllers().expect("get parent controllers"),
+                cpu_memory_set
+            );
+
+            // Child created after subtree_control update inherits available_controllers.
+            let sibling = root.new_child("sibling".into()).expect("create sibling");
+            assert_eq!(
+                sibling.get_available_controllers().expect("get sibling controllers"),
+                cpu_memory_set
+            );
+
+            // Enabling cpu on `sibling` (index 1 after `parent` in `root`'s BTreeMap) causes
+            // disabling cpu on `root` to fail with EBUSY and roll back `parent`'s
+            // available_controllers.
+            let cpu_set = BTreeSet::from([ControllerType::Cpu]);
+            sibling.update_subtree_control(&cpu_set, &empty).expect("enable cpu on sibling");
+            assert_eq!(root.update_subtree_control(&empty, &cpu_set), error!(EBUSY));
+            assert_eq!(
+                parent.get_available_controllers().expect("parent controllers rolled back"),
+                cpu_memory_set
+            );
+            sibling.update_subtree_control(&empty, &cpu_set).expect("disable cpu on sibling");
+
+            // Enabling memory on `parent` makes it available to `grandchild` and prevents root
+            // from disabling memory.
+            parent.update_subtree_control(&memory_set, &empty).expect("enable memory on parent");
+            let grandchild = parent.new_child("grandchild".into()).expect("create grandchild");
+            assert_eq!(
+                grandchild.get_available_controllers().expect("get grandchild controllers"),
+                memory_set
+            );
+            assert_eq!(root.update_subtree_control(&empty, &memory_set), error!(EBUSY));
+
+            // No internal process constraint: cannot add process to non-root cgroup with active
+            // subtree_control.
+            let task = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            assert_eq!(parent.add_process(task.thread_group()), error!(EBUSY));
+
+            // Moving process to grandchild (leaf) succeeds; moving from grandchild into `parent`
+            // fails with EBUSY without removing the process from grandchild; enabling
+            // subtree_control on grandchild while populated fails with EBUSY; moving back to root
+            // succeeds even though root has active subtree_control.
+            grandchild.add_process(task.thread_group()).expect("add process to leaf grandchild");
+            assert_eq!(parent.add_process(task.thread_group()), error!(EBUSY));
+            assert_eq!(
+                root.get_cgroup(&task.pid).expect("task still in grandchild").as_ptr(),
+                Arc::as_ptr(&grandchild)
+            );
+            assert_eq!(grandchild.update_subtree_control(&memory_set, &empty), error!(EBUSY));
+            root.add_process(task.thread_group()).expect("move process back to root");
+
+            // Disabling memory on `parent` allows `parent` to accept processes and allows `root`
+            // to disable memory.
+            parent.update_subtree_control(&empty, &memory_set).expect("disable memory on parent");
+            assert!(
+                grandchild
+                    .get_available_controllers()
+                    .expect("get grandchild controllers")
+                    .is_empty()
+            );
+            parent.add_process(task.thread_group()).expect("add process to parent");
+            root.update_subtree_control(&empty, &memory_set).expect("disable memory on root");
         })
         .await;
     }

@@ -6,12 +6,9 @@
 
 #include <utility>
 
-#include <fbl/string_printf.h>
 #include <zxtest/base/event-broadcaster.h>
 
-namespace zxtest {
-namespace internal {
-
+namespace zxtest::internal {
 namespace {
 
 template <auto Fn, typename ObserverList, typename... Args>
@@ -103,5 +100,4 @@ void EventBroadcaster::OnProgramEnd(const Runner& runner) {
   Broadcast<&LifecycleObserver::OnProgramEnd>(&lifecycle_observers_, runner);
 }
 
-}  // namespace internal
-}  // namespace zxtest
+}  // namespace zxtest::internal

@@ -6,6 +6,7 @@
 import asyncio
 import inspect
 import logging
+import math
 import os
 import signal
 import time
@@ -266,7 +267,20 @@ def read_from_dict(
 class _TimeLimitExpired(BaseException):
     """Internal BaseException raised by SIGALRM in time_limit to unwind the stack
     without being caught or swallowed by inner `except Exception:` or
-    `except HoneydewTimeoutError:` blocks."""
+    `except HoneydewTimeoutError:` blocks.
+
+    Attributes:
+        owner: The `sigalarm_handler` function that raised this exception. When
+            `time_limit` calls are nested, only the `time_limit` frame whose
+            `sigalarm_handler` matches `owner` converts `_TimeLimitExpired` into
+            `exception_type`; inner frames re-raise it so an expired outer
+            `time_limit` unwinds all the way to the outer frame without being
+            caught by inner `except Exception:` / `except HoneydewError:` blocks.
+    """
+
+    def __init__(self, message: str, owner: object) -> None:
+        super().__init__(message)
+        self.owner = owner
 
 
 @contextmanager
@@ -275,7 +289,44 @@ def time_limit(
     exception_type: type[Exception] = errors.HoneydewTimeoutError,
     exception_message: str = "",
 ) -> Generator[None, None, None]:
-    """Context manager that can be used to time limit any function/method.
+    """Re-entrant context manager that can be used to time limit any function/method.
+
+    Supports arbitrary nesting of `with common.time_limit(...):` blocks using the
+    process-wide `SIGALRM` timer:
+    - On entry, any active outer `SIGALRM` handler (`prev_handler`) and its
+      remaining alarm time (`prev_remaining = signal.alarm(0)`) are saved on the
+      current stack frame.
+    - Whichever timer has the earlier deadline (this block's `timeout` or the
+      outer timer's `prev_remaining`) remains the active `SIGALRM` handler and
+      alarm duration, so an inner `time_limit` can never extend an outer
+      deadline.
+    - On exit (`finally`), the outer `SIGALRM` handler is restored and the outer
+      alarm is re-armed with its remaining time (`prev_remaining - elapsed`),
+      preventing an inner `time_limit` from disarming an outer `time_limit`.
+
+    Nested timeout call flows:
+    1. Outer deadline is shorter (e.g., outer `time_limit(60)` -> inner
+       `time_limit(90)`, and 60s expires):
+       - The outer handler stays registered (`90 >= 60`) with `signal.alarm(60)`.
+       - At 60s, the outer handler raises `_TimeLimitExpired(owner=outer)`.
+       - The inner `time_limit` is immediately aborted: its `except` block sees
+         `err.owner is not inner_handler`, sets `outer_expired = True`, and
+         re-raises `_TimeLimitExpired` without converting it (so inner
+         `except Exception:` / `except HoneydewError:` blocks cannot swallow it)
+         and without re-arming the alarm in `finally`.
+       - The outer `time_limit` catches its own `_TimeLimitExpired`, raises the
+         outer `exception_type`, and clears `signal.alarm(0)` in `finally`.
+    2. Inner deadline is shorter (e.g., outer `time_limit(75)` -> inner
+       `time_limit(50)`, and 50s expires):
+       - The inner handler is installed (`50 < 75`) with `signal.alarm(50)`.
+       - At 50s, the inner handler raises `_TimeLimitExpired(owner=inner)`.
+       - The inner `time_limit` catches it, raises the inner `exception_type`,
+         and in `finally` restores the outer handler and re-arms the remaining
+         outer time (`signal.alarm(75 - 50 = 25)`).
+       - If the outer block catches the inner exception, the remaining 25s
+         outer timer continues counting down for the rest of the outer block;
+         if the outer block does not catch it, the exception exits the outer
+         block too and the outer `finally` immediately clears `signal.alarm(0)`.
 
     Args:
         timeout: time limit allowed in seconds.
@@ -296,12 +347,27 @@ def time_limit(
             exception_type.__name__,
             exception_message,
         )
-        raise _TimeLimitExpired(exception_message)
+        raise _TimeLimitExpired(exception_message, owner=sigalarm_handler)
 
     _LOGGER.info("Setting a time limit of %s sec...", timeout)
     start_time: float = time.time()
-    signal.signal(signal.SIGALRM, sigalarm_handler)
-    signal.alarm(timeout)
+    # Save any active outer SIGALRM handler and cancel/read its remaining seconds
+    # so we can restore it when exiting this nested context.
+    prev_handler = signal.getsignal(signal.SIGALRM)
+    prev_remaining: int = signal.alarm(0)
+    outer_expired: bool = False
+
+    if prev_remaining == 0 or timeout < prev_remaining:
+        # Either no outer timer is active, or this inner timer has a shorter
+        # deadline and will expire before the outer timer.
+        signal.signal(signal.SIGALRM, sigalarm_handler)
+        signal.alarm(timeout)
+    else:
+        # An outer timer is already active and will expire before (or at the
+        # same time as) this inner timer; keep the outer handler and its
+        # remaining alarm duration so the outer deadline takes precedence.
+        signal.alarm(prev_remaining)
+
     try:
         yield
         _LOGGER.info(
@@ -310,6 +376,13 @@ def time_limit(
             time.time() - start_time,
         )
     except _TimeLimitExpired as err:
+        if err.owner is not sigalarm_handler:
+            # This timeout was raised by an enclosing outer `time_limit` whose
+            # deadline was shorter than ours. Re-raise `_TimeLimitExpired`
+            # untouched so it bypasses any inner `except Exception:` handlers
+            # and is caught by the outer `time_limit` that owns it.
+            outer_expired = True
+            raise
         _LOGGER.warning(
             "Time limit of %s sec reached. Raising %s('%s')",
             timeout,
@@ -319,3 +392,10 @@ def time_limit(
         raise exception_type(exception_message) from err
     finally:
         signal.alarm(0)
+        signal.signal(signal.SIGALRM, prev_handler)
+        if prev_remaining > 0 and not outer_expired:
+            # Subtract the time spent inside this inner block and re-arm the
+            # enclosing outer timer with its remaining seconds.
+            elapsed: float = time.time() - start_time
+            remaining_outer: int = max(1, math.ceil(prev_remaining - elapsed))
+            signal.alarm(remaining_outer)

@@ -13,6 +13,7 @@ def _dummy_lib_impl(_ctx):
 dummy_lib = rule(
     implementation = _dummy_lib_impl,
     attrs = {
+        "data": attr.label(),
         "deps": attr.label_list(),
     },
 )
@@ -211,6 +212,28 @@ def assert_no_deps_test_suite(name):
         target_under_test = ":subpackages_success",
     )
 
+    dummy_lib(
+        name = "single_label_data_valid",
+        data = ":foo",
+    )
+
+    assert_no_deps_success_test(
+        name = "single_label_data_success_test",
+        target_under_test = ":single_label_data_valid",
+    )
+
+    dummy_lib(
+        name = "single_label_data_deps",
+        data = ":foo",
+        tags = ["assert_no_deps=:foo"],
+    )
+
+    assert_no_deps_failure_test(
+        name = "single_label_data_failure_test",
+        target_under_test = ":single_label_data_deps",
+        expected_message = "single_label_data_deps violates assert_no_deps: found forbidden dependencies: :foo",
+    )
+
     native.test_suite(
         name = name,
         visibility = ["//visibility:private"],
@@ -228,5 +251,7 @@ def assert_no_deps_test_suite(name):
             ":subpackages_deps_failure_test",
             ":local_subpackages_deps_failure_test",
             ":subpackages_success_test",
+            ":single_label_data_success_test",
+            ":single_label_data_failure_test",
         ],
     )

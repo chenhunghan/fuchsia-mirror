@@ -6,6 +6,7 @@
 import json
 import tempfile
 import unittest
+from pathlib import Path
 
 import debug_json
 
@@ -69,7 +70,7 @@ class DebugJsonTest(unittest.TestCase):
         with tempfile.NamedTemporaryFile("wt") as tf:
             json.dump(json_data, tf)
             tf.flush()
-            data = debug_json.parse(tf.name)
+            data = debug_json.parse(Path(tf.name))
         import pprint
 
         pprint.pprint(data)

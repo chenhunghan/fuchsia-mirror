@@ -13,8 +13,8 @@ import (
 	"text/template"
 
 	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/lib/config"
+	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/lib/cpp_wire"
 	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/lib/ir"
-	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/lib/llcpp"
 	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/lib/mixer"
 	"go.fuchsia.dev/fuchsia/tools/fidl/lib/fidlgen"
 )
@@ -43,11 +43,11 @@ func GenerateBenchmarks(gidl ir.All, fidl fidlgen.Root, config config.GeneratorC
 		if err != nil {
 			return nil, fmt.Errorf("reference benchmark %s: %s", gidlBenchmark.Name, err)
 		}
-		valBuild, valVar := llcpp.BuildValueAllocator("allocator", gidlBenchmark.Value, decl, llcpp.HandleReprRaw)
+		valBuild, valVar := cpp_wire.BuildValueAllocator("allocator", gidlBenchmark.Value, decl, cpp_wire.HandleReprRaw)
 		tmplInput.Benchmarks = append(tmplInput.Benchmarks, benchmark{
 			Path:       gidlBenchmark.Name,
 			Name:       benchmarkName(gidlBenchmark.Name),
-			Type:       llcppBenchmarkType(gidlBenchmark.Value),
+			Type:       cppWireBenchmarkType(gidlBenchmark.Value),
 			ValueBuild: valBuild,
 			ValueVar:   valVar,
 		})
@@ -59,7 +59,7 @@ func GenerateBenchmarks(gidl ir.All, fidl fidlgen.Root, config config.GeneratorC
 	return buf.Bytes(), nil
 }
 
-func llcppBenchmarkType(value ir.Value) string {
+func cppWireBenchmarkType(value ir.Value) string {
 	return fmt.Sprintf("test_benchmarkfidl::wire::%s", ir.TypeFromValue(value))
 }
 

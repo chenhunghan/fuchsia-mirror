@@ -16,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "src/developer/debug/debug_agent/arch.h"
 #include "src/developer/debug/debug_agent/binary_launcher.h"
@@ -36,7 +37,7 @@
 #include "src/developer/debug/shared/status.h"
 #include "src/developer/debug/shared/string_util.h"
 
-#if defined(__linux__)
+#ifdef __linux__
 #include <unistd.h>
 #endif
 
@@ -44,7 +45,7 @@ namespace debug_agent {
 
 namespace {
 
-constexpr size_t kMegabyte = 1024 * 1024;
+constexpr size_t kMegabyte = size_t{1024} * 1024;
 
 std::string LogResumeRequest(const debug_ipc::ResumeRequest& request) {
   std::stringstream ss;
@@ -109,8 +110,8 @@ void DebugAgent::TakeAndConnectRemoteAPIStream(std::unique_ptr<debug::BufferedSt
   // started without a socket connection to a host tool, so it is safe to capture |this|. When the
   // socket is closed, we exit.
   adapter_->set_stream(&stream->stream());
-  stream->set_data_available_callback([this]() { adapter_->OnStreamReadable(); });
-  stream->set_error_callback([this]() {
+  stream->set_data_available_callback([this] { adapter_->OnStreamReadable(); });
+  stream->set_error_callback([this] {
     // Unconditionally quit when the debug_ipc socket is closed.
     Disconnect();
     ClearState();
@@ -153,10 +154,11 @@ void DebugAgent::ClearState() {
 
 void DebugAgent::RemoveDebuggedProcess(zx_koid_t process_koid) {
   auto found = procs_.find(process_koid);
-  if (found == procs_.end())
+  if (found == procs_.end()) {
     FX_NOTREACHED();
-  else
+  } else {
     procs_.erase(found);
+  }
 }
 
 Breakpoint* DebugAgent::GetBreakpoint(uint32_t breakpoint_id) {
@@ -186,6 +188,9 @@ void DebugAgent::OnHello(const debug_ipc::HelloRequest& request, debug_ipc::Hell
   reply->arch = arch::GetCurrentArch();
   reply->platform = debug::CurrentSystemPlatform();
 
+// TODO(https://fxbug.dev/581892793): Switch to #ifdef and #elifdef once reclient's C++ include
+// scanner supports C++23 preprocessor directives.
+// NOLINTBEGIN(readability-use-concise-preprocessor-directives)
 #if defined(__Fuchsia__)
   reply->page_size = zx_system_get_page_size();
 #elif defined(__linux__)
@@ -193,6 +198,7 @@ void DebugAgent::OnHello(const debug_ipc::HelloRequest& request, debug_ipc::Hell
 #else
 #error Need platform page size.
 #endif
+  // NOLINTEND(readability-use-concise-preprocessor-directives)
 
   // Only enable log backend after the handshake is finished.
   debug::LogBackend::Set(this, true);
@@ -446,12 +452,13 @@ void DebugAgent::OnAddOrChangeBreakpoint(const debug_ipc::AddOrChangeBreakpointR
     case debug_ipc::BreakpointType::kHardware:
     case debug_ipc::BreakpointType::kReadWrite:
     case debug_ipc::BreakpointType::kWrite:
-      return SetupBreakpoint(request, reply);
+      SetupBreakpoint(request, reply);
+      return;
     case debug_ipc::BreakpointType::kLast:
       break;
   }
 
-  FX_NOTREACHED() << "Invalid Breakpoint Type: " << static_cast<int>(request.breakpoint.type);
+  FX_NOTREACHED() << "Invalid Breakpoint Type: " << std::to_underlying(request.breakpoint.type);
 }
 
 void DebugAgent::OnRemoveBreakpoint(const debug_ipc::RemoveBreakpointRequest& request,
@@ -611,12 +618,13 @@ void DebugAgent::OnWriteMemory(const debug_ipc::WriteMemoryRequest& request,
 void DebugAgent::OnLoadInfoHandleTable(const debug_ipc::LoadInfoHandleTableRequest& request,
                                        debug_ipc::LoadInfoHandleTableReply* reply) {
   DebuggedProcess* proc = GetDebuggedProcess(request.process_koid);
-  if (proc)
+  if (proc) {
     proc->OnLoadInfoHandleTable(request, reply);
-  else
+  } else {
     reply->status =
         debug::Status("Not attached to process " + std::to_string(request.process_koid) +
                       " while getting the handle table.");
+  }
 }
 
 void DebugAgent::OnUpdateGlobalSettings(const debug_ipc::UpdateGlobalSettingsRequest& request,
@@ -667,8 +675,7 @@ DebuggedThread* DebugAgent::GetDebuggedThread(const debug_ipc::ProcessThreadId& 
 std::vector<debug_ipc::ProcessThreadId> DebugAgent::ClientSuspendAll(zx_koid_t except_process,
                                                                      zx_koid_t except_thread) {
   // Neither or both koids must be supplied.
-  FX_DCHECK((except_process == ZX_KOID_INVALID && except_thread == ZX_KOID_INVALID) ||
-            (except_process != ZX_KOID_INVALID && except_thread != ZX_KOID_INVALID));
+  FX_DCHECK((except_process == ZX_KOID_INVALID) == (except_thread == ZX_KOID_INVALID));
 
   std::vector<debug_ipc::ProcessThreadId> affected;
 
@@ -758,9 +765,12 @@ std::vector<debug_ipc::FilterMatch> DebugAgent::AccumulateFilterMatches(
 
   std::ranges::for_each(filters_, [&](const Filter& filter) {
     if (filter.MatchesProcess(handle, *system_interface_)) {
-      matches.emplace_back(filter.filter().id,
-                           std::vector<debug_ipc::MatchedTask>{
-                               {.koid = handle.GetKoid(), .type = debug_ipc::TaskType::kProcess}});
+      matches.emplace_back(filter.filter().id, std::vector<debug_ipc::MatchedTask>{
+                                                   {
+                                                       .koid = handle.GetKoid(),
+                                                       .type = debug_ipc::TaskType::kProcess,
+                                                   },
+                                               });
     }
   });
 
@@ -920,7 +930,7 @@ debug::Status DebugAgent::AttachToLimboProcess(zx_koid_t process_koid,
 
   // Send the reply first, then the notifications about the process and threads.
   debug::MessageLoop::Current()->PostTask(FROM_HERE, [weak_this = GetWeakPtr(), koid = reply->koid,
-                                                      exception = std::move(exception)]() mutable {
+                                                      exception = std::move(exception)] mutable {
     if (!weak_this)
       return;
     if (DebuggedProcess* process = weak_this->GetDebuggedProcess(koid)) {
@@ -968,7 +978,7 @@ debug::Status DebugAgent::AttachToExistingProcess(zx_koid_t process_koid,
 
   // Send the reply first, then the notifications about the process and threads.
   debug::MessageLoop::Current()->PostTask(
-      FROM_HERE, [weak_this = GetWeakPtr(), koid = reply->koid, config]() mutable {
+      FROM_HERE, [weak_this = GetWeakPtr(), koid = reply->koid, config] mutable {
         if (!weak_this)
           return;
         if (DebuggedProcess* process = weak_this->GetDebuggedProcess(koid)) {
@@ -1062,8 +1072,9 @@ void DebugAgent::LaunchProcess(const debug_ipc::RunBinaryRequest& request,
 }
 
 void DebugAgent::OnProcessChanged(ProcessChangedHow how,
-                                  std::unique_ptr<ProcessHandle> process_handle) {
-  if (procs_.find(process_handle->GetKoid()) != procs_.end()) {
+                                  std::unique_ptr<ProcessHandle> process_handle,
+                                  zx_koid_t exception_thread_koid) {
+  if (procs_.contains(process_handle->GetKoid())) {
     return;  // The process might have been attached in |LaunchProcess|.
   }
 
@@ -1104,7 +1115,7 @@ void DebugAgent::OnProcessChanged(ProcessChangedHow how,
     } else if (!matched_filters.empty()) {
       // Returns true if the given |match| is found in our list of installed filters and it is
       // configured to be a job_only filter.
-      auto is_job_only = [this](const debug_ipc::FilterMatch match) -> bool {
+      auto is_job_only = [this](const debug_ipc::FilterMatch& match) -> bool {
         const auto filter = debug_ipc::GetFilterForId(GetIpcFilters(), match.id);
 
         if (filter == nullptr)
@@ -1202,14 +1213,22 @@ void DebugAgent::OnProcessChanged(ProcessChangedHow how,
 
   SendNotification(notify);
 
-  new_process->PopulateCurrentThreads();
+  if (debug_ipc::AttachConfig::ShouldDeferModules(attach_config)) {
+    // Weakly attached starting processes claim the process debugger channel, so skip initial
+    // thread population and let DebuggedProcess::OnThreadStarting report the initial thread.
+    // Job-only, minimal, and rename events won't emit OnThreadStarting, so populate threads now
+    // and report the thread held in the job exception as running.
+    if (how != ProcessChangedHow::kStarting || !new_process->IsAttached()) {
+      new_process->PopulateCurrentThreads(exception_thread_koid);
+    }
+  } else {
+    new_process->PopulateCurrentThreads();
 
-  // If this is a strong attach, we need to send modules here. We cannot wait for the client to
-  // request all the modules later because we won't be able to load symbols early enough to set
-  // breakpoints on things like _dl_start, which will resolve from the first modules being sent
-  // now. The rest of the modules will be sent later on when the client requests them or we hit the
-  // loader breakpoint.
-  if (!debug_ipc::AttachConfig::ShouldDeferModules(attach_config)) {
+    // If this is a strong attach, we need to send modules here. We cannot wait for the client to
+    // request all the modules later because we won't be able to load symbols early enough to set
+    // breakpoints on things like _dl_start, which will resolve from the first modules being sent
+    // now. The rest of the modules will be sent later on when the client requests them or we hit
+    // the loader breakpoint.
     new_process->SuspendAndSendModules();
   }
 }
@@ -1268,9 +1287,13 @@ void DebugAgent::OnComponentStarted(const std::string& moniker, const std::strin
     // non-job-only filters match this component started event (process starting events come
     // separately via a job's DEBUGGER exception channel).
     if (job_koid != ZX_KOID_INVALID && filter->filter().config.job_only) {
-      component_started.matching_filters.emplace_back(
-          filter->filter().id, std::vector<debug_ipc::MatchedTask>{
-                                   {.koid = job_koid, .type = debug_ipc::TaskType::kJob}});
+      component_started.matching_filters.emplace_back(filter->filter().id,
+                                                      std::vector<debug_ipc::MatchedTask>{
+                                                          {
+                                                              .koid = job_koid,
+                                                              .type = debug_ipc::TaskType::kJob,
+                                                          },
+                                                      });
     }
   }
 

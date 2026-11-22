@@ -77,12 +77,15 @@ mod enabled {
     }
 
     #[repr(C, align(8))]
-    #[derive(Default)]
     struct LockClassStateStorage(zr::OpaqueBytes<LOCK_CLASS_STATE_SIZE>);
 
     impl LockClassStateStorage {
-        const fn uninit() -> Self {
-            Self(zr::OpaqueBytes::uninit())
+        /// Zero-initializes the backing storage so that any pre-`call_constructors()` lock
+        /// initialization (such as `dlog_init_early`) observes a valid null `*const InternedString`
+        /// at offset 0 rather than uninitialized `MaybeUninit` bytes before
+        /// `RustLockClassRegistrar` placement-constructs the C++ `LockClassState`.
+        const fn zeroed() -> Self {
+            Self(zr::OpaqueBytes::new([0; LOCK_CLASS_STATE_SIZE]))
         }
     }
 
@@ -102,7 +105,7 @@ mod enabled {
 
     impl LockClassRegistration {
         pub const fn new(name: &'static ::kstring::interned_string::InternedString) -> Self {
-            Self { name, flags: 0, state_storage: LockClassStateStorage::uninit() }
+            Self { name, flags: 0, state_storage: LockClassStateStorage::zeroed() }
         }
 
         pub const fn with_flags(
@@ -110,7 +113,7 @@ mod enabled {
             flags: crate::LockFlags,
         ) -> Self {
             crate::validate_lock_flags(flags);
-            Self { name, flags, state_storage: LockClassStateStorage::uninit() }
+            Self { name, flags, state_storage: LockClassStateStorage::zeroed() }
         }
 
         #[inline]

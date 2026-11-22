@@ -9,7 +9,6 @@
 #include <lib/async/cpp/task.h>
 #include <lib/ddk/debug.h>
 #include <lib/ddk/driver.h>
-#include <lib/ddk/hw/arch_ops.h>
 #include <lib/ddk/metadata.h>
 #include <lib/ddk/platform-defs.h>
 #include <lib/driver-unit-test/utils.h>

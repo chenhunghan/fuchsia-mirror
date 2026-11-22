@@ -35,7 +35,7 @@ namespace abi {
 // of the runtime thread descriptor must be located such that both their own
 // alignment requirements and the p_align of module 1's PT_TLS are respected.
 
-template <class Elf, class AbiTraits>
+template <elfldltl::ElfApi Elf, class AbiTraits>
 struct Abi<Elf, AbiTraits>::TlsModule {
   constexpr Elf::size_type tls_size() const { return tls_initial_data.size() + tls_bss_size; }
 
@@ -97,7 +97,7 @@ inline ptrdiff_t TpRelativeToOffset(T* ptr) {
 // Interrogate the passive ABI (e.g. ld::abi::_ld_abi) for the thread-pointer
 // offset of each thread's static TLS data area for the given TLS module ID
 // among the initial-exec set of TLS modules.
-template <class Elf, class AbiTraits>
+template <elfldltl::ElfApi Elf, class AbiTraits>
 constexpr ptrdiff_t TlsInitialExecOffset(const typename abi::Abi<Elf, AbiTraits>& abi,
                                          typename Elf::size_type modid,
                                          typename Elf::size_type offset = 0) {
@@ -125,7 +125,7 @@ constexpr void TlsModuleInit(const Module& module, std::span<std::byte> segment,
 }
 
 // This describes a single module's PT_TLS and its segment in a given thread.
-template <class Elf, class AbiTraits>
+template <elfldltl::ElfApi Elf, class AbiTraits>
 struct TlsSegment {
   using TlsModule = abi::Abi<Elf, AbiTraits>::TlsModule;
 
@@ -138,7 +138,7 @@ struct TlsSegment {
 // static TLS data (and the like) for a given thread.  The offset should be the
 // location within that span where the thread pointer will point (which may be
 // at the end of the span for x86 negative TLS offsets).
-template <class Elf, class AbiTraits>
+template <elfldltl::ElfApi Elf, class AbiTraits>
 inline std::ranges::input_range auto TlsInitialExecSegments(
     const typename abi::Abi<Elf, AbiTraits>& abi, std::span<std::byte> block, size_t tp_offset) {
   using size_type = Elf::size_type;
@@ -156,7 +156,7 @@ inline std::ranges::input_range auto TlsInitialExecSegments(
 
 // Populate the static TLS block with initial data and zero'd tbss regions for
 // each module that has a PT_TLS segment.
-template <class Elf, class AbiTraits>
+template <elfldltl::ElfApi Elf, class AbiTraits>
 inline void TlsInitialExecDataInit(const typename abi::Abi<Elf, AbiTraits>& abi,
                                    std::span<std::byte> block, size_t tp_offset,
                                    bool known_zero = false) {
@@ -169,7 +169,7 @@ inline void TlsInitialExecDataInit(const typename abi::Abi<Elf, AbiTraits>& abi,
 // Interrogate the passive ABI (e.g. ld::abi::_ld_abi) to locate the current
 // thread's TLS data area for the given TLS module ID among the initial-exec
 // set of TLS modules.
-template <class Elf, class AbiTraits>
+template <elfldltl::ElfApi Elf, class AbiTraits>
 inline void* TlsInitialExecData(const typename abi::Abi<Elf, AbiTraits>& abi,
                                 typename Elf::size_type modid, typename Elf::size_type offset = 0) {
   if (modid == 0) {

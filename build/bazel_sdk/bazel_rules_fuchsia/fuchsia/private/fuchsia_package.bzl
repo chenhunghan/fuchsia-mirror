@@ -6,14 +6,13 @@
 
 load(
     "@fuchsia_rules_common//debug_symbols:debug_symbols.bzl",
-    "FUCHSIA_DEBUG_SYMBOLS_ATTRS",
     "find_and_process_unstripped_binaries",
     "merge_debug_symbol_infos",
 )
 load(
     "@fuchsia_rules_common//packages:package.bzl",
-    "COMMON_BUILD_FUCHSIA_PACKAGE_ATTRIBUTES",
-    "common_build_fuchsia_package_impl",
+    "BUILD_FUCHSIA_PACKAGE_COMMON_ATTRS",
+    "build_fuchsia_package_common_impl",
 )
 load(
     "@fuchsia_rules_common//packages:resources.bzl",
@@ -292,7 +291,7 @@ def _build_fuchsia_package_impl(ctx):
         ctx.attr._fuchsia_sdk_debug_symbols,
     )
 
-    return common_build_fuchsia_package_impl(
+    return build_fuchsia_package_common_impl(
         ctx = ctx,
         ffx_package = sdk.ffx_package,
         ffx_package_is_ffx = True,
@@ -311,7 +310,7 @@ _build_fuchsia_package = rule(
     implementation = _build_fuchsia_package_impl,
     cfg = fuchsia_transition,
     toolchains = [FUCHSIA_TOOLCHAIN_DEFINITION, "@bazel_tools//tools/cpp:toolchain_type"],
-    attrs = COMMON_BUILD_FUCHSIA_PACKAGE_ATTRIBUTES | {
+    attrs = BUILD_FUCHSIA_PACKAGE_COMMON_ATTRS | {
         "fuchsia_api_level": attr.string(
             doc = """The Fuchsia API level to use when building this package.
 
@@ -333,5 +332,5 @@ _build_fuchsia_package = rule(
         "_allowlist_function_transition": attr.label(
             default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
         ),
-    } | COMPATIBILITY.FUCHSIA_ATTRS | FUCHSIA_API_LEVEL_ATTRS | FUCHSIA_DEBUG_SYMBOLS_ATTRS,
+    } | COMPATIBILITY.FUCHSIA_ATTRS | FUCHSIA_API_LEVEL_ATTRS,
 )

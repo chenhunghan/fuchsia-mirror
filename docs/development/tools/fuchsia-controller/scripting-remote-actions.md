@@ -68,7 +68,7 @@ supported, e.g., reading from or writing to a VMO.
 Please [file an issue][file-an-issue] if you encounter bugs, or have questions
 or suggestions.
 
-### Prerequisites {:.numbered}
+### Prerequisites {:#prerequisites .numbered}
 
 This tutorial requires the following:
 
@@ -86,7 +86,7 @@ This tutorial requires the following:
   (For more information, see
   [Interacting with target devices][interact-with-target-devices].)
 
-### Create a build target {:.numbered}
+### Create a build target {:#create-a-build-target .numbered}
 
 Update a `BUILD.gn` file to include a build target like the following:
 
@@ -102,7 +102,7 @@ The `ffx` libraries enable connecting to our Fuchsia device. And
 the FIDL dependencies make the necessary Python FIDL bindings available to the
 script.
 
-### Write the script {:.numbered}
+### Write the script {:#write-the-script .numbered}
 
 First, our script needs to import the necessary modules:
 
@@ -130,7 +130,7 @@ particular IP address, and then call the
 target.
 
 Note: You might notice the component moniker `core/build-info` in the script.
-See the [Finding component monikers][#finding-component-monikers] for how to
+See the [Finding component monikers][finding-component-monikers] for how to
 discover the component moniker for the Fuchsia component you wish to communicate
 with.
 
@@ -151,7 +151,7 @@ script:
 {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="tools/fidl/fidlgen_python/examples/describe_host.py" region_tag="full_code" %}
 ```
 
-### Build and run the script {:.numbered}
+### Build and run the script {:#build-and-run-the-script .numbered}
 
 This example code lives in `//tools/fidl/fidlgen_python`, so you build it with
 the following command on an `x64` host (after adding
@@ -182,7 +182,7 @@ Target Info Received:
     version: 2025-04-08T02:04:13+00:00
 ```
 
-## Finding component monikers
+## Finding component monikers {:#finding-component-monikers}
 To communicate with a Fuchsia component, a script must know the component's
 moniker in advance. A component moniker can be retrieved using `ffx`. For
 example, the following `ffx` command will print that `core/build-info` exposes
@@ -498,8 +498,8 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Then this can be run by completing the Python environment setup steps in the
-[next section](#experiment-with-the-python-interpreter). When run, it prints
+Then this can be run by following the steps in
+[Build and run the script](#build-and-run-the-script). When run, it prints
 the following output and exits:
 
 ```sh {:.devsite-disable-click-to-copy}
@@ -517,9 +517,10 @@ For more examples on server testing, see this
 [overnet]: /src/connectivity/overnet/README.md
 [fuchsia-controller-header-file]: /src/developer/fuchsia-controller/cpp/fuchsia_controller_internal/fuchsia_controller.h
 [file-an-issue]: https://issuetracker.google.com/issues/new?component=1378581&template=1840403
-[interact-with-target-devices]: /docs/development/tools/ffx/getting-started.md#interacting_with_target_devices
+[interact-with-target-devices]: /docs/development/tools/ffx/getting-started.md#interacting-with-target-devices
 [test-server-and-event-handler]: /tools/fidl/fidlgen_python/tests/test_server_and_event_handler.py
 [test-fidl]: /src/developer/fuchsia-controller/fidl/fuchsia_controller.test.fidl
 [async-python]: /docs/development/tools/fuchsia-controller/async-python.md
 [get-started]: /docs/get-started/README.md
 [ffx-config]: /docs/development/tools/ffx/commands/config.md#runtime-configuration
+[finding-component-monikers]: #finding-component-monikers

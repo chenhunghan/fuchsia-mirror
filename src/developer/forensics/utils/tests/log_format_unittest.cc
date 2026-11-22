@@ -4,7 +4,7 @@
 
 #include "src/developer/forensics/utils/log_format.h"
 
-#include <fuchsia/logger/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
 
@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include "src/developer/forensics/testing/gpretty_printers.h"
+#include "src/developer/forensics/testing/log_message.h"
 
 namespace forensics {
 namespace {
@@ -24,23 +25,6 @@ namespace {
 using ::testing::TestParamInfo;
 using ::testing::TestWithParam;
 using ::testing::ValuesIn;
-
-constexpr zx::duration kLogMessageBaseTimestamp = zx::sec(15604);
-constexpr uint64_t kLogMessageProcessId = 7559;
-constexpr uint64_t kLogMessageThreadId = 7687;
-
-fuchsia::logger::LogMessage BuildLogMessage(const int32_t severity, const std::string& text,
-                                            const zx::duration timestamp_offset = zx::nsec(0),
-                                            const std::vector<std::string>& tags = {}) {
-  fuchsia::logger::LogMessage msg{};
-  msg.time = zx::time_boot((kLogMessageBaseTimestamp + timestamp_offset).get());
-  msg.pid = kLogMessageProcessId;
-  msg.tid = kLogMessageThreadId;
-  msg.tags = tags;
-  msg.severity = severity;
-  msg.msg = text;
-  return msg;
-}
 
 TEST(LogFormatTest, Check_CorrectSeverity) {
   std::string log_message;
@@ -86,9 +70,9 @@ TEST(LogFormatTest, Check_CorrectTags) {
 }
 
 TEST(LogFormatTest, Check_InsertsDroppedLogMessageSingular) {
-  fuchsia::logger::LogMessage message = BuildLogMessage(FUCHSIA_LOG_INFO, "line 1", zx::msec(1),
-                                                        /*tags=*/{"foo", "bar"});
-  message.dropped_logs = 1;
+  fuchsia_logger::LogMessage message = BuildLogMessage(FUCHSIA_LOG_INFO, "line 1", zx::msec(1),
+                                                       /*tags=*/{"foo", "bar"});
+  message.dropped_logs(1);
 
   EXPECT_EQ(
       Format(message),
@@ -96,9 +80,9 @@ TEST(LogFormatTest, Check_InsertsDroppedLogMessageSingular) {
 }
 
 TEST(LogFormatTest, Check_InsertsDroppedLogMessageMultiple) {
-  fuchsia::logger::LogMessage message = BuildLogMessage(FUCHSIA_LOG_INFO, "line 1", zx::msec(1),
-                                                        /*tags=*/{"foo", "bar"});
-  message.dropped_logs = 2;
+  fuchsia_logger::LogMessage message = BuildLogMessage(FUCHSIA_LOG_INFO, "line 1", zx::msec(1),
+                                                       /*tags=*/{"foo", "bar"});
+  message.dropped_logs(2);
 
   EXPECT_EQ(
       Format(message),
@@ -270,13 +254,13 @@ using FormatRoundTripTest = TestWithParam<FormatRoundTripTestCase>;
 
 TEST_P(FormatRoundTripTest, FormatAndParseLogHeaderRoundTrip) {
   const FormatRoundTripTestCase& test_case = GetParam();
-  fuchsia::logger::LogMessage message =
+  fuchsia_logger::LogMessage message =
       BuildLogMessage(FUCHSIA_LOG_INFO, test_case.text,
                       /*timestamp_offset=*/zx::nsec(0), /*tags=*/{"foo", "bar"});
-  message.time = test_case.timestamp;
-  message.pid = test_case.pid;
-  message.tid = test_case.tid;
-  message.dropped_logs = test_case.dropped_logs;
+  message.time(test_case.timestamp);
+  message.pid(test_case.pid);
+  message.tid(test_case.tid);
+  message.dropped_logs(test_case.dropped_logs);
 
   const std::string formatted = Format(message);
   EXPECT_EQ(ParseLogHeader(formatted), test_case.expected_timestamp);
@@ -296,21 +280,21 @@ INSTANTIATE_TEST_SUITE_P(
         },
         {
             .test_name = "MillisecondPrecision",
-            .timestamp = zx::time_boot((zx::sec(15604) + zx::msec(25)).get()),
+            .timestamp = kLogMessageBaseTimestamp + zx::msec(25),
             .pid = kLogMessageProcessId,
             .tid = kLogMessageThreadId,
             .dropped_logs = 0,
             .text = "line 1",
-            .expected_timestamp = zx::time_boot((zx::sec(15604) + zx::msec(25)).get()),
+            .expected_timestamp = kLogMessageBaseTimestamp + zx::msec(25),
         },
         {
             .test_name = "SubMillisecondTruncated",
-            .timestamp = zx::time_boot((zx::sec(15604) + zx::msec(25) + zx::usec(999)).get()),
+            .timestamp = kLogMessageBaseTimestamp + zx::msec(25) + zx::usec(999),
             .pid = kLogMessageProcessId,
             .tid = kLogMessageThreadId,
             .dropped_logs = 0,
             .text = "line 1",
-            .expected_timestamp = zx::time_boot((zx::sec(15604) + zx::msec(25)).get()),
+            .expected_timestamp = kLogMessageBaseTimestamp + zx::msec(25),
         },
         {
             .test_name = "LargeTimestampOverFiveDigits",
@@ -323,39 +307,39 @@ INSTANTIATE_TEST_SUITE_P(
         },
         {
             .test_name = "ZeroKoids",
-            .timestamp = zx::time_boot((zx::sec(15604) + zx::msec(1)).get()),
+            .timestamp = kLogMessageBaseTimestamp + zx::msec(1),
             .pid = 0,
             .tid = 0,
             .dropped_logs = 0,
             .text = "line 1",
-            .expected_timestamp = zx::time_boot((zx::sec(15604) + zx::msec(1)).get()),
+            .expected_timestamp = kLogMessageBaseTimestamp + zx::msec(1),
         },
         {
             .test_name = "LargeKoids",
-            .timestamp = zx::time_boot((zx::sec(15604) + zx::msec(1)).get()),
+            .timestamp = kLogMessageBaseTimestamp + zx::msec(1),
             .pid = std::numeric_limits<uint64_t>::max(),
             .tid = std::numeric_limits<uint64_t>::max() - 1,
             .dropped_logs = 0,
             .text = "line 1",
-            .expected_timestamp = zx::time_boot((zx::sec(15604) + zx::msec(1)).get()),
+            .expected_timestamp = kLogMessageBaseTimestamp + zx::msec(1),
         },
         {
             .test_name = "WithDroppedLogs",
-            .timestamp = zx::time_boot((zx::sec(15604) + zx::msec(1)).get()),
+            .timestamp = kLogMessageBaseTimestamp + zx::msec(1),
             .pid = kLogMessageProcessId,
             .tid = kLogMessageThreadId,
             .dropped_logs = 2,
             .text = "line 1",
-            .expected_timestamp = zx::time_boot((zx::sec(15604) + zx::msec(1)).get()),
+            .expected_timestamp = kLogMessageBaseTimestamp + zx::msec(1),
         },
         {
             .test_name = "MultilineMessage",
-            .timestamp = zx::time_boot((zx::sec(15604) + zx::msec(4)).get()),
+            .timestamp = kLogMessageBaseTimestamp + zx::msec(4),
             .pid = kLogMessageProcessId,
             .tid = kLogMessageThreadId,
             .dropped_logs = 0,
             .text = "multi\nline\nmessage",
-            .expected_timestamp = zx::time_boot((zx::sec(15604) + zx::msec(4)).get()),
+            .expected_timestamp = kLogMessageBaseTimestamp + zx::msec(4),
         },
     })),
     [](const TestParamInfo<FormatRoundTripTestCase>& info) { return info.param.test_name; });

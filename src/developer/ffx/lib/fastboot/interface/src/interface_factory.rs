@@ -33,6 +33,13 @@ pub trait InterfaceFactoryBase<T: AsyncRead + AsyncWrite + Unpin + Send> {
     fn open(&mut self) -> impl Future<Output = Result<T, InterfaceFactoryError>> + Send;
     fn close(&self) -> impl Future<Output = ()> + Send;
     fn rediscover(&mut self) -> impl Future<Output = Result<(), InterfaceFactoryError>> + Send;
+
+    /// Returns whether automatic GBL background storage tasks (`oem gbl-enable-async-task`) are
+    /// supported over this transport. Enabled only on TCP transports; USB targets may run firmware
+    /// whose `BlockIo2` / USB gadget drivers stall under concurrent cross-partition async writes.
+    fn supports_gbl_async_tasks(&self) -> bool {
+        false
+    }
 }
 
 pub trait InterfaceFactory<T: AsyncRead + AsyncWrite + Unpin + Send>:

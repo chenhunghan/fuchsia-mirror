@@ -410,7 +410,7 @@ class ZeroFunctionTest(zero_function.ZeroFunctionBaseTest):
             )
             return
 
-        power_hub = self.dut.usb_power_hub
+        power_hub = self.dut.usb.power_hub
         if power_hub is None:
             asserts.skip(
                 "Positive USB_DEVICE_TEST_MODE check requires a configured "
@@ -425,11 +425,10 @@ class ZeroFunctionTest(zero_function.ZeroFunctionBaseTest):
                 "usb_test_mode_selector", UsbTestModeSelector.TEST_SE0_NAK
             )
         )
-        power_port = self.dut.usb_power_hub_port
 
         def _power_cycle_port() -> None:
-            power_hub.power_off(port=power_port)
-            power_hub.power_on(port=power_port)
+            power_hub.power_off()
+            power_hub.power_on()
 
         _LOGGER.info(
             "Executing EP0 Test Mode (selector=%#x) on %s...",

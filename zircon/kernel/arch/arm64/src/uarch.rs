@@ -7,11 +7,8 @@
 //! Microarchitecture-specific workarounds and optimizations
 
 use super::mp::read_percpu_field;
+use crate::psci::psci_get_version;
 use arm64_mp_bindings as mp_bindings;
-
-unsafe extern "C" {
-    fn psci_get_version() -> u32;
-}
 
 /// Returns whether the calling CPU's microarchitecture needs the Spectre V2 mitigation.
 pub fn arm64_uarch_needs_spectre_v2_mitigation() -> bool {
@@ -35,7 +32,5 @@ pub fn arm64_uarch_do_spectre_v2_mitigation() {
     // Invalidate indirect branch predictors to guard the kernel by executing a PSCI call
     // TODO(https://fxbug.dev/42108888): Use SMCCC ARCH_WORKAROUND and v1.1 calling convention if
     // available.
-    // SAFETY: The declaration matches `psci_get_version()` in `<dev/psci.h>`, which takes no
-    // arguments and has no caller preconditions.
-    unsafe { psci_get_version() };
+    psci_get_version();
 }

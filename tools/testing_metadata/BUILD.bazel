@@ -10,12 +10,8 @@ package(default_applicable_licenses = ["//:license"])
 
 rustc_binary_host_tool(
     name = "testing_metadata_bin",
-    srcs = [
-        "src/main.rs",
-        "src/owners.rs",
-    ],
+    srcs = ["src/main.rs"],
     compile_data = [
-        "directory_owners.schema.json",
         "testing_input.schema.json",
         "testing_metadata.schema.json",
     ],

@@ -12,14 +12,14 @@ driver_bind_rules("ddk-fidl-bind") {
   deps = [ "//src/devices/bind/fuchsia.test.platform" ]
 }
 
-fuchsia_cc_driver("fidl-llcpp-driver-driver") {
+fuchsia_cc_driver("fidl-wire-driver-driver") {
   legacy = true
-  output_name = "fidl-llcpp-driver"
+  output_name = "fidl-wire-driver"
   configs += [
     "//build/config:all_source",
     "//build/config/fuchsia:enable_zircon_asserts",
   ]
-  sources = [ "fidl-llcpp-driver.cc" ]
+  sources = [ "fidl-wire-driver.cc" ]
 
   deps = [
     ":ddk-fidl-bind",
@@ -33,11 +33,10 @@ fuchsia_cc_driver("fidl-llcpp-driver-driver") {
   ]
 }
 
-fuchsia_driver_component("fidl-llcpp-driver") {
-  component_name = "fidl-llcpp-driver"
-  deps = [ ":fidl-llcpp-driver-driver" ]
-  info = "meta/fidl-llcpp-driver-info.json"
-  manifest = "meta/fidl-llcpp-driver.cml"
+fuchsia_driver_component("fidl-wire-driver") {
+  component_name = "fidl-wire-driver"
+  deps = [ ":fidl-wire-driver-driver" ]
+  manifest = "meta/fidl-wire-driver.cml"
 }
 
 driver_bind_rules("ddk-fidl-async-bind") {
@@ -45,14 +44,14 @@ driver_bind_rules("ddk-fidl-async-bind") {
   deps = [ "//src/devices/bind/fuchsia.test.platform" ]
 }
 
-fuchsia_cc_driver("fidl-async-llcpp-driver-driver") {
+fuchsia_cc_driver("fidl-async-wire-driver-driver") {
   legacy = true
-  output_name = "fidl-async-llcpp-driver"
+  output_name = "fidl-async-wire-driver"
   configs += [
     "//build/config:all_source",
     "//build/config/fuchsia:enable_zircon_asserts",
   ]
-  sources = [ "fidl-async-llcpp-driver.cc" ]
+  sources = [ "fidl-async-wire-driver.cc" ]
 
   deps = [
     ":ddk-fidl-async-bind",
@@ -69,11 +68,10 @@ fuchsia_cc_driver("fidl-async-llcpp-driver-driver") {
   ]
 }
 
-fuchsia_driver_component("fidl-async-llcpp-driver") {
-  component_name = "fidl-async-llcpp-driver"
-  deps = [ ":fidl-async-llcpp-driver-driver" ]
-  info = "meta/fidl-async-llcpp-driver-info.json"
-  manifest = "meta/fidl-async-llcpp-driver.cml"
+fuchsia_driver_component("fidl-async-wire-driver") {
+  component_name = "fidl-async-wire-driver"
+  deps = [ ":fidl-async-wire-driver-driver" ]
+  manifest = "meta/fidl-async-wire-driver.cml"
 }
 
 test("ddk-fidl-test") {
@@ -95,8 +93,8 @@ fuchsia_unittest_package("ddk-fidl-test-package") {
 
   deps = [
     ":ddk-fidl-test",
-    ":fidl-async-llcpp-driver",
-    ":fidl-llcpp-driver",
+    ":fidl-async-wire-driver",
+    ":fidl-wire-driver",
     "//src/devices/board/drivers/integration-test",
     "//src/devices/bus/drivers/platform",
   ]

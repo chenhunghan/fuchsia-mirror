@@ -5,22 +5,153 @@
 import("//build/python/python_mobly_test.gni")
 import("//build/testing/environments.gni")
 
-assert(is_host, "Python E2E tests are host-only")
+# Device-agnostic battery E2E tests (`fuchsia.hardware.power.battery.Service`),
+# separated by target environment setup:
+#
+#   1. `e2e_battery_emu_tests` (`emu_env`):
+#      Emulator running `//src/power/testing/fake-battery`. Exercises
+#      `fake_battery` discharge injection and FIDL telemetry across reboot
+#      (where `cycle_count` is unset on boot).
+#
+#   2. `e2e_battery_infra_tests` (`iris_env`, `has_real_battery = false`):
+#      Standard hardware infra bots powered by a battery eliminator (no pack
+#      EEPROM at `0x50`). Skips converter force-discharge so turning off the
+#      buck cannot brown out `VSYS`, and permits `remaining_capacity_uah == 0`
+#      depending on eliminator voltage.
+#
+#   3. Real-battery test bench & 4. Real device with real battery
+#      (`e2e_battery_real_battery_tests`, `has_real_battery = true`):
+#      Bench testbeds (with real pack + EEPROM at `0x50`) and local developer
+#      devices equipped with a physical cell. Forces
+#      `OperatingMode::DISCHARGING` via
+#      `fuchsia.hardware.power.charger.DebugService` and asserts positive
+#      `remaining_capacity_uah`. Sets `skip_reboot_test = true` so a
+#      real-battery bench run executes `battery_real_battery_test` alongside
+#      `//vendor/google/tests/end_to_end/iris/battery:learned_battery_parameters`
+#      with a single reboot total. Kept in its own GN group (excluded from
+#      `e2e_battery_infra_tests` and `e2e_battery_test`) so battery-eliminator
+#      `iris_env` builders never schedule it; run on a real-battery device or
+#      bench with:
+#        `fx test //src/tests/end_to_end/battery:battery_real_battery_test --e2e`
+#
+# Single-boot MAX77779 PMIC / fuel-gauge / EEPROM / VIMon hardware checks run
+# directly on-target in Rust via
+# `//vendor/google/iris/pmic/drivers/max77779/tests/device:max77779_device_tests`,
+# while cross-reboot MAX77779 custom model (`0x80..0x9F`) and pack EEPROM
+# learned NVM (`0x9C..0xCA`) checks live under
+# `//vendor/google/tests/end_to_end/iris/battery/`.
 
-python_mobly_test("battery_test_fc") {
-  main_source = "battery_test.py"
-  libraries = [
+if (is_host) {
+  _common_battery_test_libraries = [
+    "//sdk/fidl/fuchsia.hardware.power.charger:fuchsia.hardware.power.charger_python",
     "//src/testing/end_to_end/honeydew",
     "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
   ]
-  package_deps = [ "//src/power/testing/fake-battery/tool:package" ]
-  environments = [ iris_env ]
+
+  # (1) Emulator (`fake-battery`)
+  python_mobly_test("battery_emu_test") {
+    main_source = "battery_test.py"
+    sources = [ "utils.py" ]
+    libraries = _common_battery_test_libraries
+    package_deps = [ "//src/power/testing/fake-battery/tool:package" ]
+    environments = [ emu_env ]
+  }
+
+  # (2) Standard `iris_env` infra (battery eliminator)
+  python_mobly_test("battery_test_fc") {
+    main_source = "battery_test.py"
+    sources = [ "utils.py" ]
+    libraries = _common_battery_test_libraries
+    params = {
+      has_real_battery = false
+    }
+    environments = [ iris_env ]
+  }
+
+  # (3) Real-battery test bench & (4) Real device with physical battery
+  python_mobly_test("battery_real_battery_test") {
+    main_source = "battery_test.py"
+    sources = [ "utils.py" ]
+    libraries = _common_battery_test_libraries
+    params = {
+      has_real_battery = true
+      skip_reboot_test = true
+    }
+    environments = [ iris_env ]
+  }
+
+  python_mobly_test("composite_battery_restart_emu_test") {
+    main_source = "composite_battery_restart_test.py"
+    sources = [ "utils.py" ]
+    libraries = _common_battery_test_libraries
+    test_data_deps =
+        [ "//src/developer/ffx/tools/driver:ffx_driver_tool_test_data" ]
+    package_deps = [ "//src/power/testing/fake-battery/tool:package" ]
+    environments = [ emu_env ]
+  }
+
+  python_mobly_test("composite_battery_restart_test") {
+    main_source = "composite_battery_restart_test.py"
+    sources = [ "utils.py" ]
+    libraries = _common_battery_test_libraries
+    params = {
+      has_real_battery = false
+    }
+    test_data_deps =
+        [ "//src/developer/ffx/tools/driver:ffx_driver_tool_test_data" ]
+    environments = [ iris_env ]
+  }
+
+  python_mobly_test("composite_battery_restart_real_battery_test") {
+    main_source = "composite_battery_restart_test.py"
+    sources = [ "utils.py" ]
+    libraries = _common_battery_test_libraries
+    params = {
+      has_real_battery = true
+    }
+    test_data_deps =
+        [ "//src/developer/ffx/tools/driver:ffx_driver_tool_test_data" ]
+    environments = [ iris_env ]
+  }
+}
+
+group("e2e_battery_emu_tests") {
+  testonly = true
+  public_deps = [
+    ":battery_emu_test($host_toolchain)",
+    ":composite_battery_restart_emu_test($host_toolchain)",
+    "//src/power/testing/fake-battery/tool:package",
+  ]
+}
+
+group("e2e_battery_infra_tests") {
+  testonly = true
+  public_deps = [
+    ":battery_test_fc($host_toolchain)",
+    ":composite_battery_restart_test($host_toolchain)",
+  ]
+}
+
+group("e2e_battery_real_battery_tests") {
+  testonly = true
+  public_deps = [
+    ":battery_real_battery_test($host_toolchain)",
+    ":composite_battery_restart_real_battery_test($host_toolchain)",
+  ]
 }
 
 group("e2e_battery_test") {
   testonly = true
   public_deps = [
-    ":battery_test_fc($host_toolchain)",
-    "//src/power/testing/fake-battery/tool:package",
+    ":e2e_battery_emu_tests",
+    ":e2e_battery_infra_tests",
+  ]
+}
+
+group("tests") {
+  testonly = true
+  public_deps = [
+    ":e2e_battery_emu_tests",
+    ":e2e_battery_infra_tests",
   ]
 }

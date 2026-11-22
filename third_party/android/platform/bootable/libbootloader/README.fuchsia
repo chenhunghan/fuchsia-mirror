@@ -1,0 +1,16 @@
+Name: libbootloader
+URL: https://android.googlesource.com/platform/bootable/libbootloader/
+Revision: b5c99964b58cb360eea7b68d13566342d2465f0f
+Security Critical: yes
+
+License: Apache-2.0, BSD-2-Clause-Patent
+License File: src/LICENSES/Apache-2.0.txt
+License File: src/LICENSES/BSD-2-Clause-Patent.txt
+License File: src/gbl/licensing/LICENSE
+License File: src/libxbc/COPYING
+Non-License File: src/gbl/libefi_types/license.bzl
+Non-License File: src/gbl/licensing/license_formatter.py
+Non-License File: src/gbl/licensing/licenses.bzl
+
+Description:
+  Android Generic Bootloader (GBL) and boot libraries, including libabr.

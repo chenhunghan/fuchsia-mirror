@@ -132,10 +132,21 @@ _partner_idk_unstable_source_sets_list = [
   "//sdk/lib/driver/fake-resource/cpp",
   "//sdk/lib/driver/fake-vreg/cpp",
   "//sdk/lib/driver/metadata/cpp",
+  "//sdk/lib/driver/pci/cpp",
   "//sdk/lib/driver/power/cpp",
   "//sdk/lib/driver/platform-device/cpp",
+  "//sdk/lib/driver/resource-vote/cpp",
   "//sdk/lib/driver_test_realm:internal_server_cpp",
   "//sdk/lib/power/state_recorder/cpp",
+
+  # TODO(https://fxbug.dev/444521390): Stabilize or remove `vmo_store`.
+  "//src/lib/vmo_store:vmo_store",
+
+  # TODO(https://fxbug.dev/444521390): Remove `fbl` from the IDK.
+  "//zircon/system/ulib/fbl:fbl",
+
+  # TODO(https://fxbug.dev/444521390): Stabilize or remove `fzl`.
+  "//zircon/system/ulib/fzl:fzl",
 
   # keep-sorted: end
 ]
@@ -190,7 +201,6 @@ _internal_source_sets_list = [
   "//sdk/lib/driver/devicetree/visitors/drivers/mali-gpu:mali-gpu-visitor_visitor",
   "//sdk/lib/driver/devicetree/visitors/drivers/mmc/sdmmc:sdmmc-visitor_visitor",
   "//sdk/lib/driver/devicetree/visitors/drivers/power/power-domain:power-domain-visitor_visitor",
-  "//sdk/lib/driver/devicetree/visitors/drivers/power/power-element:power-element-visitor_visitor",
   "//sdk/lib/driver/devicetree/visitors/drivers/pwm-controllers/pwm-init:pwm-init-visitor_visitor",
   "//sdk/lib/driver/devicetree/visitors/drivers/pwm-controllers/pwm:pwm-visitor_visitor",
   "//sdk/lib/driver/devicetree/visitors/drivers/registers:registers-visitor_visitor",
@@ -217,7 +227,6 @@ _internal_source_sets_list = [
   # TODO(https://fxbug.dev/444519345): Promote these to "partner".
   "//sdk/lib/driver/mmio/testing/cpp",
   "//src/devices/registers/testing/mock-registers:mock-registers",
-  "//src/devices/testing/fake-mmio-reg:fake-mmio-reg",
   "//src/devices/testing/mock-mmio-reg:mock-mmio-reg",
 
   # TODO(https://fxbug.dev/331991540): Remove once the Firmware SDK no longer
@@ -233,10 +242,6 @@ _internal_source_sets_list = [
   "//third_party/vboot_reference/firmware:headers",
   "//third_party/vboot_reference/firmware/lib:gpt_misc",
   "//third_party/vboot_reference/firmware/lib:headers",
-
-  # TODO(https://fxbug.dev/444521390): Eliminate dependencies on `fbl` from
-  # `devicetree` and `mock-mmio-reg`.
-  "//zircon/system/ulib/fbl:fbl",
 ]
 
 # Ensure the lists are mutually exclusive.
@@ -314,8 +319,8 @@ _partner_idk_versioned_shared_libraries_list = [
   "//sdk/lib/svc:svc",
   "//sdk/lib/vfs/internal:vfs_internal",
   "//src/devices/bin/driver_runtime:driver_runtime",
-  "//src/performance/memory/heapdump/instrumentation:instrumentation",
-  "//src/performance/memory/sampler/instrumentation:instrumentation",
+  "//src/memory/heapdump/instrumentation:instrumentation",
+  "//src/memory/sampler/instrumentation:instrumentation",
   "//third_party/Vulkan-Loader/src:libvulkan",
   "//zircon/system/ulib/trace-engine:trace-engine",
   "//zircon/system/ulib/trace-provider:trace-provider-so",

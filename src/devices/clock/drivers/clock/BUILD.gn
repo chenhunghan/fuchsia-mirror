@@ -70,7 +70,6 @@ fuchsia_driver_component("clock") {
     ":clock-bind",
     ":clock-driver",
   ]
-  info = "meta/clock-info.json"
 }
 
 fuchsia_driver_package("package") {

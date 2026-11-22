@@ -12,6 +12,7 @@
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/driver/component/cpp/driver_export2.h>
+#include <lib/stdcompat/span.h>
 #include <lib/sync/completion.h>
 
 #include <thread>
@@ -72,6 +73,7 @@ class UsbHidbus : public fdf::DriverBase2,
   static void FindDescriptors(usb::Interface interface, const usb_hid_descriptor_t** hid_desc,
                               const usb_endpoint_descriptor_t** endptin,
                               const usb_endpoint_descriptor_t** endptout);
+  static bool IsFidoAllianceReportDescriptor(cpp20::span<const uint8_t> report_desc);
 
  private:
   void StopHidbus();

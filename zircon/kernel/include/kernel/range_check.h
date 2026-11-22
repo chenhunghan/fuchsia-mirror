@@ -8,7 +8,6 @@
 #ifndef ZIRCON_KERNEL_INCLUDE_KERNEL_RANGE_CHECK_H_
 #define ZIRCON_KERNEL_INCLUDE_KERNEL_RANGE_CHECK_H_
 
-#include <fbl/algorithm.h>
 #include <ktl/algorithm.h>
 #include <ktl/limits.h>
 

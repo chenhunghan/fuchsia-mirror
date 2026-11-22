@@ -1,0 +1,38 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "focus",
+    srcs = [
+        "a11y_focus_manager_impl.cc",
+    ],
+    hdrs = [
+        "a11y_focus_manager.h",
+        "a11y_focus_manager_impl.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fsl",
+    ],
+    # Headers and sources use Zircon types (<zircon/types.h>, zx_koid_t,
+    # ZX_KOID_INVALID) and Fuchsia-only deps (focus_chain, inspect/component/cpp).
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/ui/a11y/lib:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.ui.annotation:fuchsia.ui.annotation_hlcpp",
+        "//sdk/lib/inspect/component/cpp",
+        "//src/ui/a11y/lib/annotation",
+        "//src/ui/a11y/lib/focus_chain",
+        "//src/ui/a11y/lib/semantics",
+        "//src/ui/a11y/lib/util",
+        "//src/ui/a11y/lib/view",
+        "//src/ui/a11y/lib/virtual_keyboard",
+    ],
+    alwayslink = True,
+)

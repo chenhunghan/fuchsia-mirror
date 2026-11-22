@@ -329,7 +329,7 @@ realm1/echo:a/b/c/d:*
 
 [datatype-fidl]: https://fuchsia.dev/reference/fidl/fuchsia.diagnostics#DataType
 [detect]: /src/diagnostics/config/triage/detect
-[instance_and_collection_names]: /docs/reference/components/moniker.md#identifiers
+[instance_and_collection_names]: /docs/reference/components/moniker.md#child
 [moniker]: /docs/reference/components/moniker.md
 [topology-example-img]: selectors-example.png
 [triage]: /src/diagnostics/config/triage

@@ -53,15 +53,15 @@ This template is specifically designed to package components containing tests.
 * {C++}
 
    ```gn
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/cpp/BUILD.gn" region_tag="cpp_test" adjust_indentation="auto" %}
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/cpp/BUILD.gn" region_tag="fuchsia_test" adjust_indentation="auto" %}
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/cpp/BUILD.bazel" region_tag="cpp_test" adjust_indentation="auto" %}
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/cpp/BUILD.bazel" region_tag="fuchsia_test" adjust_indentation="auto" %}
    ```
 
 * {Rust}
 
    ```gn
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/rust/BUILD.gn" region_tag="rustc_tests" adjust_indentation="auto" %}
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/rust/BUILD.gn" region_tag="fuchsia_test" adjust_indentation="auto" %}
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/rust/BUILD.bazel" region_tag="rustc_tests" adjust_indentation="auto" %}
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/rust/BUILD.bazel" region_tag="fuchsia_test" adjust_indentation="auto" %}
    ```
 
 To learn more about how Fuchsia uses GN to define test packages,

@@ -148,6 +148,11 @@ static const long double huge = 0x1p10000L;
 /* XXX Prevent gcc from erroneously constant folding this. */
 static const volatile long double twom10000 = 0x1p-10000L;
 
+static long double underflow(void) {
+  long double t = twom10000;
+  return t * t;
+}
+
 static long double reducl(long double);
 static long double powil(long double, int);
 
@@ -328,7 +333,7 @@ long double powl(long double x, long double y) {
   if (w > MEXP)
     return huge * huge; /* overflow */
   if (w < MNEXP)
-    return twom10000 * twom10000; /* underflow */
+    return underflow();
 
   e = w;
   Hb = H - Ha;
@@ -439,7 +444,7 @@ static long double powil(long double x, int nn) {
     return huge * huge; /* overflow */
 
   if (s < MINLOGL)
-    return twom10000 * twom10000; /* underflow */
+    return underflow();
   /* Handle tiny denormal answer, but with less accuracy
    * since roundoff error in 1.0/x will be amplified.
    * The precise demarcation should be the gradual underflow threshold.

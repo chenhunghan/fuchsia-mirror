@@ -299,7 +299,7 @@ constexpr std::optional<TlsdescRuntime> TlsdescRuntimeFromMagic(uintptr_t magic)
 // enum values (as from ld::RemoteAbiStub), and a load bias applied to those
 // addresses.  Individual hooks can be replaced later with SetHook.
 //
-template <class Elf, elfldltl::ElfMachine Machine>
+template <elfldltl::ElfApi Elf, elfldltl::ElfMachine Machine>
 class StaticTlsDescResolver {
  public:
   using size_type = Elf::size_type;

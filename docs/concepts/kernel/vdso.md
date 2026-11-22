@@ -67,7 +67,7 @@ innately tied to (and embedded within) the kernel binary and includes
 information specific to each kernel build, so the Build ID of the vDSO
 distinguishes kernels as well.
 
-### `zx_process_start()` argument
+### zx_process_start() argument {#zx-process-start-argument}
 
 The [`zx_process_start()`] system call is how a
 program loader tells the kernel to start a new process's first thread
@@ -82,7 +82,7 @@ register. This address is where the ELF file header can be found in memory,
 pointing to all the other ELF format elements necessary to look up symbol
 names and thus make system calls.
 
-### **PA_VMO_VDSO** handle
+### **PA_VMO_VDSO** handle {#pa-vmo-vdso-handle}
 
 The vDSO image is embedded in the kernel at compile time. The kernel
 exposes it to userspace as a read-only [VMO](/docs/reference/kernel_objects/vm_object.md).
@@ -101,7 +101,7 @@ info entry* `PA_HND(PA_VMO_VDSO, 0)`.
 
 ## vDSO Implementation Details
 
-### **zither** tool
+### **zither** tool {#zither-tool}
 
 The [`zither` tool](/zircon/tools/zither/) generates both C/C++ function
 declarations that form the public [system
@@ -202,7 +202,7 @@ the VMO covering `vdso_constants` into its own address space long enough
 to initialize the structure with the right values for the current run of
 the system.
 
-### Enforcement
+### Enforcement {#enforcement}
 
 The vDSO entry points are the only means to enter the kernel for system
 calls. The machine-specific instructions used to enter the kernel (e.g.

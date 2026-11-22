@@ -577,24 +577,14 @@ async fn handle_get_player_application_setting_attribute_text(
     // Send static text descriptions of the supported attributes.
     // Descriptions taken from AVRCP 1.6, Section 27, Appendix F.
     for attribute_id in cmd.attribute_ids {
-        let desc;
-        match attribute_id {
-            PlayerApplicationSettingAttributeId::RepeatStatusMode => {
-                desc = "Repeat Mode status".to_string().into_bytes();
-            }
-            PlayerApplicationSettingAttributeId::ShuffleMode => {
-                desc = "Shuffle ON/OFF status".to_string().into_bytes();
-            }
+        let desc = match attribute_id {
+            PlayerApplicationSettingAttributeId::RepeatStatusMode => "Repeat Mode status",
+            PlayerApplicationSettingAttributeId::ShuffleMode => "Shuffle ON/OFF status",
             _ => {
                 return Err(StatusCode::InvalidParameter);
             }
-        }
-        attribute_text.push(AttributeInfo::new(
-            attribute_id,
-            CharsetId::Utf8,
-            desc.len() as u8,
-            desc,
-        ));
+        };
+        attribute_text.push(AttributeInfo::new(attribute_id, desc));
     }
     let response = GetPlayerApplicationSettingAttributeTextResponse::new(attribute_text);
 

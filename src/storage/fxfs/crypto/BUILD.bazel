@@ -55,7 +55,6 @@ rustc_library(
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:arbitrary",
         "//third_party/rust_crates/vendor:byteorder",
-        "//third_party/rust_crates/vendor:cbc",
         "//third_party/rust_crates/vendor:chacha20",
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",

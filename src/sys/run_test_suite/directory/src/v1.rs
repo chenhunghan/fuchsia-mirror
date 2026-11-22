@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 use crate::{
-    ArtifactMetadata, ArtifactSubDirectory, CommonResult, MaybeUnknown, Outcome, SchemaVersion,
-    SuiteResult, TestCaseResult, TestRunResult, RUN_NAME, RUN_SUMMARY_NAME,
+    ArtifactMetadata, ArtifactSubDirectory, CommonResult, MaybeUnknown, Outcome, RUN_NAME,
+    RUN_SUMMARY_NAME, SchemaVersion, SuiteResult, TestCaseResult, TestRunResult,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -40,6 +40,8 @@ struct SerializableSuite<'a> {
     common: SerializableCommon<'a>,
     cases: Vec<SerializableTestCase<'a>>,
     tags: Cow<'a, Vec<TestTag>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runner: Option<Cow<'a, str>>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -93,6 +95,7 @@ fn make_serializable_suite<'a, 'b>(suite: &'a SuiteResult<'b>) -> SerializableSu
             })
             .collect(),
         tags: Cow::Borrowed(&suite.tags),
+        runner: suite.runner.as_deref().map(Cow::Borrowed),
     }
 }
 
@@ -144,6 +147,7 @@ fn from_serializable_suite(
             })
             .collect(),
         tags: serializable.tags,
+        runner: serializable.runner,
     }
 }
 
@@ -188,7 +192,7 @@ pub fn validate_against_schema(root_path: &Path) {
 #[cfg(test)]
 mod test {
     use super::*;
-    use serde_json::{from_str, json, to_string, Value};
+    use serde_json::{Value, from_str, json, to_string};
 
     #[test]
     fn run_version_serialized() {

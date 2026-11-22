@@ -18,8 +18,8 @@
 
 #include <fbl/algorithm.h>
 #include <ktl/iterator.h>
-#include <phys/address-space.h>
-#include <phys/allocation.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/allocation.h>
 #include <phys/boot-zbi/boot-zbi.h>
 
 #include "turducken.h"

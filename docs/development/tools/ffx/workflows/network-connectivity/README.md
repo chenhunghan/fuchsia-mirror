@@ -1,17 +1,19 @@
 # Network connectivity troubleshoot playbook
 
-This playbook is intended to help diagnose network connectivity issues
-between your local Linux host machine and a connected Fuchsia device.
-
-The CDC mechanisms behind `ffx` are explored in depth. Other non-CDC
-mechanisms are out of scope in this playbook.
+This playbook is intended to help diagnose connectivity and discovery issues
+between your local Linux host machine and a connected Fuchsia target device
+(including physical devices over USB or network, emulators, and remote
+instances).
 
 The playbook is split into the following three parts, where each part
 represents a category of related issues:
 
-* **Part 1**: [Interface configuration][part-1]
-* **Part 2**: [Device discovery][part-2]
-* **Part 3**: [SSH daemon][part-3]
+* **Part 1**: [Interface configuration][part-1] (USB enumeration, `udev`
+  permissions, and CDC network interfaces)
+* **Part 2**: [Device discovery][part-2] (mDNS, USB Fastboot, USB VSOCK,
+  emulators, manual targets, Fastboot files, GCE, and UART)
+* **Part 3**: [SSH daemon][part-3] (SSH authentication and Remote Control
+  Service connectivity)
 
 When diagnosing network connectivity issues, it’s often one of these
 three categories that is impeding connection. The approaches in this

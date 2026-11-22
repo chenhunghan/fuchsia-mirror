@@ -1,0 +1,52 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "rust-log-crasher",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    binary_name = "rust_log_crasher",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//src/lib/diagnostics/log/rust/fidl:fuchsia.diagnostics.crasher_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "rust-log-crasher_packaged_bin",
+    testonly = True,
+    binary = ":rust-log-crasher",
+    binary_name = "rust_log_crasher",
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    testonly = True,
+    component_name = "crasher",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/crasher.cml",
+)
+
+fx_component(
+    name = "component",
+    testonly = True,
+    compiled_manifest = ":component_manifest",
+    visibility = ["//src/lib/diagnostics/log/rust:__pkg__"],
+    deps = [":rust-log-crasher_packaged_bin"],
+)

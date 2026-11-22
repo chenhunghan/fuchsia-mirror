@@ -241,7 +241,7 @@ This change will have no or minimal performance impact as this will not affect
 how the test is launched, it only affects where the test is launched in the
 topology.
 
-## Ergonomics
+## Ergonomics {:#ergonomics}
 
 This sections describes some solutions to pass in moniker and test collection
 to the test executor. Detailed solutions are out of scope for this document.

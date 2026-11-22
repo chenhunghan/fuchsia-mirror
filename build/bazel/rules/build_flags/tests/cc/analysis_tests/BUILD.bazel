@@ -1,0 +1,54 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Analysis failure tests for C++ `build_flags()` rules.
+
+Kept in a subpackage separate from `//build/bazel/rules/build_flags/tests/cc:tests`
+because `bazel_host_test_suites` requires every test in `host_tests` to provide
+`FuchsiaHostTestInfo`, which Starlark `analysistest` rules do not provide.
+"""
+
+load("@fuchsia_rules_common//build_flags:extra_linker_flags.bzl", "extra_linker_flags")
+load("//build/bazel/rules/build_flags/tests/cc:host_tests.bzl", "custom_linker_input_cc_lib")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+load("//build/bazel/rules/testing:defs.bzl", "analysis_failure_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Built in the host configuration by //build/bazel/rules/tests:quick_tests.
+test_suite(
+    name = "analysis_tests",
+    tests = [
+        ":verify_fx_cc_shared_library_non_pic_static_fails",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+fx_cc_library(
+    name = "empty_dep",
+)
+
+custom_linker_input_cc_lib(
+    name = "shlib_non_pic_static_dep",
+    mode = "non_pic_static_only",
+)
+
+extra_linker_flags(
+    name = "flags_shlib_non_pic_static",
+    link_deps = [":shlib_non_pic_static_dep"],
+)
+
+fx_cc_shared_library(
+    name = "fx_cc_shared_library_non_pic_static_fail",
+    build_flags = [":flags_shlib_non_pic_static"],
+    tags = ["manual"],
+    deps = [":empty_dep"],
+)
+
+analysis_failure_test(
+    name = "verify_fx_cc_shared_library_non_pic_static_fails",
+    expected_message = "provides only a non-PIC static archive",
+    target_under_test = ":fx_cc_shared_library_non_pic_static_fail",
+)

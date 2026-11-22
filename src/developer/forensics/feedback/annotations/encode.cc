@@ -4,7 +4,11 @@
 
 #include "src/developer/forensics/feedback/annotations/encode.h"
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "third_party/rapidjson/include/rapidjson/document.h"
 #include "third_party/rapidjson/include/rapidjson/prettywriter.h"
@@ -12,22 +16,19 @@
 namespace forensics::feedback {
 
 template <>
-fuchsia::feedback::Annotations Encode(const Annotations& annotations) {
-  std::vector<fuchsia::feedback::Annotation> vec;
+fuchsia_feedback::Annotations Encode(const Annotations& annotations) {
+  std::vector<fuchsia_feedback::Annotation> vec;
   for (const auto& [key, value] : annotations) {
     if (value.HasValue()) {
-      fuchsia::feedback::Annotation annotation;
-      annotation.key = key;
-      annotation.value = value.Value();
-      vec.push_back(std::move(annotation));
+      vec.push_back(fuchsia_feedback::Annotation{{.key = key, .value = value.Value()}});
     }
   }
 
-  fuchsia::feedback::Annotations result;
+  fuchsia_feedback::Annotations result;
   if (!vec.empty()) {
     // Cap annotations at its lower max size compared to annotations2 if vec's size ever
     // approaches that max size.
-    result.set_annotations2(std::move(vec));
+    result.annotations2(std::move(vec));
   }
 
   return result;

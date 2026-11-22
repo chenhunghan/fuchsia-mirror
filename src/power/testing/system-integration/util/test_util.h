@@ -4,7 +4,7 @@
 #ifndef SRC_POWER_TESTING_SYSTEM_INTEGRATION_UTIL_TEST_UTIL_H_
 #define SRC_POWER_TESTING_SYSTEM_INTEGRATION_UTIL_TEST_UTIL_H_
 
-#include <fidl/fuchsia.component.sandbox/cpp/fidl.h>
+#include <fidl/fuchsia.component.runtime/cpp/fidl.h>
 #include <fidl/fuchsia.diagnostics/cpp/fidl.h>
 #include <fidl/fuchsia.driver.development/cpp/fidl.h>
 #include <fidl/fuchsia.power.broker/cpp/fidl.h>
@@ -23,29 +23,25 @@ namespace system_integration_utils {
 /// "fake-all-drivers" aggregator power element.
 class BasicElementRunner;
 
-class Connector final : public fidl::Server<fuchsia_component_sandbox::Receiver> {
+class Connector final : public fidl::Server<fuchsia_component_runtime::Receiver> {
  public:
   explicit Connector(async_dispatcher_t* dispatcher, std::string path,
-                     fidl::ServerEnd<fuchsia_component_sandbox::Receiver> server)
+                     fidl::ServerEnd<fuchsia_component_runtime::Receiver> server)
       : dispatcher_(dispatcher),
         path_(std::move(path)),
         binding_(dispatcher, std::move(server), this, fidl::kIgnoreBindingClosure) {}
 
   void Receive(ReceiveRequest& request, ReceiveCompleter::Sync& completer) override;
 
-  void handle_unknown_method(
-      fidl::UnknownMethodMetadata<fuchsia_component_sandbox::Receiver> metadata,
-      fidl::UnknownMethodCompleter::Sync& completer) override {}
-
  private:
   async_dispatcher_t* dispatcher_;
   std::string path_;
-  fidl::ServerBinding<fuchsia_component_sandbox::Receiver> binding_;
+  fidl::ServerBinding<fuchsia_component_runtime::Receiver> binding_;
 };
 
 struct CustomDictionaryEntry {
   std::string name;
-  fidl::ClientEnd<fuchsia_component_sandbox::Receiver> client_end;
+  fidl::ClientEnd<fuchsia_component_runtime::Receiver> client_end;
 };
 
 class TestLoopBase : public loop_fixture::RealLoop {
@@ -124,18 +120,17 @@ class TestLoopBase : public loop_fixture::RealLoop {
       const std::vector<std::string>& target_child_nodes,
       std::vector<CustomDictionaryEntry> custom_entries = {});
 
-  // Create and export a component framework dictionary that contains connectors for the various
-  // power framework protocols, that are connected to the test-specific SAG and power broker that
-  // is accessible in the incoming namespace of the test component. See 'meta/client.shard.cml'.
-  fuchsia_component_sandbox::DictionaryRef CreateDictionaryForTest(
-      std::vector<CustomDictionaryEntry> custom_entries = {});
+  // Create a component framework dictionary that contains connectors for the various power
+  // framework protocols, that are connected to the test-specific SAG and power broker that is
+  // accessible in the incoming namespace of the test component. See 'meta/client.shard.cml'.
+  // Returns a fuchsia.component.runtime reference to the dictionary.
+  zx::eventpair CreateDictionaryForTest(std::vector<CustomDictionaryEntry> custom_entries = {});
 
   // Query the driver framework for nodes that have a moniker matching the |node_filter|.
   std::vector<fuchsia_driver_development::NodeInfo> GetNodeInfo(std::string_view node_filter);
 
  private:
   async::Loop sandbox_connector_loop_{&kAsyncLoopConfigNeverAttachToThread};
-  uint32_t next_cap_id_ = 1;
   fidl::ClientEnd<test_sagcontrol::State> sag_control_state_client_end_;
   fidl::ClientEnd<test_suspendcontrol::Device> suspend_device_client_end_;
   fidl::ClientEnd<fuchsia_driver_development::Manager> driver_manager_client_end_;

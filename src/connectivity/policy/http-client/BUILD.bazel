@@ -106,6 +106,7 @@ fx_packaged_binary(
     binary_name = "http_client",
 )
 
+# @bazel2gn:raw_attribute:visibility = [ ":*" ]
 fx_component_manifest(
     name = "manifest",
     component_name = "http-client",
@@ -118,22 +119,14 @@ fx_component_manifest(
     manifest = "meta/http_client.cml",
 )
 
+# @bazel2gn:raw_attribute:visibility = [ ":*" ]
 fx_component(
     name = "component",
     compiled_manifest = ":manifest",
-    # `//src/connectivity/policy/http-client/integration` depends on
-    # `../:component` in GN.
-    # @bazel2gn:skip
-    visibility = [
-        "//src/lib/http-sse:__pkg__",
-        "//src/security/tests/pkg_test/tests/access_ota_blob_as_executable:__pkg__",
-        "//src/security/tests/pkg_test/tests/bad_signature_update:__pkg__",
-        "//src/sys/pkg:__subpackages__",
-        "//vendor/google:__subpackages__",
-    ],
     deps = [":http_client_packaged_bin"],
 )
 
+# @bazel2gn:raw_attribute:visibility = [ ":*" ]
 fx_component_manifest(
     name = "google_manifest",
     component_name = "google-http-client",
@@ -146,6 +139,7 @@ fx_component_manifest(
     manifest = "meta/google_http_client.cml",
 )
 
+# @bazel2gn:raw_attribute:visibility = [ ":*" ]
 fx_component(
     name = "google_component",
     compiled_manifest = ":google_manifest",

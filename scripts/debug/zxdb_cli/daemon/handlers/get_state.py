@@ -42,7 +42,7 @@ async def handle(
         if threads_resp.body and threads_resp.body.threads is not None:
             daemon.update_thread_cache(threads_resp.body.threads)
             for t in threads_resp.body.threads:
-                threads.append(ThreadInfo(id=t.id, name=t.name))
+                threads.append(ThreadInfo(thread_id=t.id, name=t.name))
 
         breakpoints = {
             file: sorted(list(lines))

@@ -773,7 +773,7 @@ mod tests {
                 let layer_writer = DirectWriter::new(&new_layer_object, txn_options).await;
                 let writer = PersistentLayerWriter::<_, ObjectKey, ObjectValue>::new_with_version(
                     layer_writer,
-                    0,
+                    None,
                     fs.block_size(),
                     EARLIEST_SUPPORTED_VERSION,
                 )

@@ -12,6 +12,7 @@
 #include <lib/mmio-ptr/fake.h>
 
 #include <soc/aml-a311d/a311d-hw.h>
+#include <soc/aml-meson/a5-clk.h>
 #include <soc/aml-meson/aml-clk-common.h>
 #include <soc/aml-meson/axg-clk.h>
 #include <soc/aml-meson/g12a-clk.h>
@@ -41,6 +42,7 @@ class Environment : public fdf_testing::Environment {
 
   void SetupPDev(fdf::MmioBuffer hiu_buffer, fdf::MmioBuffer dos_buffer, uint32_t pdev_did) {
     fdf_fake::FakePDev::Config pdev_config{
+        .use_fake_smc = true,
         .device_info = std::make_optional<fdf::PDev::DeviceInfo>({.did = pdev_did})};
     pdev_config.mmios[AmlClock::kHiuMmio] = std::move(hiu_buffer);
     pdev_config.mmios[AmlClock::kDosbusMmio] = std::move(dos_buffer);
@@ -465,6 +467,44 @@ TEST_F(AmlClockTest, TestCpuClkQuerySupportedRates) {
   ASSERT_TRUE(rate.ok()) << rate.FormatDescription();
   ASSERT_TRUE(rate->is_ok()) << rate.FormatDescription();
   EXPECT_EQ(rate.value()->hz, gigahertz(1));
+}
+
+TEST_F(AmlClockTest, TestCpuClkQuerySupportedRatesA5NotFound) {
+  constexpr uint32_t kTestCpuClk = a5_clk::CLK_SYS_CPU_CLK;
+
+  auto buffer = fdf_testing::CreateMmioBuffer(S905D2_HIU_LENGTH);
+
+  InitDriver(std::move(buffer), PDEV_DID_AMLOGIC_A5_CLK);
+
+  fdf::WireUnownedResult rate = clock_impl()->QuerySupportedRate(kTestCpuClk, megahertz(20));
+  ASSERT_TRUE(rate.ok()) << rate.FormatDescription();
+  EXPECT_STATUS(rate.value(), ZX_ERR_NOT_FOUND);
+}
+
+TEST_F(AmlClockTest, TestCpuClkQuerySupportedRatesA5Fclk) {
+  constexpr uint32_t kTestCpuClk = a5_clk::CLK_SYS_CPU_CLK;
+
+  auto buffer = fdf_testing::CreateMmioBuffer(S905D2_HIU_LENGTH);
+
+  InitDriver(std::move(buffer), PDEV_DID_AMLOGIC_A5_CLK);
+
+  fdf::WireUnownedResult rate = clock_impl()->QuerySupportedRate(kTestCpuClk, gigahertz(1) + 1);
+  ASSERT_TRUE(rate.ok()) << rate.FormatDescription();
+  ASSERT_TRUE(rate->is_ok()) << rate.FormatDescription();
+  EXPECT_EQ(rate.value()->hz, gigahertz(1));
+}
+
+TEST_F(AmlClockTest, TestCpuClkQuerySupportedRatesA5SysPll) {
+  constexpr uint32_t kTestCpuClk = a5_clk::CLK_SYS_CPU_CLK;
+
+  auto buffer = fdf_testing::CreateMmioBuffer(S905D2_HIU_LENGTH);
+
+  InitDriver(std::move(buffer), PDEV_DID_AMLOGIC_A5_CLK);
+
+  fdf::WireUnownedResult rate = clock_impl()->QuerySupportedRate(kTestCpuClk, megahertz(1550));
+  ASSERT_TRUE(rate.ok()) << rate.FormatDescription();
+  ASSERT_TRUE(rate->is_ok()) << rate.FormatDescription();
+  EXPECT_EQ(rate.value()->hz, megahertz(1500));
 }
 
 TEST_F(AmlClockTest, TestCpuClkGetRate) {

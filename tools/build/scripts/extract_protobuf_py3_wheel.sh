@@ -47,11 +47,25 @@ CHECK_FILE=google/protobuf/descriptor_pb2.py
 
 DEST_DIR="${FUCHSIA_DIR}/${DEST_SUBDIR}"
 echo "Using destination directory: ${DEST_DIR}"
+
+if [[ -f "${DEST_DIR}/protobuf-${SRC_VERSION}.dist-info/LICENSE" &&
+      -f "${DEST_DIR}/${CHECK_FILE}" &&
+      -f "${DEST_DIR}/BUILD.gn" &&
+      -f "${DEST_DIR}/README.fuchsia" &&
+      "${DEST_DIR}/${CHECK_FILE}" -nt "${BASH_SOURCE[0]}" ]]; then
+  echo "Already extracted version [${SRC_VERSION}], skipping"
+  exit 0
+fi
+
 mkdir -p "${DEST_DIR}"
 rm -rf "${DEST_DIR:?}"/*
 
 echo "Extracting archive"
-unzip -o -q "${SRC_FILE}" -d "${DEST_DIR}" || die "Could not unzip ${SRC_FILE}"
+# Wheel archives use fixed 1980-01-01 ZIP timestamps. Pass -DD so extracted
+# files get current mtimes and Python's (mtime, size)-based .pyc cache under
+# PYTHONPYCACHEPREFIX invalidates bytecode from prior wheel versions even when
+# a file's byte size is unchanged.
+unzip -DD -o -q "${SRC_FILE}" -d "${DEST_DIR}" || die "Could not unzip ${SRC_FILE}"
 [[ -f "${DEST_DIR}/${CHECK_FILE}" ]] ||
     die "Missing file from extracted archive: ${DEST_DIR}/${CHECK_FILE}"
 

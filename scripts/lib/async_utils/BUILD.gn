@@ -46,6 +46,7 @@ if (is_host) {
       "command.py",
       "signals.py",
     ]
+    imports = [ ".." ]
     visibility = [
       ":*",
       "//scripts/fxtest/python:*",
@@ -55,5 +56,6 @@ if (is_host) {
       "//src/developer/debug/e2e_tests/dap_integration_tests:*",
       "//tools/devshell/python/status:*",
     ]
+    enable_mypy = false
   }
 }

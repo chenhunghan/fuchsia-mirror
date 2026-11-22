@@ -5,7 +5,7 @@
 // All PCI layouts and information are documented in the PCI Local Bus Specification
 // https://pcisig.com/specification-overview/pci-conventional
 use anyhow::{Context, Error, anyhow};
-use fidl_fuchsia_hardware_pci::{Address, DebugProxy, HeaderType};
+use fidl_fuchsia_hardware_pci::{Bdf, DebugProxy, DeviceIteratorMarker, HeaderType};
 use fuchsia_component::client::Service;
 use lspci::bridge::Bridge;
 use lspci::device::Device;
@@ -37,7 +37,7 @@ async fn handle_subcommands<'a>(proxies: &'a Vec<DebugProxy>, args: Args) -> Res
     match args.command {
         Some(SubCommand::Buses(..)) => {
             for proxy in proxies {
-                let info = proxy.get_host_bridge_info().await?;
+                let info = proxy.get_root_info().await?;
                 println!(
                     "{}: segment {:04x}, bus start {:#04x}, bus end {:#04x}",
                     info.name, info.segment_group, info.start_bus_number, info.end_bus_number,
@@ -53,10 +53,10 @@ async fn handle_subcommands<'a>(proxies: &'a Vec<DebugProxy>, args: Args) -> Res
                 ));
             }
 
-            let bdf = Address {
-                bus: options.device.bus,
-                device: options.device.dev.unwrap(),
-                function: options.device.func.unwrap(),
+            let bdf = Bdf {
+                bus_id: options.device.bus,
+                device_id: options.device.dev.unwrap(),
+                function_id: options.device.func.unwrap(),
             };
 
             let bytes = bus
@@ -82,18 +82,34 @@ async fn handle_subcommands<'a>(proxies: &'a Vec<DebugProxy>, args: Args) -> Res
         }
         None => {
             for proxy in proxies {
-                for fidl_device in &proxy.get_devices().await? {
-                    let device = Device::new(fidl_device, &db, &args);
-                    if let Some(filter) = &args.filter {
-                        if !filter.matches(&device) {
-                            continue;
-                        }
+                let (iterator, server) = fidl::endpoints::create_proxy::<DeviceIteratorMarker>();
+                proxy.get_devices(server)?;
+                loop {
+                    let fidl_devices = iterator.get_next().await?;
+                    if fidl_devices.is_empty() {
+                        break;
                     }
+                    for fidl_device in &fidl_devices {
+                        let Some(device) = Device::new(fidl_device, &db, &args) else {
+                            eprintln!(
+                                "Skipping {:02x}:{:02x}.{:1x}: config space is too short",
+                                fidl_device.bdf.bus_id,
+                                fidl_device.bdf.device_id,
+                                fidl_device.bdf.function_id
+                            );
+                            continue;
+                        };
+                        if let Some(filter) = &args.filter {
+                            if !filter.matches(&device) {
+                                continue;
+                            }
+                        }
 
-                    if device.cfg.header_type & HeaderType::Bridge.into_primitive() > 0 {
-                        print!("{}", Bridge::new(&device));
-                    } else {
-                        print!("{}", device);
+                        if (device.cfg.header_type & 0x7f) == HeaderType::Bridge.into_primitive() {
+                            print!("{}", Bridge::new(&device));
+                        } else {
+                            print!("{}", device);
+                        }
                     }
                 }
             }
@@ -116,7 +132,7 @@ async fn find_bus_containing_bdf<'a>(
     proxies: &'a Vec<DebugProxy>,
 ) -> Result<&'a DebugProxy, Error> {
     for proxy in proxies {
-        let info = proxy.get_host_bridge_info().await?;
+        let info = proxy.get_root_info().await?;
         if info.start_bus_number <= filter.bus && info.end_bus_number >= filter.bus {
             return Ok(proxy);
         }

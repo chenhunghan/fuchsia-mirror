@@ -32,7 +32,7 @@ rustc_test(
         "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/sys/component_manager/tests/fidl:components_rust",
     ],
 )

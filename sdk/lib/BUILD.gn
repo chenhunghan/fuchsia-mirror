@@ -9,12 +9,8 @@ group("tests") {
 
   deps = [
     ":bazel_tests",
-    "async:tests",
-    "async-loop:tests",
     "async-loop-testing:tests",
-    "async-testing:tests",
     "async/rust:tests",
-    "async_patterns:tests",
     "c:tests",
     "component:tests",
     "device-watcher:tests",
@@ -24,23 +20,20 @@ group("tests") {
     "driver_test_realm:tests",
     "fdio:tests",
     "fdio-caller:tests",
-    "fidl/cpp/tests",
+    "fidl_driver/tests",
     "file-lock:tests",
-    "fit:tests",
     "fit-promise:tests",
     "fuchsia-mem-ext:tests",
     "fuzzing/cpp:tests",
     "inspect:tests",
     "iob:tests",
     "ld:tests",
+    "memory_barriers:tests",
     "power:tests",
     "scheduler:tests",
-    "stdcompat:tests",
     "sys/component:tests",
-    "sys/cpp:tests",
     "sys/service/cpp:tests",
     "syslog:tests",
-    "ui/scenic/cpp/tests:scenic_cpp_tests",
     "utf-utils:tests",
     "vfs/cpp:tests",
     "zircon-assert/test",
@@ -49,5 +42,6 @@ group("tests") {
 }
 
 bazel_test_suite("bazel_tests") {
+  host_tests = [ "//sdk/lib:host_tests" ]
   target_tests = [ "//sdk/lib:target_tests" ]
 }

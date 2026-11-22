@@ -8,16 +8,18 @@
 import argparse
 import hashlib
 import os
+import re
 import shlex
 import shutil
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 
 from build.bazel.scripts import runfiles_utils
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _DEFAULT_FUCHSIA_DIR = _SCRIPT_DIR.parent.parent.parent
+_COMPACT_PYTHON_REAL_RE = re.compile(r"^python(\d+)\.(\d+)-real$")
 
 
 def _link_or_copy_file(src: str | Path, dst: str | Path) -> None:
@@ -69,37 +71,6 @@ def _infer_fuchsia_dir(
     return None
 
 
-def _is_persistent_source_path(
-    resolved_path: Path,
-    execroot: Path,
-    fuchsia_dir: Path | None,
-    *,
-    allow_prebuilt: bool = False,
-) -> bool:
-    ephemeral_parts = {"bazel-out", "external", "prebuilt_out"}
-    if ephemeral_parts.intersection(resolved_path.parts):
-        return False
-    if fuchsia_dir is not None:
-        if not resolved_path.is_relative_to(fuchsia_dir):
-            return False
-        rel_parts = resolved_path.relative_to(fuchsia_dir).parts
-        if not rel_parts:
-            return False
-        disallowed_top = {"out", "bazel-out", "external"}
-        if not allow_prebuilt:
-            disallowed_top.add("prebuilt")
-        return rel_parts[0] not in disallowed_top
-    if resolved_path.is_relative_to(execroot):
-        rel_parts = resolved_path.relative_to(execroot).parts
-        if not rel_parts:
-            return False
-        disallowed_top = {"out", "bazel-out", "external", "prebuilt_out"}
-        if not allow_prebuilt:
-            disallowed_top.add("prebuilt")
-        return rel_parts[0] not in disallowed_top
-    return True
-
-
 def _resolve_persistent_prebuilt_dir(
     src_resolved: Path,
     execroot: Path,
@@ -107,10 +78,19 @@ def _resolve_persistent_prebuilt_dir(
 ) -> Path | None:
     if fuchsia_dir is None or not src_resolved.is_dir():
         return None
-    if _is_persistent_source_path(
-        src_resolved, execroot, fuchsia_dir, allow_prebuilt=True
+    prebuilt_root = fuchsia_dir / "prebuilt"
+    if (
+        src_resolved != prebuilt_root
+        and src_resolved.is_relative_to(prebuilt_root)
+        and not {"bazel-out", "external", "prebuilt_out"}.intersection(
+            src_resolved.parts
+        )
     ):
         return src_resolved
+    if src_resolved.is_relative_to(
+        fuchsia_dir
+    ) and not src_resolved.is_relative_to(execroot):
+        return None
     search_parts = (
         src_resolved.relative_to(execroot).parts
         if src_resolved.is_relative_to(execroot)
@@ -144,33 +124,51 @@ def _materialize_ephemeral_directory(
         copy_function=_link_or_copy_file,
     )
     _make_dirs_writable(dst)
+    src_real = src_resolved.resolve()
     dst_real = dst.resolve()
     for dirpath, dirnames, filenames in os.walk(dst):
         parent = Path(dirpath)
+        rel_parent = parent.relative_to(dst)
         for name in list(dirnames) + list(filenames):
             entry = parent / name
             if not entry.is_symlink():
                 continue
             raw_target = os.readlink(entry)
+            src_entry = src_real / rel_parent / name
             try:
-                resolved = entry.resolve()
+                resolved = src_entry.resolve()
             except OSError:
                 continue
             if not resolved.exists():
                 continue
             if not os.path.isabs(raw_target) and (
-                resolved == dst_real or resolved.is_relative_to(dst_real)
+                resolved == src_real or resolved.is_relative_to(src_real)
             ):
-                continue
-            if resolved.is_dir() and _is_persistent_source_path(
-                resolved, execroot, fuchsia_dir, allow_prebuilt=True
-            ):
-                if raw_target != str(resolved):
-                    _force_symlink(entry, resolved)
-                continue
-            _stage_artifact(
-                resolved, entry, execroot, fuchsia_dir, allow_prebuilt=True
+                try:
+                    dst_target = entry.resolve()
+                except OSError:
+                    dst_target = None
+                if (
+                    dst_target is not None
+                    and (
+                        dst_target == dst_real
+                        or dst_target.is_relative_to(dst_real)
+                    )
+                    and dst_target.exists()
+                ):
+                    continue
+            persistent_dir = _resolve_persistent_prebuilt_dir(
+                resolved, execroot, fuchsia_dir
             )
+            if persistent_dir is not None:
+                if name in dirnames:
+                    dirnames.remove(name)
+                if raw_target != str(persistent_dir):
+                    _force_symlink(entry, persistent_dir)
+                continue
+            if name in dirnames:
+                dirnames.remove(name)
+            _stage_artifact(resolved, entry, execroot, fuchsia_dir)
 
 
 def _stage_artifact(
@@ -179,7 +177,6 @@ def _stage_artifact(
     execroot: Path,
     fuchsia_dir: Path | None,
     *,
-    allow_prebuilt: bool = False,
     require_executable: bool = False,
 ) -> None:
     if src_resolved.is_dir():
@@ -188,10 +185,6 @@ def _stage_artifact(
         )
         if persistent_dir is not None:
             _force_symlink(dst, persistent_dir)
-        elif _is_persistent_source_path(
-            src_resolved, execroot, fuchsia_dir, allow_prebuilt=allow_prebuilt
-        ):
-            _force_symlink(dst, src_resolved)
         else:
             _materialize_ephemeral_directory(
                 src_resolved, dst, execroot, fuchsia_dir
@@ -205,6 +198,16 @@ def _stage_artifact(
         dst.chmod(dst.stat().st_mode | 0o111)
     else:
         _link_or_copy_file(src_resolved, dst)
+
+
+def _iter_directory_executables(pkg_dir: Path) -> list[Path]:
+    scan_dir = (pkg_dir / "bin") if (pkg_dir / "bin").is_dir() else pkg_dir
+    abs_scan_dir = Path(os.path.abspath(scan_dir))
+    return [
+        abs_scan_dir / entry.name
+        for entry in sorted(scan_dir.iterdir(), key=lambda p: p.name)
+        if not entry.is_dir() and os.access(entry, os.X_OK)
+    ]
 
 
 def _parse_data_runfile(spec: str, bazel_execroot: Path) -> tuple[str, Path]:
@@ -228,14 +231,6 @@ def _parse_data_runfile(spec: str, bazel_execroot: Path) -> tuple[str, Path]:
     return rlocation, artifact
 
 
-def _link_directory_executables(bin_dir: Path, pkg_dir: Path) -> None:
-    scan_dir = (pkg_dir / "bin") if (pkg_dir / "bin").is_dir() else pkg_dir
-    abs_scan_dir = Path(os.path.abspath(scan_dir))
-    for entry in sorted(scan_dir.iterdir(), key=lambda p: p.name):
-        if not entry.is_dir() and os.access(entry, os.X_OK):
-            _force_symlink(bin_dir / entry.name, abs_scan_dir / entry.name)
-
-
 def _file_git_sha1(path: Path) -> str:
     for attr in ("casfs.hash", "user.casfs.hash"):
         try:
@@ -248,6 +243,98 @@ def _file_git_sha1(path: Path) -> str:
     return hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
 
 
+def _normalize_compact_python_runtimes(
+    output_runfiles_dir: Path,
+) -> Sequence[str]:
+    """Relayout staged compact Python runtimes to CPython's native prefix layout.
+
+    Fuchsia's @prebuilt_python compact runtime stages `python<X>.<Y>-real` and
+    `lib_python<X>.<Y>.zip` at the repo root and relies on a wrapper script that
+    exports PYTHONHOME and prepends the zip to PYTHONPATH. Those variables leak
+    into child processes spawned by fx tools (breaking nested `fx` or Python
+    invocations).
+
+    Because fx_host_tool materializes `python<X>.<Y>-real` as a regular file,
+    moving it to `bin/python<X>.<Y>` and the stdlib zip to `lib/python<X><Y>.zip`
+    lets CPython derive its prefix natively from argv[0] without PYTHONHOME or
+    PYTHONPATH. The rewritten `python3` wrapper unsets PYTHONHOME and converts
+    rules_python's injected PYTHONSAFEPATH into the non-inheritable `-P` flag.
+    """
+    normalized_repos = []
+    for repo_dir in sorted(output_runfiles_dir.iterdir(), key=lambda p: p.name):
+        if not repo_dir.is_dir() or repo_dir.is_symlink():
+            continue
+        wrapper_path = repo_dir / "python3"
+        if not wrapper_path.is_file():
+            continue
+
+        matched = next(
+            (
+                (child, match.group(1), match.group(2))
+                for child in sorted(repo_dir.iterdir(), key=lambda p: p.name)
+                if (match := _COMPACT_PYTHON_REAL_RE.match(child.name))
+                is not None
+                and child.is_file()
+            ),
+            None,
+        )
+        if matched is None:
+            continue
+
+        real_bin, major, minor = matched
+        version = f"{major}.{minor}"
+        zip_src = repo_dir / f"lib_python{version}.zip"
+        if not zip_src.is_file():
+            continue
+
+        _make_dirs_writable(repo_dir)
+
+        bin_rel = f"bin/python{version}"
+        bin_dst = repo_dir / bin_rel
+        bin_dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(real_bin, bin_dst)
+
+        zip_rel = f"lib/python{major}{minor}.zip"
+        zip_dst = repo_dir / zip_rel
+        zip_dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(zip_src, zip_dst)
+
+        # Unlink before writing so we never overwrite a hardlinked file in
+        # Bazel's external repository cache.
+        wrapper_path.unlink()
+        wrapper_path.write_text(
+            "#!/bin/bash\n"
+            "# Generated by generate_fx_host_tool.py - self-contained Python launcher.\n"
+            'readonly _REAL_SCRIPT="$(realpath "${BASH_SOURCE[0]}")"\n'
+            'readonly _SCRIPT_DIR="$(dirname "${_REAL_SCRIPT}")"\n'
+            "unset PYTHONHOME\n"
+            'if [[ "${_FX_UNSET_PYTHONSAFEPATH:-}" == "1" && -n "${PYTHONSAFEPATH:-}" ]]; then\n'
+            "  unset PYTHONSAFEPATH _FX_UNSET_PYTHONSAFEPATH\n"
+            f'  exec "${{_SCRIPT_DIR}}/{bin_rel}" -P -S -s "$@"\n'
+            "fi\n"
+            f'exec "${{_SCRIPT_DIR}}/{bin_rel}" -S -s "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper_path.chmod(0o755)
+
+        normalized_repos.append(repo_dir.name)
+
+    return tuple(normalized_repos)
+
+
+def _entry_uses_compact_python(
+    entry_path: Path, repo_names: Collection[str]
+) -> bool:
+    """Return True if entry_path is a script referencing a compact Python wrapper."""
+    if not repo_names or not entry_path.is_file():
+        return False
+    with entry_path.open("rb") as f:
+        header = f.read(65536)
+    return header.startswith(b"#!") and any(
+        f"{repo}/python3".encode("utf-8") in header for repo in repo_names
+    )
+
+
 def generate_fx_host_tool(
     *,
     entry_point: Path,
@@ -257,6 +344,7 @@ def generate_fx_host_tool(
     bazel_execroot: Path,
     data_runfiles: Sequence[str],
     runtime_tools: Mapping[str, Path],
+    runtime_tool_manifests: Mapping[str, Path] | None = None,
     runtime_cipd_dirs: Mapping[str, tuple[Path, str]] | None = None,
     runtime_fx_tools: Mapping[str, tuple[Path, Path]] | None = None,
     fuchsia_dir: Path | None = None,
@@ -273,6 +361,15 @@ def generate_fx_host_tool(
     if not entry_src.exists():
         print(f"ERROR: Missing entry point: {entry_src}", file=sys.stderr)
         return 1
+
+    resolved_tool_manifests = runtime_tool_manifests or {}
+    for tool_alias in resolved_tool_manifests:
+        if tool_alias not in runtime_tools:
+            print(
+                f"ERROR: runtime_tool_manifest '{tool_alias}' has no matching runtime_tool",
+                file=sys.stderr,
+            )
+            return 1
 
     if output_runtime_dir.exists():
         _make_dirs_writable(output_runtime_dir)
@@ -294,22 +391,28 @@ def generate_fx_host_tool(
         (output_runtime_dir / ".always_build").write_text("", encoding="utf-8")
 
     has_runfiles = False
+    manifest_sources: list[tuple[str, Path]] = []
+    if entry_runfiles_manifest is not None:
+        manifest_sources.append(("entry", entry_runfiles_manifest))
+    for tool_alias, rt_manifest in resolved_tool_manifests.items():
+        manifest_sources.append((f"runtime_tool '{tool_alias}'", rt_manifest))
 
-    if entry_runfiles_manifest is not None or data_runfiles:
+    if manifest_sources or data_runfiles:
         has_runfiles = True
         output_runfiles_dir = output_runtime_dir / f"{entry_name}.runfiles"
         output_runfiles_dir.mkdir(parents=True, exist_ok=True)
-        exported_entries: dict[str, str] = {}
+        saw_repo_mapping = False
+        repo_mapping_entries: dict[tuple[str, str], str] = {}
 
-        if entry_runfiles_manifest is not None:
+        for manifest_label, raw_manifest in manifest_sources:
             manifest_src = (
-                entry_runfiles_manifest
-                if entry_runfiles_manifest.is_absolute()
-                else execroot / entry_runfiles_manifest
+                raw_manifest
+                if raw_manifest.is_absolute()
+                else execroot / raw_manifest
             )
             if not manifest_src.exists():
                 print(
-                    f"ERROR: Missing Bazel runfiles manifest: {manifest_src}",
+                    f"ERROR: Missing Bazel runfiles manifest ({manifest_label}): {manifest_src}",
                     file=sys.stderr,
                 )
                 return 1
@@ -322,11 +425,53 @@ def generate_fx_host_tool(
             )
 
             for rlocation, target_str in input_manifest.as_dict().items():
+                if rlocation == "MANIFEST":
+                    continue
+                if rlocation == "_repo_mapping":
+                    saw_repo_mapping = True
+                    if target_str:
+                        rm_path = Path(target_str)
+                        if not rm_path.is_absolute():
+                            rm_path = execroot / rm_path
+                        if not rm_path.exists():
+                            print(
+                                f"ERROR: Missing Bazel _repo_mapping file ({manifest_label}): {rm_path}",
+                                file=sys.stderr,
+                            )
+                            return 1
+                        for line in rm_path.read_text(
+                            encoding="utf-8"
+                        ).splitlines():
+                            if not line:
+                                continue
+                            items = line.split(",")
+                            if len(items) != 3:
+                                print(
+                                    f"ERROR: Invalid _repo_mapping line in {rm_path}: {line}",
+                                    file=sys.stderr,
+                                )
+                                return 1
+                            src_repo, apparent_name, canonical_name = items
+                            prev = repo_mapping_entries.get(
+                                (src_repo, apparent_name)
+                            )
+                            if prev is not None and prev != canonical_name:
+                                print(
+                                    f"ERROR: Conflicting _repo_mapping for ({src_repo!r}, {apparent_name!r}): "
+                                    f"{prev!r} vs {canonical_name!r}",
+                                    file=sys.stderr,
+                                )
+                                return 1
+                            repo_mapping_entries[
+                                (src_repo, apparent_name)
+                            ] = canonical_name
+                    continue
+
                 dest_path = output_runfiles_dir / rlocation
                 if not target_str:
-                    dest_path.parent.mkdir(parents=True, exist_ok=True)
-                    dest_path.write_text("")
-                    exported_entries[rlocation] = ""
+                    if not dest_path.exists() and not dest_path.is_symlink():
+                        dest_path.parent.mkdir(parents=True, exist_ok=True)
+                        dest_path.write_text("")
                 else:
                     target_path = Path(target_str)
                     if not target_path.is_absolute():
@@ -338,9 +483,18 @@ def generate_fx_host_tool(
                         execroot,
                         effective_fuchsia_dir,
                     )
-                    exported_entries[
-                        rlocation
-                    ] = f"{entry_name}.runfiles/{rlocation}"
+
+        if saw_repo_mapping:
+            (output_runfiles_dir / "_repo_mapping").write_text(
+                "".join(
+                    f"{src_repo},{apparent_name},{canonical_name}\n"
+                    for (
+                        src_repo,
+                        apparent_name,
+                    ), canonical_name in repo_mapping_entries.items()
+                ),
+                encoding="utf-8",
+            )
 
         for short_path in data_runfiles:
             rlocation, resolved_target = _parse_data_runfile(
@@ -350,17 +504,14 @@ def generate_fx_host_tool(
             _stage_artifact(
                 resolved_target, dest_path, execroot, effective_fuchsia_dir
             )
-            exported_entries.setdefault(
-                rlocation, f"{entry_name}.runfiles/{rlocation}"
-            )
-
-        exported_manifest = runfiles_utils.RunfilesManifest(exported_entries)
-        output_manifest_path = output_runfiles_dir / "MANIFEST"
-        output_manifest_path.write_text(exported_manifest.generate_content())
-        _force_symlink(
-            output_runtime_dir / f"{entry_name}.runfiles_manifest",
-            Path(f"{entry_name}.runfiles/MANIFEST"),
+        compact_python_repos = _normalize_compact_python_runtimes(
+            output_runfiles_dir
         )
+        entry_uses_compact_python = _entry_uses_compact_python(
+            output_entry, compact_python_repos
+        )
+    else:
+        entry_uses_compact_python = False
 
     resolved_cipd_dirs = runtime_cipd_dirs or {}
     resolved_fx_tools = runtime_fx_tools or {}
@@ -368,6 +519,7 @@ def generate_fx_host_tool(
     if has_bin_dir:
         bin_dir = output_runtime_dir / ".bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
+        staged_commands: dict[str, str] = {}
         for tool_alias, (
             tree_rel,
             source_rel_path,
@@ -390,7 +542,19 @@ def generate_fx_host_tool(
                 cipd_pkg_dir = effective_fuchsia_dir / norm_rel
             else:
                 cipd_pkg_dir = tree_src.resolve()
-            _link_directory_executables(bin_dir, cipd_pkg_dir)
+            source_label = f"runtime_cipd_dir '{tool_alias}' ({cipd_pkg_dir})"
+            cipd_exes = _iter_directory_executables(cipd_pkg_dir)
+            for exe_path in cipd_exes:
+                if exe_path.name in staged_commands:
+                    print(
+                        f"ERROR: Duplicate runtime tool command '{exe_path.name}' in .bin: "
+                        f"provided by both {staged_commands[exe_path.name]} and {source_label}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                staged_commands[exe_path.name] = source_label
+            for exe_path in cipd_exes:
+                _force_symlink(bin_dir / exe_path.name, exe_path)
 
         for tool_alias, tool_rel in runtime_tools.items():
             tool_src = (
@@ -408,6 +572,15 @@ def generate_fx_host_tool(
                     file=sys.stderr,
                 )
                 return 1
+            source_label = f"runtime_tool '{tool_alias}' ({tool_src})"
+            if tool_alias in staged_commands:
+                print(
+                    f"ERROR: Duplicate runtime tool command '{tool_alias}' in .bin: "
+                    f"provided by both {staged_commands[tool_alias]} and {source_label}",
+                    file=sys.stderr,
+                )
+                return 1
+            staged_commands[tool_alias] = source_label
             _stage_artifact(
                 tool_src.resolve(),
                 bin_dir / tool_alias,
@@ -447,6 +620,15 @@ def generate_fx_host_tool(
                     file=sys.stderr,
                 )
                 return 1
+            source_label = f"runtime_fx_tool '{tool_alias}' ({fx_launcher_src})"
+            if tool_alias in staged_commands:
+                print(
+                    f"ERROR: Duplicate runtime tool command '{tool_alias}' in .bin: "
+                    f"provided by both {staged_commands[tool_alias]} and {source_label}",
+                    file=sys.stderr,
+                )
+                return 1
+            staged_commands[tool_alias] = source_label
             staged_launcher = bin_dir / tool_alias
             if staged_launcher.exists() or staged_launcher.is_symlink():
                 staged_launcher.unlink()
@@ -493,6 +675,16 @@ def generate_fx_host_tool(
                 'export FX_RUNTIME_TOOLS_DIR="${_FX_RUNTIME_DIR}/.bin"',
                 'export PATH="${FX_RUNTIME_TOOLS_DIR}${PATH:+:$PATH}"',
             ]
+        )
+    if entry_uses_compact_python:
+        launcher_lines.extend(
+            (
+                'if [[ -z "${PYTHONSAFEPATH+x}" ]]; then',
+                "  export _FX_UNSET_PYTHONSAFEPATH=1",
+                "else",
+                "  unset _FX_UNSET_PYTHONSAFEPATH",
+                "fi",
+            )
         )
     launcher_lines.append(f'exec "${{_FX_RUNTIME_DIR}}"/{quoted_entry} "$@"')
 
@@ -566,6 +758,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Mapping of <name>=<path> to expose in PATH at runtime.",
     )
     parser.add_argument(
+        "--runtime-tool-manifest",
+        action="append",
+        default=[],
+        type=str,
+        help="Mapping of <name>=<manifest_path> for Bazel runfiles of a runtime_tool.",
+    )
+    parser.add_argument(
         "--runtime-cipd-dir",
         action="append",
         default=[],
@@ -610,7 +809,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        if alias in runtime_tools:
+            print(
+                f"ERROR: Duplicate --runtime-tool command '{alias}': "
+                f"{runtime_tools[alias]} vs {raw_path}",
+                file=sys.stderr,
+            )
+            return 1
         runtime_tools[alias] = Path(raw_path)
+
+    runtime_tool_manifests: dict[str, Path] = {}
+    for spec in args.runtime_tool_manifest:
+        alias, sep, raw_path = spec.partition("=")
+        if sep != "=" or not alias or not raw_path:
+            print(
+                f"ERROR: Invalid --runtime-tool-manifest='{spec}', expected <name>=<manifest_path>",
+                file=sys.stderr,
+            )
+            return 1
+        if alias in runtime_tool_manifests:
+            print(
+                f"ERROR: Duplicate --runtime-tool-manifest for '{alias}': "
+                f"{runtime_tool_manifests[alias]} vs {raw_path}",
+                file=sys.stderr,
+            )
+            return 1
+        runtime_tool_manifests[alias] = Path(raw_path)
 
     runtime_cipd_dirs: dict[str, tuple[Path, str]] = {}
     for spec in args.runtime_cipd_dir:
@@ -625,6 +849,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         ):
             print(
                 f"ERROR: Invalid --runtime-cipd-dir='{spec}', expected <name>=<tree_path>:<source_rel_path>",
+                file=sys.stderr,
+            )
+            return 1
+        if alias in runtime_cipd_dirs:
+            print(
+                f"ERROR: Duplicate --runtime-cipd-dir '{alias}'",
                 file=sys.stderr,
             )
             return 1
@@ -646,6 +876,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        if alias in runtime_fx_tools:
+            print(
+                f"ERROR: Duplicate --runtime-fx-tool command '{alias}'",
+                file=sys.stderr,
+            )
+            return 1
         runtime_fx_tools[alias] = (Path(launcher_raw), Path(runtime_raw))
 
     return generate_fx_host_tool(
@@ -656,6 +892,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         bazel_execroot=args.bazel_execroot,
         data_runfiles=args.data_runfile,
         runtime_tools=runtime_tools,
+        runtime_tool_manifests=runtime_tool_manifests,
         runtime_cipd_dirs=runtime_cipd_dirs,
         runtime_fx_tools=runtime_fx_tools,
         fuchsia_dir=args.fuchsia_dir,

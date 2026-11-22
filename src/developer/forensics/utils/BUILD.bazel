@@ -1,0 +1,257 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+###############################################################################
+# SOURCES
+###############################################################################
+fx_cc_library(
+    name = "archive",
+    srcs = ["archive.cc"],
+    hdrs = ["archive.h"],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/files",
+        "//src/lib/fxl",
+        "//third_party/zlib:minizip",
+    ],
+    visibility = [
+        "//src/developer/forensics/feedback_data:__subpackages__",
+        "//src/developer/forensics/snapshot/tests:__pkg__",
+        "//src/developer/forensics/testing/fakes:__pkg__",
+        "//src/developer/forensics/utils/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
+        "//src/lib/fsl",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "errors",
+    srcs = ["errors.cc"],
+    hdrs = ["errors.h"],
+    visibility = ["//src/developer/forensics:__subpackages__"],
+    deps = [
+        "//sdk/lib/syslog/cpp",
+        "//sdk/lib/utf-utils",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "fidl_event_handler",
+    hdrs = ["fidl_event_handler.h"],
+    visibility = [
+        "//src/developer/forensics/exceptions/handler:__pkg__",
+        "//src/developer/forensics/testing/stubs:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/fidl/cpp/wire",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_cc_library(
+    name = "inspect_node_manager",
+    srcs = ["inspect_node_manager.cc"],
+    hdrs = ["inspect_node_manager.h"],
+    visibility = [
+        "//src/developer/forensics/crash_reports/info:__pkg__",
+        "//src/developer/forensics/feedback:__pkg__",
+        "//src/developer/forensics/feedback_data:__pkg__",
+        "//src/developer/forensics/utils/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/inspect",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "instrumented_binding_set",
+    hdrs = ["instrumented_binding_set.h"],
+    visibility = [
+        "//src/developer/forensics/feedback:__pkg__",
+        "//src/developer/forensics/utils/tests:__pkg__",
+    ],
+    deps = [
+        ":inspect_node_manager",
+        "//sdk/lib/fidl/cpp",
+        "//sdk/lib/fidl/cpp/wire",
+        "//zircon/system/ulib/inspect",
+    ],
+)
+
+fx_cc_library(
+    name = "logs",
+    srcs = ["log_format.cc"],
+    hdrs = ["log_format.h"],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+    ],
+    visibility = [
+        "//src/developer/forensics/feedback/tests:__pkg__",
+        "//src/developer/forensics/feedback_data:__subpackages__",
+        "//src/developer/forensics/utils/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "numbered_entries",
+    srcs = ["numbered_entries.cc"],
+    hdrs = ["numbered_entries.h"],
+    implementation_deps = [
+        "//src/lib/files",
+        "//src/lib/fxl",
+    ],
+    visibility = [
+        "//src/developer/forensics/feedback_data/system_log_recorder:__pkg__",
+        "//src/developer/forensics/utils/tests:__pkg__",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "promise_timeout",
+    hdrs = ["promise_timeout.h"],
+    visibility = [
+        "//src/developer/forensics/exceptions/handler:__pkg__",
+        "//src/developer/forensics/exceptions/tests:__pkg__",
+        "//src/developer/forensics/utils/tests:__pkg__",
+    ],
+    deps = [
+        ":errors",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/fit-promise",
+    ],
+)
+
+fx_cc_library(
+    name = "purge_memory",
+    srcs = ["purge_memory.cc"],
+    hdrs = ["purge_memory.h"],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/memory/lib/scudo",
+    ],
+    visibility = [
+        "//src/developer/forensics/feedback_data/system_log_recorder:__pkg__",
+        "//src/developer/forensics/utils/tests:__pkg__",
+    ],
+    deps = ["//sdk/lib/async:async-cpp"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "regexp",
+    hdrs = ["regexp.h"],
+    visibility = [
+        "//src/developer/forensics/crash_reports:__pkg__",
+        "//src/developer/forensics/feedback/annotations:__pkg__",
+        "//src/developer/forensics/feedback_data/system_log_recorder/tests:__pkg__",
+        "//src/developer/forensics/utils/redact:__pkg__",
+    ],
+    deps = ["//third_party/re2"],
+)
+
+fx_cc_library(
+    name = "sized_data",
+    hdrs = ["sized_data.h"],
+    visibility = ["//src/developer/forensics/crash_reports:__subpackages__"],
+)
+
+fx_cc_library(
+    name = "storage_size",
+    hdrs = ["storage_size.h"],
+    visibility = ["//src/developer/forensics:__subpackages__"],
+    deps = ["//sdk/lib/syslog/cpp"],
+)
+
+fx_cc_library(
+    name = "time",
+    srcs = ["time.cc"],
+    hdrs = ["time.h"],
+    implementation_deps = ["//src/lib/fxl"],
+    visibility = [
+        "//src/developer/forensics/crash_reports/info:__pkg__",
+        "//src/developer/forensics/feedback/annotations:__pkg__",
+        "//src/developer/forensics/feedback/reboot_log:__pkg__",
+        "//src/developer/forensics/feedback/tests:__pkg__",
+        "//src/developer/forensics/utils/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/timekeeper",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "utc_time_provider",
+    srcs = ["utc_time_provider.cc"],
+    hdrs = ["utc_time_provider.h"],
+    implementation_deps = [
+        ":time",
+        "//src/lib/files",
+    ],
+    visibility = [
+        "//src/developer/forensics/crash_reports:__pkg__",
+        "//src/developer/forensics/feedback_data:__pkg__",
+        "//src/developer/forensics/utils/tests:__pkg__",
+    ],
+    deps = [
+        ":utc_clock_ready_watcher",
+        "//src/lib/timekeeper:system",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "utc_clock_ready_watcher",
+    srcs = ["utc_clock_ready_watcher.cc"],
+    hdrs = ["utc_clock_ready_watcher.h"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.time:fuchsia.time_cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+    visibility = [
+        "//src/developer/forensics/crash_reports:__pkg__",
+        "//src/developer/forensics/testing/stubs:__pkg__",
+        "//src/developer/forensics/utils/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "vmo",
+    srcs = ["vmo.cc"],
+    hdrs = ["vmo.h"],
+    implementation_deps = ["//sdk/lib/syslog/cpp"],
+    visibility = ["//src/developer/forensics:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)

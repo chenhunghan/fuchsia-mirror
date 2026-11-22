@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@fuchsia_build_config//:defs.bzl", "build_config")
+load("@fuchsia_build_info//:args.bzl", "rust_bindgen_prefix")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("//build/bazel/rules:cipd_prebuilt.bzl", "cipd_prebuilt_file")
 load(":cargo_toml_gen.bzl", "cargo_toml_gen")
@@ -21,8 +21,16 @@ py_binary(
 
 # Used by `rustc_bindgen_golden()` in //build/bazel/rules/rust:rustc_bindgen.bzl.
 cipd_prebuilt_file(
+    name = "prebuilt_bindgen",
+    path = "//%s/bindgen" % rust_bindgen_prefix,
+    visibility = ["//visibility:private"],
+)
+
+alias(
     name = "bindgen",
-    path = "//prebuilt/third_party/rust_bindgen/%s/bindgen" % build_config.host_tag,
+    actual = (
+        ":prebuilt_bindgen" if rust_bindgen_prefix.startswith("prebuilt/") else "@fuchsia_build_config//:host_prebuilts/bindgen"
+    ),
     visibility = ["//build/bazel/rules/rust:__pkg__"],
 )
 

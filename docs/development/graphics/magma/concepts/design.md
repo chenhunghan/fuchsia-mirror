@@ -26,7 +26,7 @@ system critical gpu clients like the compositor, resulting in a noticeable
 hiccup in user experience.  Consequently Magma attempts to minimize the
 opportunities for clients to induce gpu faults.
 
-## Architecture
+## Architecture {:#architecture}
 
 As mentioned in the overview, the Magma architecture involves two driver
 components: a client library, and a privileged system driver process.  Both are

@@ -5,15 +5,9 @@
 #ifndef SRC_SYSMEM_SERVER_SYSMEM_METRICS_H_
 #define SRC_SYSMEM_SERVER_SYSMEM_METRICS_H_
 
-#include <lib/sys/cpp/service_directory.h>
-
 #include <src/lib/metrics_buffer/metrics_buffer.h>
 
 #include <src/sysmem/metrics/metrics.cb.h>
-
-namespace sys {
-class ServiceDirectory;
-}  // namespace sys
 
 class SysmemMetrics {
  public:

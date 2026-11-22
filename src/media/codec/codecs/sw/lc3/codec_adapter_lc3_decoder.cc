@@ -112,7 +112,7 @@ std::optional<int> GetFrameDurationUs(const std::vector<uint8_t>& raw_bytes) {
 // Assigned Numbers section 6.12.5.3 Audio_Channel_Allocation.
 // Get the channel allocation from the raw LTV parameter value.
 // If any of the channels is not one of the acceptable values, return nullopt.
-std::optional<std::vector<fuchsia::media::AudioChannelId2>> GetAudioChannelMap(
+std::optional<std::vector<fuchsia_media::AudioChannelId2>> GetAudioChannelMap(
     const std::vector<uint8_t>& raw_bytes) {
   if (raw_bytes.size() != 4) {
     LOG(DEBUG, "Invalid Audio_Channel_Allocation LTV length %zu", raw_bytes.size());
@@ -152,33 +152,33 @@ std::optional<std::vector<fuchsia::media::AudioChannelId2>> GetAudioChannelMap(
     return std::nullopt;
   }
 
-  std::vector<fuchsia::media::AudioChannelId2> channels;
+  std::vector<fuchsia_media::AudioChannelId2> channels;
   channels.reserve(std::popcount(value));
   // If present, channels are added in the following order:
   // FL -> FR -> FC -> LFE -> BL -> BR -> SL -> SR.
   if ((value & kFlFlag) == kFlFlag) {
-    channels.push_back(fuchsia::media::AudioChannelId2::FL);
+    channels.push_back(fuchsia_media::AudioChannelId2::kFl);
   }
   if ((value & kFrFlag) == kFrFlag) {
-    channels.push_back(fuchsia::media::AudioChannelId2::FR);
+    channels.push_back(fuchsia_media::AudioChannelId2::kFr);
   }
   if ((value & kFcFlag) == kFcFlag) {
-    channels.push_back(fuchsia::media::AudioChannelId2::FC);
+    channels.push_back(fuchsia_media::AudioChannelId2::kFc);
   }
   if ((value & kLfeFlag) == kLfeFlag) {
-    channels.push_back(fuchsia::media::AudioChannelId2::LFE);
+    channels.push_back(fuchsia_media::AudioChannelId2::kLfe);
   }
   if ((value & kBlFlag) == kBlFlag) {
-    channels.push_back(fuchsia::media::AudioChannelId2::BL);
+    channels.push_back(fuchsia_media::AudioChannelId2::kBl);
   }
   if ((value & kBrFlag) == kBrFlag) {
-    channels.push_back(fuchsia::media::AudioChannelId2::BR);
+    channels.push_back(fuchsia_media::AudioChannelId2::kBr);
   }
   if ((value & kSlFlag) == kSlFlag) {
-    channels.push_back(fuchsia::media::AudioChannelId2::SL);
+    channels.push_back(fuchsia_media::AudioChannelId2::kSl);
   }
   if ((value & kSrFlag) == kSrFlag) {
-    channels.push_back(fuchsia::media::AudioChannelId2::SR);
+    channels.push_back(fuchsia_media::AudioChannelId2::kSr);
   }
 
   ZX_DEBUG_ASSERT(channels.size() <= kMaxChannelCount);
@@ -212,9 +212,9 @@ CodecAdapterLc3Decoder::CodecAdapterLc3Decoder(std::mutex& lock,
                                                CodecAdapterEvents* codec_adapter_events)
     : CodecAdapterSWImpl(lock, codec_adapter_events) {}
 
-std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterLc3Decoder::OutputFormatDetails() {
+std::pair<fuchsia_media::FormatDetails, size_t> CodecAdapterLc3Decoder::OutputFormatDetails() {
   uint32_t sr_hz = 0;
-  std::vector<fuchsia::media::AudioChannelId2> channels;
+  std::vector<fuchsia_media::AudioChannelId2> channels;
   size_t min_output_buffer_size = 0;
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -223,16 +223,16 @@ std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterLc3Decoder::OutputF
     channels = codec_params_->channels;
     min_output_buffer_size = MinOutputBufferSize();
   }
-  fuchsia::media::PcmFormat2 out;
-  out.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
+  fuchsia_media::PcmFormat2 out;
+  out.pcm_mode() = fuchsia_media::AudioPcmMode2::kLinear;
   // For simplicity, we always decode the output as 16-bit PCM audio data.
-  out.set_bits_per_sample(kNumBitsPerPcmSample);
-  out.set_frames_per_second(sr_hz);
-  out.set_channel_map(std::move(channels));
+  out.bits_per_sample() = kNumBitsPerPcmSample;
+  out.frames_per_second() = sr_hz;
+  out.channel_map() = std::move(channels);
 
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_mime_type(kPcmMimeType);
-  format_details.set_pcm_format(std::move(out));
+  fuchsia_media::FormatDetails format_details;
+  format_details.mime_type() = kPcmMimeType;
+  format_details.pcm_format() = std::move(out);
 
   return {std::move(format_details), min_output_buffer_size};
 }
@@ -273,20 +273,21 @@ int CodecAdapterLc3Decoder::ProcessInputChunkData(const uint8_t* input_data, siz
   return bytes_produced;
 }
 
-fuchsia::sysmem::BufferCollectionConstraints CodecAdapterLc3Decoder::BufferCollectionConstraints(
+fuchsia_sysmem2::BufferCollectionConstraints CodecAdapterLc3Decoder::BufferCollectionConstraints(
     CodecPort port) {
-  fuchsia::sysmem::BufferCollectionConstraints c;
+  fuchsia_sysmem2::BufferCollectionConstraints c;
+  auto& bmc = c.buffer_memory_constraints().emplace();
   if (port == kInputPort) {
-    c.min_buffer_count_for_camping = kMinInputBufferCountForCamping;
+    c.min_buffer_count_for_camping() = kMinInputBufferCountForCamping;
 
-    c.buffer_memory_constraints.min_size_bytes = zx_system_get_page_size();
-    c.buffer_memory_constraints.max_size_bytes = kInputPerPacketBufferBytesMax;
+    bmc.min_size_bytes() = zx_system_get_page_size();
+    bmc.max_size_bytes() = kInputPerPacketBufferBytesMax;
   } else {
-    c.min_buffer_count_for_camping = kMinOutputBufferCountForCamping;
+    c.min_buffer_count_for_camping() = kMinOutputBufferCountForCamping;
 
     ZX_ASSERT(min_output_buffer_size_.has_value());
-    c.buffer_memory_constraints.min_size_bytes = *min_output_buffer_size_;
-    c.buffer_memory_constraints.max_size_bytes = 0xFFFFFFFF;  // arbitrary value.
+    bmc.min_size_bytes() = *min_output_buffer_size_;
+    bmc.max_size_bytes() = 0xFFFFFFFF;  // arbitrary value.
   }
 
   return c;
@@ -315,25 +316,26 @@ size_t CodecAdapterLc3Decoder::MinOutputBufferSize() {
 }
 
 CodecAdapterLc3Decoder::InputLoopStatus CodecAdapterLc3Decoder::ProcessFormatDetails(
-    const fuchsia::media::FormatDetails& format_details) {
+    const fuchsia_media::FormatDetails& format_details) {
   if (codec_params_.has_value()) {
     events_->onCoreCodecFailCodec("LC3 Decoder: Midstream input format change is not supported.");
     return kShouldTerminate;
   }
 
-  if (!format_details.has_mime_type() || format_details.mime_type() != kLc3MimeType ||
-      !format_details.has_oob_bytes() || format_details.oob_bytes().size() < kMinOobBytesSize) {
+  if (!format_details.mime_type().has_value() || *format_details.mime_type() != kLc3MimeType ||
+      !format_details.oob_bytes().has_value() ||
+      format_details.oob_bytes()->size() < kMinOobBytesSize) {
     events_->onCoreCodecFailCodec(
         "LC3 Decoder received input that was not valid compressed lc3 audio.");
     return kShouldTerminate;
   }
 
-  const auto& oob_bytes = format_details.oob_bytes();
+  const auto& oob_bytes = *format_details.oob_bytes();
 
   int frame_us = 0;
   int sampling_freq = 0;
   int nbytes = 0;
-  std::vector<fuchsia::media::AudioChannelId2> channels;
+  std::vector<fuchsia_media::AudioChannelId2> channels;
   std::unordered_set<uint8_t> seen_params;
 
   size_t idx = 0;

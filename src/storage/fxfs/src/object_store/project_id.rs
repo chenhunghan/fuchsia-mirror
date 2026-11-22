@@ -9,7 +9,7 @@ use crate::object_store::transaction::{LockKey, Mutation, Options, lock_keys};
 use crate::object_store::{
     BytesAndNodes, ObjectKey, ObjectKeyData, ObjectKind, ObjectStore, ObjectValue, ProjectProperty,
 };
-use anyhow::{Error, anyhow};
+use anyhow::{Error, anyhow, ensure};
 use fprint::TypeFingerprint;
 use fxfs_macros::SerializeKey;
 use serde::{Deserialize, Serialize};
@@ -72,13 +72,14 @@ impl ObjectStore {
         Ok(())
     }
 
-    /// Apply a `project_id` to a given node. Fails if node is not found or target project is zero.
-    pub async fn set_project_for_node(
+    /// Internal helper to update or clear the project ID for a node.
+    /// Reconciles quota accounting through `update_attributes_internal`.
+    /// Clearing a project on an unprojected node (including a symlink) returns Ok(()).
+    async fn update_project_for_node(
         &self,
         node_id: u64,
-        project_id: ProjectId,
+        project_id: Option<ProjectId>,
     ) -> Result<(), Error> {
-        let root_id = self.root_directory_object_id();
         let mut transaction = self
             .new_transaction(
                 lock_keys![LockKey::object(self.store_object_id, node_id)],
@@ -86,52 +87,39 @@ impl ObjectStore {
             )
             .await?;
 
-        let object_key = ObjectKey::object(node_id);
-        let (kind, mut attributes) =
-            match self.tree().find_value(&object_key).await?.ok_or(FxfsError::NotFound)? {
-                ObjectValue::Object { kind, attributes } => (kind, attributes),
-                _ => return Err(FxfsError::Inconsistent.into()),
-            };
-        // Make sure the object kind makes sense.
-        match kind {
-            ObjectKind::File { .. } | ObjectKind::Directory { .. } => (),
+        let (kind, attributes) = match self
+            .tree()
+            .find_value(&ObjectKey::object(node_id))
+            .await?
+            .ok_or(FxfsError::NotFound)?
+        {
+            ObjectValue::Object { kind, attributes } => (kind, attributes),
+            _ => return Err(FxfsError::Inconsistent.into()),
+        };
 
-            // Setting a project id on symlink objects is not currently supported.
-            ObjectKind::Symlink { .. }
-            | ObjectKind::EncryptedSymlink { .. }
-            | ObjectKind::NonInlineSymlink { .. } => {
-                return Err(FxfsError::NotSupported.into());
-            }
-            ObjectKind::Graveyard => return Err(FxfsError::Inconsistent.into()),
-        }
-        let storage_size = attributes.allocated_size.try_into().map_err(|_| FxfsError::TooBig)?;
-        let old_project_id = attributes.project_id;
-        if old_project_id == Some(project_id) {
+        if attributes.project_id == project_id {
             return Ok(());
         }
-        attributes.project_id = Some(project_id);
 
-        transaction.add(
-            self.store_object_id,
-            Mutation::replace_or_insert_object(
-                object_key,
-                ObjectValue::Object { kind, attributes },
-            ),
+        // Setting a project id on symlink objects is not currently supported.
+        ensure!(
+            matches!(kind, ObjectKind::File { .. } | ObjectKind::Directory { .. }),
+            FxfsError::NotSupported
         );
-        transaction.merge_bytes_and_nodes(
-            self.store_object_id,
-            ObjectKey::project_usage(root_id, project_id),
-            BytesAndNodes { bytes: storage_size, nodes: 1 },
-        );
-        if let Some(old_project_id) = old_project_id {
-            transaction.merge_bytes_and_nodes(
-                self.store_object_id,
-                ObjectKey::project_usage(root_id, old_project_id),
-                BytesAndNodes { bytes: -storage_size, nodes: -1 },
-            );
-        }
+
+        self.update_attributes_internal(&mut transaction, node_id, None, None, Some(project_id))
+            .await?;
         transaction.commit().await?;
         Ok(())
+    }
+
+    /// Apply a `project_id` to a given node. Fails if node is not found or target project is zero.
+    pub async fn set_project_for_node(
+        &self,
+        node_id: u64,
+        project_id: ProjectId,
+    ) -> Result<(), Error> {
+        self.update_project_for_node(node_id, Some(project_id)).await
     }
 
     /// Return the project_id associated with the given `node_id`.
@@ -150,56 +138,7 @@ impl ObjectStore {
     /// Remove the project id for a given `node_id`. The call will do nothing and return success
     /// if the node is found to not be associated with any project.
     pub async fn clear_project_for_node(&self, node_id: u64) -> Result<(), Error> {
-        let root_id = self.root_directory_object_id();
-        let mut transaction = self
-            .new_transaction(
-                lock_keys![LockKey::object(self.store_object_id, node_id)],
-                Options::default(),
-            )
-            .await?;
-
-        let object_key = ObjectKey::object(node_id);
-        let (kind, mut attributes) =
-            match self.tree().find_value(&object_key).await?.ok_or(FxfsError::NotFound)? {
-                ObjectValue::Object { kind, attributes } => (kind, attributes),
-                _ => return Err(FxfsError::Inconsistent.into()),
-            };
-        let Some(old_project_id) = attributes.project_id else {
-            return Ok(());
-        };
-        // Make sure the object kind makes sense.
-        match kind {
-            ObjectKind::File { .. } | ObjectKind::Directory { .. } => (),
-
-            // Setting a project id on symlink objects is not currently supported.
-            ObjectKind::Symlink { .. }
-            | ObjectKind::EncryptedSymlink { .. }
-            | ObjectKind::NonInlineSymlink { .. } => {
-                return Err(FxfsError::NotSupported.into());
-            }
-            ObjectKind::Graveyard => return Err(FxfsError::Inconsistent.into()),
-        }
-        attributes.project_id = None;
-        let storage_size = attributes.allocated_size;
-        transaction.add(
-            self.store_object_id,
-            Mutation::replace_or_insert_object(
-                object_key,
-                ObjectValue::Object { kind, attributes },
-            ),
-        );
-        // Not safe to convert storage_size to i64, as space usage can exceed i64 in size. Not
-        // going to deal with handling such enormous files, fail the request.
-        transaction.merge_bytes_and_nodes(
-            self.store_object_id,
-            ObjectKey::project_usage(root_id, old_project_id),
-            BytesAndNodes {
-                bytes: -(storage_size.try_into().map_err(|_| FxfsError::TooBig)?),
-                nodes: -1,
-            },
-        );
-        transaction.commit().await?;
-        Ok(())
+        self.update_project_for_node(node_id, None).await
     }
 
     /// Returns a list of project ids currently tracked with project limits or usage in ascending

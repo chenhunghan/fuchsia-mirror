@@ -94,11 +94,11 @@ void FormatTableName(StringBuilder* str, const FidlCodedTable* coded_table) {
   }
 }
 
-void FormatXUnionName(StringBuilder* str, const FidlCodedXUnion* coded_xunion) {
-  if (coded_xunion->name) {
-    str->Append(coded_xunion->name);
+void FormatUnionName(StringBuilder* str, const FidlCodedUnion* coded_union) {
+  if (coded_union->name) {
+    str->Append(coded_union->name);
   } else {
-    str->Append("xunion");
+    str->Append("union");
   }
 }
 
@@ -248,8 +248,8 @@ void FormatTypeName(StringBuilder* str, const fidl_type_t* type) {
     case kFidlTypeTable:
       FormatTableName(str, &type->coded_table());
       break;
-    case kFidlTypeXUnion:
-      FormatXUnionName(str, &type->coded_union());
+    case kFidlTypeUnion:
+      FormatUnionName(str, &type->coded_union());
       break;
     case kFidlTypePrimitive:
       ZX_PANIC("unrecognized tag");

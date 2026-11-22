@@ -95,9 +95,16 @@ type Params struct {
 	// The experiments to enable in infra.
 	Experiments []string `protobuf:"bytes,19,rep,name=experiments,proto3" json:"experiments,omitempty"`
 	// Kernel command-line arguments to pass on boot.
-	ZirconArgs    []string `protobuf:"bytes,20,rep,name=zircon_args,json=zirconArgs,proto3" json:"zircon_args,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ZirconArgs []string `protobuf:"bytes,20,rep,name=zircon_args,json=zirconArgs,proto3" json:"zircon_args,omitempty"`
+	// By default, tests that produce performance results are put into separate
+	// shards from other tests. The names of these shards have the "perf:"
+	// prefix. Each test in these shards is run only once within the shard
+	// (unless it's multiplied), so that failures can be retried by re-running
+	// the whole shard.
+	// Set this to put these tests in the same shards as other tests instead.
+	DisableSeparatePerfShards bool `protobuf:"varint,21,opt,name=disable_separate_perf_shards,json=disableSeparatePerfShards,proto3" json:"disable_separate_perf_shards,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *Params) Reset() {
@@ -263,11 +270,18 @@ func (x *Params) GetZirconArgs() []string {
 	return nil
 }
 
+func (x *Params) GetDisableSeparatePerfShards() bool {
+	if x != nil {
+		return x.DisableSeparatePerfShards
+	}
+	return false
+}
+
 var File_params_proto protoreflect.FileDescriptor
 
 const file_params_proto_rawDesc = "" +
 	"\n" +
-	"\fparams.proto\x12\vtestsharder\x1a\x1egoogle/protobuf/duration.proto\"\xd9\x06\n" +
+	"\fparams.proto\x12\vtestsharder\x1a\x1egoogle/protobuf/duration.proto\"\x9a\a\n" +
 	"\x06Params\x12)\n" +
 	"\x10environment_tags\x18\x01 \x03(\tR\x0fenvironmentTags\x12B\n" +
 	"\x0ftarget_duration\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x0etargetDuration\x12+\n" +
@@ -290,7 +304,8 @@ const file_params_proto_rawDesc = "" +
 	"\ause_tcg\x18\x11 \x01(\bR\x06useTcg\x12 \n" +
 	"\vexperiments\x18\x13 \x03(\tR\vexperiments\x12\x1f\n" +
 	"\vzircon_args\x18\x14 \x03(\tR\n" +
-	"zirconArgsB<Z:go.fuchsia.dev/fuchsia/tools/integration/testsharder/protob\x06proto3"
+	"zirconArgs\x12?\n" +
+	"\x1cdisable_separate_perf_shards\x18\x15 \x01(\bR\x19disableSeparatePerfShardsB<Z:go.fuchsia.dev/fuchsia/tools/integration/testsharder/protob\x06proto3"
 
 var (
 	file_params_proto_rawDescOnce sync.Once

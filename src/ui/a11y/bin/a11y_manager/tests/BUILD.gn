@@ -20,7 +20,7 @@ cc_test_executable("a11y_manager_apptests") {
     "//sdk/fidl/fuchsia.accessibility:fuchsia.accessibility_hlcpp",
     "//sdk/lib/inspect/testing/cpp",
     "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fostr/fidl/fuchsia.accessibility",
     "//src/lib/fsl",

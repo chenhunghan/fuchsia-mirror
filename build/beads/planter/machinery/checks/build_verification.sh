@@ -140,6 +140,124 @@ def git_lines(args):
     return [l.strip() for l in out.splitlines() if l.strip()]
 
 
+# Probe that .git, the build output directory, and the checkout accept non-empty
+# file writes (degraded FUSE/casfs mounts allow 0-byte O_CREAT metadata ops while
+# failing write() with ENOENT/EROFS/EIO).
+_write_probe_cache = []
+
+
+def workspace_write_probe_error():
+    if _write_probe_cache:
+        return _write_probe_cache[0]
+    probe_bytes = b"planter-write-probe\n"
+    probe_dirs = []
+    try:
+        gdir = subprocess.check_output(
+            ["git", "-C", workdir, "rev-parse", "--absolute-git-dir"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        if gdir and os.path.isdir(gdir):
+            probe_dirs.append(gdir)
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    bdir_rel = ""
+    try:
+        with open(
+            os.path.join(workdir, ".fx-build-dir"),
+            encoding="utf-8",
+            errors="replace",
+        ) as f:
+            bdir_rel = f.read().strip()
+    except OSError:
+        bdir_rel = ""
+    if bdir_rel:
+        bdir_abs = os.path.join(workdir, bdir_rel)
+        out_parent = os.path.dirname(bdir_abs)
+        for cand_dir in (out_parent, bdir_abs):
+            if os.path.isdir(cand_dir) and cand_dir not in probe_dirs:
+                probe_dirs.append(cand_dir)
+    else:
+        out_abs = os.path.join(workdir, "out")
+        if os.path.isdir(out_abs) and out_abs not in probe_dirs:
+            probe_dirs.append(out_abs)
+    if os.path.isdir(workdir) and workdir not in probe_dirs:
+        probe_dirs.append(workdir)
+    for pdir in probe_dirs:
+        fd = None
+        probe_path = None
+        try:
+            fd, probe_path = tempfile.mkstemp(
+                dir=pdir, prefix=".planter-write-probe."
+            )
+            os.write(fd, probe_bytes)
+            os.close(fd)
+            fd = None
+            with open(probe_path, "rb") as rf:
+                if rf.read() != probe_bytes:
+                    raise OSError("short write during writability probe")
+            os.unlink(probe_path)
+        except OSError as err:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if probe_path and os.path.lexists(probe_path):
+                try:
+                    os.unlink(probe_path)
+                except OSError:
+                    pass
+            _write_probe_cache.append((pdir, err))
+            return pdir, err
+    _write_probe_cache.append(None)
+    return None
+
+
+# Build a single workspace_write_error finding when the checkout/build mount rejects writes.
+def build_workspace_write_error_finding(pdir, err):
+    msg = (
+        f"Filesystem write failed during writability probe in `{pdir}` ({err}). "
+        "The checkout, `.git`, or build directory mount is rejecting file writes "
+        "(for example a degraded FUSE/casfs mount), so `fx build`, `fx lint`, "
+        "and `fx bazel` cannot run."
+    )
+    rem = (
+        "This is a workspace filesystem/mount write failure, not a BUILD.bazel or "
+        "BUILD.gn defect. Do not edit build files to work around it; stop retrying "
+        "failing build or `git commit` write commands, keep the task commit's "
+        "changed files (`git diff --name-only HEAD~1 HEAD` when `HEAD` already has "
+        "the local migration commit) in `CoderReport.modified_files` rather than "
+        "`[]` (so `PLANTER_CHANGE_BASE=HEAD` retries do not fail with "
+        "`empty_migration_diff`), set `test_footers` to `[\"fx lint\"]` and "
+        "`disputed_findings` to `[]` in `CoderReport` (an empty `test_footers` "
+        "fails `test_verifier` with `missing_test_footer`, while target-bearing "
+        "`Test:` commands trigger spurious `test_verifier` query errors on an "
+        "unwritable mount), and report the mount write error in `summary`."
+    )
+    return {
+        "source": "build_verification",
+        "category": "workspace_write_error",
+        "severity": "ERROR",
+        "message": msg,
+        "remediation": rem,
+    }
+
+
+# Fail fast before acquiring `.git` locks, mutating `.git/index`, or reusing uploaded
+# patchset builds when the checkout or `.git` mount rejects file writes.
+if not dry_run and not skip_build:
+    _upfront_write_err = workspace_write_probe_error()
+    if _upfront_write_err is not None:
+        print(
+            json.dumps(
+                [build_workspace_write_error_finding(*_upfront_write_err)],
+                indent=2,
+            )
+        )
+        sys.exit(0)
+
+
 # Serialize active builds against tests_json_parity working-tree reversion and `fx gen`
 # runs so concurrent check invocations never collide in regenerator.py.
 def acquire_workdir_build_lock(wdir):
@@ -222,6 +340,36 @@ if not changed:
             ["ls-files", "--others", "--exclude-standard"]
         )
 changed_set = set(changed)
+
+
+# Force a full product `fx build` when Assembly Input Bundles, BootFS file
+# packages, or scrutiny BootFS goldens are modified. Target-scoped GN builds
+# skip `bundles/assembly` (in EXCLUDED_GLOBAL_DIRS) and only build individual
+# AIB targets in isolation, which misses `ffx assembly product` failures such
+# as duplicate BootFS destination Merkle conflicts across AIBs.
+def _requires_full_product_assembly_build(changed_files, base_ref):
+    assembly_tokens = (
+        "fx_bootfs_files_package",
+        "bootfs_files_package",
+        "bootfs_files_for_assembly",
+        "assembly_input_bundle",
+    )
+    for rel_path in changed_files:
+        if rel_path.startswith("bundles/assembly/"):
+            return True
+        if rel_path.startswith(
+            "build/bazel_sdk/bazel_rules_fuchsia/fuchsia/private/assembly/goldens/"
+        ):
+            return True
+        if os.path.basename(rel_path) in ("BUILD.bazel", "BUILD.gn"):
+            diff_out = "\n".join(git_lines(["diff", "-U0", base_ref, "--", rel_path]))
+            if any(tok in diff_out for tok in assembly_tokens):
+                return True
+    return False
+
+
+if _requires_full_product_assembly_build(changed_set, change_base):
+    os.environ["PLANTER_FULL_GN_BUILD"] = "1"
 
 
 all_changed_build_dirs = {
@@ -362,11 +510,20 @@ def _existed_at_change_base(p):
 def _owning_pkg_dir(rel_p):
     cur = os.path.dirname(rel_p).strip("/")
     while cur:
+        sec_gn = (
+            f"build/secondary/{cur}/BUILD.gn"
+            if not cur.startswith("build/secondary/")
+            else ""
+        )
         if (
             os.path.isfile(os.path.join(workdir, cur, "BUILD.bazel"))
+            or os.path.isfile(os.path.join(workdir, cur, "BUILD"))
             or os.path.isfile(os.path.join(workdir, cur, "BUILD.gn"))
+            or (sec_gn and os.path.isfile(os.path.join(workdir, sec_gn)))
             or _existed_at_change_base(f"{cur}/BUILD.bazel")
+            or _existed_at_change_base(f"{cur}/BUILD")
             or _existed_at_change_base(f"{cur}/BUILD.gn")
+            or (sec_gn and _existed_at_change_base(sec_gn))
         ):
             return cur
         cur = os.path.dirname(cur).strip("/")
@@ -591,6 +748,7 @@ BAZEL_HOST_TEST_RULES = {
     "host_test",
     "host_cc_test",
     "host_shac_test",
+    "golden_test",
 }
 test_bazel_dirs_set = {d for d in bazel_dirs if _has_substantive_bazel_target_change(d)}
 host_test_targets = []
@@ -884,11 +1042,27 @@ def dependent_labels():
             if (
                 tmpl in LINKED_TEMPLATES
                 or tmpl in LIBRARY_TEMPLATES
-                or tmpl in ("bazel_fuchsia_package", "bazel_input_file")
+                or tmpl
+                in (
+                    "bazel_fuchsia_package",
+                    "bazel_input_file",
+                    "ffx_plugin",
+                    "ffx_tool",
+                    "bazel_ffx_tool",
+                    "bazel_host_tool",
+                    "bazel_py_host_tool",
+                    "sdk_atom",
+                    "host_test",
+                    "host_test_data",
+                )
             ):
                 own.append(lbl)
             if tmpl.startswith("rustc_") and UNIT_TESTS.search(body) and f"{lbl}_test" not in excl_d:
                 own.append(f"{lbl}_test")
+            if tmpl == "ffx_plugin" and UNIT_TESTS.search(body):
+                for ut_sfx in ("_tests", "_args_test"):
+                    if f"{lbl}{ut_sfx}" not in excl_d:
+                        own.append(f"{lbl}{ut_sfx}")
     for rel in rdep_files:
         pkg = os.path.dirname(rel)
         text = read(rel) or ""
@@ -929,6 +1103,16 @@ def dependent_labels():
         key = label if label in keys else next((k for k in keys if "host" in k), keys[0] if keys else None)
         if key and key not in labels:
             labels.append(key)
+    # Include user and userdebug scrutiny verification targets when assembly or bootfs
+    # packages/goldens change, since default eng builds do not verify user/userdebug goldens.
+    if os.environ.get("PLANTER_FULL_GN_BUILD", "").strip() in ("1", "true"):
+        for scrutiny_lbl in (
+            "//bundles/assembly/scrutiny:user",
+            "//bundles/assembly/scrutiny:userdebug",
+        ):
+            for k in toolchains.get(scrutiny_lbl, []):
+                if k not in labels:
+                    labels.append(k)
     notes = []
     if excluded_presen:
         shown_excl = " ".join(sorted(excluded_presen))
@@ -1016,13 +1200,75 @@ def _dir_has_fdomain_unsupported_handles(d):
     return False
 
 
+# Identify `ffx_plugin` targets in `d/BUILD.bazel` whose generated `<name>_suite` subtarget
+# is unused in `d/BUILD.bazel` and cannot compile because the plugin is a standalone FHO
+# subtool whose Rust sources lack `#[ffx_command]` or `fho::embedded_plugin!` / `#[ffx_plugin]`.
+def _unbuildable_ffx_plugin_suites(d, text):
+    if "ffx_plugin" not in text:
+        return []
+    code_no_comments = gn_code(text)
+    out = []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return out
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = (
+            node.func.id
+            if isinstance(node.func, ast.Name)
+            else (node.func.attr if isinstance(node.func, ast.Attribute) else None)
+        )
+        if fn != "ffx_plugin":
+            continue
+        kws = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        nm_node = kws.get("name")
+        if not (isinstance(nm_node, ast.Constant) and isinstance(nm_node.value, str)):
+            continue
+        tname = nm_node.value
+        suite_name = f"{tname}_suite"
+        if re.search(r'[:"]' + re.escape(suite_name) + r'"', code_no_comments):
+            continue
+        args_files = [
+            c.value
+            for k in ("args_srcs", "args_crate_root")
+            if k in kws
+            for c in ast.walk(kws[k])
+            if isinstance(c, ast.Constant) and isinstance(c.value, str) and c.value.endswith(".rs")
+        ] or ["src/args.rs"]
+        has_ffx_command = any(
+            re.search(r"\bffx_command\b", gn_code(read(f"{d}/{af}") or "")) for af in args_files
+        )
+        srcs_files = (
+            [
+                c.value
+                for c in ast.walk(kws["srcs"])
+                if isinstance(c, ast.Constant)
+                and isinstance(c.value, str)
+                and c.value.endswith(".rs")
+            ]
+            if "srcs" in kws
+            else []
+        )
+        has_embedded_plugin = not srcs_files or any(
+            re.search(r"\b(?:embedded_plugin!|ffx_plugin)\b", gn_code(read(f"{d}/{sf}") or ""))
+            for sf in srcs_files
+        )
+        if not has_ffx_command or not has_embedded_plugin:
+            out.append(suite_name)
+    return out
+
+
 # Exclude `_validate_json_action` targets (from `fidl_library`, structured config macros, and
-# `validate_json`) from top-level `:all` builds so `assert_no_deps_aspect` does not crash.
+# `validate_json`) from top-level `:all` builds so `assert_no_deps_aspect` does not crash, and
+# exclude unbuildable `<name>_suite` subtargets of standalone FHO subtool `ffx_plugin` targets.
 def validate_json_exclusions(d):
     """Returns `-//<d>:<target>` exclusions for `_validate_json_action` targets in `d/BUILD.bazel`
     (including `<name>_fidl_internal_validate_ir_json` expanded by `fuchsia_structured_config_*`
-    macros, and `<name>_rust_fdomain{,_flex}` when `.fidl` sources use `zx.Handle` subtypes missing
-    from `fdomain_client`). `//build/bazel/aspects:assert_no_deps.bzl` iterates
+    macros, `<name>_rust_fdomain{,_flex}` when `.fidl` sources use `zx.Handle` subtypes missing
+    from `fdomain_client`, and `<name>_suite` on `ffx_plugin` targets whose Rust sources omit
+    `#[ffx_command]` or `fho::embedded_plugin!`). `//build/bazel/aspects:assert_no_deps.bzl` iterates
     `getattr(ctx.rule.attr, "data", [])`, which crashes with `Error: type 'Target' is not iterable`
     when `:all` applies `assert_no_deps_aspect` at the top level to `_validate_json_action`
     (`data = attr.label(...)`). Excluding `<name>_validate_ir_json` (and
@@ -1077,6 +1323,8 @@ def validate_json_exclusions(d):
             nm = re.search(r'\bname\s*=\s*"([^"]+)"', args_body)
             if nm:
                 _add_fidl(nm.group(1), fn)
+    for suite_target in _unbuildable_ffx_plugin_suites(d, text):
+        _add(suite_target)
     return out
 
 
@@ -1141,8 +1389,12 @@ steps = [
 # `fx lint` without file arguments finds and checks all modified files itself;
 # `--fail-level=warning` makes `shac check` fail on warnings as well as errors.
 steps.append(("shac_check", [fx, "lint", "--fail-level=warning"]))
+# Filter out test_suite-only aggregator packages before running top-level `:all` builds.
 fuchsia_bazel_dirs = [
     d for d in bazel_dirs if d in test_bazel_dirs_set and has_non_suite_bazel_targets(d)
+]
+substantive_host_dirs = [
+    d for d in host_dirs if has_non_suite_bazel_targets(d)
 ]
 
 
@@ -1159,7 +1411,7 @@ def build_bazel_step_cmd(step_name):
         return (
             [fx, "bazel", "build", "--config=host", "--config=remote"]
             + gn_targets_override("host")
-            + bazel_target_args(host_dirs)
+            + bazel_target_args(substantive_host_dirs)
         )
     if step_name == "bazel_test_host":
         return (
@@ -1171,7 +1423,7 @@ def build_bazel_step_cmd(step_name):
 
 if fuchsia_bazel_dirs:
     steps.append(("bazel_build_fuchsia", build_bazel_step_cmd("bazel_build_fuchsia")))
-if host_dirs:
+if substantive_host_dirs:
     steps.append(("bazel_build_host", build_bazel_step_cmd("bazel_build_host")))
 if host_test_targets:
     steps.append(("bazel_test_host", build_bazel_step_cmd("bazel_test_host")))
@@ -1328,10 +1580,37 @@ worktree_dirty_vs_head = bool(
     git_lines(["diff", "--name-only", "HEAD", "--"])
     or [u for u in git_lines(["ls-files", "--others", "--exclude-standard"]) if any(u == d or u.startswith(d + "/") for d in dirs)]
 )
+# Verify HEAD belongs to this task (not a stacked prerequisite commit for another
+# package) before validating HEAD's commit message `Test:` footers.
+def _is_task_local_head_commit(h_sha, uploaded_env):
+    if not h_sha:
+        return False
+    if not target_dirs:
+        return True
+    if uploaded_env:
+        up_sha = (
+            git_lines(["rev-parse", "--verify", f"{uploaded_env}^{{commit}}"])
+            or [""]
+        )[0]
+        if up_sha and up_sha == h_sha:
+            return True
+    eff_tdirs = list(target_dirs)
+    for td in target_dirs:
+        if td.startswith("build/secondary/"):
+            sec = td[len("build/secondary/") :].strip("/")
+            if sec and sec not in eff_tdirs:
+                eff_tdirs.append(sec)
+    head_files = git_lines(["diff-tree", "--no-commit-id", "--name-only", "-r", h_sha])
+    return any(
+        f == td or f.startswith(td + "/") for td in eff_tdirs for f in head_files
+    )
+
+
 head_subj = (git_lines(["log", "-1", "--format=%s", "HEAD"]) or [""])[0]
 has_local_commit = bool(
     changed
     and not head_is_upstream
+    and _is_task_local_head_commit(head_sha, uploaded_commit_env)
     and ((head_sha and base_sha and head_sha != base_sha) or "[bazel_migration]" in head_subj)
 )
 if has_local_commit and not worktree_dirty_vs_head:
@@ -1408,33 +1687,6 @@ if has_local_commit and not worktree_dirty_vs_head:
                         "rejects `:all` and labels without `@` in `Test:` footers)."
                     ),
                 })
-        if "fx bazel build" in m_line:
-            missing_excls = []
-            for d_all in re.findall(r"//([^\s:;\"'`]+):all\b", m_line):
-                for excl in validate_json_exclusions(d_all.strip("/")):
-                    if excl not in m_line and excl not in missing_excls:
-                        missing_excls.append(excl)
-            if missing_excls:
-                findings.append({
-                    "source": "build_verification",
-                    "category": "unexcluded_validate_json_in_test_footer",
-                    "severity": "ERROR",
-                    "file": "",
-                    "line": 0,
-                    "message": (
-                        f"Commit `Test:` footer `{m_line.strip()}` runs `fx bazel build` with `:all` on a package "
-                        f"defining `fidl_library`/`validate_json` without excluding `{' '.join(missing_excls)}`. "
-                        "`assert_no_deps_aspect` crashes with `Error: type 'Target' is not iterable` when `:all` "
-                        "applies it at the top level to `_validate_json_action`."
-                    ),
-                    "remediation": (
-                        "Do not use `:all` in the commit `Test:` footer or `CoderReport.test_footers` "
-                        "(commit_message_format rejects `:all` footers): name each migrated target explicitly "
-                        "as `@//<dir>:<target>` (e.g. `fx bazel build --config=fuchsia_platform "
-                        "@//<dir>:<target>`), which never applies `assert_no_deps_aspect` to "
-                        f"`{' '.join(missing_excls)}` at the top level."
-                    ),
-                })
         # Check that `fx build` footers only pass GN labels configured in the active toolchain
         # (unqualified host-only targets fail `fx gn desc` in the default Fuchsia toolchain).
         if toolchains_map is not None and re.search(r"\bfx\s+build\b", test_cmd):
@@ -1492,7 +1744,7 @@ if has_local_commit and not worktree_dirty_vs_head:
             bz_test_re = (
                 r"\b(?:fx_unittest_package|fx_unittest_component|fx_test|fx_test_package|"
                 r"host_rustc_test|wrap_host_rust_test|host_go_test|host_py_test|host_test|"
-                r"host_cc_test|host_shac_test|rustc_test|go_test|cc_test|test_suite)\s*\("
+                r"host_cc_test|host_shac_test|golden_test|rustc_test|go_test|cc_test|test_suite)\s*\("
             )
             gn_test_re = (
                 r"\b(?:fuchsia_unittest_package|fuchsia_test_package|fuchsia_test|"
@@ -1664,7 +1916,15 @@ if has_local_commit and not worktree_dirty_vs_head:
                         "is the required convention, not a `machinery_conflict` (do not report it in `disputed_findings`)."
                     ),
                 })
-    if len(test_footer_lines) > 3:
+    # Cap build/test `Test:` lines only. The trailing shac/bazel2gn verification line
+    # (`fx lint`, `shac check`, `verify_bazel2gn`, `fx bazel2gn`) is excluded: its form is
+    # owned by commit_message_format's test_footer_bazel2gn_form, and upload may re-add or
+    # strip it, so counting it here made the cap contradict one `fx test` per test target.
+    build_test_footer_lines = [
+        l for l in test_footer_lines
+        if not re.search(r"\bfx\s+lint\b|\bshac\s+check\b|verify_bazel2gn|\bfx bazel2gn\b", l)
+    ]
+    if len(build_test_footer_lines) > 3:
         findings.append({
             "source": "build_verification",
             "category": "too_many_test_footer_lines",
@@ -1672,15 +1932,17 @@ if has_local_commit and not worktree_dirty_vs_head:
             "file": "COMMIT_MSG",
             "line": 0,
             "message": (
-                f"Commit message has {len(test_footer_lines)} `Test:` footer lines (at most 3 allowed). "
-                "Per-package incremental build or query lines clutter the commit message when more than 3 `Test:` lines are present."
+                f"Commit message has {len(build_test_footer_lines)} build/test `Test:` footer lines "
+                "(at most 3 allowed, not counting the trailing `fx lint` line). Per-package "
+                "incremental build or query lines clutter the commit message."
             ),
             "remediation": (
-                "Consolidate the commit message `Test:` footers (and `CoderReport.test_footers`) to at most 3 lines: "
-                "one `fx bazel test|build --config=fuchsia_platform @//<dir>:<test>` line for the migrated test targets, "
-                "one `fx bazel test --config=host @//<dir>:<host test>` line when host tests exist, and "
-                "`fx lint` last; "
-                "remove redundant per-package `fx build` / `fx bazel build` / `fx bazel query` lines."
+                "Consolidate the build/test `Test:` footers (and `CoderReport.test_footers`) to at "
+                "most 3 lines, e.g. one `fx test //<dir>:<test>` per migrated test target, or one "
+                "`fx bazel test|build --config=fuchsia_platform @//<dir>:<test>` line covering them "
+                "plus one `fx bazel test --config=host @//<dir>:<host test>` line; keep a single "
+                "`fx lint` last and drop any extra shac/bazel2gn line. Remove redundant per-package "
+                "`fx build` / `fx bazel build` / `fx bazel query` lines."
             ),
         })
 
@@ -1817,6 +2079,105 @@ if uploaded_commit and not dry_run and os.environ.get("PLANTER_BUILD_NO_REUSE", 
         })
         print(json.dumps(findings, indent=2))
         sys.exit(0)
+
+# Check whether `prebuilt/tools/shac/shac` is older than `min_shac_version` in
+# `shac.textproto` and refresh it in place from the CIPD version pinned in
+# `manifests/jiri.lock` or `manifests/prebuilts`.
+def _parse_semver_tuple(raw_ver):
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", raw_ver or "")
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def _read_pinned_shac_cipd_version(cipd_pkg):
+    lock_txt = read("manifests/jiri.lock") or ""
+    if lock_txt:
+        try:
+            for entry in json.loads(lock_txt):
+                if isinstance(entry, dict) and entry.get("package") == cipd_pkg:
+                    ver = str(entry.get("version", "")).strip()
+                    if ver:
+                        return ver
+        except Exception:
+            pass
+    prebuilts_txt = read("manifests/prebuilts") or ""
+    m = re.search(
+        r'name="fuchsia/shac/\$\{platform\}"[\s\S]{0,300}?version="([^"]+)"',
+        prebuilts_txt,
+    )
+    return m.group(1).strip() if m else ""
+
+
+def _refresh_stale_shac_prebuilt():
+    shac_cfg = read("shac.textproto") or ""
+    m_req = re.search(r'(?m)^\s*min_shac_version\s*:\s*"([^"]+)"', shac_cfg)
+    if not m_req:
+        return
+    req_tuple = _parse_semver_tuple(m_req.group(1))
+    if not req_tuple:
+        return
+    shac_dir = os.path.join(workdir, "prebuilt", "tools", "shac")
+    shac_bin = os.path.join(shac_dir, "shac")
+    cur_tuple = None
+    if os.path.isfile(shac_bin):
+        try:
+            ver_out = subprocess.check_output(
+                [shac_bin, "version"],
+                cwd=workdir,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=10,
+            )
+            cur_tuple = _parse_semver_tuple(ver_out)
+        except Exception:
+            cur_tuple = None
+    if cur_tuple is not None and cur_tuple >= req_tuple:
+        return
+    arch = "arm64" if os.uname().machine in ("aarch64", "arm64") else "amd64"
+    cipd_pkg = f"fuchsia/shac/linux-{arch}"
+    pinned_ver = _read_pinned_shac_cipd_version(cipd_pkg)
+    if not pinned_ver:
+        return
+    cipd_bin = os.path.join(workdir, ".jiri_root", "bin", "cipd")
+    if not os.path.isfile(cipd_bin):
+        cipd_bin = shutil.which("cipd") or ""
+    if not cipd_bin or not os.path.isdir(shac_dir):
+        return
+    tmp_dir = None
+    tmp_bin = None
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix="planter-cipd-shac-")
+        subprocess.run(
+            [cipd_bin, "export", "-root", tmp_dir, "-ensure-file", "-"],
+            input=f"{cipd_pkg} {pinned_ver}\n",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+        exported_shac = os.path.join(tmp_dir, "shac")
+        if not os.path.isfile(exported_shac):
+            return
+        fd, tmp_bin = tempfile.mkstemp(dir=shac_dir, prefix=".shac-prebuilt.")
+        os.close(fd)
+        shutil.copyfile(exported_shac, tmp_bin)
+        os.chmod(tmp_bin, 0o755)
+        os.replace(tmp_bin, shac_bin)
+        tmp_bin = None
+    except Exception:
+        pass
+    finally:
+        if tmp_bin and os.path.lexists(tmp_bin):
+            try:
+                os.unlink(tmp_bin)
+            except OSError:
+                pass
+        if tmp_dir and os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+if not dry_run:
+    _refresh_stale_shac_prebuilt()
 
 reuse_path = None
 reuse_key = None
@@ -2013,6 +2374,11 @@ def check_ext_repo_failed_test_footers(step_items, footer_lines, target_pkg_dirs
                 })
 
 
+# Emit a single workspace_write_error finding when the checkout/build mount rejects writes.
+def append_workspace_write_error(pdir, err):
+    findings.append(build_workspace_write_error_finding(pdir, err))
+
+
 if reused is not None:
     # Refresh cached bazel_tests_note / dependents_note wording when reusing a build result.
     for rf in reused:
@@ -2070,12 +2436,107 @@ NINJA_FAILED_PYTHON_STAMP = re.compile(
     r"^FAILED:\s*(?:\[code=\d+\]\s+)?(?:host_[A-Za-z0-9_]+/)?obj/"
     r"([A-Za-z0-9_./+-]+)/([^/\s]+)\.(?:mypy_checked|check)\b"
 )
+# Extract the GN package and target name from a failed Ninja C/C++ object compile output.
+NINJA_FAILED_CC_OBJ = re.compile(
+    r"^FAILED:\s*(?:\[code=\d+\]\s+)?(?:[A-Za-z0-9_+-]+/)?obj/"
+    r"([A-Za-z0-9_./+-]+)/([^/\s.]+)\.[A-Za-z0-9_.$+-]+\.(?:o|obj)\b"
+)
 NINJA_MISSING_RULE = re.compile(
     r"^ninja: error: '([^']+)', needed by '([^']+)', missing and no known rule to make it$"
 )
 NINJA_MISSING_PREBUILT = re.compile(
     r"(?:\.\./)+(prebuilt/[A-Za-z0-9_./+-]+):\s*No such file or directory"
 )
+NINJA_SRC_INCLUDE_DIR = re.compile(
+    r"(?:^|\s)(?:-I|-isystem\s*)(?:\.\./){2,}([A-Za-z0-9_./+-]+)"
+)
+NINJA_HEADER_NOT_FOUND = re.compile(
+    r"['\"<]([^'\">]+)['\">]\s*file not found"
+)
+
+
+# Check whether a missing header path belongs to any of the task's changed directories.
+def _header_belongs_to_changed_dirs(hdr):
+    clean_hdr = (hdr or "").strip().strip("/")
+    if not clean_hdr:
+        return False
+    for d in dirs:
+        base_d = os.path.basename(d)
+        if clean_hdr == d or clean_hdr.startswith(d + "/"):
+            return True
+        if base_d and clean_hdr.startswith(base_d + "/"):
+            return True
+        for rel_cand in (f"{d}/{clean_hdr}", f"{d}/include/{clean_hdr}"):
+            if os.path.exists(os.path.join(workdir, rel_cand)) or _existed_at_change_base(
+                rel_cand
+            ):
+                return True
+    return False
+
+
+# Check whether failed Ninja compile steps failed solely on missing header file(s) when
+# their command line passes `-I../../<dir>` for an unpopulated submodule/subrepository
+# directory that does not exist on disk in the checkout.
+def unrelated_ninja_missing_include_dir(lines):
+    failed_indices = [i for i, l in enumerate(lines) if l.startswith("FAILED:")]
+    if not failed_indices:
+        return None
+    missing_inc_dirs = []
+    for idx in failed_indices:
+        end_idx = len(lines)
+        for j in range(idx + 1, len(lines)):
+            if (
+                lines[j].startswith(("FAILED:", "ninja:"))
+                or re.match(r"^\[\d+/\d+\]", lines[j])
+            ):
+                end_idx = j
+                break
+        cmd_line = lines[idx + 1] if idx + 1 < end_idx else ""
+        step_missing = []
+        for raw_inc in NINJA_SRC_INCLUDE_DIR.findall(cmd_line):
+            rel_dir = os.path.normpath(raw_inc).strip("/")
+            if not rel_dir or rel_dir == "." or rel_dir.startswith(("out/", "../")):
+                continue
+            if os.path.exists(os.path.join(workdir, rel_dir)):
+                continue
+            if any(
+                rel_dir == d
+                or rel_dir.startswith(d + "/")
+                or d.startswith(rel_dir + "/")
+                for d in dirs
+            ):
+                return None
+            if git_lines(["diff", "--name-only", change_base, "--", rel_dir]):
+                return None
+            if rel_dir not in step_missing:
+                step_missing.append(rel_dir)
+        if not step_missing:
+            return None
+        diag_lines = [
+            l
+            for l in lines[idx + 2 : end_idx]
+            if ": error:" in l or ": fatal error:" in l
+        ]
+        if not diag_lines:
+            return None
+        for dl in diag_lines:
+            m_hdr = NINJA_HEADER_NOT_FOUND.search(dl)
+            if not m_hdr or _header_belongs_to_changed_dirs(m_hdr.group(1)):
+                return None
+        for rel_dir in step_missing:
+            if rel_dir not in missing_inc_dirs:
+                missing_inc_dirs.append(rel_dir)
+    if not missing_inc_dirs:
+        return None
+    shown_dirs = " ".join(missing_inc_dirs)
+    return (
+        f"Ninja compile failed on missing include directory ({shown_dirs}) from an "
+        "unpopulated or out-of-sync submodule/subrepository in the checkout. Do not edit "
+        "unrelated packages or report this pre-existing failure in `disputed_findings` "
+        "(set `disputed_findings` to `[]` in `CoderReport` and list only exit-0 commands "
+        "such as `fx bazel build` in `Test:` footers); the changed packages are still "
+        "verified by `shac_check` and the Bazel build steps."
+    )
 
 
 # Check whether Ninja failed because a CIPD prebuilt tool under `prebuilt/` is missing on disk
@@ -2108,13 +2569,17 @@ def unrelated_ninja_missing_prebuilt(lines):
 
 
 # Check whether a single failed Ninja step is in an unrelated GN target with no dependency path
-# to any changed package (via Rust transdeps or Python mypy/build-time-test library_infos).
+# to any changed package (via Rust transdeps, Python library_infos, or C/C++ compile steps).
 def unrelated_ninja_step_target(lines, idx, build_dir, rdep_pkgs):
     pm = NINJA_FAILED_PYTHON_STAMP.match(lines[idx].strip())
+    cm = NINJA_FAILED_CC_OBJ.match(lines[idx].strip())
     sm = NINJA_STEP_TARGET.match(lines[idx - 1].strip()) if idx > 0 else None
     if pm:
         pkg = pm.group(1).strip("/")
         full_lbl = f"//{pkg}:{pm.group(2)}"
+    elif cm:
+        pkg = cm.group(1).strip("/")
+        full_lbl = f"//{pkg}:{cm.group(2)}"
     elif sm:
         full_lbl, pkg = sm.group(1), sm.group(2).strip("/")
     else:
@@ -2124,6 +2589,10 @@ def unrelated_ninja_step_target(lines, idx, build_dir, rdep_pkgs):
     if pkg in rdep_pkgs or git_lines(["diff", "--name-only", change_base, "--", pkg]):
         return None
     cmd_line = lines[idx + 1] if idx + 1 < len(lines) else ""
+    if cm:
+        if any(f"/{d}/" in cmd_line for d in dirs):
+            return None
+        return full_lbl
     tm = TRANSDEPS_ARG.search(cmd_line)
     if tm and build_dir:
         t_content = read(os.path.join(build_dir, tm.group(1)))
@@ -2257,7 +2726,10 @@ def unrelated_regenerator_bazel_query_failure(output):
 # Check whether a native Ninja failure in `fx build` is in an unrelated GN target
 # outside the changed packages and their reverse dependencies.
 def unrelated_gn_ninja_failure(output):
-    if not bazel_dirs or any(p.endswith((".gni", ".bzl", "MODULE.bazel")) for p in changed):
+    if not bazel_dirs or any(
+        p.endswith((".gni", ".bzl", "MODULE.bazel")) and p != "sdk/atom_lists.bzl"
+        for p in changed
+    ):
         return None
     if re.search(r"ERROR at //", output):
         return None
@@ -2275,6 +2747,9 @@ def unrelated_gn_ninja_failure(output):
     missing_prebuilt_note = unrelated_ninja_missing_prebuilt(lines)
     if missing_prebuilt_note:
         return missing_prebuilt_note
+    missing_inc_note = unrelated_ninja_missing_include_dir(lines)
+    if missing_inc_note:
+        return missing_inc_note
     build_dir = (read(".fx-build-dir") or "").strip()
     failed_targets = []
     for i, l in enumerate(lines):
@@ -2292,6 +2767,192 @@ def unrelated_gn_ninja_failure(output):
         "and have no dependency path to any changed package, so the failure predates the change "
         "(pre-existing upstream build failure). Do not edit them; the changed packages and their "
         "GN dependents are still verified by the remaining steps."
+    )
+
+
+# Persist unmigrated target directories that fail GN compilation at unmodified base_sha
+# so migration_sanity recognizes pre-existing bitrot blockers on subsequent check runs.
+def _record_preexisting_gn_failure_pkgs(pkg_list):
+    if not base_sha or not pkg_list:
+        return
+    try:
+        gdir = subprocess.check_output(
+            ["git", "-C", workdir, "rev-parse", "--absolute-git-dir"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        if not gdir or not os.path.isdir(gdir):
+            return
+        rec_path = os.path.join(gdir, "planter-preexisting-gn-failures.json")
+        entries = {}
+        try:
+            with open(rec_path, encoding="utf-8") as rf:
+                old = json.load(rf)
+            if isinstance(old, dict) and isinstance(old.get("entries"), dict):
+                entries = old["entries"]
+        except (OSError, ValueError):
+            pass
+        now_ts = int(time.time())
+        for d in pkg_list:
+            if d:
+                entries[f"{base_sha}:{d}"] = now_ts
+        if len(entries) > 50:
+            newest = sorted(entries.items(), key=lambda kv: kv[1], reverse=True)[:50]
+            entries = dict(newest)
+        fd, tmp = tempfile.mkstemp(
+            dir=gdir, prefix=".planter-preexisting-gn-failures."
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as wf:
+            json.dump({"entries": entries}, wf)
+        os.replace(tmp, rec_path)
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        pass
+
+
+# Collect owning package directories for untouched non-build source diagnostics in output.
+def _unmodified_failing_source_pkgs(output):
+    src_exts = (
+        ".rs", ".cc", ".c", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".go", ".py", ".fidl",
+    )
+    pkgs = []
+    for m in LOCATION.finditer(output):
+        loc_path = m.group(1).replace("../../", "", 1)
+        if loc_path.startswith(workdir + "/"):
+            loc_path = loc_path[len(workdir) + 1 :]
+        loc_path = os.path.normpath(loc_path).strip("/")
+        if loc_path.startswith(("bazel-out/", "external/", "out/", "prebuilt/")):
+            continue
+        if not loc_path.endswith(src_exts) or loc_path in changed_set:
+            return []
+        if not _existed_at_change_base(loc_path):
+            return []
+        pkg_d = _owning_pkg_dir(loc_path)
+        if not pkg_d:
+            return []
+        if pkg_d not in pkgs:
+            pkgs.append(pkg_d)
+    return pkgs
+
+
+def _pkg_dir_variants(pkg_d):
+    clean = (pkg_d or "").strip("/")
+    if not clean:
+        return []
+    out = [clean]
+    if clean.startswith("build/secondary/"):
+        overlaid = clean[len("build/secondary/") :].strip("/")
+        if overlaid and overlaid not in out:
+            out.append(overlaid)
+    else:
+        sec = f"build/secondary/{clean}"
+        if sec not in out:
+            out.append(sec)
+    return out
+
+
+def _has_pkg_bazel_build(pkg_d):
+    clean = (pkg_d or "").strip("/")
+    cands = [clean]
+    if clean.startswith("build/secondary/"):
+        overlaid = clean[len("build/secondary/") :].strip("/")
+        if overlaid:
+            cands.append(overlaid)
+    for c in cands:
+        if (
+            os.path.isfile(os.path.join(workdir, c, "BUILD.bazel"))
+            or os.path.isfile(os.path.join(workdir, c, "BUILD"))
+        ):
+            return True
+    return False
+
+
+def _expand_pkgs_for_preexisting_record(pkgs):
+    expanded = []
+    for d in pkgs:
+        for v in _pkg_dir_variants(d):
+            if v == d or v in target_dirs or os.path.exists(os.path.join(workdir, v)):
+                if v not in expanded:
+                    expanded.append(v)
+    return expanded
+
+
+# Detect pre-existing GN compilation failures in an unmodified checkout or untouched
+# unmigrated target directory so build_verification emits preexisting_failure_<step> (INFO).
+def preexisting_unmodified_gn_failure(step_name, step_code, output):
+    _ = step_name
+    if step_code == "timeout":
+        return None
+    if re.search(
+        r"fx set|no build directory|Unable to find build directory", output, re.I
+    ):
+        return None
+    overlaid_tdirs = set(target_dirs)
+    for td in target_dirs:
+        overlaid_tdirs.update(_pkg_dir_variants(td))
+    unmodified_tree = (
+        not changed_set
+        and not has_local_commit
+        and not worktree_dirty_vs_head
+        and (not head_sha or not base_sha or head_sha == base_sha)
+    )
+    src_pkgs = _unmodified_failing_source_pkgs(output)
+    if unmodified_tree:
+        cand_pkgs = (
+            [d for d in src_pkgs if d in overlaid_tdirs]
+            if src_pkgs
+            else list(target_dirs)
+        )
+        unmig_tdirs = [
+            d for d in cand_pkgs if d in overlaid_tdirs and not _has_pkg_bazel_build(d)
+        ]
+        _record_preexisting_gn_failure_pkgs(
+            _expand_pkgs_for_preexisting_record(unmig_tdirs)
+        )
+        return (
+            "the working tree has no modifications relative to the change base, so "
+            "this GN build failure is pre-existing at unmodified HEAD (for example, "
+            "source bitrot in a package disconnected from the GN build graph; see "
+            "//build/beads/references/migration/scoping_changelists.md Section 3.E). "
+            "Do not edit source files (`build_only_scope`); leave the broken package "
+            "unmigrated (`modified_files: []`, `test_footers: [\"fx lint\"]`, and "
+            "`disputed_findings: []`), re-run `run_checks.sh` so `migration_sanity` "
+            "records the blocker, and never dispute post-turn "
+            "`migration_sanity/empty_migration_diff` or this `INFO` note."
+        )
+    if (
+        not src_pkgs
+        or any(p.endswith((".gni", ".bzl", "MODULE.bazel")) for p in changed_set)
+    ):
+        return None
+    changed_pkgs = set()
+    for f in changed_set:
+        opkg = _owning_pkg_dir(f)
+        if opkg:
+            changed_pkgs.update(_pkg_dir_variants(opkg))
+    for pkg_d in src_pkgs:
+        if pkg_d not in overlaid_tdirs:
+            return None
+        if _has_pkg_bazel_build(pkg_d):
+            return None
+        pkg_vars = _pkg_dir_variants(pkg_d)
+        if any(_path_in_pkg_dirs(f, pkg_vars) for f in changed_set):
+            return None
+        raw_gn = read(f"{pkg_d}/BUILD.gn")
+        if not raw_gn and not pkg_d.startswith("build/secondary/"):
+            raw_gn = read(f"build/secondary/{pkg_d}/BUILD.gn")
+        gn_txt = gn_code(raw_gn or "")
+        for raw_s in re.findall(r'"([^"]+)"', gn_txt):
+            dep_d = label_dir(raw_s, pkg_d)
+            if dep_d and dep_d in changed_pkgs:
+                return None
+    _record_preexisting_gn_failure_pkgs(_expand_pkgs_for_preexisting_record(src_pkgs))
+    shown = " ".join(f"//{d}" for d in src_pkgs)
+    return (
+        f"the failing GN compilation in unmigrated target package(s) ({shown}) "
+        "occurs in untouched source files with no dependency on any changed package, "
+        "so it is pre-existing at unmodified HEAD. Leave the broken package "
+        "unmigrated for a separate precursor CL (see scoping_changelists.md "
+        "Section 3.E) and do not dispute this `INFO` note."
     )
 
 
@@ -2871,9 +3532,26 @@ def _build_only_third_party_readme_shac_note(finding_lines):
 
 
 # Check whether a `shac check` failure (such as repo-wide `verify_bazel2gn`, stacked
-# ancestor commit messages, or pre-existing `unchanged_lines_warning_only` warnings on
-# untouched targets of modified files) only reports items outside the task's change.
+# ancestor commit messages, pre-existing `unchanged_lines_warning_only` warnings on
+# untouched targets of modified files, or a stale CIPD `shac` prebuilt older than
+# `shac.textproto`'s `min_shac_version`) only reports items outside the task's change.
 def unrelated_shac_failure(output):
+    m_ver = re.search(
+        r'shac:\s*min_shac_version specifies unsupported version\s*"([^"]+)",\s*running\s*(\S+)',
+        output,
+    )
+    if m_ver and "shac.textproto" not in changed_set:
+        req_v, cur_v = m_ver.group(1), m_ver.group(2)
+        return (
+            f"the checkout's local `shac` prebuilt binary ({cur_v}) is older "
+            f"than `min_shac_version: \"{req_v}\"` in `shac.textproto` (for example after "
+            "rebasing onto a newer `origin/main` revision without updating gitignored CIPD "
+            "prebuilts). Do not edit `shac.textproto` or report this pre-existing environment "
+            "mismatch in `disputed_findings` (set `disputed_findings` to `[]` in `CoderReport` "
+            "and omit `fx lint` from `Test:` footers when `modified_files` is non-empty and "
+            "`fx lint` exits non-zero); `bazel_shac_lint` and the remaining steps still verify "
+            "the change."
+        )
     if not dirs or any(
         p.startswith(("scripts/shac/", "build/tools/bazel2gn/")) for p in changed
     ):
@@ -3012,101 +3690,6 @@ def planter_banner_only_shac_failure(output):
         "report this as a machinery conflict."
     )
 
-
-# Probe that .git, the build output directory, and the checkout accept non-empty
-# file writes (degraded FUSE/casfs mounts allow 0-byte O_CREAT metadata ops while
-# failing write() with ENOENT/EROFS/EIO).
-def workspace_write_probe_error():
-    probe_bytes = b"planter-write-probe\n"
-    probe_dirs = []
-    try:
-        gdir = subprocess.check_output(
-            ["git", "-C", workdir, "rev-parse", "--absolute-git-dir"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        if gdir and os.path.isdir(gdir):
-            probe_dirs.append(gdir)
-    except (OSError, subprocess.CalledProcessError):
-        pass
-    bdir_rel = (read(".fx-build-dir") or "").strip()
-    if bdir_rel:
-        bdir_abs = os.path.join(workdir, bdir_rel)
-        out_parent = os.path.dirname(bdir_abs)
-        for cand_dir in (out_parent, bdir_abs):
-            if os.path.isdir(cand_dir) and cand_dir not in probe_dirs:
-                probe_dirs.append(cand_dir)
-    else:
-        out_abs = os.path.join(workdir, "out")
-        if os.path.isdir(out_abs) and out_abs not in probe_dirs:
-            probe_dirs.append(out_abs)
-    if os.path.isdir(workdir) and workdir not in probe_dirs:
-        probe_dirs.append(workdir)
-    for pdir in probe_dirs:
-        fd = None
-        probe_path = None
-        try:
-            fd, probe_path = tempfile.mkstemp(
-                dir=pdir, prefix=".planter-write-probe."
-            )
-            os.write(fd, probe_bytes)
-            os.close(fd)
-            fd = None
-            with open(probe_path, "rb") as rf:
-                if rf.read() != probe_bytes:
-                    raise OSError("short write during writability probe")
-            os.unlink(probe_path)
-        except OSError as err:
-            if fd is not None:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            if probe_path and os.path.lexists(probe_path):
-                try:
-                    os.unlink(probe_path)
-                except OSError:
-                    pass
-            return pdir, err
-    return None
-
-
-# Emit a single workspace_write_error finding when the checkout/build mount rejects writes.
-def append_workspace_write_error(pdir, err):
-    msg = (
-        f"Filesystem write failed during writability probe in `{pdir}` ({err}). "
-        "The checkout, `.git`, or build directory mount is rejecting file writes "
-        "(for example a degraded FUSE/casfs mount), so `fx build`, `fx lint`, "
-        "and `fx bazel` cannot run."
-    )
-    rem = (
-        "This is a workspace filesystem/mount write failure, not a BUILD.bazel or "
-        "BUILD.gn defect. Do not edit build files to work around it; stop retrying "
-        "failing build or `git commit` write commands, set `test_footers` to "
-        "`[\"fx lint\"]` and `disputed_findings` to `[]` in "
-        "`CoderReport` (an empty `test_footers` fails `test_verifier` with "
-        "`missing_test_footer`, while `fx bazel`/`fx build`/`fx test` target "
-        "commands trigger spurious `test_verifier` query errors on an unwritable "
-        "mount), and report the mount write error in `summary`."
-    )
-    findings.append({
-        "source": "build_verification",
-        "category": "workspace_write_error",
-        "severity": "ERROR",
-        "message": msg,
-        "remediation": rem,
-    })
-
-
-if not dry_run:
-    upfront_write_err = workspace_write_probe_error()
-    if upfront_write_err is not None:
-        # Drop pre-build commit Test: footer errors when .git/mount rejects writes.
-        findings[:] = [f for f in findings if f.get("severity") not in STEP_BLOCKING]
-        append_workspace_write_error(*upfront_write_err)
-        print(json.dumps(findings, indent=2))
-        sys.exit(0)
-
 # Return any GN prerequisite targets needed before running `bazel_build_fuchsia`.
 def fuchsia_platform_gn_prereqs():
     if not fuchsia_bazel_dirs:
@@ -3121,9 +3704,585 @@ def fuchsia_platform_gn_prereqs():
     return prereqs
 
 
+# Temporarily strip stale `# planter-managed` label entries from `<build dir>/args.gn`
+# during build/test steps when their GN target was removed from `<pkg>/BUILD.gn`
+# (or is host-only under `target_labels`), restoring original `args.gn` bytes afterward.
+import atexit
+
+_PLANTER_MANAGED_COMMENT_RE = re.compile(r"#\s*planter-managed\b", re.I)
+_ARGS_GN_LABEL_ASSIGN_RE = re.compile(r"^\s*([A-Za-z_]\w*_labels)\s*(\+?=|-=)")
+_swapped_args_gn_state = []
+
+
+def _blank_gn_comments_bv(text):
+    return re.sub(
+        r'("(?:\\.|[^"\\])*")|#[^\n]*',
+        lambda m: m.group(1) or " " * len(m.group(0)),
+        text,
+    )
+
+
+def _gn_closing_brace_bv(code, open_idx):
+    depth, in_str, idx = 0, False, open_idx
+    while idx < len(code):
+        ch = code[idx]
+        if in_str:
+            if ch == "\\":
+                idx += 2
+                continue
+            in_str = ch != '"'
+        elif ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return idx
+        idx += 1
+    return len(code)
+
+
+def _args_gn_bracket_delta(clean_line):
+    delta = 0
+    in_str = False
+    i = 0
+    while i < len(clean_line):
+        ch = clean_line[i]
+        if in_str:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "([{":
+            delta += 1
+        elif ch in ")]}":
+            delta -= 1
+        i += 1
+    return delta
+
+
+def _consume_args_gn_stmt(raw_lines, start):
+    n = len(raw_lines)
+    clean_first = _blank_gn_comments_bv(raw_lines[start])
+    depth = _args_gn_bracket_delta(clean_first)
+    needs_rhs = bool(re.search(r"(?<![=!<>])=\s*$", clean_first))
+    idx = start + 1
+    while idx < n and (depth > 0 or needs_rhs):
+        clean_ln = _blank_gn_comments_bv(raw_lines[idx])
+        depth = max(0, depth + _args_gn_bracket_delta(clean_ln))
+        needs_rhs = bool(re.search(r"(?<![=!<>])=\s*$", clean_ln))
+        idx += 1
+    return idx
+
+
+def _pos_inside_is_host_gn_block(clean_code, pos):
+    for mh in re.finditer(r"\bif\s*\(\s*is_host\b[^{]*\{", clean_code):
+        brace_i = mh.end() - 1
+        end_i = _gn_closing_brace_bv(clean_code, brace_i)
+        if brace_i < pos < end_i:
+            return True
+    return False
+
+
+def _planter_args_gn_label_resolves(raw_lbl, var_name):
+    has_tc = "(" in raw_lbl
+    lbl = raw_lbl.split("(", 1)[0].strip()
+    if not lbl.startswith("//"):
+        return True
+    path_part, sep, name_part = lbl[2:].partition(":")
+    pkg = path_part.strip("/")
+    t_name = name_part if sep else os.path.basename(pkg)
+    if not t_name:
+        return True
+    gn_rel = os.path.join(pkg, "BUILD.gn") if pkg else "BUILD.gn"
+    gn_path = os.path.join(workdir, gn_rel)
+    if not os.path.isfile(gn_path) and pkg and not pkg.startswith("build/secondary/"):
+        gn_path = os.path.join(workdir, "build", "secondary", gn_rel)
+    if not os.path.isfile(gn_path):
+        return False
+    try:
+        with open(gn_path, "r", encoding="utf-8") as gf:
+            raw_gn = gf.read()
+    except OSError:
+        return False
+    clean = _blank_gn_comments_bv(raw_gn)
+    cand_names = [t_name]
+    if re.search(r"\bwith_unit_tests\s*=\s*true\b", clean):
+        if t_name.endswith("_test") and len(t_name) > 5:
+            cand_names.append(t_name[:-5])
+        elif t_name.endswith("_tests") and len(t_name) > 6:
+            cand_names.append(t_name[:-6])
+    positions = []
+    for cname in cand_names:
+        pat = r'\b(?!import\b)[A-Za-z_]\w*\(\s*"' + re.escape(cname) + r'"\s*\)'
+        for m in re.finditer(pat, clean):
+            positions.append(m.start())
+    if not positions:
+        return False
+    if var_name == "target_labels" and not has_tc:
+        if re.search(r"\bassert\s*\(\s*is_host\b", clean):
+            return False
+        if all(_pos_inside_is_host_gn_block(clean, p) for p in positions):
+            return False
+    return True
+
+
+def _find_top_args_gn_bracket_spans_bv(clean_stmt):
+    spans = []
+    depth = 0
+    in_str = False
+    cur_open = -1
+    ci = 0
+    while ci < len(clean_stmt):
+        ch = clean_stmt[ci]
+        if in_str:
+            if ch == "\\":
+                ci += 2
+                continue
+            if ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "[":
+            if depth == 0:
+                cur_open = ci
+            depth += 1
+        elif ch == "]" and depth > 0:
+            depth -= 1
+            if depth == 0 and cur_open >= 0:
+                spans.append((cur_open, ci))
+                cur_open = -1
+        ci += 1
+    return spans
+
+
+def _strip_pm_comment_from_tail_bv(tail):
+    nl = "\n" if tail.endswith("\n") else ""
+    body = tail[:-1] if nl else tail
+    if _PLANTER_MANAGED_COMMENT_RE.search(body):
+        clean_b = _blank_gn_comments_bv(body)
+        code_len = len(clean_b.rstrip(" \t"))
+        return body[:code_len].rstrip(" \t") + nl
+    return tail
+
+
+def _rewrite_planter_managed_stmt(var_name, op, stmt_lines, whole_stmt_managed=False):
+    full_stmt = "".join(stmt_lines)
+    clean_full = _blank_gn_comments_bv(full_stmt)
+    spans = _find_top_args_gn_bracket_spans_bv(clean_full)
+    if not spans:
+        return full_stmt
+
+    pure_list_assign = (
+        len(spans) == 1
+        and bool(
+            re.match(
+                r"^\s*[A-Za-z_]\w*\s*(?:\+=|-=|=)\s*$",
+                clean_full[: spans[0][0]],
+            )
+        )
+        and not clean_full[spans[0][1] + 1 :].strip()
+    )
+
+    out_stmt = full_stmt
+    changed_any = False
+    single_kept_elems = 0
+    single_kept_lbls = None
+    for idx in range(len(spans) - 1, -1, -1):
+        open_idx, close_idx = spans[idx]
+        open_line_start = full_stmt.rfind("\n", 0, open_idx) + 1
+        open_nl = full_stmt.find("\n", open_idx)
+        open_line_end = len(full_stmt) if open_nl < 0 else open_nl + 1
+        close_line_start = full_stmt.rfind("\n", 0, close_idx) + 1
+        close_nl = full_stmt.find("\n", close_idx)
+        close_line_end = len(full_stmt) if close_nl < 0 else close_nl + 1
+
+        prev_bound = 0
+        if idx > 0:
+            prev_nl = full_stmt.find("\n", spans[idx - 1][1])
+            prev_bound = (
+                min(open_idx, prev_nl + 1)
+                if prev_nl >= 0
+                else spans[idx - 1][1] + 1
+            )
+        next_bound = spans[idx + 1][0] if idx + 1 < len(spans) else len(full_stmt)
+        same_line_brackets = open_line_start == close_line_start
+        last_on_close_line = next_bound >= close_line_end
+
+        before_open_pm = bool(
+            _PLANTER_MANAGED_COMMENT_RE.search(full_stmt[prev_bound:open_idx])
+        )
+        open_rest_code = clean_full[open_idx + 1 : open_line_end].strip()
+        close_pre_code = clean_full[close_line_start:close_idx].strip()
+        open_hdr_pm = (
+            not same_line_brackets
+            and not open_rest_code
+            and bool(
+                _PLANTER_MANAGED_COMMENT_RE.search(
+                    full_stmt[open_idx + 1 : open_line_end]
+                )
+            )
+        )
+        close_ftr_pm = (
+            not same_line_brackets
+            and not close_pre_code
+            and last_on_close_line
+            and bool(
+                _PLANTER_MANAGED_COMMENT_RE.search(
+                    full_stmt[close_idx + 1 : close_line_end]
+                )
+            )
+        )
+        after_close_pm = last_on_close_line and bool(
+            _PLANTER_MANAGED_COMMENT_RE.search(full_stmt[close_line_end:next_bound])
+        )
+        same_line_pm = same_line_brackets and (
+            bool(
+                _PLANTER_MANAGED_COMMENT_RE.search(
+                    full_stmt[open_idx : close_idx + 1]
+                )
+            )
+            or (
+                last_on_close_line
+                and bool(
+                    _PLANTER_MANAGED_COMMENT_RE.search(
+                        full_stmt[close_idx + 1 : close_line_end]
+                    )
+                )
+            )
+        )
+        span_whole_managed = (
+            whole_stmt_managed
+            or before_open_pm
+            or same_line_pm
+            or open_hdr_pm
+            or close_ftr_pm
+            or after_close_pm
+        )
+
+        if same_line_brackets:
+            if not span_whole_managed:
+                single_kept_elems = 1
+                continue
+            inner_clean = clean_full[open_idx + 1 : close_idx]
+            raw_lbls = re.findall(r'"([^"]+)"', inner_clean)
+            if not raw_lbls:
+                continue
+            kept_lbls = [
+                lbl
+                for lbl in raw_lbls
+                if _planter_args_gn_label_resolves(lbl, var_name)
+            ]
+            if len(kept_lbls) == len(raw_lbls):
+                single_kept_elems = len(kept_lbls)
+                continue
+            changed_any = True
+            single_kept_elems = len(kept_lbls)
+            single_kept_lbls = kept_lbls
+            rep_end = close_line_end if last_on_close_line else close_idx + 1
+            tail = out_stmt[close_idx + 1 : rep_end]
+            if not kept_lbls and last_on_close_line:
+                tail = _strip_pm_comment_from_tail_bv(tail)
+            out_stmt = (
+                out_stmt[:open_idx] + json.dumps(kept_lbls) + tail + out_stmt[rep_end:]
+            )
+            continue
+
+        segments = []
+        if open_rest_code:
+            seg = full_stmt[open_idx + 1 : open_line_end]
+            if not seg.endswith("\n"):
+                seg += "\n"
+            segments.append(
+                ("  " + seg.lstrip(" "), full_stmt[open_line_start:open_line_end])
+            )
+        for mid_ln in full_stmt[open_line_end:close_line_start].splitlines(
+            keepends=True
+        ):
+            segments.append((mid_ln, mid_ln))
+        if close_pre_code:
+            seg = full_stmt[close_line_start:close_idx].rstrip() + "\n"
+            segments.append((seg, full_stmt[close_line_start:close_line_end]))
+
+        kept_segs = []
+        kept_elems = 0
+        dropped_in_span = False
+        pending_comments = []
+        pm_comments = []
+        si = 0
+        while si < len(segments):
+            seg_txt, chk_ln = segments[si]
+            stripped = seg_txt.strip()
+            if not stripped:
+                if not pm_comments:
+                    pending_comments.append(seg_txt)
+                else:
+                    pm_comments.append(seg_txt)
+                si += 1
+                continue
+            if stripped.startswith("#"):
+                if _PLANTER_MANAGED_COMMENT_RE.search(chk_ln) or pm_comments:
+                    pm_comments.append(seg_txt)
+                else:
+                    pending_comments.append(seg_txt)
+                si += 1
+                continue
+            elem_segs = [(seg_txt, chk_ln)]
+            edepth = _args_gn_bracket_delta(_blank_gn_comments_bv(seg_txt))
+            si += 1
+            while si < len(segments) and edepth > 0:
+                n_txt, n_chk = segments[si]
+                elem_segs.append((n_txt, n_chk))
+                edepth = max(
+                    0, edepth + _args_gn_bracket_delta(_blank_gn_comments_bv(n_txt))
+                )
+                si += 1
+            elem_pm = (
+                span_whole_managed
+                or bool(pm_comments)
+                or any(_PLANTER_MANAGED_COMMENT_RE.search(c) for _, c in elem_segs)
+            )
+            keep_elem = True
+            if elem_pm:
+                elem_clean = "".join(_blank_gn_comments_bv(t) for t, _ in elem_segs)
+                elem_lbls = re.findall(r'"([^"]+)"', elem_clean)
+                if elem_lbls and not all(
+                    _planter_args_gn_label_resolves(lbl, var_name) for lbl in elem_lbls
+                ):
+                    keep_elem = False
+                    dropped_in_span = True
+            if keep_elem:
+                kept_segs.extend(pending_comments)
+                kept_segs.extend(pm_comments)
+                kept_segs.extend(t for t, _ in elem_segs)
+                kept_elems += 1
+            else:
+                kept_segs.extend(pending_comments)
+            pending_comments = []
+            pm_comments = []
+
+        single_kept_elems = kept_elems
+        if not dropped_in_span:
+            continue
+        changed_any = True
+        rep_end = close_line_end if last_on_close_line else close_idx + 1
+        tail = out_stmt[close_idx + 1 : rep_end]
+        if last_on_close_line and (close_pre_code or kept_elems == 0):
+            tail = _strip_pm_comment_from_tail_bv(tail)
+        if kept_elems == 0:
+            out_stmt = out_stmt[:open_idx] + "[]" + tail + out_stmt[rep_end:]
+        else:
+            kept_segs.extend(pending_comments)
+            open_hdr_tail = (
+                "\n"
+                if open_rest_code
+                else full_stmt[open_idx + 1 : open_line_end]
+            )
+            close_indent = (
+                "" if close_pre_code else full_stmt[close_line_start:close_idx]
+            )
+            rebuilt_span = (
+                "[" + open_hdr_tail + "".join(kept_segs) + close_indent + "]"
+            )
+            out_stmt = (
+                out_stmt[:open_idx] + rebuilt_span + tail + out_stmt[rep_end:]
+            )
+
+    if not changed_any:
+        return full_stmt
+    if pure_list_assign:
+        if single_kept_elems == 0:
+            return f"{var_name} = []\n" if op == "=" else ""
+        if single_kept_lbls is not None:
+            return f"{var_name} {op} {json.dumps(single_kept_lbls)}  # planter-managed\n"
+    if not out_stmt.endswith("\n"):
+        out_stmt += "\n"
+    return out_stmt
+
+
+def _strip_stale_planter_managed_args_gn(raw_args):
+    if not _PLANTER_MANAGED_COMMENT_RE.search(raw_args):
+        return raw_args
+    raw_lines = raw_args.splitlines(keepends=True)
+    kept = []
+    i = 0
+    n = len(raw_lines)
+    while i < n:
+        line = raw_lines[i]
+        if line.lstrip().startswith("#") and _PLANTER_MANAGED_COMMENT_RE.search(line):
+            comment_start = i
+            while (
+                i < n
+                and raw_lines[i].lstrip().startswith("#")
+                and _PLANTER_MANAGED_COMMENT_RE.search(raw_lines[i])
+            ):
+                i += 1
+            if i < n:
+                m_next = _ARGS_GN_LABEL_ASSIGN_RE.match(
+                    _blank_gn_comments_bv(raw_lines[i])
+                )
+                if m_next:
+                    var_name, op = m_next.group(1), m_next.group(2)
+                    end = _consume_args_gn_stmt(raw_lines, i)
+                    rewritten = _rewrite_planter_managed_stmt(
+                        var_name, op, raw_lines[i:end], whole_stmt_managed=True
+                    )
+                    if rewritten == "".join(raw_lines[i:end]):
+                        kept.extend(raw_lines[comment_start:end])
+                    elif rewritten:
+                        if not _PLANTER_MANAGED_COMMENT_RE.search(rewritten) and bool(
+                            re.search(r'"[^"]+"', _blank_gn_comments_bv(rewritten))
+                        ):
+                            kept.extend(raw_lines[comment_start:i])
+                        kept.append(rewritten)
+                    i = end
+                    continue
+            kept.extend(raw_lines[comment_start:i])
+            continue
+        m_stmt = _ARGS_GN_LABEL_ASSIGN_RE.match(_blank_gn_comments_bv(line))
+        if m_stmt:
+            var_name, op = m_stmt.group(1), m_stmt.group(2)
+            end = _consume_args_gn_stmt(raw_lines, i)
+            stmt_lines = raw_lines[i:end]
+            i = end
+            if any(_PLANTER_MANAGED_COMMENT_RE.search(ln) for ln in stmt_lines):
+                rewritten = _rewrite_planter_managed_stmt(var_name, op, stmt_lines)
+                if rewritten:
+                    kept.append(rewritten)
+                continue
+            kept.extend(stmt_lines)
+            continue
+        kept.append(line)
+        i += 1
+    return "".join(kept)
+
+
+def _restore_swapped_args_gn():
+    while _swapped_args_gn_state:
+        args_path, orig_bytes = _swapped_args_gn_state.pop()
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=os.path.dirname(args_path),
+                prefix=".planter-args-restore.",
+            )
+            with os.fdopen(fd, "wb") as af:
+                af.write(orig_bytes)
+            os.replace(tmp_path, args_path)
+        except OSError:
+            if tmp_path and os.path.lexists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+
+def _swap_stale_planter_args_gn():
+    if dry_run or skip_build or not steps:
+        return
+    bdir = os.environ.get("FUCHSIA_BUILD_DIR", "").strip()
+    if not bdir:
+        try:
+            with open(
+                os.path.join(workdir, ".fx-build-dir"),
+                "r",
+                encoding="utf-8",
+            ) as f:
+                bdir = f.read().strip()
+        except OSError:
+            bdir = ""
+    if not bdir:
+        return
+    full_bdir = bdir if os.path.isabs(bdir) else os.path.join(workdir, bdir)
+    args_path = os.path.abspath(os.path.join(full_bdir, "args.gn"))
+    if not os.path.isfile(args_path):
+        return
+    try:
+        with open(args_path, "rb") as rf:
+            orig_bytes = rf.read()
+        orig_text = orig_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+    cleaned_text = _strip_stale_planter_managed_args_gn(orig_text)
+    if cleaned_text == orig_text:
+        return
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(args_path),
+            prefix=".planter-args-clean.",
+        )
+        with os.fdopen(fd, "wb") as wf:
+            wf.write(cleaned_text.encode("utf-8"))
+        _swapped_args_gn_state.append((args_path, orig_bytes))
+        atexit.register(_restore_swapped_args_gn)
+        os.replace(tmp_path, args_path)
+    except OSError:
+        _swapped_args_gn_state.clear()
+        if tmp_path and os.path.lexists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+# Detect remote build (RBE) authentication and credential preflight failures so
+# non-interactive sandboxes report one environment finding instead of per-step
+# build failures and skip remaining RBE-backed steps while still running fx lint.
+_RBE_AUTH_FAILURE_RE = re.compile(
+    r"RBE preflight check failed|"
+    r"please run:\s*fx rbe auth|"
+    r"Run 'fx rbe auth'|"
+    r"Failed to authenticate for (?:reclient|bazel)|"
+    r"Did not find valid Application Default Credentials|"
+    r"Please run \w+ to get a valid [\w-]+ certificate|"
+    r"cannot connect to ssh-agent: SSH_AUTH_SOCK not defined",
+    re.I,
+)
+
+
+def is_rbe_auth_failure(output):
+    return bool(output and _RBE_AUTH_FAILURE_RE.search(output))
+
+
+def build_rbe_auth_error_finding(cmd, code, summary_text):
+    msg = (
+        f"`{fmt_cmd(cmd)}` failed ({code}) due to expired or unavailable "
+        "remote build (RBE) credentials in the execution environment; "
+        "remaining RBE-backed build/test steps were skipped:\n"
+        f"{summary_text}"
+    )
+    rem = (
+        "This is an execution-environment RBE authentication failure, not a "
+        "BUILD.bazel or BUILD.gn defect. Do not edit build files or args.gn "
+        "to work around RBE authentication, and do not retry failing RBE "
+        "`fx build` or `fx bazel` commands. Verify static checks with "
+        "`run_checks.sh --skip-build` (and fix any `shac_check` or static "
+        "check findings), keep pre-upload Git edits uncommitted in the working "
+        "tree (or `git commit --amend` only when `HEAD` already carries `TAG: "
+        "planter`), keep all migrated files in `CoderReport.modified_files`, "
+        "remove stale entries from `CoderReport.disputed_findings` for checks "
+        "that already pass locally, and note in `summary` that host RBE "
+        "credentials need refreshing (`fx rbe auth`)."
+    )
+    return {
+        "source": "build_verification",
+        "category": "rbe_auth_error",
+        "severity": "ERROR",
+        "message": msg,
+        "remediation": rem,
+    }
+
+
 failed = set()
 step_findings_start = len(findings)
 gn_build_scoped = False
+rbe_auth_failed = False
+_swap_stale_planter_args_gn()
 for name, cmd in steps:
     if name == "gn_build":
         if os.environ.get("PLANTER_FULL_GN_BUILD", "").strip() not in ("1", "true"):
@@ -3176,9 +4335,17 @@ for name, cmd in steps:
             "message": f"PLANTER_BUILD_DRY_RUN: {name} would run `{fmt_cmd(cmd)}`",
         })
         continue
-    # Refresh `<build dir>/host_*/bazel2gn` before running `shac check` when `//build/tools/bazel2gn`
-    # or `bazel-bin/.../bazel2gn` is newer than the Ninja host binary.
-    if name == "shac_check" and _bazel2gn_host_tool_stale():
+    # Skip remaining RBE-backed steps once RBE authentication has failed, while
+    # still running local `shac_check` (`fx lint`) to catch static lint defects.
+    if rbe_auth_failed and name != "shac_check":
+        failed.add(name)
+        continue
+    # Refresh `<build dir>/host_*/bazel2gn` and `prebuilt/tools/shac/shac` before running
+    # `shac check` when `//build/tools/bazel2gn` is newer than the Ninja host binary or
+    # `shac.textproto` requires a newer `min_shac_version` than the local CIPD prebuilt.
+    if name == "shac_check":
+        _refresh_stale_shac_prebuilt()
+    if name == "shac_check" and not rbe_auth_failed and _bazel2gn_host_tool_stale():
         try:
             subprocess.run(
                 [fx, "build", "--host", "//build/tools/bazel2gn:bazel2gn"],
@@ -3197,16 +4364,19 @@ for name, cmd in steps:
         code = "timeout"
         output = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
         output += f"\n(timed out after {timeout}s)"
-    # If target-scoped gn_build ran regenerator (updating ninja_outputs.json) and Ninja
-    # rejected a pre-regeneration target that lost its GN consumers (e.g. a library whose
-    # sole GN caller became bazel_ffx_tool/bazel_host_tool), refresh dependent_labels()
-    # from the newly regenerated ninja_outputs.json and retry once.
+    # If target-scoped gn_build ran regenerator (updating ninja_outputs.json) and fx build
+    # or Ninja rejected a pre-regeneration label/target that left the configured graph
+    # (e.g. an unconfigured dependent test or a library whose sole GN caller moved to
+    # Bazel), refresh dependent_labels() from the regenerated ninja_outputs.json and retry.
     if (
         name == "gn_build"
         and gn_build_scoped
         and code != 0
         and code != "timeout"
-        and "ninja: error: unknown target" in output
+        and (
+            "ninja: error: unknown target" in output
+            or "Unknown GN label" in output
+        )
     ):
         refreshed_labels, refreshed_notes = dependent_labels()
         if refreshed_labels != labels:
@@ -3251,6 +4421,13 @@ for name, cmd in steps:
         failed.add(name)
         append_workspace_write_error(*mid_write_err)
         break
+    if is_rbe_auth_failure(output):
+        failed.add(name)
+        if not rbe_auth_failed:
+            rbe_auth_failed = True
+            text, _, _ = summarize(output, LOCATION)
+            findings.append(build_rbe_auth_error_finding(cmd, code, text))
+        continue
     if name == "shac_check":
         note = planter_banner_only_shac_failure(output) or unrelated_shac_failure(output)
         if note:
@@ -3267,11 +4444,15 @@ for name, cmd in steps:
                 ),
             })
             continue
-    if name == "gn_build_dependents" and code != "timeout":
+    if (
+        name == "gn_build_dependents" or (name == "gn_build" and gn_build_scoped)
+    ) and code != "timeout":
+        own_prereqs = fuchsia_platform_gn_prereqs() if name == "gn_build" else []
         own_only = [
             lbl
             for lbl in labels
-            if any(
+            if lbl in own_prereqs
+            or any(
                 lbl.split("(", 1)[0].split(":", 1)[0] == f"//{d}"
                 for d in dirs
             )
@@ -3288,7 +4469,10 @@ for name, cmd in steps:
                     timeout=timeout,
                 )
                 if own_proc.returncode == 0:
-                    continue
+                    if name == "gn_build_dependents":
+                        continue
+                else:
+                    cmd, code, output = own_cmd, own_proc.returncode, own_proc.stdout
             except subprocess.TimeoutExpired:
                 pass
     if name in ("bazel_build_fuchsia", "bazel_build_host"):
@@ -3308,7 +4492,9 @@ for name, cmd in steps:
             })
             continue
     if name in ("gn_build", "gn_build_dependents"):
-        note = unrelated_bazel_failure(output)
+        note = unrelated_bazel_failure(output) or preexisting_unmodified_gn_failure(
+            name, code, output
+        )
         if note:
             text, file, line = summarize(output, LOCATION)
             findings.append({
@@ -3361,6 +4547,7 @@ for name, cmd in steps:
     if name == "gn_build" and re.search(r"fx set|no build directory|Unable to find build directory", output, re.I):
         break  # The tree is not configured; the remaining steps would fail the same way.
 
+_restore_swapped_args_gn()
 step_findings = findings[step_findings_start:]
 check_ext_repo_failed_test_footers(step_findings, locals().get("test_footer_lines", []), dirs)
 if reuse_key and not any(f.get("severity") in STEP_BLOCKING for f in step_findings):

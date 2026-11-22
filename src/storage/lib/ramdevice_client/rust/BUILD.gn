@@ -3,33 +3,15 @@
 # found in the LICENSE file.
 
 import("//build/components.gni")
-import("//build/rust/rustc_test.gni")
 import("//src/storage/testing/driver_test_realm.gni")
 
 group("rust") {
   public_deps = [ ":ramdevice_client" ]
 }
 
-# The library is defined in BUILD.bazel. The unit tests stay in GN because
-# //src/storage/testing:storage_driver_test_realm has no Bazel build yet.
-rustc_test("ramdevice_client_test") {
-  edition = "2024"
-  output_name = "ramdevice_client_lib_test"
-  deps = [
-    "//sdk/fidl/fuchsia.hardware.ramdisk:fuchsia.hardware.ramdisk_rust",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-component/client",
-    "//src/lib/fuchsia-fs",
-    "//src/storage/lib/fs_management/rust:fs_management",
-    "//third_party/rust_crates:anyhow",
-  ]
-  sources = [ "src/lib.rs" ]
-}
-
+# The library and test binary are defined in BUILD.bazel. The test component
+# and package stay in GN because //src/storage/testing:storage_driver_test_realm
+# has no Bazel build yet.
 storage_driver_test_realm_component("ramdevice-client-test-component") {
   deps = [ ":ramdevice_client_test" ]
 }
@@ -91,5 +73,24 @@ if (is_fuchsia) {
       "//src/storage/lib/fs_management/rust:fs_management",
       "//third_party/rust_crates:anyhow",
     ]
+  }
+}
+if (is_fuchsia) {
+  rustc_test("ramdevice_client_test") {
+    sources = [ "src/lib.rs" ]
+    edition = "2024"
+    deps =
+        [
+          "//sdk/fidl/fuchsia.hardware.ramdisk:fuchsia.hardware.ramdisk_rust",
+          "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+          "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+          "//sdk/rust/zx",
+          "//src/lib/fidl/rust/fidl",
+          "//src/lib/fuchsia-component/client",
+          "//src/lib/fuchsia-fs",
+          "//src/storage/lib/fs_management/rust:fs_management",
+          "//third_party/rust_crates:anyhow",
+        ] + [ "//src/lib/fuchsia" ]
+    output_name = "ramdevice_client_lib_test"
   }
 }

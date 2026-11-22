@@ -9,11 +9,15 @@
 //! | Implements | [`PortController`]: port controller hardware operations |
 //! | Implements | [`Typec`]: partner callbacks |
 //! | Embeds | [`TypecPort`]: port configuration and synchronized state |
-//! | Calls | [`TypecExt`]: state queries and Inspect diagnostics |
+//! | Calls | [`TypecExt`]: events, queries, and Inspect diagnostics |
 //! | Reports | [`CcStatus`] and [`RoleControl`]: CC line state and presented terminations |
 
+mod actor;
 mod cc;
+mod inspect;
 mod port;
+mod power;
+mod runner;
 mod state;
 mod typec;
 

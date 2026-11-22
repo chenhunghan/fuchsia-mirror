@@ -36,10 +36,11 @@ pub const PAGE_ENTRY_BIT: u64 = 0x2;
 /// Bit `10`: Access Flag (`AF`). Must be set to `1` when hardware access flag updates are disabled.
 pub const PAGE_ENTRY_ACCESS_FLAG_BIT: u64 = 1 << 10;
 
-/// Bit `51`: Dirty Bit Modifier (`DBM`). Must be `0` when hardware dirty state updates are
-/// disabled.
-pub const PAGE_ENTRY_DBM_BIT: u64 = 1 << 51;
-
+/// Bit `11`: not global (`nG`). A TLB entry made from a global (`nG == 0`) leaf descriptor is not
+/// tagged with an ASID: any context with the same VMID may use it, and an invalidation by ASID
+/// is not required to remove it. Every leaf this driver writes belongs to one device address
+/// space, so it must be set.
+pub const PAGE_ENTRY_NOT_GLOBAL_BIT: u64 = 1 << 11;
 /// Returns `true` if `addr` is a 4 KiB-aligned 48-bit physical/IOVA address.
 #[inline]
 pub const fn is_valid_addr(addr: u64) -> bool {
@@ -84,7 +85,7 @@ pub fn make_table_entry(addr: u64) -> u64 {
 /// Encodes the `UXN` (bit 54), `PXN` (bit 53), and `AP[2:1]` (bits `[7:6]`) permission fields for a
 /// VMSAv8-64 stage-1 page descriptor.
 #[inline]
-pub const fn make_perms(uxn: u64, pxn: u64, ap21: u64) -> u64 {
+pub(crate) const fn make_perms(uxn: u64, pxn: u64, ap21: u64) -> u64 {
     // See Section D8.3.1.2 Figure D8-16 of the ARM ARM.
     ((uxn & 0x1) << 54) | ((pxn & 0x1) << 53) | ((ap21 & 0x3) << 6)
 }
@@ -116,9 +117,12 @@ pub const fn make_perms(uxn: u64, pxn: u64, ap21: u64) -> u64 {
 ///
 /// The current SMMU driver attempts to do the following for user-created BTIs:
 ///
-/// + Force all transactions to be considered unprivileged using the `S2CR.PRIVCFG` field in the
-///   BTI's SMRG(s). Whether or not this override takes effect depends on static SMMU configuration
-///   which can be read via `IDR2.DIPANS`.
+/// + Force all transactions to be considered unprivileged. SMMUv2 does it with the
+///   `S2CR.PRIVCFG` field of the BTI's SMRG(s), whose Unprivileged encoding (`0b10`) is always
+///   available (`IDR2.DIPANS` only changes what the `0b01` encoding means; IHI 0062D.c section
+///   9.6.23). SMMUv3 does it with `STE.PRIVCFG`, which exists only where
+///   `SMMU_IDR1.ATTR_PERMS_OVR` is set; where it is not, the SMMUv3 driver refuses the one kind
+///   of mapping which depends on it (neither read nor write access).
 /// + Disable WXN/UWXN via the context bank's SCTLR register.
 ///
 /// The final set of possible mappings from `BTI_PERM` flags to effective permissions is given in
@@ -140,7 +144,7 @@ pub const fn make_perms(uxn: u64, pxn: u64, ap21: u64) -> u64 {
 /// - `AP[2:1] = 0b01` (`1`): Read/Write at EL0 and higher
 /// - `AP[2:1] = 0b11` (`3`): Read-only at EL0 and higher
 /// - `AP[2:1] = 0b10` (`2`): Read-only at EL1+, no access at EL0 (used when neither R nor W is set)
-pub const PERM_LUT: [u64; 8] = [
+pub(crate) const PERM_LUT: [u64; 8] = [
     make_perms(1, 1, 2), // [0]: --- ==> pR-- : u---
     make_perms(1, 1, 3), // [1]: R-- ==> pR-- : uR--
     make_perms(1, 1, 1), // [2]: -W- ==> pRW- : uRW-
@@ -157,24 +161,6 @@ pub const fn get_page_entry_perms(perms: u32) -> u64 {
     PERM_LUT[(perms & ALL_PERM_FLAGS) as usize]
 }
 
-/// Decodes the effective unprivileged (`EL0`) `IOMMU_FLAG_PERM_*` bits from a VMSAv8-64 stage-1
-/// leaf page descriptor (`AP[2:1]` at bits `[7:6]` and `UXN` at bit `54`).
-#[inline]
-pub const fn decode_page_entry_perms(pte: u64) -> u32 {
-    let ap21 = (pte >> 6) & 0x3;
-    let uxn = (pte >> 54) & 0x1;
-    let mut perms = 0u32;
-    if ap21 == 1 {
-        perms |= super::constants::IOMMU_FLAG_PERM_READ | super::constants::IOMMU_FLAG_PERM_WRITE;
-    } else if ap21 == 3 {
-        perms |= super::constants::IOMMU_FLAG_PERM_READ;
-    }
-    if uxn == 0 {
-        perms |= super::constants::IOMMU_FLAG_PERM_EXECUTE;
-    }
-    perms
-}
-
 /// Creates a valid level 3 leaf page descriptor mapping to physical address `addr` with `perms`.
 #[inline]
 pub fn make_page_entry(addr: u64, perms: u32) -> u64 {
@@ -186,6 +172,7 @@ pub fn make_page_entry(addr: u64, perms: u32) -> u64 {
         | VALID_ENTRY_BIT
         | PAGE_ENTRY_BIT
         | PAGE_ENTRY_ACCESS_FLAG_BIT
+        | PAGE_ENTRY_NOT_GLOBAL_BIT
         | get_page_entry_perms(perms)
 }
 

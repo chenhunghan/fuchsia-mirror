@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":inspect-cpp-unittest"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "inspect",
+    srcs = [
+        "bounded_list_node_unittest.cc",
+        "health_unittest.cc",
+        "heap_unittest.cc",
+        "inspect_unittest.cc",
+        "lazy_unittest.cc",
+        "node_unittest.cc",
+        "reader_unittest.cc",
+        "scanner_unittest.cc",
+        "snapshot_unittest.cc",
+        "state_unittest.cc",
+        "value_list_unittest.cc",
+    ],
+    deps = [
+        "//sdk/lib/fit-promise",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/inspect",
+        "//zircon/system/ulib/pretty",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "inspect-cpp-unittest",
+    unit_tests = [":inspect"],
+)

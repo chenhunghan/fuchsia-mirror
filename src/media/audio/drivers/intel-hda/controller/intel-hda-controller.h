@@ -10,8 +10,8 @@
 #include <lib/async/cpp/irq.h>
 #include <lib/ddk/device.h>
 #include <lib/ddk/driver.h>
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/mmio/cpp/mmio.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/fzl/pinned-vmo.h>
 #include <lib/fzl/vmar-manager.h>
 #include <lib/fzl/vmo-mapper.h>
@@ -111,7 +111,6 @@ class IntelHDAController : public fbl::RefCounted<IntelHDAController>,
   void ReleaseStreamTagLocked(bool input, uint8_t tag_num) TA_REQ(stream_pool_lock_);
 
   // Device interface implementation
-  zx_status_t DeviceGetProtocol(uint32_t proto_id, void* protocol);
   void DeviceShutdown();
   void DeviceRelease();
   void GetChannel(GetChannelCompleter::Sync& completer) override;
@@ -231,7 +230,6 @@ class IntelHDAController : public fbl::RefCounted<IntelHDAController>,
 
   static std::atomic_uint32_t device_id_gen_;
   static zx_protocol_device_t CONTROLLER_DEVICE_THUNKS;
-  static ihda_codec_protocol_ops_t CODEC_PROTO_THUNKS;
 
   fbl::Mutex channel_lock_;
   fbl::RefPtr<Channel> channel_ TA_GUARDED(channel_lock_);

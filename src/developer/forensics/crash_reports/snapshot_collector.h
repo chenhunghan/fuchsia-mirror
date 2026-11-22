@@ -46,7 +46,7 @@ class SnapshotCollector {
   // containing the most up-to-date system data (a new snapshot will be created if all existing
   // snapshots contain data that is out-of-date). No snapshot will be saved if |timeout| expires.
   ::fpromise::promise<Report> GetReport(zx::duration timeout,
-                                        fuchsia::feedback::CrashReport fidl_report,
+                                        fuchsia_feedback::CrashReport fidl_report,
                                         ProgramShortname program_shortname, ReportId report_id,
                                         std::optional<timekeeper::time_utc> current_utc_time,
                                         const Product& product, bool is_hourly_snapshot,

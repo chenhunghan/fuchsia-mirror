@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-import cl_utils
-import rustc
+from build.rbe import cl_utils, rustc
 
 
 def _strs(items: Sequence[Any]) -> Sequence[str]:
@@ -807,7 +806,7 @@ class RustActionTests(unittest.TestCase):
                 dep_command,
                 [
                     "../tools/rustc",
-                    f"--emit=metadata,dep-info={new_depfile}",
+                    f"--emit=dep-info={new_depfile}",
                     "-Z",
                     "binary-dep-depinfo",
                     "../foo/lib.rs",
@@ -866,7 +865,7 @@ class RustActionTests(unittest.TestCase):
             dep_command,
             [
                 "../tools/rustc",
-                f"--emit=metadata,dep-info={new_depfile}",
+                f"--emit=dep-info={new_depfile}",
                 "-Z",
                 "binary-dep-depinfo",
                 "../foo/lib.rs",
@@ -907,7 +906,7 @@ class RustActionTests(unittest.TestCase):
             dep_only_command,
             [
                 "../tools/rustc",
-                f"--emit=metadata,dep-info={new_depfile}",
+                f"--emit=dep-info={new_depfile}",
                 "-Z",
                 "binary-dep-depinfo",
                 "../foo/lib.rs",
@@ -944,7 +943,7 @@ class RustActionTests(unittest.TestCase):
             dep_only_command,
             [
                 "../tools/rustc",
-                f"--emit=metadata,dep-info={new_depfile}",
+                f"--emit=dep-info={new_depfile}",
                 "-Z",
                 "binary-dep-depinfo",
                 "../foo/lib.rs",
@@ -999,7 +998,7 @@ class RustActionTests(unittest.TestCase):
                 dep_only_command,
                 [
                     "../tools/rustc",
-                    f"--emit=metadata,dep-info={new_depfile}",
+                    f"--emit=dep-info={new_depfile}",
                     "-Z",
                     "binary-dep-depinfo",
                     "../foo/lib.rs",
@@ -1049,7 +1048,7 @@ class RustActionTests(unittest.TestCase):
                 dep_only_command,
                 [
                     "../tools/rustc",
-                    f"--emit=metadata,dep-info={new_depfile}",
+                    f"--emit=dep-info={new_depfile}",
                     "-Z",
                     "binary-dep-depinfo",
                     "../foo/lib.rs",

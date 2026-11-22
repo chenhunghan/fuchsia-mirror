@@ -176,5 +176,5 @@ See [Handling results found through fuzzing](handle-results.md#clusterfuzz-bugs)
 [fuchsia-gn]: /docs/development/build/gn_concepts/intro.md
 [fx-serve]: /tools/devshell/serve
 [options]: https://llvm.org/docs/LibFuzzer.html#options
-[package-deployment-options]: /docs/development/build/fx.md#package_deployment_options
-[test_manager]: /docs/development/testing/components/test_runner_framework.md#the_test_manager
+[package-deployment-options]: /docs/development/build/fx.md#package-deployment-options
+[test_manager]: /docs/development/testing/components/test_runner_framework.md#the-test-manager

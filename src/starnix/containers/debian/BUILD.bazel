@@ -1,0 +1,145 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "@fuchsia_rules_common//packages:resources.bzl",
+    "fuchsia_package_resource_collection",
+)
+load("//build/bazel/rules:cipd_prebuilt.bzl", "cipd_prebuilt_file")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(":ext4_to_pkg.bzl", "ext4_to_pkg", "fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+alias(
+    name = "debian",
+    actual = ":debian_package",
+    visibility = ["//src/starnix/containers:__pkg__"],
+)
+
+# bazel2gn does not convert cipd_prebuilt_file, resource collections, or
+# ext4_to_pkg; the GN equivalents remain above the sentinel in BUILD.gn while GN
+# consumers still reference :container_resources.
+# LINT.IfChange
+# @bazel2gn:skip
+cipd_prebuilt_file(
+    name = "amd64_system_image",
+    path = "prebuilt/starnix/linux-amd64/amd64_system.img",
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+)
+
+# @bazel2gn:skip
+cipd_prebuilt_file(
+    name = "arm64_system_image",
+    path = "prebuilt/starnix/linux-arm64/arm64_system.img",
+    target_compatible_with = ["@platforms//cpu:arm64"],
+)
+
+# @bazel2gn:skip
+cipd_prebuilt_file(
+    name = "riscv64_system_image",
+    path = "prebuilt/starnix/linux-riscv64/riscv64_system.img",
+    target_compatible_with = ["@platforms//cpu:riscv64"],
+)
+
+# @bazel2gn:skip
+ext4_to_pkg(
+    name = "system_image",
+    input = select({
+        "@platforms//cpu:x86_64": ":amd64_system_image",
+        "@platforms//cpu:arm64": ":arm64_system_image",
+        "@platforms//cpu:riscv64": ":riscv64_system_image",
+    }),
+    prefix = "data/system",
+)
+
+# @bazel2gn:skip
+fuchsia_package_resource_collection(
+    name = "container_resources",
+    resources = [
+        ":system_image",
+        "//src/starnix/containers:data_tmp_target",
+        "//src/starnix/containers:default_init",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)
+
+fx_component_manifest(
+    name = "debian_container_manifest",
+    component_name = "debian_container",
+    includes = [
+        "meta/debian_container.base.cml",
+        "//src/starnix/containers:container.shard",
+    ],
+    manifest = "meta/debian_container.cml",
+)
+
+fx_component(
+    name = "debian_container",
+    compiled_manifest = ":debian_container_manifest",
+)
+
+fx_component_manifest(
+    name = "debian_container_with_user_volume_manifest",
+    component_name = "debian_container_with_user_volume",
+    includes = [
+        "meta/debian_container.base.cml",
+        "//src/starnix/containers:container.shard",
+    ],
+    manifest = "meta/debian_container_with_user_volume.cml",
+)
+
+fx_component(
+    name = "debian_container_with_user_volume",
+    compiled_manifest = ":debian_container_with_user_volume_manifest",
+)
+
+fx_component_manifest(
+    name = "debian_container_with_user_volume_inline_encrypted_manifest",
+    component_name = "debian_container_with_user_volume_inline_encrypted",
+    includes = [
+        "meta/debian_container.base.cml",
+        "//src/starnix/containers:container.shard",
+    ],
+    manifest = "meta/debian_container_with_user_volume_inline_encrypted.cml",
+)
+
+# Same as `debian_container_with_user_volume` but with the `inlinecrypt` mount
+# option.
+fx_component(
+    name = "debian_container_with_user_volume_inline_encrypted",
+    compiled_manifest = ":debian_container_with_user_volume_inline_encrypted_manifest",
+)
+
+fx_component_manifest(
+    name = "debian_container_profiled_manifest",
+    component_name = "debian_container_profiled",
+    includes = [
+        "meta/debian_container.base.cml",
+        "//src/starnix/containers:container.shard",
+    ],
+    manifest = "meta/debian_container_profiled.cml",
+)
+
+fx_component(
+    name = "debian_container_profiled",
+    compiled_manifest = ":debian_container_profiled_manifest",
+)
+
+fx_package(
+    name = "debian_package",
+    package_name = "debian",
+    components = [
+        ":debian_container",
+        ":debian_container_profiled",
+        ":debian_container_with_user_volume",
+        ":debian_container_with_user_volume_inline_encrypted",
+    ],
+    resources = [":container_resources"],
+    visibility = ["//src/starnix/containers:__pkg__"],
+)

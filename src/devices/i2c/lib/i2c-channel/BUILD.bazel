@@ -42,9 +42,7 @@ fx_cc_test_binary(
         "//src/devices/i2c/testing/fake-i2c",
         "//src/lib/fxl/test:gtest_main",
         "//src/lib/testing/predicates",
-        # Bazel googletest has no :gmock target (its :gtest bundles gmock),
-        # while GN needs the separate :gmock target for <gmock/gmock.h>.
-        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+        "@com_google_googletest//:gtest",
     ],
 )
 

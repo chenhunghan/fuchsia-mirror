@@ -4,31 +4,7 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-import("//build/cpp/library_headers.gni")
 import("//build/rust/rustc_library.gni")
-import("//build/test.gni")
-
-library_headers("headers") {
-  headers = [ "vm/phys/arena.h" ]
-  public_deps = [
-    # <vm/phys/arena.h> has #include <lib/fit/result.h>
-    "//sdk/lib/fit",
-
-    # <vm/phys/arena.h> has #include <lib/memalloc/range.h>
-    "//zircon/kernel/phys/lib/memalloc:range.headers",
-  ]
-}
-
-test("arena-selection-tests") {
-  sources = [ "arena-selection-tests.cc" ]
-  deps = [
-    ":headers",
-    "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gtest",
-    "//zircon/kernel/phys/lib/memalloc",
-    "//zircon/kernel/phys/lib/memalloc:testing",
-  ]
-}
 
 rustc_library("arena") {
   name = "arena"
@@ -43,8 +19,5 @@ rustc_library("arena") {
 
 group("tests") {
   testonly = true
-  deps = [
-    ":arena-selection-tests($host_toolchain)",
-    ":arena_test($host_toolchain)",
-  ]
+  deps = [ ":arena_test($host_toolchain)" ]
 }

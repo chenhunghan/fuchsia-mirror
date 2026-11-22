@@ -21,6 +21,9 @@ FuchsiaExpectedIncludesInfo = provider(
         "transitive_shards": """depset[File] of all shard files from includes (and their
         cml_shard() transitive includes) and deps of expect_includes() targets, needed as sandbox
         inputs when running cmc compile or cmc check-includes.""",
+        "required_package_components": """depset[Label] of components from
+        expect_includes(required_package_components = ...) that every package containing a dependent
+        component must also contain.""",
     },
 )
 
@@ -51,12 +54,26 @@ def _expect_includes_impl(ctx):
             for dep in ctx.attr.deps
         ],
     )
+    for component in ctx.attr.required_package_components:
+        if not component.startswith(("//", "@")):
+            fail("`required_package_components` of {} must use absolute labels, got {}.".format(
+                ctx.label,
+                repr(component),
+            ))
+    required_package_components = depset(
+        [Label(component) for component in ctx.attr.required_package_components],
+        transitive = [
+            dep[FuchsiaExpectedIncludesInfo].required_package_components
+            for dep in ctx.attr.deps
+        ],
+    )
     return [
         DefaultInfo(files = transitive_shards),
         FuchsiaExpectedIncludesInfo(
             enforced_shards = enforced_shards,
             auto_include_shards = auto_include_shards,
             transitive_shards = transitive_shards,
+            required_package_components = required_package_components,
         ),
     ]
 
@@ -72,6 +89,11 @@ or `check_includes = False` on the component).
 In addition, `fx_unittest_component()` and `fx_unittest_package()` automatically
 add the shards in `includes` to the component manifest they generate for unit
 test binaries, regardless of whether `enforce` is `True` or `False`.
+
+If `required_package_components` is set, every `fx_package()` that contains a
+dependent component must also list those components in its own `components` or
+`test_components`, or analysis of the package fails. Use this when the shards
+in `includes` refer to a component by a relative URL (`#meta/<name>.cm`).
 
 If a shard in `includes` itself `include`s other `.shard.cml` files, wrap it in
 a `cml_shard()` target so its transitive shards are available in the Bazel
@@ -104,6 +126,14 @@ manifests, though shard inclusion in generated unit test manifests
             doc = """Other `expect_includes()` targets whose expected includes are transitively
 required by this target.""",
             providers = [FuchsiaExpectedIncludesInfo],
+        ),
+        "required_package_components": attr.string_list(
+            doc = """Absolute labels of `fx_component()` targets that every `fx_package()` containing a
+dependent component must also contain.
+
+These are labels, not dependencies, so this target doesn't analyze or build the
+components itself. `bazel2gn` omits this attribute: GN packages get these
+components through regular dependencies instead.""",
         ),
     },
     provides = [FuchsiaExpectedIncludesInfo],

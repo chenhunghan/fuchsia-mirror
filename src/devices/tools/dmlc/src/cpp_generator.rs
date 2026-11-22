@@ -1023,9 +1023,9 @@ mod tests {
         assert!(h_code.contains("// Copyright 2025 The Fuchsia Authors. All rights reserved."));
         assert!(cc_code.contains("// Copyright 2025 The Fuchsia Authors. All rights reserved."));
         assert!(h_code.contains("namespace my_hyphenated_driver {"));
-        assert!(h_code.contains("struct My_hyphenated_driverMetadata {"));
+        assert!(h_code.contains("struct MyHyphenatedDriverMetadata {"));
         assert!(cc_code.contains(
-            "std::optional<My_hyphenated_driverMetadata> My_hyphenated_driverMetadata::Parse"
+            "std::optional<MyHyphenatedDriverMetadata> MyHyphenatedDriverMetadata::Parse"
         ));
     }
 
@@ -1043,7 +1043,7 @@ mod tests {
         assert!(cc_code.contains("#include \"aml-ethernet_parser.h\"\n"));
         assert!(!cc_code.contains("aml_eth_bind_parser.h"));
         assert!(h_code.contains("namespace aml_ethernet_metadata {"));
-        assert!(h_code.contains("struct Aml_eth_bindMetadata {"));
+        assert!(h_code.contains("struct AmlEthBindMetadata {"));
     }
 
     #[test]

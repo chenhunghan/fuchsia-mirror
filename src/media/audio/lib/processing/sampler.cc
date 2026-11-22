@@ -13,12 +13,16 @@
 
 #include "src/media/audio/lib/format2/fixed.h"
 #include "src/media/audio/lib/format2/format.h"
+#include "src/media/audio/lib/processing/coefficient_table.h"
 #include "src/media/audio/lib/processing/flags.h"
 #include "src/media/audio/lib/processing/point_sampler.h"
 #include "src/media/audio/lib/processing/sinc_sampler.h"
 #include "src/media/audio/lib/timeline/timeline_function.h"
 
 namespace media_audio {
+
+static_assert(Sampler::kUltrasoundMinFrequencyHz == kUltrasoundMinFrequencyHz);
+static_assert(Sampler::kAudioMaxFrequencyHz == kAudioMaxFrequencyHz);
 
 void Sampler::State::AdvanceAllPositionsTo(int64_t dest_target_frame) {
   AdvancePositionsBy(dest_target_frame - next_dest_frame_, /*advance_source_pos_modulo=*/true);
@@ -302,11 +306,36 @@ std::shared_ptr<Sampler> Sampler::Create(const Format& source_format, const Form
                                          Type type) {
   TRACE_DURATION("audio", "Sampler::Create");
 
+  if (type == Type::kHighPassSincSampler) {
+    if (source_format.frames_per_second() != dest_format.frames_per_second()) {
+      FX_LOGS(WARNING) << "HighPassSincSampler does not support frame rate conversion ("
+                       << source_format.frames_per_second() << " -> "
+                       << dest_format.frames_per_second() << ")";
+      return nullptr;
+    }
+    if (source_format.frames_per_second() <= 2 * kUltrasoundMinFrequencyHz) {
+      FX_LOGS(WARNING) << "HighPassSincSampler source frame rate ("
+                       << source_format.frames_per_second() << ") must exceed "
+                       << 2 * kUltrasoundMinFrequencyHz;
+      return nullptr;
+    }
+  }
+  if (type == Type::kLowPassSincSampler) {
+    if (source_format.frames_per_second() <= 2 * kAudioMaxFrequencyHz) {
+      FX_LOGS(WARNING) << "LowPassSincSampler source frame rate ("
+                       << source_format.frames_per_second() << ") must exceed "
+                       << 2 * kAudioMaxFrequencyHz;
+      return nullptr;
+    }
+  }
+
   if (type == Type::kDefault &&
       source_format.frames_per_second() == dest_format.frames_per_second()) {
     return PointSampler::Create(source_format, dest_format);
   }
-  return SincSampler::Create(source_format, dest_format);
+  return SincSampler::Create(source_format, dest_format,
+                             /*high_pass=*/(type == Type::kHighPassSincSampler),
+                             /*low_pass=*/(type == Type::kLowPassSincSampler));
 }
 
 }  // namespace media_audio

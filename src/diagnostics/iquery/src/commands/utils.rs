@@ -313,7 +313,11 @@ pub async fn get_accessor_selectors(
     for instance in instances {
         match get_resolved_declaration(&instance.moniker, realm_query).await {
             Err(GetDeclarationError::InstanceNotFound(_))
-            | Err(GetDeclarationError::InstanceNotResolved(_)) => continue,
+            | Err(GetDeclarationError::InstanceNotResolved(_))
+            | Err(GetDeclarationError::BadUrl(_))
+            | Err(GetDeclarationError::ResolveFailed(_))
+            | Err(GetDeclarationError::PackageOpenFailed(_))
+            | Err(GetDeclarationError::PackageReadFailed(_)) => continue,
             Err(err) => return Err(err.into()),
             Ok(decl) => {
                 for capability in decl.capabilities {

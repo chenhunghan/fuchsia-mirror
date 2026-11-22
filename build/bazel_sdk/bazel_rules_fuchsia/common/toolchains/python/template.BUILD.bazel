@@ -4,10 +4,27 @@
 
 """Python toolchain definition for our prebuilt Python3 executable."""
 
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_python//python:defs.bzl", "py_runtime_pair")
 load("@rules_python//python:py_exec_tools_toolchain.bzl", "py_exec_tools_toolchain")
 
 package(default_visibility = ["//visibility:public"])
+
+exports_files(
+    ["python{python_version}-real"],
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "python_exe",
+    actual = "python{python_version}-real",
+)
+
+cc_library(
+    name = "headers",
+    hdrs = glob(["include/python{python_version}/**"], allow_empty = True),
+    includes = ["include/python{python_version}"],
+)
 
 filegroup(
     name = "runtime_files",

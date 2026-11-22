@@ -4,7 +4,7 @@
 
 use std::collections::hash_map::{self, HashMap};
 use std::fmt::{self, Debug, Display};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::ops::{Deref as _, DerefMut as _};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,7 +21,8 @@ use net_types::ip::{IpAddr, Mtu};
 use net_types::{SpecifiedAddr, UnicastAddr};
 use netstack3_core::device::{
     BatchSize, DeviceBufferBindingsTypes, DeviceClassMatcher, DeviceId, DeviceIdAndNameMatcher,
-    DeviceSendFrameError, EthernetLinkDevice, LoopbackDeviceId, PureIpDevice, TxBufferAllocator,
+    DeviceSendFrameError, EthernetLinkDevice, LoopbackDeviceId, MAX_TX_QUEUED_LEN, PureIpDevice,
+    TxBufferAllocator,
 };
 use netstack3_core::trace::trace_duration;
 use netstack3_core::types::WorkQueueReport;
@@ -29,7 +30,7 @@ use thiserror::Error;
 
 use fidl_fuchsia_net_interfaces as fnet_interfaces;
 
-use crate::bindings::power::TransmitSuspensionHandler;
+use crate::bindings::power::{PowerDependencyToken, TransmitSuspensionHandler};
 use crate::bindings::routes::interface_local::LocalRouteTables;
 use crate::bindings::stats_sampler::InterfaceStatusSampler;
 use crate::bindings::sync::CoreRwLock;
@@ -389,6 +390,7 @@ pub(crate) struct TxTask {
     device_id: DeviceId<BindingsCtx>,
     watcher: NeedsDataWatcher,
     task_state: TxTaskState,
+    power_dependency_token: Option<PowerDependencyToken>,
 }
 
 impl TxTask {
@@ -397,13 +399,21 @@ impl TxTask {
         device_id: DeviceId<BindingsCtx>,
         watcher: NeedsDataWatcher,
         task_state: TxTaskState,
+        power_dependency_token: Option<PowerDependencyToken>,
     ) -> Self {
-        Self { ctx, device_id, watcher, task_state }
+        Self { ctx, device_id, watcher, task_state, power_dependency_token }
     }
 
     pub(crate) async fn run(self) -> Result<!, TxTaskError> {
-        let Self { ctx, device_id, watcher, task_state } = self;
-        tx_task(ctx, device_id, watcher, task_state).await
+        self.run_with_max_suspension_drain(MAX_TX_QUEUED_LEN).await
+    }
+
+    async fn run_with_max_suspension_drain(
+        self,
+        max_suspension_drain_frames: usize,
+    ) -> Result<!, TxTaskError> {
+        let Self { ctx, device_id, watcher, task_state, power_dependency_token } = self;
+        tx_task(ctx, device_id, watcher, task_state, power_dependency_token, max_suspension_drain_frames).await
     }
 }
 
@@ -553,14 +563,17 @@ impl TxTaskState {
 // `D`. That is doable but not worth the extra code at this moment since
 // bindings doesn't have meaningful amounts of code that is generic over the
 // device type.
-pub(crate) async fn tx_task(
+async fn tx_task(
     mut ctx: Ctx,
     device_id: DeviceId<BindingsCtx>,
     mut watcher: NeedsDataWatcher,
     mut task_state: TxTaskState,
+    power_dependency_token: Option<PowerDependencyToken>,
+    max_suspension_drain_frames: usize,
 ) -> Result<!, TxTaskError> {
     let mut yield_fut = futures::future::OptionFuture::default();
-    let mut suspension_handler = TransmitSuspensionHandler::new(&ctx, device_id.downgrade()).await;
+    let mut suspension_handler =
+        TransmitSuspensionHandler::new(&ctx, device_id.downgrade(), power_dependency_token).await;
 
     // This control loop selects an action which may be:
     //   - suspension:
@@ -596,114 +609,173 @@ pub(crate) async fn tx_task(
         match action {
             Action::TxAvailable => {}
             Action::Suspension(s) => {
-                // Suspension requested, finish up in-progress work and block
-                // until we are allowed to resume.
+                // Suspension requested: drain frames queued in Core to
+                // netdevice before waiting for netdevice TX completion and
+                // releasing our suspension guard. Cap total frames drained
+                // across suspension to a fixed budget (`MAX_TX_QUEUED_LEN` in
+                // production) so frames already queued (plus occasional frames
+                // produced while suspension is pending, such as protocol
+                // replies) are flushed, while a socket continuously generating
+                // frames cannot prevent suspension indefinitely.
+                yield_fut = futures::future::OptionFuture::default();
+                let mut remaining = max_suspension_drain_frames;
+                while let Some(max_frames) = NonZeroUsize::new(remaining) {
+                    match transmit_batch(&mut ctx, &device_id, &mut task_state, Some(max_frames))
+                        .await?
+                    {
+                        None
+                        | Some(TransmitBatchOutcome { report: WorkQueueReport::AllDone, .. }) => {
+                            break;
+                        }
+                        Some(TransmitBatchOutcome {
+                            report: WorkQueueReport::Pending,
+                            processed,
+                        }) => {
+                            remaining = remaining.saturating_sub(processed.get());
+                            if remaining == 0 {
+                                let name = device_id.bindings_id();
+                                log::warn!(
+                                    "device {name} reached pre-suspension tx drain limit \
+                                     ({max_suspension_drain_frames} frames); deferring remaining \
+                                     queued frames until resume"
+                                );
+                                // The drain budget was exhausted while frames
+                                // remain in Core's TX queue without necessarily
+                                // waking `watcher` again; arm `yield_fut` so
+                                // remaining frames are sent after resume.
+                                yield_fut =
+                                    Some(async_utils::futures::YieldToExecutorOnce::new()).into();
+                                break;
+                            }
+                            async_utils::futures::YieldToExecutorOnce::new().await;
+                        }
+                    }
+                }
                 s.handle_suspension().await;
                 continue;
             }
         };
 
-        let batch_size = match device_id.external_state() {
-            DeviceSpecificInfo::Loopback(_) => {
-                unimplemented!("tx task is not supported for loopback devices")
-            }
-            DeviceSpecificInfo::Blackhole(_) => {
-                unimplemented!("tx task is not supported for blackhole devices")
-            }
-            DeviceSpecificInfo::Ethernet(EthernetInfo { netdevice, .. })
-            | DeviceSpecificInfo::PureIp(PureIpDeviceInfo { netdevice, .. }) => {
-                // Attempt to preallocate buffers to handle the queue.
-                let queue_len = match &device_id {
-                    DeviceId::Ethernet(id) => {
-                        ctx.api().transmit_queue::<EthernetLinkDevice>().count(id)
-                    }
-                    DeviceId::PureIp(id) => ctx.api().transmit_queue::<PureIpDevice>().count(id),
-                    DeviceId::Loopback(_) | DeviceId::Blackhole(_) => unreachable!(),
-                };
-
-                match queue_len {
-                    Some(queue_len) => {
-                        if queue_len != 0 {
-                            let device_buffers_in_queue = task_state
-                                .alloc_state
-                                .device_buffers_in_queue
-                                .load(Ordering::Relaxed);
-                            // If we have more buffers in queue, then Vec-based buffers must be in
-                            // use, we try to collect buffers to dequeue context. Note that we now
-                            // can't be blocked on `collect_buffers` because it is possible that
-                            // all available Tx device buffers are already in the queue and we
-                            // dead lock.
-                            if device_buffers_in_queue == 0 {
-                                let collected = task_state
-                                    .collect_buffers(
-                                        &netdevice.handler,
-                                        BatchSize::new_saturating(queue_len),
-                                    )
-                                    .await?;
-                                BatchSize::new_saturating(collected)
-                            } else {
-                                BatchSize::new_saturating(device_buffers_in_queue)
-                            }
-                        } else {
-                            // We got woken up to do tx work but core says we
-                            // have zero buffers in the queue, go back to
-                            // waiting.
-                            continue;
-                        }
-                    }
-                    None => {
-                        // Queueing is not configured, go back to waiting.
-                        continue;
-                    }
-                }
-            }
-        };
-
-        trace_duration!("devices::tx_task",
-            "iface" => device_id.bindings_id().id.get(),
-            "batch" => usize::from(batch_size)
-        );
-
-        let r = match &device_id {
-            DeviceId::Loopback(_) => {
-                unimplemented!("tx task is not supported for loopback devices")
-            }
-            DeviceId::Blackhole(_) => {
-                unimplemented!("tx task is not supported for blackhole devices")
-            }
-            DeviceId::Ethernet(id) => ctx
-                .api()
-                .transmit_queue::<EthernetLinkDevice>()
-                .transmit_queued_frames(id, batch_size, &mut task_state),
-            DeviceId::PureIp(id) => ctx
-                .api()
-                .transmit_queue::<PureIpDevice>()
-                .transmit_queued_frames(id, batch_size, &mut task_state),
-        }
-        .unwrap_or_else(|err| {
-            match err {
-                // Core is already keeping track of counters for this, nothing
-                // to be done in bindings.
-                DeviceSendFrameError::NoBuffers => (),
-            }
-            // If we observe an error when sending, we're not sure if the queue
-            // was drained or not, so assume we need to look at it again.
-            WorkQueueReport::Pending
-        });
-
-        let TxTaskState { tx_buffers, alloc_state: _ } = &mut task_state;
-        // If for some reason we have buffers left here, return them so other
-        // interfaces on the same device can use the buffers.
-        tx_buffers.clear();
-
-        match r {
-            WorkQueueReport::AllDone => (),
-            WorkQueueReport::Pending => {
+        match transmit_batch(&mut ctx, &device_id, &mut task_state, None).await? {
+            None | Some(TransmitBatchOutcome { report: WorkQueueReport::AllDone, .. }) => (),
+            Some(TransmitBatchOutcome { report: WorkQueueReport::Pending, .. }) => {
                 // Yield the task to the executor once.
                 yield_fut = Some(async_utils::futures::YieldToExecutorOnce::new()).into();
             }
         }
     }
+}
+
+struct TransmitBatchOutcome {
+    report: WorkQueueReport,
+    processed: NonZeroUsize,
+}
+
+async fn transmit_batch(
+    ctx: &mut Ctx,
+    device_id: &DeviceId<BindingsCtx>,
+    task_state: &mut TxTaskState,
+    max_frames: Option<NonZeroUsize>,
+) -> Result<Option<TransmitBatchOutcome>, TxTaskError> {
+    let batch_size = match device_id.external_state() {
+        DeviceSpecificInfo::Loopback(_) => {
+            unimplemented!("tx task is not supported for loopback devices")
+        }
+        DeviceSpecificInfo::Blackhole(_) => {
+            unimplemented!("tx task is not supported for blackhole devices")
+        }
+        DeviceSpecificInfo::Ethernet(EthernetInfo { netdevice, .. })
+        | DeviceSpecificInfo::PureIp(PureIpDeviceInfo { netdevice, .. }) => {
+            // Attempt to preallocate buffers to handle the queue.
+            let queue_len = match device_id {
+                DeviceId::Ethernet(id) => {
+                    ctx.api().transmit_queue::<EthernetLinkDevice>().count(id)
+                }
+                DeviceId::PureIp(id) => ctx.api().transmit_queue::<PureIpDevice>().count(id),
+                DeviceId::Loopback(_) | DeviceId::Blackhole(_) => unreachable!(),
+            };
+
+            match queue_len {
+                Some(queue_len) => {
+                    if queue_len != 0 {
+                        let max_batch =
+                            max_frames.map_or(queue_len, |limit| queue_len.min(limit.get()));
+                        let device_buffers_in_queue =
+                            task_state.alloc_state.device_buffers_in_queue.load(Ordering::Relaxed);
+                        // If we have more buffers in queue, then Vec-based buffers must be in
+                        // use, we try to collect buffers to dequeue context. Note that we now
+                        // can't be blocked on `collect_buffers` because it is possible that
+                        // all available Tx device buffers are already in the queue and we
+                        // dead lock.
+                        if device_buffers_in_queue == 0 {
+                            let collected = task_state
+                                .collect_buffers(
+                                    &netdevice.handler,
+                                    BatchSize::new_saturating(max_batch),
+                                )
+                                .await?;
+                            BatchSize::new_saturating(collected)
+                        } else {
+                            BatchSize::new_saturating(device_buffers_in_queue.min(max_batch))
+                        }
+                    } else {
+                        // We got woken up to do tx work but core says we
+                        // have zero buffers in the queue, go back to
+                        // waiting.
+                        return Ok(None);
+                    }
+                }
+                None => {
+                    // Queueing is not configured, go back to waiting.
+                    return Ok(None);
+                }
+            }
+        }
+    };
+
+    trace_duration!("devices::tx_task",
+        "iface" => device_id.bindings_id().id.get(),
+        "batch" => usize::from(batch_size)
+    );
+
+    let outcome = match match device_id {
+        DeviceId::Loopback(_) => {
+            unimplemented!("tx task is not supported for loopback devices")
+        }
+        DeviceId::Blackhole(_) => {
+            unimplemented!("tx task is not supported for blackhole devices")
+        }
+        DeviceId::Ethernet(id) => ctx
+            .api()
+            .transmit_queue::<EthernetLinkDevice>()
+            .transmit_queued_frames(id, batch_size, task_state),
+        DeviceId::PureIp(id) => ctx
+            .api()
+            .transmit_queue::<PureIpDevice>()
+            .transmit_queued_frames(id, batch_size, task_state),
+    } {
+        Ok(report) => TransmitBatchOutcome {
+            report,
+            processed: NonZeroUsize::new(usize::from(batch_size)).unwrap_or(NonZeroUsize::MIN),
+        },
+        Err(err) => {
+            match err {
+                // Core is already keeping track of counters for this, nothing
+                // to be done in bindings.
+                DeviceSendFrameError::NoBuffers => (),
+            }
+            // Core drops the failed frame and requeues the rest of the batch,
+            // so at least one frame was removed from the queue.
+            TransmitBatchOutcome { report: WorkQueueReport::Pending, processed: NonZeroUsize::MIN }
+        }
+    };
+
+    let TxTaskState { tx_buffers, alloc_state: _ } = task_state;
+    // If for some reason we have buffers left here, return them so other
+    // interfaces on the same device can use the buffers.
+    tx_buffers.clear();
+
+    Ok(Some(outcome))
 }
 
 /// Static information common to all devices.
@@ -1013,6 +1085,21 @@ impl DeviceIdAndNameMatcher for DeviceIdAndName {
 mod test {
     use super::*;
 
+    use std::ops::Range;
+    use std::pin::{Pin, pin};
+    use std::task::Poll;
+
+    use fidl_fuchsia_netemul_network as fnetemul_network;
+    use fidl_fuchsia_posix_socket as fposix_socket;
+    use fidl_fuchsia_posix_socket_packet as fposix_socket_packet;
+    use fidl_fuchsia_power_system as fpower_system;
+    use futures::channel::mpsc;
+    use futures::future::OptionFuture;
+    use netstack3_core::device::EthernetDeviceId;
+
+    use crate::bindings::integration_tests::{StackSetupBuilder, TestSetupBuilder};
+    use crate::bindings::power::{BinaryPowerLevel, InternalPowerElement};
+
     #[derive(Debug, PartialEq, Eq, Clone)]
     struct TestCoreId(String);
 
@@ -1258,5 +1345,412 @@ mod test {
         let inner = buf2.into_inner();
         assert_eq!(inner, [4u8, 5, 6]);
         assert_eq!(alloc_state.device_buffers_in_queue.load(Ordering::Relaxed), 0);
+    }
+
+    const TEST_ETHERTYPE: [u8; 2] = [0x88, 0xb5];
+    const DEST_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    const SRC_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+    const FRAME_LEN: usize = 64;
+    const ETHERTYPE_OFFSET: usize = 12;
+    const PAYLOAD_OFFSET: usize = 14;
+
+    struct TxSuspensionTestEnv {
+        ctx: Ctx,
+        ethernet_id: EthernetDeviceId<BindingsCtx>,
+        binding_id: BindingId,
+        suspend_blocker: fpower_system::SuspendBlockerProxy,
+        probe_element: InternalPowerElement,
+        packet_socket: fposix_socket_packet::SocketProxy,
+        fake_endpoint: fnetemul_network::FakeEndpointProxy,
+        tx_task_fut: Pin<Box<dyn futures::Future<Output = Result<!, TxTaskError>>>>,
+    }
+
+    async fn send_test_frame(
+        packet_socket: &fposix_socket_packet::SocketProxy,
+        binding_id: BindingId,
+        index: usize,
+    ) {
+        let packet_info = fposix_socket_packet::PacketInfo {
+            protocol: 0,
+            interface_id: binding_id.get(),
+            addr: fposix_socket_packet::HardwareAddress::None(fposix_socket_packet::Empty),
+        };
+        let mut frame = [0u8; FRAME_LEN];
+        frame[..6].copy_from_slice(&DEST_MAC);
+        frame[6..12].copy_from_slice(&SRC_MAC);
+        frame[ETHERTYPE_OFFSET..PAYLOAD_OFFSET].copy_from_slice(&TEST_ETHERTYPE);
+        let index_bytes = u32::try_from(index).expect("index fits u32").to_be_bytes();
+        frame[PAYLOAD_OFFSET..PAYLOAD_OFFSET + index_bytes.len()].copy_from_slice(&index_bytes);
+        packet_socket
+            .send_msg(
+                Some(&packet_info),
+                &frame,
+                &fposix_socket_packet::SendControlData::default(),
+                fposix_socket::SendMsgFlags::empty(),
+            )
+            .await
+            .expect("send_msg FIDL")
+            .expect("send_msg");
+    }
+
+    async fn expect_test_frames(
+        fake_endpoint: &fnetemul_network::FakeEndpointProxy,
+        indices: Range<usize>,
+    ) {
+        for expected_index in indices {
+            loop {
+                let (data, dropped_frames) =
+                    fake_endpoint.read().await.expect("read from fake endpoint");
+                assert_eq!(dropped_frames, 0);
+                if data.get(ETHERTYPE_OFFSET..PAYLOAD_OFFSET) != Some(&TEST_ETHERTYPE) {
+                    continue;
+                }
+                let expected_bytes =
+                    u32::try_from(expected_index).expect("index fits u32").to_be_bytes();
+                assert_eq!(
+                    &data[PAYLOAD_OFFSET..PAYLOAD_OFFSET + expected_bytes.len()],
+                    &expected_bytes,
+                );
+                break;
+            }
+        }
+    }
+
+    impl TxSuspensionTestEnv {
+        fn queued_count(&mut self) -> Option<usize> {
+            self.ctx.api().transmit_queue::<EthernetLinkDevice>().count(&self.ethernet_id)
+        }
+
+        async fn send_frames(&self, indices: Range<usize>) {
+            for index in indices {
+                send_test_frame(&self.packet_socket, self.binding_id, index).await;
+            }
+        }
+
+        async fn expect_frames(&self, indices: Range<usize>) {
+            expect_test_frames(&self.fake_endpoint, indices).await;
+        }
+    }
+
+    async fn with_tx_suspension_test_env(
+        max_suspension_drain_frames: Option<usize>,
+        test_body: impl AsyncFnOnce(&mut TxSuspensionTestEnv),
+    ) {
+        const ENDPOINT_NAME: &str = "test-ep";
+
+        let (suspend_blocker, suspend_blocker_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fpower_system::SuspendBlockerMarker>();
+        let (suspend_blocker_sink, suspend_blocker_receiver) = mpsc::unbounded();
+        suspend_blocker_sink
+            .unbounded_send(suspend_blocker_stream)
+            .expect("send suspend blocker stream");
+
+        let mut setup = TestSetupBuilder::new()
+            .add_named_endpoint(ENDPOINT_NAME)
+            .add_stack(StackSetupBuilder::new().with_suspend_blocker(suspend_blocker_receiver))
+            .build()
+            .await;
+
+        let fake_endpoint = setup.create_fake_endpoint().await;
+        // Issue a two-way call on `fake_endpoint` to ensure the pipelined
+        // `CreateFakeEndpoint` request has completed before frames are sent.
+        let mut sync_frame = [0u8; FRAME_LEN];
+        sync_frame[..6].copy_from_slice(&DEST_MAC);
+        sync_frame[6..12].copy_from_slice(&SRC_MAC);
+        fake_endpoint.write(&sync_frame).await.expect("sync fake endpoint");
+
+        let (endpoint, port_id) = setup.get_endpoint(ENDPOINT_NAME).await;
+        let mut netstack = setup.get(0).netstack();
+        let ctx = netstack.ctx.clone();
+        let worker = netdevice_worker::NetdeviceWorker::new(ctx.clone(), endpoint)
+            .await
+            .expect("create netdevice worker");
+        let handler = worker.new_handler();
+        let port_scope = fasync::Scope::new_with_name("test_port");
+        let _: fasync::JoinHandle<()> = port_scope.spawn(async move {
+            let Err(err) = worker.run().await;
+            match err {
+                netdevice_worker::Error::Client(netdevice_client::Error::Fidl(fidl_err))
+                    if fidl_err.is_closed() => {}
+                other => panic!("netdevice worker exited with unexpected error: {other:?}"),
+            }
+        });
+
+        let (control_sender, _control_receiver) = mpsc::channel(1);
+        let (binding_id, status_stream, port_guard, tx_task, link_multicast) = handler
+            .add_port(
+                &mut netstack,
+                port_scope.as_handle(),
+                interfaces_admin::InterfaceOptions {
+                    name: None,
+                    metric: None,
+                    netstack_managed_routes_designation: Default::default(),
+                },
+                port_id,
+                control_sender,
+            )
+            .await
+            .expect("add_port");
+        std::mem::drop((status_stream, link_multicast));
+
+        let core_id = ctx.bindings_ctx().devices.get_core_id(binding_id).expect("core id");
+        let ethernet_id = assert_matches!(&core_id, DeviceId::Ethernet(id) => id.clone());
+        core_id.external_state().with_common_info_mut(|info| {
+            info.admin_enabled = true;
+        });
+        assert_matches!(
+            core_id.external_state(),
+            DeviceSpecificInfo::Ethernet(EthernetInfo { netdevice, .. }) => netdevice
+        )
+        .handler
+        .attach()
+        .await
+        .expect("attach port");
+
+        let mut tx_task_fut: Pin<Box<dyn futures::Future<Output = Result<!, TxTaskError>>>> =
+            match max_suspension_drain_frames {
+                None => Box::pin(tx_task.run()),
+                Some(limit) => Box::pin(tx_task.run_with_max_suspension_drain(limit)),
+            };
+        // First poll registers `tx_task`'s internal lessor with `PowerWorker`.
+        assert_matches!(futures::poll!(&mut tx_task_fut), Poll::Pending);
+
+        // Register a probe power element after `tx_task` so FIFO ordering on
+        // `PowerWorker`'s work channel guarantees `tx_task`'s lessor is leased
+        // before `probe_element` observes `BinaryPowerLevel::On`.
+        let mut probe_element = InternalPowerElement::new();
+        let probe_registration =
+            ctx.bindings_ctx().power.register_internal_lessor(probe_element.lessor());
+        assert_eq!(probe_element.wait_level_change().await, BinaryPowerLevel::On);
+
+        // Advance `tx_task` past `TransmitSuspensionHandler::new` so it parks
+        // at `select_biased!` with an empty transmit queue.
+        assert_matches!(futures::poll!(&mut tx_task_fut), Poll::Pending);
+
+        let packet_provider = setup.get(0).connect_proxy::<fposix_socket_packet::ProviderMarker>();
+        let packet_socket = packet_provider
+            .socket(fposix_socket_packet::Kind::Link)
+            .await
+            .expect("socket FIDL")
+            .expect("create packet socket")
+            .into_proxy();
+
+        let mut env = TxSuspensionTestEnv {
+            ctx,
+            ethernet_id,
+            binding_id,
+            suspend_blocker,
+            probe_element,
+            packet_socket,
+            fake_endpoint,
+            tx_task_fut,
+        };
+        test_body(&mut env).await;
+
+        let TxSuspensionTestEnv {
+            mut ctx,
+            ethernet_id,
+            binding_id,
+            suspend_blocker,
+            probe_element,
+            packet_socket,
+            fake_endpoint,
+            tx_task_fut,
+        } = env;
+        packet_socket.close().await.expect("close FIDL").expect("close packet socket");
+        std::mem::drop((
+            packet_socket,
+            packet_provider,
+            fake_endpoint,
+            suspend_blocker,
+            tx_task_fut,
+            ethernet_id,
+            core_id,
+            netstack,
+        ));
+        interfaces_admin::remove_interface(&mut ctx, binding_id).await;
+        std::mem::drop((ctx, handler, port_guard));
+        port_scope.cancel().await;
+        std::mem::drop((probe_registration, probe_element));
+        setup.shutdown().await;
+    }
+
+    #[fuchsia::test(logging = false)]
+    async fn tx_task_drains_queued_frames_before_suspension() {
+        const EXTRA_FRAMES: usize = 5;
+        const PRE_SUSPEND_FRAMES: usize = BatchSize::MAX + EXTRA_FRAMES;
+        const DURING_SUSPEND_FRAMES: usize = EXTRA_FRAMES;
+        const TOTAL_FRAMES: usize = PRE_SUSPEND_FRAMES + DURING_SUSPEND_FRAMES;
+
+        with_tx_suspension_test_env(None, async |env| {
+            // Enqueue more than `BatchSize::MAX` frames into Core's transmit
+            // queue while `tx_task` is not being polled, exercising multi-batch
+            // draining.
+            env.send_frames(0..PRE_SUSPEND_FRAMES).await;
+            assert_eq!(env.queued_count(), Some(PRE_SUSPEND_FRAMES));
+
+            // Request suspension and wait for `PowerWorker` to drop internal
+            // leases before polling `tx_task`, ensuring `select_biased!` sees
+            // both `suspension_handler.wait()` and `watcher.next()` ready.
+            let mut before_suspend = pin!(env.suspend_blocker.before_suspend());
+            assert_matches!(futures::poll!(&mut before_suspend), Poll::Pending);
+            assert_eq!(env.probe_element.wait_level_change().await, BinaryPowerLevel::Off);
+            assert_matches!(futures::poll!(&mut before_suspend), Poll::Pending);
+            assert_eq!(env.queued_count(), Some(PRE_SUSPEND_FRAMES));
+
+            // Poll `tx_task` once so it enters `Action::Suspension`, sends the
+            // first batch, and yields mid-drain, then enqueue a few more frames
+            // while suspension is pending (within the `MAX_TX_QUEUED_LEN`
+            // budget).
+            assert_matches!(futures::poll!(&mut env.tx_task_fut), Poll::Pending);
+            let mid_drain_queued = env.queued_count().expect("queue configured");
+            assert!(
+                mid_drain_queued > 0 && mid_drain_queued < PRE_SUSPEND_FRAMES,
+                "unexpected mid-drain queue count: {mid_drain_queued}",
+            );
+            env.send_frames(PRE_SUSPEND_FRAMES..TOTAL_FRAMES).await;
+
+            {
+                let mut tx_task_fused = (&mut env.tx_task_fut).fuse();
+                futures::select! {
+                    res = before_suspend => res.expect("before_suspend FIDL"),
+                    res = tx_task_fused => panic!("tx_task exited unexpectedly: {res:?}"),
+                }
+            }
+
+            // Both the pre-suspend queued frames and the frames enqueued while
+            // draining within budget must be delivered before `BeforeSuspend`
+            // completes (prior to `AfterResume`).
+            assert_eq!(env.queued_count(), Some(0));
+            env.expect_frames(0..TOTAL_FRAMES).await;
+
+            env.suspend_blocker.after_resume().await.expect("after_resume FIDL");
+        })
+        .await;
+    }
+
+    #[fuchsia::test(logging = false)]
+    async fn tx_task_bounds_drain_during_suspension() {
+        const EXTRA_FRAMES: usize = 5;
+        const INITIAL_FRAMES: usize = BatchSize::MAX + EXTRA_FRAMES;
+        const PRE_SUSPEND_EXTRA_FRAMES: usize = BatchSize::MAX;
+        const TOTAL_PRE_SUSPEND_FRAMES: usize = INITIAL_FRAMES + PRE_SUSPEND_EXTRA_FRAMES;
+        const DRAIN_BUDGET: usize = 2 * BatchSize::MAX;
+
+        with_tx_suspension_test_env(Some(DRAIN_BUDGET), async |env| {
+            // Enqueue > `BatchSize::MAX` frames and poll `tx_task` once before
+            // suspension so `watcher.next()` is consumed while frames remain in
+            // the queue (exercising `yield_fut` recovery without a pending
+            // `watcher` wakeup).
+            env.send_frames(0..INITIAL_FRAMES).await;
+            assert_matches!(futures::poll!(&mut env.tx_task_fut), Poll::Pending);
+            let remaining_after_first_batch = env.queued_count().expect("queue configured");
+            assert!(
+                remaining_after_first_batch > 0 && remaining_after_first_batch < INITIAL_FRAMES,
+                "unexpected remaining count after first batch: {remaining_after_first_batch}",
+            );
+            let first_batch_sent = INITIAL_FRAMES - remaining_after_first_batch;
+            env.expect_frames(0..first_batch_sent).await;
+
+            // Enqueue another `BatchSize::MAX` frames before requesting
+            // suspension so the pre-suspension queue spans multiple batches
+            // while still starting below `DRAIN_BUDGET`.
+            env.send_frames(INITIAL_FRAMES..TOTAL_PRE_SUSPEND_FRAMES).await;
+            let pre_suspend_queued = remaining_after_first_batch + PRE_SUSPEND_EXTRA_FRAMES;
+            assert_eq!(env.queued_count(), Some(pre_suspend_queued));
+            assert!(pre_suspend_queued < DRAIN_BUDGET);
+
+            // Request suspension and poll `tx_task` once so it enters
+            // `Action::Suspension`, sends the first batch toward
+            // `DRAIN_BUDGET`, and yields mid-drain.
+            let mut before_suspend = pin!(env.suspend_blocker.before_suspend());
+            assert_matches!(futures::poll!(&mut before_suspend), Poll::Pending);
+            assert_eq!(env.probe_element.wait_level_change().await, BinaryPowerLevel::Off);
+            assert_matches!(futures::poll!(&mut before_suspend), Poll::Pending);
+
+            assert_matches!(futures::poll!(&mut env.tx_task_fut), Poll::Pending);
+            let mid_drain_queued = env.queued_count().expect("queue configured");
+            assert!(
+                mid_drain_queued > 0 && mid_drain_queued < pre_suspend_queued,
+                "unexpected mid-drain queue count: {mid_drain_queued}",
+            );
+            let first_suspend_batch = pre_suspend_queued - mid_drain_queued;
+            env.expect_frames(first_batch_sent..first_batch_sent + first_suspend_batch).await;
+
+            // Enqueue `DRAIN_BUDGET` frames while `tx_task` is mid-drain (more
+            // than the remaining drain budget), then keep sending frames
+            // while driving `before_suspend` to verify continuous socket
+            // traffic cannot prevent suspension from completing. Bound total
+            // frames sent during this window so slow `before_suspend`
+            // completion (e.g. under coverage instrumentation) cannot exceed
+            // Core's `MAX_TX_QUEUED_LEN` queue capacity and fail with `ENOBUFS`.
+            env.send_frames(TOTAL_PRE_SUSPEND_FRAMES..TOTAL_PRE_SUSPEND_FRAMES + DRAIN_BUDGET)
+                .await;
+
+            const MAX_FRAMES_DURING_SUSPEND: usize = 10;
+            let mut total_sent = TOTAL_PRE_SUSPEND_FRAMES + DRAIN_BUDGET;
+            let mut frames_sent_during_suspend = 0;
+            {
+                let packet_socket = &env.packet_socket;
+                let binding_id = env.binding_id;
+                let mut tx_task_fused = (&mut env.tx_task_fut).fuse();
+                let mut send_fut = pin!(OptionFuture::default());
+                let mut send_in_flight = false;
+                loop {
+                    if !send_in_flight && frames_sent_during_suspend < MAX_FRAMES_DURING_SUSPEND {
+                        let index = total_sent;
+                        total_sent += 1;
+                        frames_sent_during_suspend += 1;
+                        send_fut.set(
+                            Some(send_test_frame(packet_socket, binding_id, index).fuse()).into(),
+                        );
+                        send_in_flight = true;
+                    }
+                    futures::select! {
+                        res = before_suspend => {
+                            res.expect("before_suspend FIDL");
+                            break;
+                        }
+                        res = tx_task_fused => panic!("tx_task exited unexpectedly: {res:?}"),
+                        res = send_fut => {
+                            assert_eq!(res, Some(()));
+                            send_in_flight = false;
+                        }
+                    }
+                }
+                if send_in_flight {
+                    assert_eq!(send_fut.await, Some(()));
+                }
+            }
+
+            // `Action::Suspension` must have stopped after draining exactly
+            // `DRAIN_BUDGET` frames, leaving excess frames in Core's TX queue
+            // until resume.
+            let expected_drained_before_suspend = first_batch_sent + DRAIN_BUDGET;
+            assert_eq!(env.queued_count(), Some(total_sent - expected_drained_before_suspend));
+            env.expect_frames(
+                first_batch_sent + first_suspend_batch..expected_drained_before_suspend,
+            )
+            .await;
+
+            // After resume, the re-armed `yield_fut` must wake `tx_task` (even
+            // though `watcher` was not notified while the queue stayed
+            // non-empty) and drain all remaining frames.
+            env.suspend_blocker.after_resume().await.expect("after_resume FIDL");
+            {
+                let fake_endpoint = &env.fake_endpoint;
+                let mut tx_task_fused = (&mut env.tx_task_fut).fuse();
+                let mut expect_fut = pin!(
+                    expect_test_frames(fake_endpoint, expected_drained_before_suspend..total_sent)
+                        .fuse()
+                );
+                futures::select! {
+                    () = expect_fut => {}
+                    res = tx_task_fused => panic!("tx_task exited unexpectedly: {res:?}"),
+                }
+            }
+            assert_eq!(env.queued_count(), Some(0));
+        })
+        .await;
     }
 }

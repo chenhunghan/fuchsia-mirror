@@ -2,9 +2,156 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["create_raw_processes.shard.cml"],
-    visibility = ["//zircon/system/ulib/zx/test:__pkg__"],
+    visibility = [
+        "//src/memory/stacktrack/collector:__pkg__",
+        "//src/sys/lib/elf_runner:__pkg__",
+        "//zircon/system/ulib/zx/test:__pkg__",
+        "//zircon/system/utest/psutils:__pkg__",
+    ],
+)
+
+exports_files(
+    ["create_raw_processes_ambient_exec.shard.cml"],
+    visibility = [
+        "//zircon/system/utest/debugger:__pkg__",
+    ],
+)
+
+# Note: GN's `with_unit_tests = true` on `lib` was never wired into `group("tests")`,
+# contains no `#[cfg(test)]` tests, and fails `-Wunused_crate_dependencies` on its
+# unused `test_deps = ["//src/lib/fuchsia"]`; omitted per unbuilt template unit test rule.
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/launcher.rs",
+        "src/lib.rs",
+        "src/runner.rs",
+        "src/test_server.rs",
+    ],
+    crate_name = "test_runners_elf_lib",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    visibility = ["//src/sys/test_runners/fuzz:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/trace/rust:trace-provider",
+        "//src/sys/test_runners:lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "elf_test_runner",
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    deps = [
+        ":lib",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "elf_test_runner",
+)
+
+fx_component_manifest(
+    name = "elf-test-runner-component-manifest",
+    component_name = "elf-test-runner",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+        "//src/sys/test_runners:lib.shard",
+    ],
+    manifest = "meta/elf_test_runner.cml",
+)
+
+fx_component(
+    name = "elf-test-runner-component",
+    compiled_manifest = ":elf-test-runner-component-manifest",
+    visibility = ["//src/sys/test_manager:__pkg__"],
+    deps = [":bin_packaged_bin"],
+)
+
+# Identical to elf-test-runner-component, just with the ambient exec job policy.
+fx_component_manifest(
+    name = "elf-test-ambient-exec-runner-component-manifest",
+    component_name = "elf-test-ambient-exec-runner",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:lib.shard",
+    ],
+    manifest = "meta/elf_test_ambient_exec_runner.cml",
+)
+
+fx_component(
+    name = "elf-test-ambient-exec-runner-component",
+    compiled_manifest = ":elf-test-ambient-exec-runner-component-manifest",
+    deps = [":bin_packaged_bin"],
+)
+
+# Identical to elf-test-runner-component, just with the create raw processes job
+# policy.
+fx_component_manifest(
+    name = "elf-test-create-raw-processes-runner-component-manifest",
+    component_name = "elf-test-create-raw-processes-runner",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:lib.shard",
+    ],
+    manifest = "meta/elf_test_create_raw_processes_runner.cml",
+)
+
+fx_component(
+    name = "elf-test-create-raw-processes-runner-component",
+    compiled_manifest = ":elf-test-create-raw-processes-runner-component-manifest",
+    deps = [":bin_packaged_bin"],
+)
+
+# Identical to elf-test-runner-component, just with the create raw processes and
+# ambient exec job policies.
+fx_component_manifest(
+    name = "elf-test-create-raw-processes-ambient-exec-runner-component-manifest",
+    component_name = "elf-test-create-raw-processes-ambient-exec-runner",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:lib.shard",
+    ],
+    manifest = "meta/elf_test_create_raw_processes_ambient_exec_runner.cml",
+)
+
+fx_component(
+    name = "elf-test-create-raw-processes-ambient-exec-runner-component",
+    compiled_manifest = ":elf-test-create-raw-processes-ambient-exec-runner-component-manifest",
+    deps = [":bin_packaged_bin"],
 )

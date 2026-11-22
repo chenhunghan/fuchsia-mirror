@@ -32,6 +32,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "test-harness-crate-tests",
-    package_name = "test-harness-crate-tests",
     unit_tests = [":tests_bin"],
 )

@@ -17,9 +17,9 @@ use crate::vm::vm_cow_pages::{
 use crate::vm::{page_queues, pmm};
 use core::fmt::Write;
 use core::marker::PhantomPinned;
+use core::mem;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use evictor_bindings as bindings;
 use fbl::StringBuffer;
 use ksync::{KMutex, guarded, source_tag};
 use pin_init::{PinInit, pin_data, pin_init, stack_pin_init};
@@ -51,33 +51,18 @@ fn checked_increment(a: &mut u64, b: u64) {
     *a = result;
 }
 
-#[repr(u8)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EvictionLevel {
     OnlyOldest = 0,
     IncludeNewest = 1,
 }
 
-// Compile-time layout assertions against C++ EvictionLevel
-zr::static_assert!(
-    core::mem::size_of::<EvictionLevel>()
-        == core::mem::size_of::<bindings::Evictor_EvictionLevel>()
-);
-zr::static_assert!(
-    EvictionLevel::OnlyOldest as u8 == bindings::Evictor_EvictionLevel::OnlyOldest as u8
-);
-zr::static_assert!(
-    EvictionLevel::IncludeNewest as u8 == bindings::Evictor_EvictionLevel::IncludeNewest as u8
-);
-
-#[repr(u8)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum Output {
     NoPrint = 0,
     Print = 1,
 }
 
-#[repr(u8)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum TriggerReason {
     Other = 0,
@@ -86,7 +71,6 @@ pub enum TriggerReason {
 
 /// Eviction target state is grouped together behind a lock to allow different threads to safely
 /// trigger and perform the eviction.
-#[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct EvictionTarget {
     pub pending: bool,
@@ -113,44 +97,9 @@ impl Default for EvictionTarget {
     }
 }
 
-// Compile-time layout assertions against C++ EvictionTarget
-zr::static_assert!(
-    core::mem::size_of::<EvictionTarget>()
-        == core::mem::size_of::<bindings::Evictor_EvictionTarget>()
-);
-zr::static_assert!(
-    core::mem::align_of::<EvictionTarget>()
-        == core::mem::align_of::<bindings::Evictor_EvictionTarget>()
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictionTarget, pending)
-        == core::mem::offset_of!(bindings::Evictor_EvictionTarget, pending)
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictionTarget, free_pages_target)
-        == core::mem::offset_of!(bindings::Evictor_EvictionTarget, free_pages_target)
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictionTarget, min_pages_to_free)
-        == core::mem::offset_of!(bindings::Evictor_EvictionTarget, min_pages_to_free)
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictionTarget, level)
-        == core::mem::offset_of!(bindings::Evictor_EvictionTarget, level)
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictionTarget, print_counts)
-        == core::mem::offset_of!(bindings::Evictor_EvictionTarget, print_counts)
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictionTarget, oom_trigger)
-        == core::mem::offset_of!(bindings::Evictor_EvictionTarget, oom_trigger)
-);
-
 /// We count non-loaned and loaned evicted pages separately since the eviction goal is set in terms
 /// of non-loaned pages (for now) so in order to verify expected behavior in tests we keep separate
 /// counts.
-#[repr(C)]
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub struct EvictedPageCounts {
     /// The pager_backed and pager_backed_loaned counts are exclusive; any given evicted page is
@@ -195,32 +144,6 @@ impl core::ops::Sub for EvictedPageCounts {
     }
 }
 
-// Compile-time layout assertions against C++ EvictedPageCounts
-zr::static_assert!(
-    core::mem::size_of::<EvictedPageCounts>()
-        == core::mem::size_of::<bindings::Evictor_EvictedPageCounts>()
-);
-zr::static_assert!(
-    core::mem::align_of::<EvictedPageCounts>()
-        == core::mem::align_of::<bindings::Evictor_EvictedPageCounts>()
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictedPageCounts, pager_backed)
-        == core::mem::offset_of!(bindings::Evictor_EvictedPageCounts, pager_backed)
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictedPageCounts, pager_backed_loaned)
-        == core::mem::offset_of!(bindings::Evictor_EvictedPageCounts, pager_backed_loaned)
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictedPageCounts, discardable)
-        == core::mem::offset_of!(bindings::Evictor_EvictedPageCounts, discardable)
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictedPageCounts, compressed)
-        == core::mem::offset_of!(bindings::Evictor_EvictedPageCounts, compressed)
-);
-
 /// Result returned from eviction methods indicating what they performed and why they returned.
 /// Provides by the count of how many different items were evicted, which could be more or less
 /// than requested, as well as whether any free memory target was achieved.
@@ -256,7 +179,6 @@ pub type FreePagesFunction = SendSyncInlineFn<'static, fn() -> u64>;
 /// This class is thread-safe.
 #[guarded]
 #[pin_data(PinnedDrop)]
-#[repr(C)]
 pub struct Evictor {
     /// Target for eviction.
     #[guarded_by(lock)]
@@ -307,60 +229,6 @@ pub struct Evictor {
     #[pin]
     _pin: PhantomPinned,
 }
-
-// Compile-time layout assertions against the C++ Evictor type and StateLayout via bindgen.
-zr::static_assert!(core::mem::size_of::<Evictor>() == core::mem::size_of::<bindings::Evictor>());
-zr::static_assert!(core::mem::align_of::<Evictor>() == core::mem::align_of::<bindings::Evictor>());
-zr::static_assert!(
-    core::mem::size_of::<Evictor>() == core::mem::size_of::<bindings::Evictor_StateLayout>()
-);
-zr::static_assert!(
-    core::mem::align_of::<Evictor>() == core::mem::align_of::<bindings::Evictor_StateLayout>()
-);
-zr::static_assert!(
-    core::mem::offset_of!(Evictor, eviction_target)
-        == core::mem::offset_of!(bindings::Evictor_StateLayout, eviction_target)
-);
-zr::static_assert!(
-    core::mem::offset_of!(Evictor, eviction_lock)
-        == core::mem::offset_of!(bindings::Evictor_StateLayout, eviction_lock)
-);
-zr::static_assert!(
-    core::mem::offset_of!(Evictor, total_evicted)
-        == core::mem::offset_of!(bindings::Evictor_StateLayout, total_evicted)
-);
-zr::static_assert!(
-    core::mem::offset_of!(Evictor, lock)
-        == core::mem::offset_of!(bindings::Evictor_StateLayout, lock)
-);
-zr::static_assert!(
-    core::mem::offset_of!(Evictor, eviction_thread)
-        == core::mem::offset_of!(bindings::Evictor_StateLayout, eviction_thread)
-);
-zr::static_assert!(
-    core::mem::offset_of!(Evictor, eviction_thread_exiting)
-        == core::mem::offset_of!(bindings::Evictor_StateLayout, eviction_thread_exiting)
-);
-zr::static_assert!(
-    core::mem::offset_of!(Evictor, eviction_signal)
-        == core::mem::offset_of!(bindings::Evictor_StateLayout, eviction_signal)
-);
-zr::static_assert!(
-    core::mem::offset_of!(Evictor, test_reclaim_function)
-        == core::mem::offset_of!(bindings::Evictor_StateLayout, test_reclaim_function)
-);
-zr::static_assert!(
-    core::mem::offset_of!(Evictor, test_free_pages_function)
-        == core::mem::offset_of!(bindings::Evictor_StateLayout, test_free_pages_function)
-);
-zr::static_assert!(
-    core::mem::offset_of!(Evictor, eviction_enabled)
-        == core::mem::offset_of!(bindings::Evictor_StateLayout, eviction_enabled)
-);
-zr::static_assert!(
-    core::mem::offset_of!(Evictor, use_compression)
-        == core::mem::offset_of!(bindings::Evictor_StateLayout, use_compression)
-);
 
 // SAFETY: `Evictor` is internally synchronized via `lock`, `eviction_lock`, and atomics, and its
 // test callbacks (`SendSyncInlineFn`) are `Send + Sync`.
@@ -509,14 +377,8 @@ impl ReclaimFailureStats {
         reclaimed_result: Result<VmCowReclaimSuccess, VmCowReclaimFailure>,
         evicted_page: Option<VmPagePtr>,
     ) {
-        let prev_evicted_page = self.prev_evicted_page;
-        let prev_eviction_result = self.prev_eviction_result;
-        // Wait until the very end to update prev_evicted_page and prev_eviction_result, because we
-        // will use the old values to perform the check.
-        let _update_prev = zr::defer(|| {
-            self.prev_evicted_page = evicted_page;
-            self.prev_eviction_result = reclaimed_result;
-        });
+        let prev_evicted_page = mem::replace(&mut self.prev_evicted_page, evicted_page);
+        let prev_eviction_result = mem::replace(&mut self.prev_eviction_result, reclaimed_result);
 
         if evicted_page != prev_evicted_page {
             return;
@@ -1149,49 +1011,6 @@ impl Evictor {
         }
         reclaim_from_global_page_queues(compression, eviction_level)
             .map(|(res, page)| (res, Some(page)))
-    }
-}
-
-// C FFI exports for C++ `Evictor` methods
-
-/// Initializes an `Evictor` in place at `evictor`.
-///
-/// # Safety
-///
-/// The caller must ensure that `evictor` is a valid, aligned, non-null pointer to uninitialized
-/// storage suitable for `Evictor` that will remain pinned until destroyed by
-/// `rust_evictor_destroy`.
-// SAFETY: Symbol name is prefixed with `rust_evictor_` and matches `evictor.cc`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_evictor_init(evictor: *mut Evictor) {
-    // SAFETY: The caller guarantees `evictor` points to valid, aligned, uninitialized storage
-    // that will remain pinned.
-    let _ = unsafe { Evictor::init().__pinned_init(evictor) };
-}
-
-/// Destroys the `Evictor` at `evictor` in place.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `evictor` is a valid, aligned, non-null pointer to a live, pinned `Evictor` that will not be
-///   accessed again after this call.
-/// - No concurrent calls to `Evictor` methods are active on `evictor`.
-/// - The current thread does not hold `evictor`'s internal locks and is not the eviction thread.
-// SAFETY: Symbol name is prefixed with `rust_evictor_` and matches `evictor.cc`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_evictor_destroy(evictor: *mut Evictor) {
-    // SAFETY: The caller guarantees `evictor` points to a live, pinned `Evictor` with no
-    // concurrent calls, and shutting down the background eviction thread via shared reference
-    // first avoids creating an exclusive `&mut Evictor` while the eviction thread still holds
-    // `&Evictor`.
-    unsafe {
-        (*evictor).disable_eviction();
-    }
-    // SAFETY: The eviction thread has been joined above, and the caller guarantees `evictor` is
-    // valid for dropping in place and will not be used again.
-    unsafe {
-        core::ptr::drop_in_place(evictor);
     }
 }
 

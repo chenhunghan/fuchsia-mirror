@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "tee-test",
+    srcs = ["tee-test.c"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/lib/fdio",
+        # TODO(https://fxbug.dev/584376026): Bazel cc_binary requires CcInfo via
+        # cc_import; GN depends on the shared library directly.
+        "//src/security/lib/tee/tee-client-api:tee-client-api-import",  # @bazel2gn:path_overwrite://src/security/lib/tee/tee-client-api
+        "//src/zircon/lib/zircon",
+    ],
+)

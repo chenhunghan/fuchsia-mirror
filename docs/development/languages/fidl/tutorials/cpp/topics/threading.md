@@ -76,15 +76,15 @@ There are a few solutions to this problem, all in the spirit of adding mutual
 exclusion between the destruction of user objects and **to-user** calls:
 
 <ol>
-    <li id="solution_1_scheduling">
+    <li id="solution-1-scheduling">
         <b>Scheduling</b>: ensure that the destruction of relevant user objects
         is never scheduled in parallel with any to-user calls.
     </li>
-    <li id="solution_2_ref_counting">
+    <li id="solution-2-ref-counting">
         <b>Reference-counting</b>: reference-count the user objects such that
         they are not destroyed until the binding teardown is complete.
     </li>
-    <li id="solution_3_two_phase_shutdown">
+    <li id="solution-3-two-phase-shutdown">
         <b>Two-phase shutdown</b>: provide a notification when binding teardown
         is complete, such that the user could arrange the business objects to
         destruct after that.
@@ -105,9 +105,9 @@ The threading behavior of `fidl::Client` also applies to `fidl::WireClient`.
 Similarly, the threading behavior of `fidl::SharedClient` extends to
 `fidl::WireSharedClient`.
 
-### Client
+### Client {:#client}
 
-`fidl::Client` supports [solution #1 (scheduling)](#solution_1_scheduling) by
+`fidl::Client` supports [solution #1 (scheduling)](#solution-1-scheduling) by
 enforcing that it is used from a
 [synchronized dispatcher][glossary.synchronized-dispatcher] that reads and
 handles messages from the channel:
@@ -165,7 +165,7 @@ destroyed - the client binding will be torn down as part of the process, and
 the threading checks performed by `fidl::Client` are sufficient to prevent this
 class of use-after-frees.
 
-#### Additional use-after-free risks with `ThenExactlyOnce`
+#### Additional use-after-free risks with ThenExactlyOnce {:#additional-use-after-free-risks-with-thenexactlyonce}
 
 When a client object is destroyed, pending callbacks registered through
 `ThenExactlyOnce` will asynchronously receive a cancellation error. Care is
@@ -223,11 +223,11 @@ In the above example, if the server would like to re-initialize `bar_` while
 keeping `FooProtocol` connections alive, it may use `ThenExactlyOnce` to
 reply a cancellation error when handling `FooMethod`, or introduce retry logic.
 
-### SharedClient
+### SharedClient {:#sharedclient}
 
 `fidl::SharedClient` supports [solution #2 (reference
-counting)](#solution_2_ref_counting) and [solution #3 (two-phase
-shutdown)](#solution_3_two_phase_shutdown). You may make FIDL calls on a
+counting)](#solution-2-ref-counting) and [solution #3 (two-phase
+shutdown)](#solution-3-two-phase-shutdown). You may make FIDL calls on a
 `SharedClient` from arbitrary threads, and use the shared client from any kind
 of async dispatcher. Unlike `Client` where destroying a client immediately
 guarantees that there are no more **to-user** calls, destroying a `SharedClient`
@@ -242,10 +242,10 @@ teardown completion.
 
 There are two ways to observe teardown completion:
 
-* [Owned event handler](#owned_event_handler)
-* [Custom teardown observer](#custom_teardown_observer)
+* [Owned event handler](#owned-event-handler)
+* [Custom teardown observer](#custom-teardown-observer)
 
-#### Owned event handler
+#### Owned event handler {:#owned-event-handler}
 
 Transfer the ownership of an event handler to the client as an implementation of
 `std::unique_ptr<fidl::AsyncEventHandler<Protocol>>` when binding the
@@ -259,7 +259,7 @@ Here is an example showing this pattern:
 {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client_thread_safety/main.cc" region_tag="owned_event_handler" %}
 ```
 
-#### Custom teardown observer
+#### Custom teardown observer {:#custom-teardown-observer}
 
 Provide an instance of `fidl::AnyTeardownObserver` to the bindings.
 The observer will be notified when teardown is complete. There are several
@@ -342,11 +342,11 @@ the trade-off is that we need to practice some care in maintaining the lifetime
 of the server implementation object. There are two cases:
 
 * [Initiating teardown from the synchronized
-  dispatcher](#initiating_teardown_from_the_synchronized_dispatcher)
+  dispatcher](#initiating-teardown-from-the-synchronized-dispatcher)
 * [Initiating teardown from an arbitrary
-  thread](#initiating_teardown_from_an_arbitrary_thread)
+  thread](#initiating-teardown-from-an-arbitrary-thread)
 
-### Initiating teardown from the synchronized dispatcher
+### Initiating teardown from the synchronized dispatcher {:#initiating-teardown-from-the-synchronized-dispatcher}
 
 When the async dispatcher (`async_dispatcher_t*`) passed to `fidl::BindServer`
 is a [synchronized dispatcher][glossary.synchronized-dispatcher], and teardown
@@ -376,7 +376,7 @@ void OnUnbound(ServerImpl* impl, fidl::UnbindInfo info,
 If the server object was destroyed earlier on, the callback must not access the
 `impl` variable as it now points to invalid memory.
 
-### Initiating teardown from an arbitrary thread
+### Initiating teardown from an arbitrary thread {:#initiating-teardown-from-an-arbitrary-thread}
 
 If the application cannot guarantee that the teardown is always initiated from
 the synchronized dispatcher, then there could be ongoing **to-user** calls

@@ -92,6 +92,7 @@ def create_build_flags_info(
 def _build_flags_impl(ctx):
     return [create_build_flags_info(ctx)]
 
+# Attributes required by `create_build_flags_info()`.
 BUILD_FLAGS_ATTRS = {
     "cflags": attr.string_list(
         doc = "List of C and C++ compiler flags.",

@@ -515,7 +515,7 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
                                 log_status_on_failure=False,
                                 disable_controlmaster=True,
                             )
-                            dut.fuchsia_controller.after_usb_reconnect()
+                            dut.usb.after_connect()
                     except Exception as e:
                         _LOGGER.error(
                             "Failed to restore initial USB configuration or "

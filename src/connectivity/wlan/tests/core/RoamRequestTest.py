@@ -12,10 +12,7 @@ import fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211
 import fidl_fuchsia_wlan_internal as fidl_security
 import fidl_fuchsia_wlan_sme as fidl_sme
 import fuchsia_wlan_base_test
-import honeydew.affordances.connectivity.wlan.core as wlan_core
-from honeydew.affordances.connectivity.wlan.core import (
-    ConnectTransactionEventHandler,
-)
+from honeydew.affordances.connectivity.wlan.core import wlan_core
 from honeydew.affordances.connectivity.wlan.utils.types import (
     KNOWN_COUNTRY_CODES,
 )
@@ -416,7 +413,7 @@ class RoamRequestTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             server,
         ) = self.dut.fuchsia_controller.channel_create()
         client = fidl_sme.ConnectTransactionClient(proxy.take())
-        async with ConnectTransactionEventHandler(client) as ctx:
+        async with wlan_core.ConnectTransactionEventHandler(client) as ctx:
             txn_queue = ctx.txn_queue
 
             protocol = test_params.origin_security_mode.to_fidl_wlan_internal()
@@ -493,12 +490,13 @@ class RoamRequestTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                     f"Timed out after {CONNECT_WAIT_TIME_SECONDS} seconds awaiting a connect result"
                 )
 
-            if next_txn != fidl_sme.ConnectTransactionOnConnectResultRequest(
-                result=fidl_sme.ConnectResult(
-                    code=fidl_ieee80211.StatusCode.SUCCESS,
-                    is_credential_rejected=False,
-                    is_reconnect=False,
-                )
+            if not isinstance(
+                next_txn,
+                fidl_sme.ConnectTransactionOnConnectResultRequest,
+            ) or next_txn.result != fidl_sme.ConnectResult(
+                code=fidl_ieee80211.StatusCode.SUCCESS,
+                is_credential_rejected=False,
+                is_reconnect=False,
             ):
                 raise signals.TestError(f"Failed to connect to initial AP.")
 

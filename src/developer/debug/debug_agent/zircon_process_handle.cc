@@ -53,10 +53,10 @@ debug_ipc::AddressRegion MapToAddressRegion(const zx_info_maps& map) {
   region.vmo_offset = map.u.mapping.vmo_offset;
   region.committed_bytes = map.u.mapping.committed_bytes;
 
-  region.read = map.u.mapping.mmu_flags & ZX_VM_PERM_READ;
-  region.write = map.u.mapping.mmu_flags & ZX_VM_PERM_WRITE;
-  region.execute = map.u.mapping.mmu_flags & ZX_VM_PERM_EXECUTE;
-  region.shared = false;  // Unused on Fuchsia.
+  region.read = map.u.mapping.mmu_flags & ZX_VM_PERM_READ;        // NOLINT(bugprone-signed-bitwise)
+  region.write = map.u.mapping.mmu_flags & ZX_VM_PERM_WRITE;      // NOLINT(bugprone-signed-bitwise)
+  region.execute = map.u.mapping.mmu_flags & ZX_VM_PERM_EXECUTE;  // NOLINT(bugprone-signed-bitwise)
+  region.shared = false;                                          // Unused on Fuchsia.
 
   return region;
 }
@@ -89,7 +89,8 @@ debug::Status ZirconProcessHandle::Kill() { return debug::ZxStatus(process_.kill
 
 int64_t ZirconProcessHandle::GetReturnCode() const {
   zx_info_process_t info = {};
-  if (process_.get_info(ZX_INFO_PROCESS, &info, sizeof(info), nullptr, nullptr) == ZX_OK)
+  if (process_.get_info(ZX_INFO_PROCESS,  // NOLINT(bugprone-signed-bitwise)
+                        &info, sizeof(info), nullptr, nullptr) == ZX_OK)
     return info.return_code;
   return 0;
 }
@@ -97,22 +98,24 @@ int64_t ZirconProcessHandle::GetReturnCode() const {
 debug::Status ZirconProcessHandle::Attach(ProcessHandleObserver* observer,
                                           AttachConfig attach_config) {
   FX_DCHECK(observer);
-  observer_ = observer;
 
-  if (!process_watch_handle_.watching()) {
-    // Start watching.
+  // Register on initial attach or when upgrading a termination-only watch to claim the debugger
+  // exception channel. Keeping watch_handle local ensures failed upgrades preserve the existing
+  // termination watch, while move-assignment on success stops and replaces the prior watch.
+  if (!process_watch_handle_.watching() ||
+      (attach_config.claim_exception_channel && !exception_channel_claimed_)) {
     debug::MessageLoopFuchsia* loop = debug::MessageLoopFuchsia::Current();
     FX_DCHECK(loop);  // Loop must be created on this thread first.
 
-    // Register for debug exceptions.
     debug::MessageLoopFuchsia::WatchProcessConfig config;
     config.process_name = GetName();
     config.process_handle = process_.get();
     config.process_koid = GetKoid();
     config.watcher = this;
     config.claim_exception_channel = attach_config.claim_exception_channel;
-    if (auto status = debug::ZxStatus(
-            loop->WatchProcessExceptions(std::move(config), &process_watch_handle_));
+    debug::MessageLoop::WatchHandle watch_handle;
+    if (auto status =
+            debug::ZxStatus(loop->WatchProcessExceptions(std::move(config), &watch_handle));
         status.has_error()) {
       return status;
     }
@@ -131,19 +134,28 @@ debug::Status ZirconProcessHandle::Attach(ProcessHandleObserver* observer,
                                      sizeof(break_on_load));
       FX_CHECK(status == ZX_OK);
     }
+
+    process_watch_handle_ = std::move(watch_handle);
+    exception_channel_claimed_ = attach_config.claim_exception_channel;
   }
+  observer_ = observer;
   return debug::Status();
 }
 
-bool ZirconProcessHandle::IsAttached() const { return process_watch_handle_.watching(); }
+bool ZirconProcessHandle::IsAttached() const {
+  return process_watch_handle_.watching() && exception_channel_claimed_;
+}
 
 void ZirconProcessHandle::Detach() {
   observer_ = nullptr;
 
-  // Unset ZX_PROP_PROCESS_BREAK_ON_LOAD.
-  uintptr_t break_on_load = 0;
-  FX_CHECK(process_.set_property(ZX_PROP_PROCESS_BREAK_ON_LOAD, &break_on_load,
-                                 sizeof(break_on_load)) == ZX_OK);
+  // Unset ZX_PROP_PROCESS_BREAK_ON_LOAD only when this handle claimed the exception channel.
+  if (exception_channel_claimed_) {
+    uintptr_t break_on_load = 0;
+    FX_CHECK(process_.set_property(ZX_PROP_PROCESS_BREAK_ON_LOAD, &break_on_load,
+                                   sizeof(break_on_load)) == ZX_OK);
+    exception_channel_claimed_ = false;
+  }
 
   // Unbind from the exception port.
   process_watch_handle_.StopWatching();
@@ -235,16 +247,17 @@ fit::result<debug::Status, std::vector<debug_ipc::InfoHandle>> ZirconProcessHand
   size_t vmo_actual = 0;
   size_t vmo_avail = 0;
   if (zx_status_t status =
-          process_.get_info(ZX_INFO_PROCESS_VMOS, nullptr, 0, &vmo_actual, &vmo_avail);
+          process_.get_info(ZX_INFO_PROCESS_VMOS,  // NOLINT(bugprone-signed-bitwise)
+                            nullptr, 0, &vmo_actual, &vmo_avail);
       status != ZX_OK)
     return fit::error(debug::ZxStatus(status));
   vmo_avail += 64;  // Try to prevent races as above.
 
   // Read the VMO table.
   std::vector<zx_info_vmo_t> vmos(vmo_avail);
-  if (zx_status_t status =
-          process_.get_info(ZX_INFO_PROCESS_VMOS, vmos.data(), vmo_avail * sizeof(zx_info_vmo_t),
-                            &vmo_actual, &vmo_avail);
+  if (zx_status_t status = process_.get_info(
+          ZX_INFO_PROCESS_VMOS,  // NOLINT(bugprone-signed-bitwise)
+          vmos.data(), vmo_avail * sizeof(zx_info_vmo_t), &vmo_actual, &vmo_avail);
       status != ZX_OK)
     return fit::error(debug::ZxStatus(status));
   vmos.resize(vmo_actual);
@@ -324,7 +337,7 @@ std::vector<debug_ipc::MemoryBlock> ZirconProcessHandle::ReadMemoryBlocks(uint64
       boundaries.push_back(end);
   }
   boundaries.push_back(address + size);
-  std::sort(boundaries.begin(), boundaries.end());
+  std::ranges::sort(boundaries);
 
   std::vector<debug_ipc::MemoryBlock> blocks;
 
@@ -361,8 +374,8 @@ debug::Status ZirconProcessHandle::SaveMinidump(const std::vector<DebuggedThread
     if (thread->in_exception()) {
       zx_exception_report_t exception_report;
       zx_status_t status = thread->thread_handle().GetNativeHandle().get_info(
-          ZX_INFO_THREAD_EXCEPTION_REPORT, &exception_report, sizeof(exception_report), nullptr,
-          nullptr);
+          ZX_INFO_THREAD_EXCEPTION_REPORT,  // NOLINT(bugprone-signed-bitwise)
+          &exception_report, sizeof(exception_report), nullptr, nullptr);
       if (status != ZX_OK) {
         DEBUG_LOG(Process) << "Failed to get ZX_INFO_THREAD_EXCEPTION_REPORT for thread "
                            << thread->koid();
@@ -384,7 +397,7 @@ debug::Status ZirconProcessHandle::SaveMinidump(const std::vector<DebuggedThread
   // Copy data out of in memory file to the IPC format.
   const std::string& s = file.string();
   core_data->reserve(s.size());
-  std::copy(s.begin(), s.end(), std::back_inserter(*core_data));
+  std::ranges::copy(s, std::back_inserter(*core_data));
 
   return status;
 }
@@ -421,13 +434,15 @@ std::vector<zx_info_maps_t> ZirconProcessHandle::GetMaps() const {
   while (true) {
     map.resize(count_guess);
 
-    zx_status_t status = process_.get_info(ZX_INFO_PROCESS_MAPS, map.data(),
-                                           sizeof(zx_info_maps) * map.size(), &actual, &avail);
+    zx_status_t status =
+        process_.get_info(ZX_INFO_PROCESS_MAPS,  // NOLINT(bugprone-signed-bitwise)
+                          map.data(), sizeof(zx_info_maps) * map.size(), &actual, &avail);
 
     if (status != ZX_OK) {
       actual = 0;
       break;
-    } else if (actual == avail) {
+    }
+    if (actual == avail) {
       break;
     }
 
@@ -462,8 +477,8 @@ void ZirconProcessHandle::OnException(zx::exception exception, zx_exception_info
   zx::thread thread;
   if (exception.get_thread(&thread) == ZX_OK) {
     zx_exception_report_t stack_report;
-    if (thread.get_info(ZX_INFO_THREAD_EXCEPTION_REPORT, &stack_report, sizeof(stack_report),
-                        nullptr, nullptr) == ZX_OK) {
+    if (thread.get_info(ZX_INFO_THREAD_EXCEPTION_REPORT,  // NOLINT(bugprone-signed-bitwise)
+                        &stack_report, sizeof(stack_report), nullptr, nullptr) == ZX_OK) {
       report = stack_report;
     }
   }

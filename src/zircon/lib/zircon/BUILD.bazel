@@ -4,8 +4,8 @@
 
 """Defines the zircon library for the current configuration."""
 
-load("@rules_cc//cc:defs.bzl", "cc_library")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/cc:shared_library.bzl", "cc_link_stub_from_ifs_file")
 load("//build/bazel/rules/idk:idk_atom.bzl", "idk_noop_atom")
 
@@ -17,17 +17,17 @@ package(default_applicable_licenses = ["//:license"])
 # LINT.IfChange
 
 # Provides the proper definition for the zircon library for the current configuration.
-cc_library(
+alias(
     name = "zircon",
-    visibility = ["//visibility:public"],
-    deps = select({
-        "@platforms//os:fuchsia": [":libzircon_link_stub"],
+    actual = select({
+        "@platforms//os:fuchsia": ":libzircon_link_stub",
         # References from other environments only get the headers.  This
         # makes it easy to have "//src/zircon/lib/zircon" deps in common
         # libraries that need to link against it in Fuchsia userland but that in
         # other contexts are just using the headers.
-        "//conditions:default": [":headers"],
+        "//conditions:default": ":headers",
     }),
+    visibility = ["//:__subpackages__"],
 )
 
 # The definition of zircon for (non-kernel) Fuchsia targets.
@@ -45,16 +45,16 @@ cc_link_stub_from_ifs_file(
     deps = [":headers"],
 )
 
-cc_library(
+fx_cc_library(
     name = "zircon.as-needed",
     target_compatible_with = HOST_OS_CONSTRAINTS,
-    visibility = ["//visibility:public"],
+    visibility = ["//:__subpackages__"],
     deps = [":headers"],
 )
 
-cc_library(
+fx_cc_library(
     name = "headers",
-    visibility = ["//visibility:public"],
+    visibility = ["//:__subpackages__"],
     deps = [":zircon-headers"] +
            select({
                # TODO(https://fxbug.dev/457448700): Uncomment when available.
@@ -67,7 +67,7 @@ cc_library(
            }),
 )
 
-cc_library(
+fx_cc_library(
     name = "zircon-headers",
     hdrs = [
         "include/zircon/exception.h",
@@ -86,7 +86,7 @@ idk_noop_atom(
     idk_name = "zircon",
     stable = True,
     target_compatible_with = ["@platforms//os:fuchsia"],
-    visibility = ["//visibility:public"],
+    visibility = ["//:__subpackages__"],
 )
 
 # LINT.ThenChange(BUILD.gn)

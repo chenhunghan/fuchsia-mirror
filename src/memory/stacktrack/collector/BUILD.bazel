@@ -1,0 +1,140 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":stacktrack-collector-tests"],
+    visibility = ["//src/memory:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/main.rs",
+        "src/process.rs",
+        "src/process_v1.rs",
+        "src/registry.rs",
+        "src/utils.rs",
+    ],
+    binary_name = "stacktrack_collector",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    # Depends on Zircon and Fuchsia component libraries.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.memory.stacktrack.client:fuchsia.memory.stacktrack.client_rust",
+        "//sdk/fidl/fuchsia.memory.stacktrack.process:fuchsia.memory.stacktrack.process_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/elf-search/rust:lib",
+        "//src/lib/elf_parse",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//src/memory/stacktrack/lib/stacktrack_snapshot",
+        "//src/memory/stacktrack/lib/stacktrack_vmo",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "stacktrack_collector",
+)
+
+fx_component_manifest(
+    name = "collector_manifest",
+    component_name = "stacktrack-collector",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/stacktrack-collector.cml",
+)
+
+fx_component(
+    name = "collector_component",
+    compiled_manifest = ":collector_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "collector",
+    package_name = "stacktrack-collector",
+    components = [":collector_component"],
+)
+
+rustc_test(
+    name = "stacktrack_collector_bin_test",
+    crate = ":bin",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-runtime",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "stacktrack_collector_bin_test_packaged",
+    testonly = True,
+    binary = ":stacktrack_collector_bin_test",
+    binary_name = "stacktrack_collector_bin_test",
+)
+
+fx_component_manifest(
+    name = "stacktrack-collector-tests-manifest",
+    testonly = True,
+    component_name = "stacktrack-collector-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/elf:create_raw_processes.shard.cml",
+    ],
+    manifest = "meta/tests.cml",
+)
+
+fx_test_component(
+    name = "stacktrack-collector-tests-component",
+    compiled_manifest = ":stacktrack-collector-tests-manifest",
+    deps = [":stacktrack_collector_bin_test_packaged"],
+)
+
+fx_package(
+    name = "stacktrack-collector-tests-pkg",
+    package_name = "stacktrack-collector-tests",
+    testonly = True,
+    test_components = [":stacktrack-collector-tests-component"],
+)
+
+fx_test(
+    name = "stacktrack-collector-tests",
+    package = ":stacktrack-collector-tests-pkg",
+)

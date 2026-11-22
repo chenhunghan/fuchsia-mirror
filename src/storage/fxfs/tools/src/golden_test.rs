@@ -14,8 +14,12 @@ use crate::golden_common::{
     WRAPPING_KEY_ID, latest_image_filename,
 };
 use anyhow::{Context, Error, ensure};
+use blob_pager_and_verifier::BlobPagerAndVerifier;
+use block_server::serve_device_mapper;
 use fidl::endpoints::create_proxy;
 use fidl_fuchsia_io as fio;
+use fidl_fuchsia_storage_block as fblock;
+use fidl_fuchsia_storage_mapping as fmapping;
 use fuchsia_fs::directory::{DirEntry, DirentKind, open_file, read_file, readdir_inclusive};
 use fuchsia_hash::Hash;
 use fxfs::filesystem::FxFilesystem;
@@ -27,6 +31,7 @@ use fxfs_crypto::Crypt;
 use fxfs_insecure_crypto::new_insecure_crypt;
 use fxfs_make_blob_image::BLOB_VOLUME_NAME;
 use fxfs_platform::fuchsia::fxblob::BlobDirectory;
+use fxfs_platform::fuchsia::fxblob::mapping_provider::BlobMappingProvider;
 use fxfs_platform::fuchsia::volume::{FxVolumeAndRoot, MemoryPressureConfig};
 use fxfs_platform::fuchsia::volumes_directory::VolumesDirectory;
 use refaults_vmo::PageFaultCounter;
@@ -416,8 +421,8 @@ async fn check_data_volume(
     Ok(())
 }
 
-async fn check_blob(dir: &Arc<BlobDirectory>, hash: Hash) -> Result<(), Error> {
-    let vmo = dir.get_blob_vmo(hash).await?;
+async fn check_blob(blob_pager: &BlobPagerAndVerifier, hash: Hash) -> Result<(), Error> {
+    let vmo = blob_pager.create_vmo(&hash.into()).await?;
     let size = vmo.get_size()?;
     // Read in the whole blob to verify it.
     const STEP_SIZE: usize = 1024 * 32;
@@ -430,13 +435,31 @@ async fn check_blob(dir: &Arc<BlobDirectory>, hash: Hash) -> Result<(), Error> {
 }
 
 async fn check_blob_volume(
+    fs: &Arc<FxFilesystem>,
     vol_and_dir: FxVolumeAndRoot,
     blob_list: Vec<[u8; 32]>,
 ) -> Result<(), Error> {
     let dir = vol_and_dir.root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+    let (mapping_provider, provider_server_end) = create_proxy::<fmapping::MappingProviderMarker>();
+    vol_and_dir.volume().scope().spawn(async move {
+        BlobMappingProvider::handle_mapping_provider_requests(
+            dir,
+            provider_server_end.into_stream(),
+        )
+        .await;
+    });
+
+    let (mapper_proxy, mapper_server_end) = create_proxy::<fblock::MapperMarker>();
+    let device = fs.device().clone();
+    vol_and_dir.volume().scope().spawn(async move {
+        serve_device_mapper(device, mapper_server_end.into_stream()).await;
+    });
+
+    let blob_pager =
+        BlobPagerAndVerifier::new_with_cache_capacity(&mapping_provider, &mapper_proxy, 0).await?;
     for blob in blob_list {
         let hash = Hash::from_array(blob);
-        check_blob(&dir, hash).await.with_context(|| format!("Opening blob {:?}", hash))?;
+        check_blob(&blob_pager, hash).await.with_context(|| format!("Opening blob {:?}", hash))?;
     }
     Ok(())
 }
@@ -484,7 +507,7 @@ async fn check_image(path: &Path) -> Result<(), Error> {
                     "Should have found blobs listed in unencrypted volume. Did they open in the
                     correct order?"
                 );
-                check_blob_volume(vol_and_dir, std::mem::take(&mut blob_list))
+                check_blob_volume(&fs, vol_and_dir, std::mem::take(&mut blob_list))
                     .await
                     .with_context(|| format!("Checking {}", vol_name))?;
             } else {

@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.test",
+    src = "fuchsia.test.bind",
+    api_area = "Unknown",
+    category = "partner",
+    visibility = [
+        "//examples/drivers:__subpackages__",
+        "//sdk:__pkg__",
+        "//sdk/lib/driver/metadata/cpp/tests/metadata_integration_test:__pkg__",
+        "//sdk/lib/driver_test_realm/fake_driver:__pkg__",
+        "//src/connectivity:__subpackages__",
+        "//src/developer:__subpackages__",
+        "//src/devices:__subpackages__",
+        "//src/diagnostics:__subpackages__",
+        "//src/graphics:__subpackages__",
+        "//src/lib/ddktl/tests/metadata-server-test:__pkg__",
+        "//src/lib/diagnostics/log/rust/tests:__pkg__",
+        "//src/media:__subpackages__",
+        "//src/power:__subpackages__",
+        "//src/ui:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)

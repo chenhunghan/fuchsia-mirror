@@ -231,7 +231,7 @@ TEST_F(SnapshotPersistenceTest, Check_UsesTmpUntilCacheReady) {
   // Use directory that |scoped_mem_fs| can create using ScopedMemFsManager::Create, but |store_|
   // can't create using files::CreateDirectory
   const std::string cache_root = "/cache/delayed/path";
-  testing::ScopedMemFsManager scoped_mem_fs;
+  ScopedMemFsManager scoped_mem_fs;
   persistence_ = std::make_unique<SnapshotPersistence>(
       SnapshotPersistence::Root{GetTmpDir(), StorageSize::Megabytes(1)},
       SnapshotPersistence::Root{cache_root, StorageSize::Megabytes(1)});

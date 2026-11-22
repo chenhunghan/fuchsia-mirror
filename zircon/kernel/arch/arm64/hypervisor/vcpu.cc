@@ -19,7 +19,6 @@
 #include <hypervisor/cpu.h>
 #include <hypervisor/ktrace.h>
 #include <kernel/event.h>
-#include <kernel/percpu.h>
 #include <kernel/stats.h>
 #include <ktl/utility.h>
 #include <platform/timer.h>
@@ -146,6 +145,7 @@ AutoGich::AutoGich(IchState* ich_state, bool pending) : ich_state_(ich_state) {
   DEBUG_ASSERT(!arch_blocking_disallowed());
   int_state_ = arch_interrupt_save();
   arch_set_blocking_disallowed(true);
+  apd_.Disable();
   gic_write_gich_state(ich_state_, gich_hcr);
 }
 

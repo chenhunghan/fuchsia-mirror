@@ -12,6 +12,8 @@
 #include <limits>
 #include <set>
 
+#include <safemath/checked_math.h>
+
 #include "lib/fit/defer.h"
 #include "src/developer/debug/ipc/protocol.h"
 #include "src/developer/debug/ipc/records.h"
@@ -28,7 +30,6 @@
 #include "src/developer/debug/zxdb/client/thread_impl.h"
 #include "src/developer/debug/zxdb/client/until_process_controller.h"
 #include "src/developer/debug/zxdb/client/until_thread_controller.h"
-#include "src/developer/debug/zxdb/common/checked_math.h"
 #include "src/developer/debug/zxdb/common/join_callbacks.h"
 #include "src/developer/debug/zxdb/expr/expr_language.h"
 #include "src/developer/debug/zxdb/symbols/elf_symbol.h"
@@ -616,7 +617,7 @@ void ProcessImpl::LoadTLSHelpers() {
       }));
 
   for (const auto& region : regions) {
-    ReadMemory(region.addr, region.size,
+    ReadMemory(region.addr, static_cast<uint32_t>(region.size),
                [target = region.target, weak_this = GetWeakPtr(), finish](const Err& err,
                                                                           MemoryDump dump) {
                  if (weak_this && !err.has_error() && dump.AllValid()) {
@@ -643,11 +644,12 @@ void ProcessImpl::OnSymbolLoadFailure(const Err& err) {
 bool ProcessImpl::IsRangeCached(const AddressRange& range) const {
   for (const auto& dump : cached_memory_) {
     for (const auto& block : dump.blocks()) {
-      auto block_end = CheckedAdd(block.address, block.size);
-      if (!block.valid || block.size == 0 || !block_end) {
+      uint64_t block_end = 0;
+      if (!block.valid || block.size == 0 ||
+          !safemath::CheckAdd(block.address, block.size).AssignIfValid(&block_end)) {
         continue;
       }
-      AddressRange block_range(block.address, *block_end);
+      AddressRange block_range(block.address, block_end);
       if (block_range.Contains(range)) {
         return true;
       }
@@ -661,11 +663,11 @@ std::vector<AddressRange> ProcessImpl::CoalesceUncachedRanges(
   std::vector<AddressRange> uncached;
   uncached.reserve(ranges.size());
   for (const auto& [addr, size] : ranges) {
-    auto end = CheckedAdd(addr, size);
-    if (size == 0 || !end) {
+    uint64_t end = 0;
+    if (size == 0 || !safemath::CheckAdd(addr, size).AssignIfValid(&end)) {
       continue;
     }
-    AddressRange range(addr, *end);
+    AddressRange range(addr, end);
     if (!IsRangeCached(range)) {
       uncached.push_back(range);
     }

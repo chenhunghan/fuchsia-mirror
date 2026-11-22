@@ -47,7 +47,7 @@ class GcloudTest(unittest.TestCase):
         gcloud.login()
 
         mock_run.assert_called_once_with(
-            ["/bin/gcloud", "auth", "application-default", "login"],
+            ("/bin/gcloud", "auth", "application-default", "login"),
             stdin=mock.ANY,
             stdout=mock.ANY,
             stderr=mock.ANY,
@@ -74,6 +74,58 @@ class GcloudTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             gcloud.login()
         self.assertIn("Interactive gcloud login failed", str(ctx.exception))
+
+    @mock.patch.object(gcloud, "shutil", autospec=True)
+    @mock.patch.object(gcloud, "subprocess", autospec=True)
+    def test_login_forwards_extra_args(
+        self, mock_subprocess: mock.Mock, mock_shutil: mock.Mock
+    ) -> None:
+        mock_shutil.which.return_value = "/bin/gcloud"
+        mock_subprocess.run.return_value = subprocess.CompletedProcess((), 0)
+        gcloud.login(("--no-launch-browser",))
+        mock_subprocess.run.assert_called_once_with(
+            (
+                "/bin/gcloud",
+                "auth",
+                "application-default",
+                "login",
+                "--no-launch-browser",
+            ),
+            stdin=mock.ANY,
+            stdout=mock.ANY,
+            stderr=mock.ANY,
+            check=True,
+        )
+
+    @mock.patch.object(gcloud, "shutil", autospec=True)
+    @mock.patch.object(gcloud, "subprocess", autospec=True)
+    def test_has_valid_adc_token(
+        self, mock_subprocess: mock.Mock, mock_shutil: mock.Mock
+    ) -> None:
+        mock_shutil.which.return_value = None
+        self.assertFalse(gcloud.has_valid_adc_token())
+
+        gcloud.path.cache_clear()
+        mock_shutil.which.return_value = "/bin/gcloud"
+        mock_subprocess.run.return_value = subprocess.CompletedProcess(
+            (), 0, stdout="fake-access-token\n"
+        )
+        self.assertTrue(gcloud.has_valid_adc_token())
+
+        mock_subprocess.run.return_value = subprocess.CompletedProcess(
+            (), 0, stdout="\n"
+        )
+        self.assertFalse(gcloud.has_valid_adc_token())
+
+        mock_subprocess.run.return_value = subprocess.CompletedProcess(
+            (), 0, stdout="unexpected multi word output\n"
+        )
+        self.assertFalse(gcloud.has_valid_adc_token())
+
+        mock_subprocess.run.return_value = subprocess.CompletedProcess(
+            (), 1, stdout="fake-access-token\n"
+        )
+        self.assertFalse(gcloud.has_valid_adc_token())
 
 
 if __name__ == "__main__":

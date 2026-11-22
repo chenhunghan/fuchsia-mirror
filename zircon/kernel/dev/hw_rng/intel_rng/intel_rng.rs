@@ -7,8 +7,6 @@
 use crate::arch_rs::x86::feature::{X86_FEATURE_RDRAND, X86_FEATURE_RDSEED, x86_feature_test};
 use crate::hw_rng::{HwRngOps, hw_rng_register};
 use core::arch::x86_64::{_rdrand64_step, _rdseed64_step};
-use core::ffi::c_void;
-use core::ptr::NonNull;
 use zx_status::Status;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,30 +101,23 @@ unsafe fn get_entropy_from_rdrand(buf: &mut [u8]) -> usize {
     unsafe { get_entropy_from_instruction(buf, EntropyInstr::Rdrand) }
 }
 
-/// # Safety
-///
-/// If `len > 0`, `buf` must be non-null and point to writable memory of at least `len` bytes
-/// that is not accessed concurrently for the duration of the call.
-unsafe extern "C" fn intel_hw_rng_get_entropy(buf: Option<NonNull<c_void>>, len: usize) -> usize {
-    if len == 0 {
-        return 0;
+struct IntelRng;
+
+impl HwRngOps for IntelRng {
+    fn get_entropy(&self, buf: &mut [u8]) -> usize {
+        if buf.is_empty() {
+            return 0;
+        }
+        get_entropy_from_cpu(buf).unwrap_or(0)
     }
-
-    let buf = buf.expect("hw_rng buf must be non-null when len > 0");
-
-    // SAFETY: `len > 0` and the caller guarantees `buf` is non-null and points to writable memory
-    // of at least `len` bytes with no concurrent access for the duration of the call.
-    let buf = unsafe { zr::slice_from_raw_parts_mut(buf.as_ptr().cast::<u8>(), len) };
-
-    get_entropy_from_cpu(buf).unwrap_or(0)
 }
 
-static OPS: HwRngOps = HwRngOps { hw_rng_get_entropy: intel_hw_rng_get_entropy };
+static DRIVER: IntelRng = IntelRng;
 
 fn intel_rng_init(_level: init::LkInitLevel) {
-    // SAFETY: Registration occurs during early boot before multi-threading, and `OPS` is a
-    // `'static` with a valid callback.
-    unsafe { hw_rng_register(&OPS) };
+    // SAFETY: Called once at `LK_INIT_LEVEL_PLATFORM_EARLY + 1` on the boot CPU before secondary
+    // CPUs start, with no concurrent `hw_rng_*` calls.
+    unsafe { hw_rng_register(&DRIVER) };
 }
 
 init::lk_init_hook!(

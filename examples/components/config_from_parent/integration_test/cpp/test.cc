@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 #include <fidl/fuchsia.component.decl/cpp/fidl.h>
-#include <fidl/fuchsia.component.decl/cpp/hlcpp_conversion.h>
 #include <fidl/fuchsia.component/cpp/fidl.h>
 #include <fidl/fuchsia.diagnostics/cpp/fidl.h>
 #include <fuchsia/diagnostics/cpp/fidl.h>
@@ -65,16 +64,18 @@ TEST_F(IntegrationTest, ParentValuesObserved) {
   child_decl.url(kChildUrl);
   child_decl.startup(fuchsia_component_decl::StartupMode::kLazy);
 
-  fuchsia_component_decl::ConfigOverride greeting_override;
-  greeting_override.key("greeting");
-  greeting_override.value(fuchsia_component_decl::ConfigValue::WithSingle(
-      fuchsia_component_decl::ConfigSingleValue::WithString(expected_greeting)));
-  child_decl.config_overrides({{greeting_override}});
-
   fuchsia_component_decl::CollectionRef collection;
   collection.name(kCollectionName);
 
+  fuchsia_component_decl::OfferConfiguration offer_config;
+  offer_config.source(fuchsia_component_decl::Ref::WithSelf(fuchsia_component_decl::SelfRef{}));
+  offer_config.source_name("fuchsia.example.config.Greeting");
+  offer_config.target_name("fuchsia.example.config.Greeting");
+  offer_config.availability(fuchsia_component_decl::Availability::kRequired);
+
   fuchsia_component::CreateChildArgs child_args;
+  child_args.dynamic_offers(
+      std::vector{fuchsia_component_decl::Offer::WithConfig(std::move(offer_config))});
 
   realm->CreateChild({collection, child_decl, std::move(child_args)})
       .ThenExactlyOnce([this](fidl::Result<fuchsia_component::Realm::CreateChild>& result) {
@@ -172,19 +173,23 @@ TEST_F(IntegrationTest, DefaultValuesObserved) {
 }
 
 TEST_F(IntegrationTest, ConfigCppRealmBuilderParentOverride) {
-  std::vector<fuchsia_component_decl::ConfigOverride> child_overrides;
-  child_overrides.emplace_back();
-
-  child_overrides.back().key("greeting");
-  child_overrides.back().value(fuchsia_component_decl::ConfigValue::WithSingle(
-      fuchsia_component_decl::ConfigSingleValue::WithString("parent component")));
-
   auto realm_builder = component_testing::RealmBuilder::Create();
   auto options =
-      component_testing::ChildOptions{.startup_mode = component_testing::StartupMode::EAGER,
-                                      .config_overrides = fidl::NaturalToHLCPP(child_overrides)};
+      component_testing::ChildOptions{.startup_mode = component_testing::StartupMode::EAGER};
   auto child_name = "config_example_override_mutable_by_parent";
   realm_builder.AddChild(child_name, kChildUrl, options);
+
+  std::vector<component_testing::ConfigCapability> configurations;
+  configurations.push_back({
+      .name = "fuchsia.example.config.Greeting",
+      .value = component_testing::ConfigValue("parent component"),
+  });
+  realm_builder.AddConfiguration(std::move(configurations));
+  realm_builder.AddRoute({
+      .capabilities = {component_testing::Config{.name = "fuchsia.example.config.Greeting"}},
+      .source = component_testing::SelfRef{},
+      .targets = {component_testing::ChildRef{child_name}},
+  });
 
   realm_builder.AddRoute(component_testing::Route{
       .capabilities = {component_testing::Protocol{"fuchsia.logger.LogSink"}},

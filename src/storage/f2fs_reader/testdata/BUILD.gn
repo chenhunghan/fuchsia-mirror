@@ -3,9 +3,13 @@
 # found in the LICENSE file.
 
 import("//build/dist/resource.gni")
-import("//build/testing/host_test_data.gni")
 
+# TODO(https://fxbug.dev/570694755): Remove once GN callers under
+# //src/storage/f2fs_reader migrate to Bazel.
+# LINT.IfChange(images)
 resource("images") {
   sources = [ "f2fs.img.zst" ]
-  outputs = [ "testdata/{{source_file_part}}" ]
+  outputs = [ "testdata/f2fs.img.zst" ]
+  visibility = [ "//src/storage/f2fs_reader/*" ]
 }
+# LINT.ThenChange(BUILD.bazel:images)

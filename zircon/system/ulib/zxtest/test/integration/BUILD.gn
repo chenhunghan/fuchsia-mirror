@@ -2,7 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
 import("//build/testing/host_test.gni")
 
 # The GN copies of the Bazel host tests. bazel2gn doesn't translate
@@ -38,24 +37,6 @@ group("tests") {
     ":zxtest-integration-test-pkg",
     ":zxtest-integration_host_test($host_toolchain)",
   ]
-}
-
-fuchsia_unittest_package("zxtest-integration-test-pkg") {
-  package_name = "zxtest-integration-test"
-  deps = [ ":zxtest-integration" ]
-
-  # Because this is testing lower-level zx test assertions, do not run as a
-  # normal zxtest with the gtest runner.
-  deprecated_legacy_test_execution = true
-}
-
-fuchsia_unittest_package("zxtest-integration-stream-test-pkg") {
-  package_name = "zxtest-integration-stream-test"
-  deps = [ ":zxtest-integration-streams" ]
-
-  # Because this is testing lower-level zx test assertions, do not run as a
-  # normal zxtest with the gtest runner.
-  deprecated_legacy_test_execution = true
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -121,12 +102,25 @@ cc_test_executable("zxtest-integration") {
   ]
   output_name = "zxtest-integration-test"
   visibility = [ ":*" ]
-  deps = [
-           "//zircon/system/ulib/fbl",
-           "//zircon/system/ulib/zxtest",
-         ] + _COMMON_DEPS
+  deps = [ "//zircon/system/ulib/zxtest" ] + _COMMON_DEPS
   testonly = true
   emit_tool_path = false
+}
+
+fuchsia_component_manifest("zxtest-integration-test-manifest") {
+  testonly = true
+  component_name = "zxtest-integration-test"
+  manifest = "meta/zxtest-integration-test.cml"
+}
+
+fuchsia_test_component("zxtest-integration-test-component") {
+  cm_label = ":zxtest-integration-test-manifest"
+  deps = [ ":zxtest-integration" ]
+}
+
+fuchsia_test_package("zxtest-integration-test-pkg") {
+  package_name = "zxtest-integration-test-gn"
+  test_components = [ ":zxtest-integration-test-component" ]
 }
 
 cc_test_executable("zxtest-integration-streams") {
@@ -138,10 +132,23 @@ cc_test_executable("zxtest-integration-streams") {
   ]
   output_name = "zxtest-integration-streams-test"
   visibility = [ ":*" ]
-  deps = [
-           "//zircon/system/ulib/fbl",
-           "//zircon/system/ulib/zxtest:zxtest-streams",
-         ] + _COMMON_DEPS
+  deps = [ "//zircon/system/ulib/zxtest:zxtest-streams" ] + _COMMON_DEPS
   testonly = true
   emit_tool_path = false
+}
+
+fuchsia_component_manifest("zxtest-integration-stream-test-manifest") {
+  testonly = true
+  component_name = "zxtest-integration-stream-test"
+  manifest = "meta/zxtest-integration-stream-test.cml"
+}
+
+fuchsia_test_component("zxtest-integration-stream-test-component") {
+  cm_label = ":zxtest-integration-stream-test-manifest"
+  deps = [ ":zxtest-integration-streams" ]
+}
+
+fuchsia_test_package("zxtest-integration-stream-test-pkg") {
+  package_name = "zxtest-integration-stream-test-gn"
+  test_components = [ ":zxtest-integration-stream-test-component" ]
 }

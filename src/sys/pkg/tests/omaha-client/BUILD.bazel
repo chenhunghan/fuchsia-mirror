@@ -41,10 +41,7 @@ rustc_test(
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-component",
-        # GN depends on `//src/lib/fuchsia-component-test`, which bundles
-        # `realm_builder_server:realm_builder_server_component` for the GN test
-        # package; Bazel depends on `:fuchsia-component-test-lib` directly.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-fs",
         "//src/lib/fuchsia-sync",
         "//src/lib/fuchsia-url",

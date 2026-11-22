@@ -3,14 +3,58 @@
 // found in the LICENSE file.
 
 #include <lib/fdio/limits.h>
+#include <lib/fdio/spawn.h>
 #include <lib/zx/channel.h>
 #include <lib/zx/process.h>
+#include <lib/zx/socket.h>
+#include <unistd.h>
 #include <zircon/processargs.h>
+
+#include <iterator>
+#include <string>
 
 #include <test-utils/test-utils.h>
 #include <zxtest/zxtest.h>
 
 namespace {
+
+void RunCwdChild(const char* bin, const char* const* envp, const char* expected_cwd) {
+  zx::socket stdout_parent, stdout_child;
+  ASSERT_OK(zx::socket::create(ZX_SOCKET_STREAM, &stdout_parent, &stdout_child));
+
+  const fdio_spawn_action_t actions[] = {
+      {
+          .action = FDIO_SPAWN_ACTION_ADD_HANDLE,
+          .h =
+              {
+                  .id = PA_HND(PA_FD, STDOUT_FILENO),
+                  .handle = stdout_child.release(),
+              },
+      },
+  };
+  const char* const argv[] = {bin, expected_cwd, nullptr};
+  zx::process process;
+  char err_msg[FDIO_SPAWN_ERR_MSG_MAX_LENGTH];
+  ASSERT_OK(fdio_spawn_etc(
+                ZX_HANDLE_INVALID,
+                FDIO_SPAWN_DEFAULT_LDSVC | FDIO_SPAWN_CLONE_NAMESPACE | FDIO_SPAWN_CLONE_UTC_CLOCK,
+                argv[0], argv, envp, std::size(actions), actions, process.reset_and_get_address(),
+                err_msg),
+            "%s", err_msg);
+
+  ASSERT_OK(process.wait_one(ZX_PROCESS_TERMINATED, zx::time::infinite(), nullptr));
+
+  std::string output;
+  char buffer[1024];
+  size_t actual = 0;
+  while (stdout_parent.read(0, buffer, sizeof(buffer), &actual) == ZX_OK && actual > 0) {
+    output.append(buffer, actual);
+  }
+
+  zx_info_process_t pinfo;
+  ASSERT_OK(process.get_info(ZX_INFO_PROCESS, &pinfo, sizeof(pinfo), nullptr, nullptr));
+  EXPECT_EQ(pinfo.return_code, 0, "%s", output.c_str());
+}
 
 // Ensure that the child crashes when given bogus fd handle info.
 template <uint32_t... Info>
@@ -59,5 +103,25 @@ void BadFdTest() {
 TEST(Startup, InvalidFd) { BadFdTest<PA_HND(PA_FD, FDIO_MAX_FD)>(); }
 
 TEST(Startup, DuplicateFd) { BadFdTest<PA_HND(PA_FD, 0), PA_HND(PA_FD, 0)>(); }
+
+TEST(Startup, CwdUnsetPwd) {
+  const char* const envp[] = {nullptr};
+  RunCwdChild("/pkg/bin/cwd-child", envp, "/");
+}
+
+TEST(Startup, CwdAbsolutePwd) {
+  const char* const envp[] = {"PWD=/pkg/bin/..", nullptr};
+  RunCwdChild("/pkg/bin/cwd-child", envp, "/pkg");
+}
+
+TEST(Startup, CwdRelativePwd) {
+  const char* const envp[] = {"PWD=pkg/./bin", nullptr};
+  RunCwdChild("/pkg/bin/cwd-child", envp, "/pkg/bin");
+}
+
+TEST(Startup, CwdWithoutFdioStartup) {
+  const char* const envp[] = {"PWD=/pkg", nullptr};
+  RunCwdChild("/pkg/bin/no-startup-cwd-child", envp, "/");
+}
 
 }  // namespace

@@ -1,0 +1,273 @@
+{
+    "name": "sync_control_and_bulk",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 255,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "type": "open",
+            "fd": "fd1",
+            "mode": "rdwr"
+        },
+        {
+            "type": "open",
+            "fd": "fd2",
+            "mode": "rdwr"
+        },
+        {
+            "type": "device_script_control",
+            "b_request": 1,
+            "action": {
+                "reply": [
+                    202,
+                    254,
+                    186,
+                    190
+                ]
+            }
+        },
+        {
+            "type": "control",
+            "fd": "fd1",
+            "bm_request_type": 64,
+            "b_request": 1,
+            "w_value": 4660,
+            "w_index": 0,
+            "w_length": 4,
+            "timeout_ms": 2000,
+            "data": [
+                202,
+                254,
+                186,
+                190
+            ]
+        },
+        {
+            "type": "control",
+            "fd": "fd1",
+            "bm_request_type": 192,
+            "b_request": 1,
+            "w_value": 4660,
+            "w_index": 0,
+            "w_length": 4,
+            "timeout_ms": 2000
+        },
+        {
+            "type": "control",
+            "fd": "fd1",
+            "bm_request_type": 64,
+            "b_request": 2,
+            "w_value": 0,
+            "w_index": 0,
+            "w_length": 0,
+            "timeout_ms": 2000,
+            "data_ptr": "null"
+        },
+        {
+            "type": "device_script_control",
+            "b_request": 255,
+            "action": {
+                "stall": true
+            }
+        },
+        {
+            "type": "control",
+            "fd": "fd1",
+            "bm_request_type": 192,
+            "b_request": 255,
+            "w_value": 0,
+            "w_index": 0,
+            "w_length": 4,
+            "timeout_ms": 2000
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "bulk",
+            "fd": "fd1",
+            "ep": 2,
+            "len": 8,
+            "timeout_ms": 2000,
+            "data": [
+                222,
+                173,
+                190,
+                239,
+                1,
+                2,
+                3,
+                4
+            ]
+        },
+        {
+            "type": "device_ep_assert_empty",
+            "ep": 2
+        },
+        {
+            "type": "device_ep_pop_out",
+            "ep": 2,
+            "timeout_ms": 2000
+        },
+        {
+            "type": "device_ep_assert_empty",
+            "ep": 2
+        },
+        {
+            "type": "device_ep_push_in",
+            "ep": 129,
+            "data": [
+                222,
+                173,
+                190,
+                239,
+                1,
+                2,
+                3,
+                4
+            ]
+        },
+        {
+            "type": "bulk",
+            "fd": "fd1",
+            "ep": 129,
+            "len": 64,
+            "timeout_ms": 2000
+        },
+        {
+            "type": "device_script_control",
+            "b_request": 48,
+            "action": {
+                "hold": "h_ctrl_1"
+            }
+        },
+        {
+            "type": "start_op",
+            "task": "t_ctrl",
+            "inner": {
+                "type": "control",
+                "fd": "fd1",
+                "bm_request_type": 192,
+                "b_request": 48,
+                "w_value": 0,
+                "w_index": 0,
+                "w_length": 4,
+                "timeout_ms": 2000
+            }
+        },
+        {
+            "type": "device_release_control",
+            "hold": "h_ctrl_1",
+            "action": {
+                "reply": [
+                    170,
+                    187,
+                    204,
+                    221
+                ]
+            }
+        },
+        {
+            "type": "await_task",
+            "task": "t_ctrl",
+            "timeout_ms": 2000
+        },
+        {
+            "type": "start_op",
+            "task": "t_bulk_in",
+            "inner": {
+                "type": "bulk",
+                "fd": "fd1",
+                "ep": 129,
+                "len": 64,
+                "timeout_ms": 2000
+            }
+        },
+        {
+            "type": "device_ep_push_in",
+            "ep": 129,
+            "data": [
+                17,
+                34,
+                51,
+                68
+            ]
+        },
+        {
+            "type": "await_task",
+            "task": "t_bulk_in",
+            "timeout_ms": 2000
+        },
+        {
+            "type": "await_task",
+            "task": "t_nonexistent",
+            "timeout_ms": 100
+        },
+        {
+            "type": "bulk",
+            "fd": "fd2",
+            "ep": 2,
+            "len": 4,
+            "timeout_ms": 1000,
+            "data": [
+                1,
+                2,
+                3,
+                4
+            ]
+        },
+        {
+            "type": "release_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "close",
+            "fd": "fd1"
+        },
+        {
+            "type": "close",
+            "fd": "fd2"
+        }
+    ]
+}

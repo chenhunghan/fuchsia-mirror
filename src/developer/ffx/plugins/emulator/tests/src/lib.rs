@@ -23,8 +23,8 @@ mod tests {
     async fn new_strict_context() -> Result<(StrictContext, TempDir)> {
         let temp_dir = tempfile::TempDir::new()?;
         assert!(temp_dir.path().exists());
-        let emu_dir = temp_dir.path().join("emulators");
-        std::fs::create_dir_all(&emu_dir)?;
+        let shared_data_dir = temp_dir.path().join("shared");
+        std::fs::create_dir_all(&shared_data_dir)?;
         let ssh_priv_key = ssh_key_path(&temp_dir);
         let ssh_pub_key = temp_dir.path().join("ssh_public_key");
         let ffx_binary = PathBuf::from_str(FFX_PATH).unwrap();
@@ -38,7 +38,7 @@ mod tests {
                 ("ssh.priv", &ssh_priv_key.to_string_lossy()),
                 ("ssh.pub", &ssh_pub_key.to_string_lossy()),
                 ("ffx.subtool-search-paths", &ffx_root_dir.to_string_lossy()),
-                ("emu.instance_dir", &emu_dir.to_string_lossy()),
+                ("shared_data", &shared_data_dir.to_string_lossy()),
             ]
             .into_iter()
             .map(|(k, v)| (k.to_owned(), v.to_string()))

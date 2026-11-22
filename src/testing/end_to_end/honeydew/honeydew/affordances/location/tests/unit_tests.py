@@ -10,8 +10,8 @@ from unittest import mock
 import fidl_fuchsia_location_namedplace as f_location_namedplace
 from fuchsia_controller_py import FcTransportStatus
 from honeydew import affordances_capable
-from honeydew.affordances import location
 from honeydew.affordances.connectivity.wlan.utils.types import CountryCode
+from honeydew.affordances.location import location
 from honeydew.affordances.location.errors import HoneydewLocationError
 from honeydew.errors import NotSupportedError
 from honeydew.transports.ffx import ffx as ffx_transport

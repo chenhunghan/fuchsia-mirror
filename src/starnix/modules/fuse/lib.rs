@@ -23,8 +23,8 @@ use starnix_core::vfs::pseudo::vec_directory::{VecDirectory, VecDirectoryEntry};
 use starnix_core::vfs::{
     AppendLockWriteGuard, CacheMode, CheckAccessReason, DirEntry, DirEntryOps, DirectoryEntryType,
     DirentSink, FallocMode, FdNumber, FileObject, FileObjectState, FileOps, FileSystem,
-    FileSystemHandle, FileSystemOps, FileSystemOptions, FsLockDepType, FsNode, FsNodeFlags,
-    FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, NamespaceNode,
+    FileSystemHandle, FileSystemOps, FileSystemOptions, FsLockDepType, FsNode, FsNodeAttrFlags,
+    FsNodeFlags, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, NamespaceNode,
     PeekBufferSegmentsCallback, RenameContext, SeekTarget, StatxFlags, SymlinkTarget, ValueOrSize,
     WeakFileHandle, XattrOp, default_eof_offset, default_fcntl, default_seek,
     fileops_impl_nonseekable, fileops_impl_noop_sync, fs_args, fs_node_impl_dir_readonly,
@@ -58,7 +58,6 @@ static FUSE_DEFAULT_MAX_WRITE: std::sync::LazyLock<u32> =
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
-use syncio::zxio_node_attr_has_t;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 const FUSE_ROOT_ID_U64: u64 = uapi::FUSE_ROOT_ID as u64;
@@ -71,6 +70,7 @@ uapi::check_arch_independent_layout! {
     fuse_create_in {}
     fuse_dirent {}
     fuse_entry_out {}
+    fuse_fallocate_in {}
     fuse_flush_in {}
     fuse_forget_in {}
     fuse_getxattr_in {}
@@ -335,6 +335,9 @@ impl FileSystemOps for FuseFs {
     fn name(&self) -> &'static FsStr {
         "fuse".into()
     }
+    fn is_storage_backed(&self) -> bool {
+        true
+    }
     fn unmount(&self) {
         self.connection.lock().disconnect();
     }
@@ -588,12 +591,13 @@ impl FuseNode {
         info: &DynamicLockDepRwLock<FsNodeInfo>,
         audit_context: security::Auditable<'_>,
     ) -> Result<(), Errno> {
-        let info = self.refresh_expired_node_attributes(current_task, info)?;
+        let info = self.refresh_expired_node_attributes(node, current_task, info)?;
         node.default_check_access_impl(current_task, permission_flags, reason, info, audit_context)
     }
 
     fn refresh_expired_node_attributes<'a>(
         &self,
+        node: &FsNode,
         current_task: &CurrentTask,
         info: &'a DynamicLockDepRwLock<FsNodeInfo>,
     ) -> Result<LockDepReadGuard<'a, FsNodeInfo>, Errno> {
@@ -622,11 +626,12 @@ impl FuseNode {
         }
 
         // Force a refresh of our cached attributes.
-        self.fetch_and_refresh_info_impl(current_task, info)
+        self.fetch_and_refresh_info_impl(node, current_task, info)
     }
 
     fn fetch_and_refresh_info_impl<'a>(
         &self,
+        node: &FsNode,
         current_task: &CurrentTask,
         info: &'a DynamicLockDepRwLock<FsNodeInfo>,
     ) -> Result<LockDepReadGuard<'a, FsNodeInfo>, Errno> {
@@ -645,6 +650,7 @@ impl FuseNode {
             attr_valid_to_duration(attr_valid, attr_valid_nsec)?,
             &self.attributes_valid_until,
         )?;
+        node.sync_cached_mode(info.mode);
         Ok(LockDepWriteGuard::downgrade(info))
     }
 
@@ -768,23 +774,20 @@ impl FileOps for FuseFileObject {
     fn close(self: Box<Self>, file: &FileObjectState, current_task: &CurrentTask) {
         let node = FuseNode::from_node(file.node());
         let is_dir = file.node().is_dir();
-        {
-            let mut connection = self.connection.lock();
-            if let Err(e) = connection.execute_operation(
-                current_task,
-                node,
-                if is_dir {
-                    FuseOperation::ReleaseDir(self.open_out)
-                } else {
-                    FuseOperation::Release(self.open_out)
-                },
-            ) {
-                if e.code != ENOSYS {
-                    log_error!("Error when releasing fh: {e:?}");
-                }
-            }
-            connection.clear_released_passthrough_fds();
+        let fs_node = Some(file.node().clone());
+        let mut connection = self.connection.lock();
+        if let Err(e) = connection.execute_operation(
+            current_task,
+            node,
+            if is_dir {
+                FuseOperation::ReleaseDir(self.open_out, fs_node)
+            } else {
+                FuseOperation::Release(self.open_out, fs_node)
+            },
+        ) {
+            log_error!("Error when releasing fh: {e:?}");
         }
+        connection.clear_released_passthrough_fds();
     }
 
     fn flush(&self, file: &FileObject, current_task: &CurrentTask) {
@@ -1187,6 +1190,66 @@ impl FileOps for FuseFileObject {
         track_stub!(TODO("https://fxbug.dev/322875764"), "fuse fcntl");
         default_fcntl(cmd)
     }
+
+    fn fallocate(
+        &self,
+        _guard: &AppendLockWriteGuard<'_>,
+        file: &FileObject,
+        current_task: &CurrentTask,
+        mode: FallocMode,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), Errno> {
+        // FUSE only supports allocating, zeroing, and punching holes. Always send the request to
+        // the daemon, even when passthrough is active, so the daemon keeps cached attributes in
+        // sync.
+        let keep_size = match mode {
+            FallocMode::Allocate { keep_size } | FallocMode::Zero { keep_size } => keep_size,
+            FallocMode::PunchHole => true,
+            FallocMode::Collapse | FallocMode::InsertRange | FallocMode::UnshareRange => {
+                return error!(EOPNOTSUPP);
+            }
+        };
+        // Check cached `FUSE_FALLOCATE` support before `RLIMIT_FSIZE` so unsupported calls do not
+        // raise `SIGXFSZ`.
+        if let Some(result) =
+            self.connection.lock().operations_state.get(&uapi::fuse_opcode_FUSE_FALLOCATE).cloned()
+        {
+            result?;
+        }
+        // Unlike tmpfs, Linux FUSE exempts `FALLOC_FL_KEEP_SIZE` from `RLIMIT_FSIZE`.
+        let new_size = if !keep_size {
+            let end = offset.checked_add(length).ok_or_else(|| errno!(EFBIG))?;
+            Some(file.node().check_size_limit(current_task, end)?)
+        } else {
+            None
+        };
+
+        let node = Self::get_fuse_node(file);
+        self.connection.lock().execute_operation(
+            current_task,
+            node,
+            FuseOperation::Fallocate(uapi::fuse_fallocate_in {
+                fh: self.open_out.fh,
+                offset,
+                length,
+                mode: mode.into_bits(),
+                padding: 0,
+            }),
+        )?;
+
+        // Update `info.size` and invalidate cached attributes under the `FsNodeInfo` lock so
+        // concurrent `stat` calls cannot observe the updated size with stale cached attributes.
+        file.node().update_info(|info| {
+            if let Some(new_size) = new_size
+                && new_size > info.size
+            {
+                info.size = new_size;
+            }
+            node.invalidate_attributes();
+        });
+        Ok(())
+    }
 }
 
 struct FuseDirEntry {
@@ -1437,7 +1500,7 @@ impl FsNodeOps for FuseNode {
                         if let Err(e) = connection.execute_operation(
                             current_task,
                             &fuse_node,
-                            FuseOperation::Release(response.open),
+                            FuseOperation::Release(response.open, None),
                         ) {
                             log_error!("Error when releasing fh: {e:?}");
                         }
@@ -1575,16 +1638,18 @@ impl FsNodeOps for FuseNode {
         _guard: &AppendLockWriteGuard<'_>,
         node: &FsNode,
         current_task: &CurrentTask,
+        file: Option<&FileObject>,
         length: u64,
     ) -> Result<(), Errno> {
-        node.update_info(|info| {
-            // Truncate is implemented by updating the attributes of the file.
-            let attributes = uapi::fuse_setattr_in {
-                size: length,
-                valid: uapi::FATTR_SIZE,
-                ..Default::default()
-            };
+        // Truncate updates file attributes; attach the open file handle when available.
+        let mut attributes =
+            uapi::fuse_setattr_in { size: length, valid: uapi::FATTR_SIZE, ..Default::default() };
+        if let Some(fuse_file) = file.and_then(|file| file.downcast_file::<FuseFileObject>()) {
+            attributes.valid |= uapi::FATTR_FH;
+            attributes.fh = fuse_file.open_out.fh;
+        }
 
+        node.update_info(|info| {
             let response = self.connection.lock().execute_operation(
                 current_task,
                 self,
@@ -1606,22 +1671,9 @@ impl FsNodeOps for FuseNode {
         })
     }
 
-    fn allocate(
-        &self,
-        _guard: &AppendLockWriteGuard<'_>,
-        _node: &FsNode,
-        _current_task: &CurrentTask,
-        _mode: FallocMode,
-        _offset: u64,
-        _length: u64,
-    ) -> Result<(), Errno> {
-        track_stub!(TODO("https://fxbug.dev/322875414"), "FsNodeOps::allocate");
-        error!(ENOTSUP)
-    }
-
     fn fetch_and_refresh_info<'a>(
         &self,
-        _node: &FsNode,
+        node: &FsNode,
         current_task: &CurrentTask,
         info: &'a DynamicLockDepRwLock<FsNodeInfo>,
         flags: StatxFlags,
@@ -1632,7 +1684,7 @@ impl FsNodeOps for FuseNode {
         // NOTE: Do not be tempted to always refresh information here; sadly, there are CTS tests
         // that rely on this only updating attributes if they have expired, and this matches what
         // Linux appears to do.
-        self.refresh_expired_node_attributes(current_task, info)
+        self.refresh_expired_node_attributes(node, current_task, info)
     }
 
     fn update_attributes(
@@ -1640,23 +1692,23 @@ impl FsNodeOps for FuseNode {
         _node: &FsNode,
         current_task: &CurrentTask,
         info: &FsNodeInfo,
-        has: zxio_node_attr_has_t,
+        has: FsNodeAttrFlags,
     ) -> Result<(), Errno> {
         let mut valid = 0u32;
         // Nb: We don't have a mechanism for 'FATTR_*TIME_NOW'.
-        if has.modification_time {
+        if has.contains(FsNodeAttrFlags::TIME_MODIFY) {
             valid |= uapi::FATTR_MTIME;
         }
-        if has.access_time {
+        if has.contains(FsNodeAttrFlags::TIME_ACCESS) {
             valid |= uapi::FATTR_ATIME;
         }
-        if has.mode {
+        if has.contains(FsNodeAttrFlags::MODE) {
             valid |= uapi::FATTR_MODE;
         }
-        if has.uid {
+        if has.contains(FsNodeAttrFlags::UID) {
             valid |= uapi::FATTR_UID;
         }
-        if has.gid {
+        if has.contains(FsNodeAttrFlags::GID) {
             valid |= uapi::FATTR_GID;
         }
 
@@ -1991,17 +2043,13 @@ impl<'a> FuseMutableStateGuard<'a> {
         if let Some(result) = self.operations_state.get(&operation.opcode()) {
             return result.clone();
         }
-        if !operation.has_response() {
-            self.queue_operation(current_task, node.nodeid, operation, None)?;
+        if !operation.has_response() || operation.is_async() {
+            self.queue_operation(current_task, node.nodeid, operation, /* waiter = */ None)?;
             return Ok(FuseResponse::None);
         }
         let waiter = Waiter::with_options(WaiterOptions::UNSAFE_CALLSTACK);
-        let is_async = operation.is_async();
         let unique_id =
             self.queue_operation(current_task, node.nodeid, operation, Some(&waiter))?;
-        if is_async {
-            return Ok(FuseResponse::None);
-        }
         let mut first_loop = true;
         loop {
             if !self.is_connected() {
@@ -2072,7 +2120,7 @@ impl FuseMutableState {
 
     /// Queue the given operation on the internal queue for the userspace daemon to read. If
     /// `waiter` is not None, register `waiter` to be notified when userspace responds to the
-    /// operation. This should only be used if the operation expects a response.
+    /// operation. This should only be used if the operation expects a synchronous response.
     fn queue_operation(
         &mut self,
         current_task: &CurrentTask,
@@ -2080,7 +2128,10 @@ impl FuseMutableState {
         operation: FuseOperation,
         waiter: Option<&Waiter>,
     ) -> Result<u64, Errno> {
-        debug_assert!(waiter.is_some() == operation.has_response(), "{operation:?}");
+        debug_assert!(
+            waiter.is_some() == (operation.has_response() && !operation.is_async()),
+            "{operation:?}"
+        );
         if !self.is_connected() {
             return error!(ECONNABORTED);
         }
@@ -2218,7 +2269,10 @@ impl FuseMutableState {
             let errno = errno_from_code!(code);
             let response = operation.handle_error(&mut self.operations_state, errno);
             if is_async {
-                running_operation.remove();
+                let operation = running_operation.remove();
+                if let Ok(response) = response {
+                    self.handle_async(operation, response)?;
+                }
             } else {
                 running_operation.get_mut().response = Some(response);
             }
@@ -2236,7 +2290,9 @@ impl FuseMutableState {
                 running_operation.get_mut().response = Some(Ok(response));
             }
         }
-        self.waiters.notify_value(header.unique);
+        if !is_async {
+            self.waiters.notify_value(header.unique);
+        }
         Ok(data.bytes_read())
     }
 
@@ -2264,8 +2320,11 @@ impl FuseMutableState {
                 self.set_configuration(configuration);
                 Ok(())
             }
+            (RunningOperationKind::Release { .. }, FuseResponse::None) => {
+                self.clear_released_passthrough_fds();
+                Ok(())
+            }
             operation => {
-                // Init is the only async operation.
                 panic!("Incompatible operation={operation:?}");
             }
         }
@@ -2375,6 +2434,7 @@ impl FuseInitFlags {
 enum RunningOperationKind {
     Access,
     Create,
+    Fallocate,
     Flush,
     Forget,
     Fsync {
@@ -2410,6 +2470,7 @@ enum RunningOperationKind {
     Readlink,
     Release {
         dir: bool,
+        _node: Option<FsNodeHandle>,
     },
     RemoveXAttr,
     Rename,
@@ -2425,13 +2486,14 @@ enum RunningOperationKind {
 
 impl RunningOperationKind {
     fn is_async(&self) -> bool {
-        matches!(self, Self::Init { .. })
+        matches!(self, Self::Init { .. } | Self::Release { .. })
     }
 
     fn opcode(&self) -> u32 {
         match self {
             Self::Access => uapi::fuse_opcode_FUSE_ACCESS,
             Self::Create => uapi::fuse_opcode_FUSE_CREATE,
+            Self::Fallocate => uapi::fuse_opcode_FUSE_FALLOCATE,
             Self::Flush => uapi::fuse_opcode_FUSE_FLUSH,
             Self::Forget => uapi::fuse_opcode_FUSE_FORGET,
             Self::Fsync { dir } => {
@@ -2467,7 +2529,7 @@ impl RunningOperationKind {
                 }
             }
             Self::Readlink => uapi::fuse_opcode_FUSE_READLINK,
-            Self::Release { dir } => {
+            Self::Release { dir, .. } => {
                 if *dir {
                     uapi::fuse_opcode_FUSE_RELEASEDIR
                 } else {
@@ -2561,7 +2623,8 @@ impl RunningOperationKind {
                 }
                 Ok(FuseResponse::Readdir(result))
             }
-            Self::Flush
+            Self::Fallocate
+            | Self::Flush
             | Self::Fsync { .. }
             | Self::Release { .. }
             | Self::RemoveXAttr
@@ -2620,6 +2683,18 @@ impl RunningOperationKind {
                 state.insert(self.opcode(), Ok(response.clone()));
                 Ok(response)
             }
+            Self::Fallocate
+            | Self::GetXAttr { .. }
+            | Self::SetXAttr
+            | Self::RemoveXAttr
+            | Self::ListXAttr { .. }
+                if errno == ENOSYS =>
+            {
+                let response = error!(ENOTSUP);
+                state.insert(self.opcode(), response.clone());
+                response
+            }
+            Self::Release { .. } => Ok(FuseResponse::None),
             _ => Err(errno),
         }
     }
@@ -2631,6 +2706,7 @@ enum FuseOperation {
         mask: u32,
     },
     Create(uapi::fuse_create_in, FsString),
+    Fallocate(uapi::fuse_fallocate_in),
     Flush(uapi::fuse_open_out),
     Forget(uapi::fuse_forget_in),
     Fsync {
@@ -2687,8 +2763,8 @@ enum FuseOperation {
         use_readdirplus: bool,
     },
     Readlink,
-    Release(uapi::fuse_open_out),
-    ReleaseDir(uapi::fuse_open_out),
+    Release(uapi::fuse_open_out, Option<FsNodeHandle>),
+    ReleaseDir(uapi::fuse_open_out, Option<FsNodeHandle>),
     RemoveXAttr {
         /// Name of the attribute
         name: FsString,
@@ -2780,6 +2856,7 @@ impl FuseOperation {
             Self::Create(create_in, name) => {
                 Ok(data.write_all(create_in.as_bytes())? + Self::write_null_terminated(data, name)?)
             }
+            Self::Fallocate(fallocate_in) => data.write_all(fallocate_in.as_bytes()),
             Self::Flush(open_in) => {
                 let message =
                     uapi::fuse_flush_in { fh: open_in.fh, unused: 0, padding: 0, lock_owner: 0 };
@@ -2837,7 +2914,7 @@ impl FuseOperation {
             Self::Read(read_in) | Self::Readdir { read_in, .. } => {
                 data.write_all(read_in.as_bytes())
             }
-            Self::Release(open_out) | Self::ReleaseDir(open_out) => {
+            Self::Release(open_out, _) | Self::ReleaseDir(open_out, _) => {
                 let message = uapi::fuse_release_in {
                     fh: open_out.fh,
                     flags: 0,
@@ -2900,6 +2977,7 @@ impl FuseOperation {
         match self {
             Self::Access { .. } => uapi::fuse_opcode_FUSE_ACCESS,
             Self::Create { .. } => uapi::fuse_opcode_FUSE_CREATE,
+            Self::Fallocate(_) => uapi::fuse_opcode_FUSE_FALLOCATE,
             Self::Flush(_) => uapi::fuse_opcode_FUSE_FLUSH,
             Self::Forget(_) => uapi::fuse_opcode_FUSE_FORGET,
             Self::Fsync { is_dir, .. } => {
@@ -2935,8 +3013,8 @@ impl FuseOperation {
                 }
             }
             Self::Readlink => uapi::fuse_opcode_FUSE_READLINK,
-            Self::Release(_) => uapi::fuse_opcode_FUSE_RELEASE,
-            Self::ReleaseDir(_) => uapi::fuse_opcode_FUSE_RELEASEDIR,
+            Self::Release(..) => uapi::fuse_opcode_FUSE_RELEASE,
+            Self::ReleaseDir(..) => uapi::fuse_opcode_FUSE_RELEASEDIR,
             Self::RemoveXAttr { .. } => uapi::fuse_opcode_FUSE_REMOVEXATTR,
             Self::Rename { .. } => uapi::fuse_opcode_FUSE_RENAME2,
             Self::Rmdir { .. } => uapi::fuse_opcode_FUSE_RMDIR,
@@ -2954,6 +3032,7 @@ impl FuseOperation {
         match self {
             Self::Access { .. } => RunningOperationKind::Access,
             Self::Create { .. } => RunningOperationKind::Create,
+            Self::Fallocate(_) => RunningOperationKind::Fallocate,
             Self::Flush(_) => RunningOperationKind::Flush,
             Self::Forget(_) => RunningOperationKind::Forget,
             Self::Fsync { is_dir, .. } => RunningOperationKind::Fsync { dir: *is_dir },
@@ -2979,8 +3058,12 @@ impl FuseOperation {
                 RunningOperationKind::Readdir { use_readdirplus: *use_readdirplus }
             }
             Self::Readlink => RunningOperationKind::Readlink,
-            Self::Release(_) => RunningOperationKind::Release { dir: false },
-            Self::ReleaseDir(_) => RunningOperationKind::Release { dir: true },
+            Self::Release(_, node) => {
+                RunningOperationKind::Release { dir: false, _node: node.clone() }
+            }
+            Self::ReleaseDir(_, node) => {
+                RunningOperationKind::Release { dir: true, _node: node.clone() }
+            }
             Self::RemoveXAttr { .. } => RunningOperationKind::RemoveXAttr,
             Self::Rename { .. } => RunningOperationKind::Rename,
             Self::Rmdir { .. } => RunningOperationKind::Rmdir,
@@ -3053,6 +3136,6 @@ impl FuseOperation {
     }
 
     fn is_async(&self) -> bool {
-        matches!(self, Self::Init { .. })
+        matches!(self, Self::Init { .. } | Self::Release(..) | Self::ReleaseDir(..))
     }
 }

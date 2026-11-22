@@ -1,0 +1,86 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":hello-world-cpp-unittests"],
+    visibility = ["//examples/hello_world:__pkg__"],
+)
+
+# [START cpp_bin]
+fx_cc_binary(
+    name = "bin",
+    srcs = ["hello_world.cc"],
+)
+
+# [END cpp_bin]
+
+# [START fuchsia_component]
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "hello_world_cpp",
+)
+
+fx_component_manifest(
+    name = "hello-world-cpp-manifest",
+    # Defines the name given to the manifest when included in a fuchsia package.
+    # In this case: "hello-world-cpp.cm"
+    component_name = "hello-world-cpp",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/hello_world_cpp.cml",
+)
+
+fx_component(
+    name = "hello-world-cpp-component",
+    compiled_manifest = ":hello-world-cpp-manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "hello-world-cpp",
+    components = [
+        # component-url:
+        # fuchsia-pkg://fuchsia.com/hello-world-cpp#meta/hello-world-cpp.cm
+        ":hello-world-cpp-component",
+    ],
+    visibility = ["//examples/hello_world:__pkg__"],
+)
+
+# [END fuchsia_component]
+
+# [START cpp_test]
+fx_cc_test_binary(
+    name = "unittests",
+    srcs = ["hello_world_unittest.cc"],
+    deps = ["//src/lib/fxl/test:gtest_main"],
+)
+
+# [END cpp_test]
+
+# [START fuchsia_test]
+fx_unittest_package(
+    name = "hello-world-cpp-unittests",
+    unit_tests = [":unittests"],
+)
+# [END fuchsia_test]

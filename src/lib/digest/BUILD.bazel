@@ -2,14 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+fx_cc_library(
     name = "digest",
     srcs = [
         "digest.cc",
@@ -23,11 +20,23 @@ cc_library(
         "merkle-tree.h",
         "node-digest.h",
     ],
+    implementation_deps = [
+        "//third_party/boringssl",
+        "//zircon/third_party/ulib/safemath",
+    ],
+    visibility = [
+        "//src/camera:__subpackages__",
+        "//src/firmware:__subpackages__",
+        "//src/lib/digest/test:__pkg__",
+        "//src/media:__subpackages__",
+        "//src/security:__subpackages__",
+        "//src/storage:__subpackages__",
+        "//zircon/tools/merkleroot:__pkg__",
+    ],
     deps = [
         "//sdk/lib/stdcompat",
-        "//third_party/boringssl",
+        "//zircon/system/public",
         "//zircon/system/ulib/fbl",
         "//zircon/system/ulib/zx",
-        "//zircon/third_party/ulib/safemath",
     ],
 )

@@ -56,6 +56,7 @@ impl<BC: BindingsContext, L> ip::marker::UseTransportIpContextBlanket for CoreCt
 impl<BC: BindingsContext, L> ip::marker::UseIpSocketContextBlanket for CoreCtx<'_, BC, L> {}
 impl<BC: BindingsContext, L> ip::marker::UseIpSocketHandlerBlanket for CoreCtx<'_, BC, L> {}
 impl<BC: BindingsContext, L> ip::marker::UseDeviceIpSocketHandlerBlanket for CoreCtx<'_, BC, L> {}
+impl<BC: BindingsContext, L> ip::marker::UsePmtuHandlerBlanket for CoreCtx<'_, BC, L> {}
 impl<BC: BindingsContext, L> udp::UseUdpIpTransportContextBlanket for CoreCtx<'_, BC, L> {}
 impl<BC: BindingsContext, L> device::marker::UseArpFrameMetadataBlanket for CoreCtx<'_, BC, L> {}
 

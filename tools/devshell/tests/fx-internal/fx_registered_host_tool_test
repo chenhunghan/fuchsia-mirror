@@ -7,13 +7,21 @@
 
 BT_FILE_DEPS=(
   "build/bazel/config/bazel_top_dir"
+  "build/profile/procfs.py"
+  "build/scripts/lock_utils.py"
   "scripts/fx"
   "scripts/fx-env.sh"
   "scripts/fx-help.awk"
+  "scripts/fx-reentry"
   "scripts/hermetic-env"
+  "tools/devshell/helpdoc"
   "tools/devshell/fx_cli/__init__.py"
   "tools/devshell/fx_cli/builder.py"
+  "tools/devshell/fx_cli/fx_builtins.py"
   "tools/devshell/fx_cli/locator.py"
+  "tools/devshell/fx_cli/main.py"
+  "tools/devshell/fx_cli/metadata.py"
+  "tools/devshell/fx_cli/metrics.py"
   "tools/devshell/fx_cli/registry.py"
   "tools/devshell/fx_host_tools.json"
   "tools/devshell/lib/bazel_utils.sh"
@@ -75,65 +83,69 @@ BT_SET_UP() {
 }
 EOF
 
-  _install_mock_bazel_wrapper
+  _install_mock_fx_build
 }
 
-_install_mock_bazel_wrapper() {
-  local bazel_bin="${BT_TEMP_DIR}/out/default/gen/build/bazel/bazel"
-  mkdir -p "$(dirname "${bazel_bin}")"
-  cat > "${bazel_bin}" <<'EOF'
-#!/bin/bash
-set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-STATE_FILE="${BUILD_DIR}/bazel.mock_state"
-printf '%s\n' "$*" >> "${STATE_FILE}"
+_install_mock_fx_build() {
+  cat > "${BT_TEMP_DIR}/tools/devshell/build.mock_side_effects" <<'EOF'
+_mock_build_dir="${FUCHSIA_BUILD_DIR:-}"
+if [[ -z "${_mock_build_dir}" ]]; then
+  echo "ERROR: FUCHSIA_BUILD_DIR not set for fx-reentry build" >&2
+  return 1
+fi
+mkdir -p "${_mock_build_dir}"
+_mock_state_file="${_mock_build_dir}/build.mock_state"
+{
+  printf 'ARGS=%s\n' "$*"
+  printf 'FX_ENTRY_CMD=%s\n' "${FX_ENTRY_CMD:-}"
+  printf 'FX_BUILD_RBE_AUTH_TYPE=%s\n' "${FX_BUILD_RBE_AUTH_TYPE:-<unset>}"
+  printf 'TUI_ENABLED=%s\n' "${TUI_ENABLED:-<unset>}"
+} >> "${_mock_state_file}"
 
-if [[ -f "${BUILD_DIR}/bazel.mock_side_effects" ]]; then
-  source "${BUILD_DIR}/bazel.mock_side_effects"
+if [[ -f "${_mock_build_dir}/build.mock_side_effects" ]]; then
+  source "${_mock_build_dir}/build.mock_side_effects"
 fi
 
-bep_file=""
-target_label=""
-for arg in "$@"; do
-  case "${arg}" in
+_mock_bep_file=""
+_mock_target_label=""
+for _mock_arg in "$@"; do
+  case "${_mock_arg}" in
     --build_event_json_file=*)
-      bep_file="${arg#--build_event_json_file=}"
+      _mock_bep_file="${_mock_arg#--build_event_json_file=}"
       ;;
     @//*|//*)
-      target_label="${arg#@}"
+      _mock_target_label="${_mock_arg#@}"
       ;;
   esac
 done
 
-if [[ -n "${bep_file}" && -n "${target_label}" ]]; then
-  clean_rel="${target_label#//}"
-  if [[ "${clean_rel}" == *:* ]]; then
-    pkg_rel="${clean_rel%%:*}"
-    tname="${clean_rel#*:}"
+if [[ -n "${_mock_bep_file}" && -n "${_mock_target_label}" ]]; then
+  _mock_clean_rel="${_mock_target_label#//}"
+  if [[ "${_mock_clean_rel}" == *:* ]]; then
+    _mock_pkg_rel="${_mock_clean_rel%%:*}"
+    _mock_tname="${_mock_clean_rel#*:}"
   else
-    pkg_rel="${clean_rel}"
-    tname="${pkg_rel##*/}"
+    _mock_pkg_rel="${_mock_clean_rel}"
+    _mock_tname="${_mock_pkg_rel##*/}"
   fi
-  exec_bin_dir="${SCRIPT_DIR}/output_base/execroot/_main/bazel-out/x86_64-opt/bin/${pkg_rel}"
-  out_bin=""
-  for cand in "${exec_bin_dir}/${tname}" "${exec_bin_dir}"/*; do
-    if [[ -f "${cand}" && "${cand}" != *.runtime_dir ]]; then
-      out_bin="${cand}"
+  _mock_exec_bin_dir="${_mock_build_dir}/gen/build/bazel/output_base/execroot/_main/bazel-out/x86_64-opt/bin/${_mock_pkg_rel}"
+  _mock_out_bin=""
+  for _mock_cand in "${_mock_exec_bin_dir}/${_mock_tname}" "${_mock_exec_bin_dir}"/*; do
+    if [[ -f "${_mock_cand}" && "${_mock_cand}" != *.runtime_dir ]]; then
+      _mock_out_bin="${_mock_cand}"
       break
     fi
   done
-  if [[ -n "${out_bin}" ]]; then
-    out_name="$(basename "${out_bin}")"
-    encoded_out_bin="${out_bin// /%20}"
-    cat > "${bep_file}" <<JSON
-{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"${pkg_rel}/${out_name}","uri":"file://${encoded_out_bin}"}]}}
-{"id":{"targetCompleted":{"label":"@@//${pkg_rel}:${tname}"}},"completed":{"success":true}}
+  if [[ -n "${_mock_out_bin}" ]]; then
+    _mock_out_name="$(basename "${_mock_out_bin}")"
+    _mock_encoded_out_bin="${_mock_out_bin// /%20}"
+    cat > "${_mock_bep_file}" <<JSON
+{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"${_mock_pkg_rel}/${_mock_out_name}","uri":"file://${_mock_encoded_out_bin}"}]}}
+{"id":{"targetCompleted":{"label":"@@//${_mock_pkg_rel}:${_mock_tname}"}},"completed":{"success":true}}
 JSON
   fi
 fi
 EOF
-  chmod +x "${bazel_bin}"
 }
 
 _stage_fake_bazel_output() {
@@ -743,6 +755,7 @@ TEST_hermetic_env_preserves_fx_host_tool_vars() {
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "RUNFILES_MANIFEST_FILE=/tmp/rf_manifest"
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "XDG_CACHE_HOME=/tmp/xdg_cache"
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "JIRI_PROXY_SOCKET=/tmp/jiri.sock"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "/third_party/python3/"
   if [[ "${herm_out}" == *"/third_party/clang/"* ]]; then
     BT_FAIL "Expected hermetic-env to omit PREBUILT_ALL_PATHS when FX_INJECT_PREBUILT_PATHS=0, got: ${herm_out}"
   fi
@@ -756,7 +769,7 @@ TEST_single_python_invocation_per_command_dispatch() {
   cat > "${py_wrapper}" <<EOF
 #!/bin/bash
 for arg in "\$@"; do
-  if [[ "\${arg}" == *"locator.py"* || "\${arg}" == *"registry.py"* ]]; then
+  if [[ "\${arg}" == *"main.py"* || "\${arg}" == *"locator.py"* || "\${arg}" == *"registry.py"* ]]; then
     printf '%s\n' "\$*" >> "${BT_TEMP_DIR}/_py_calls.log"
     break
   fi
@@ -868,10 +881,10 @@ EOF
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${help_built}" "BUILT_TARGET_HELP"
   BT_EXPECT_EQ "$(_count_py_calls)" 1
 
-  # 5. fx help --full
+  # 5. fx help --full (via fx-legacy)
   : > "${BT_TEMP_DIR}/_py_calls.log"
   local help_full
-  help_full="$("${fx}" help --full 2>/dev/null)"
+  help_full="$(FX_PYTHON_CLI=0 "${fx}" help --full 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${help_full}" "single-sh"
   BT_EXPECT_EQ "$(_count_py_calls)" 1
@@ -894,12 +907,66 @@ EOF
   BT_EXPECT_EQ $? 0
   BT_EXPECT_EQ "${out_vendor}" "V_SINGLE_OK|"
   BT_EXPECT_EQ "$(_count_py_calls)" 1
+
+  # 8. fx <legacy-unregistered-cmd> via Python front door spawns main.py once,
+  # does NOT spawn locator.py a second time, and clears _FX_PRE_RESOLVED_*
+  # before invoking the subcommand.
+  cat > "${BT_TEMP_DIR}/tools/devshell/legacy-single-py" <<'EOF'
+#!/bin/bash
+for v in _FX_PRE_RESOLVED_CMD _FX_PRE_RESOLVED_KIND _FX_PRE_RESOLVED_VENDOR _FX_PRE_RESOLVED_EXEC _FX_PRE_RESOLVED_MODE; do
+  if [[ -n "${!v+x}" ]]; then
+    echo "LEAKED:${v}=${!v}" >&2
+    exit 99
+  fi
+done
+echo "LEGACY_SINGLE_PY_OK|$*"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/legacy-single-py"
+  : > "${BT_TEMP_DIR}/_py_calls.log"
+  local out_legacy_single
+  out_legacy_single="$(FX_PYTHON_CLI=1 "${fx}" legacy-single-py arg1 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_legacy_single}" "LEGACY_SINGLE_PY_OK|arg1"
+  BT_EXPECT_EQ "$(_count_py_calls)" 1
+
+  # 9. Inherited stale _FX_PRE_RESOLVED_* env vars are ignored on non-fallback
+  # legacy invocations (FX_PYTHON_CLI=0).
+  local out_stale_legacy
+  out_stale_legacy="$(
+    _FX_PRE_RESOLVED_CMD=legacy-single-py \
+    _FX_PRE_RESOLVED_KIND=not_found \
+    _FX_PRE_RESOLVED_EXEC="" \
+    FX_PYTHON_CLI=0 "${fx}" legacy-single-py from-stale 2>/dev/null
+  )"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_stale_legacy}" "LEGACY_SINGLE_PY_OK|from-stale"
+
+  # 10. Bare `fx help` via Python front door prints short usage in 1 Python call.
+  : > "${BT_TEMP_DIR}/_py_calls.log"
+  local out_bare_help
+  out_bare_help="$(FX_PYTHON_CLI=1 "${fx}" help 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out_bare_help}" "usage: fx [--dir BUILD_DIR]"
+  BT_EXPECT_EQ "$(_count_py_calls)" 1
+
+  # 11. Unknown command via Python front door uses pre-resolved not_found fast
+  # path (spawns main.py once and does NOT spawn locator.py).
+  : > "${BT_TEMP_DIR}/_py_calls.log"
+  local rc_unknown=0
+  FX_PYTHON_CLI=1 "${fx}" nonexistent-single-py-cmd >/dev/null 2>&1 || rc_unknown=$?
+  BT_EXPECT_EQ "${rc_unknown}" 1
+  if ! grep -q "main.py" "${BT_TEMP_DIR}/_py_calls.log"; then
+    BT_FAIL "Expected unknown command to invoke main.py, log: $(<"${BT_TEMP_DIR}/_py_calls.log")"
+  fi
+  if grep -q "locator.py" "${BT_TEMP_DIR}/_py_calls.log"; then
+    BT_FAIL "Expected unknown command not to spawn locator.py after main.py pre-resolution, log: $(<"${BT_TEMP_DIR}/_py_calls.log")"
+  fi
 }
 
 TEST_supports_spaces_in_fuchsia_dir() {
   local spaced_dir="${BT_TEMP_DIR}/dir with spaces"
   mkdir -p "${spaced_dir}"
-  cp -a "${BT_TEMP_DIR}/scripts" "${BT_TEMP_DIR}/tools" "${BT_TEMP_DIR}/.fx-root" "${spaced_dir}/"
+  cp -a "${BT_TEMP_DIR}/build" "${BT_TEMP_DIR}/scripts" "${BT_TEMP_DIR}/tools" "${BT_TEMP_DIR}/.fx-root" "${spaced_dir}/"
   mkdir -p "$(dirname "${spaced_dir}/${_TEST_PY3#"${BT_TEMP_DIR}/"}")"
   ln -sf "$(command -v python3)" "${spaced_dir}/${_TEST_PY3#"${BT_TEMP_DIR}/"}"
 
@@ -940,8 +1007,8 @@ EOF
 }
 
 TEST_builds_and_installs_into_host_tools_on_demand() {
-  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
-  cat > "${BT_TEMP_DIR}/out/default/bazel.mock_side_effects" <<'EOF'
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/build.mock_state"
+  cat > "${BT_TEMP_DIR}/out/default/build.mock_side_effects" <<'EOF'
 echo "Simulated noisy build stdout that must stay off command stdout"
 EOF
   _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "v1"
@@ -958,12 +1025,15 @@ EOF
   mkdir -p "${sub_cwd}"
 
   # Execute tool via `fx my-reg-tool`
-  (cd "${sub_cwd}" && "${fx}" my-reg-tool --foo bar >"${stdout_file}" 2>"${stderr_file}")
+  (cd "${sub_cwd}" && env -u FX_BUILD_RBE_AUTH_TYPE "${fx}" my-reg-tool --foo bar >"${stdout_file}" 2>"${stderr_file}")
   BT_EXPECT_EQ $? 0
 
-  # Verify Bazel build was invoked for target
-  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
-  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/out/default/bazel.mock_state" "@//scripts/developer:my-reg-tool"
+  # Verify fx-reentry build was invoked for target with expected flags and env
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/build.mock_state"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/out/default/build.mock_state" "ARGS=--no-checks --no-status --no-resultstore --skip-auth-check --host @//scripts/developer:my-reg-tool -- --experimental_convenience_symlinks=ignore --build_event_json_file="
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/out/default/build.mock_state" "FX_ENTRY_CMD=my-reg-tool"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/out/default/build.mock_state" "FX_BUILD_RBE_AUTH_TYPE=<unset>"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/out/default/build.mock_state" "TUI_ENABLED=0"
 
   # Verify binary and runtime_dir were copied into out/_fx_host_tools/
   BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/_fx_host_tools/my-reg-tool"
@@ -978,7 +1048,7 @@ EOF
 }
 
 TEST_skips_rebuild_when_stamp_is_fresh_and_rebuilds_on_revision_change() {
-  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/build.mock_state"
   _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "v1"
 
   # Also verify git worktree gitfile layout (.git is a file, not a directory).
@@ -989,14 +1059,14 @@ TEST_skips_rebuild_when_stamp_is_fresh_and_rebuilds_on_revision_change() {
   out="$("${fx}" my-reg-tool first 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "v1|"
-  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # Remove mock_state; warm invocation at same lockfile/BUILD state should NOT rebuild.
-  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -f "${BT_TEMP_DIR}/out/default/build.mock_state"
   out="$("${fx}" my-reg-tool second 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "v1|"
-  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # Updating manifests/jiri.lock invalidates the stamp and triggers a rebuild + reinstall.
   echo '[{"package":"updated-lock-v2"}]' > "${BT_TEMP_DIR}/manifests/jiri.lock"
@@ -1004,19 +1074,19 @@ TEST_skips_rebuild_when_stamp_is_fresh_and_rebuilds_on_revision_change() {
   out="$("${fx}" my-reg-tool third 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "v2|"
-  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # Updating <target_pkg>/BUILD.bazel also invalidates the stamp.
-  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -f "${BT_TEMP_DIR}/out/default/build.mock_state"
   echo "# developer build v3" > "${BT_TEMP_DIR}/scripts/developer/BUILD.bazel"
   _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "v3"
   out="$("${fx}" my-reg-tool fourth 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "v3|"
-  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # Removing .runtime_dir on a warm stamp hit triggers recovery rebuild instead of failing.
-  rm -rf "${BT_TEMP_DIR}/out/default/bazel.mock_state" \
+  rm -rf "${BT_TEMP_DIR}/out/default/build.mock_state" \
     "${BT_TEMP_DIR}/out/_fx_host_tools/my-reg-tool.runtime_dir"
   out="$("${fx}" my-reg-tool fifth 2>/dev/null)"
   BT_EXPECT_EQ $? 0
@@ -1031,11 +1101,11 @@ TEST_global_no_build_flag() {
 EOF
 
   # 1. Missing host-tools/my-reg-tool with --no-build fails fast with zero build invocation
-  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/build.mock_state"
   local err_file="${BT_TEMP_DIR}/_no_build_err"
   BT_EXPECT_FAIL "${fx}" --no-build my-reg-tool 2>"${err_file}"
   BT_EXPECT_FILE_CONTAINS_SUBSTRING "${err_file}" "no-build was specified"
-  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # 2. --no-build followed by --build honors last-flag-wins (--build) and builds the tool
   _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "ran-v1"
@@ -1047,11 +1117,11 @@ EOF
 
   # 3. Once built, --build followed by --no-build honors last-flag-wins (--no-build) and skips rebuild
   echo "rev-new-9999" > "${BT_TEMP_DIR}/.git/JIRI_HEAD"
-  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -f "${BT_TEMP_DIR}/out/default/build.mock_state"
   out="$("${fx}" --build --no-build my-reg-tool 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "ran-v1|"
-  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/build.mock_state"
 }
 
 TEST_always_build_compiled_marker_rebuilds_each_run_and_honors_no_build() {
@@ -1061,7 +1131,7 @@ TEST_always_build_compiled_marker_rebuilds_each_run_and_honors_no_build() {
 }
 EOF
 
-  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/build.mock_state"
   _stage_fake_bazel_output "scripts/developer" "compiled-tool" "compiled-v1" 1
 
   # Run 1 builds and runs
@@ -1069,29 +1139,29 @@ EOF
   out1="$("${fx}" compiled-tool 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out1}" "compiled-v1|"
-  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # Run 2 on same tree revision rebuilds because .always_build is present
-  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -f "${BT_TEMP_DIR}/out/default/build.mock_state"
   _stage_fake_bazel_output "scripts/developer" "compiled-tool" "compiled-v2" 1
   local out2
   out2="$("${fx}" compiled-tool 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out2}" "compiled-v2|"
-  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # --no-build skips rebuild and runs existing staged binary
-  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -f "${BT_TEMP_DIR}/out/default/build.mock_state"
   _stage_fake_bazel_output "scripts/developer" "compiled-tool" "compiled-v3" 1
   local out3
   out3="$("${fx}" --no-build compiled-tool 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out3}" "compiled-v2|"
-  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/build.mock_state"
 }
 
 TEST_materialize_preserves_internal_symlinks_and_aborts_on_staging_failure() {
-  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # 1. Stage a tool with:
   #    (a) an internal relative symlink (.bin/helper.runfiles -> ../my-reg-tool.runfiles)
@@ -1194,7 +1264,7 @@ _git_blob_sha1() {
 TEST_sources_manifest_and_force_build_flag() {
   # Simulate LUCI Swarming test shard environment where git is not installed.
   git() { return 127; }
-  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   local src_pkg="${BT_TEMP_DIR}/tools/sample_tool"
   mkdir -p "${src_pkg}"
@@ -1232,15 +1302,15 @@ EOF
   out1="$("${fx}" manifest-tool 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_EQ "${out1}" "RUNNING:hello-v1"
-  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # Warm run with matching sources.manifest skips Bazel (even with .always_build present!)
-  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -f "${BT_TEMP_DIR}/out/default/build.mock_state"
   local out_warm
   out_warm="$("${fx}" manifest-tool 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_EQ "${out_warm}" "RUNNING:hello-v1"
-  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # Modifying the source file invalidates sources.manifest and triggers Bazel rebuild
   echo 'print("hello-v2")' > "${src_pkg}/sample.py"
@@ -1253,15 +1323,15 @@ EOF
   out_edit="$("${fx}" manifest-tool 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_EQ "${out_edit}" "RUNNING:hello-v2"
-  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # fx --build forces Bazel rebuild even when sources.manifest is fresh
-  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -f "${BT_TEMP_DIR}/out/default/build.mock_state"
   local out_force
   out_force="$("${fx}" --build manifest-tool 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_EQ "${out_force}" "RUNNING:hello-v2"
-  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # Multi-file sources.manifest validation: when all listed files match their
   # git blob SHA-1, _sources_manifest_check succeeds without rebuilding.
@@ -1271,20 +1341,20 @@ EOF
   printf '%s  tools/sample_tool/sample.py\n%s  tools/sample_tool/helper.py\n' "${sha}" "${sha2}" \
     > "${BT_TEMP_DIR}/out/_fx_host_tools/manifest-tool.runtime_dir/sources.manifest"
 
-  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -f "${BT_TEMP_DIR}/out/default/build.mock_state"
   local out_mixed
   out_mixed="$("${fx}" manifest-tool 2>/dev/null)"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_EQ "${out_mixed}" "RUNNING:hello-v2"
-  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/build.mock_state"
 }
 
 TEST_concurrent_build_lock_runs_existing_binary_with_warning_and_waits_when_unbuilt() {
-  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/build.mock_state"
   _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "locked-v1" "1"
   "${fx}" my-reg-tool warmup >/dev/null 2>&1
   BT_EXPECT_EQ $? 0
-  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -f "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # Stage v2 in Bazel, then hold out/default.build_lock with a live background sleep PID.
   _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "locked-v2" "1"
@@ -1303,11 +1373,11 @@ TEST_concurrent_build_lock_runs_existing_binary_with_warning_and_waits_when_unbu
   BT_EXPECT_EQ "${rc_existing}" 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "$(<"${out_existing}")" "locked-v1|"
   BT_EXPECT_FILE_CONTAINS_SUBSTRING "${err_existing}" "active fx build"
-  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # When host-tools/<cmd> does NOT exist yet and .build_lock is held briefly,
   # fx prints a waiting notice to stderr, waits for the lock holder to exit, and builds!
-  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/build.mock_state"
   (
     sleep 1
     rm -f "${BT_TEMP_DIR}/out/default.build_lock"
@@ -1325,23 +1395,23 @@ TEST_concurrent_build_lock_runs_existing_binary_with_warning_and_waits_when_unbu
   BT_EXPECT_EQ "${rc_wait}" 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "$(<"${out_wait}")" "locked-v2|"
   BT_EXPECT_FILE_CONTAINS_SUBSTRING "${err_wait}" "Waiting for active fx build"
-  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/build.mock_state"
 
   # Missing fx.config during clean-build:
   # Existing staged tool runs via fast path without triggering fx-gen even if fx.config was wiped.
   _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "locked-v2" "0"
   "${fx}" my-reg-tool warmup >/dev/null 2>&1
-  rm -f "${BT_TEMP_DIR}/out/default/fx.config" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -f "${BT_TEMP_DIR}/out/default/fx.config" "${BT_TEMP_DIR}/out/default/build.mock_state"
   local out_nocfg="${BT_TEMP_DIR}/_nocfg_out"
   local err_nocfg="${BT_TEMP_DIR}/_nocfg_err"
   "${fx}" my-reg-tool warm-nocfg >"${out_nocfg}" 2>"${err_nocfg}"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "$(<"${out_nocfg}")" "locked-v2|"
-  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/build.mock_state"
 }
 
 TEST_fx_output_registry_actions_logs_lookup_fallback_build_and_skip() {
-  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/build.mock_state"
   _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "v1"
 
   mkdir -p "${BT_TEMP_DIR}/tools/devshell/host_tools/mock_sh"
@@ -1452,6 +1522,108 @@ EOF
   out_no_bdir_nobuild="$("${fx}" --no-build my-reg-tool after-rm-bdir 2>"${BT_TEMP_DIR}/_no_bdir_err")"
   BT_EXPECT_EQ $? 0
   BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out_no_bdir_nobuild}" "v1|"
+}
+
+TEST_helpdoc_generates_docs_for_registered_tools() {
+  mkdir -p "${BT_TEMP_DIR}/tools/devshell/host_tools/doc_sh" "${BT_TEMP_DIR}/vendor/acme/scripts/devshell"
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/doc_sh/doc_sh.sh" <<'EOF'
+#!/bin/bash
+## usage: fx doc-sh --detailed-flag-from-script
+##
+## Detailed documentation body for doc-sh.
+echo "ok"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/host_tools/doc_sh/doc_sh.sh"
+  cat > "${BT_TEMP_DIR}/tools/devshell/doc-smid" <<'EOF'
+#!/bin/bash
+### middle legacy build command
+#### CATEGORY=Build
+## usage: fx doc-smid
+echo "mid"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/doc-smid"
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "doc-sh": {
+    "category": "Build",
+    "script": "//tools/devshell/host_tools/doc_sh/doc_sh.sh",
+    "summary": "documented script tool"
+  },
+  "doc-target": {
+    "category": "Build",
+    "summary": "documented target tool",
+    "target": "//scripts/developer:my-reg-tool"
+  }
+}
+EOF
+  cat > "${BT_TEMP_DIR}/vendor/acme/scripts/devshell/vdoc.sh" <<'EOF'
+#!/bin/bash
+## usage: fx vendor acme vdoc --vendor-detailed-flag
+echo "vok"
+EOF
+  chmod +x "${BT_TEMP_DIR}/vendor/acme/scripts/devshell/vdoc.sh"
+  cat > "${BT_TEMP_DIR}/vendor/acme/scripts/devshell/fx_host_tools.json" <<'EOF'
+{
+  "vdoc": {
+    "category": "Build",
+    "script": "//vendor/acme/scripts/devshell/vdoc.sh",
+    "summary": "vendor documented script"
+  }
+}
+EOF
+
+  local helpdoc_out="${BT_TEMP_DIR}/_helpdoc_out"
+  "${fx}" helpdoc "${helpdoc_out}" >/dev/null 2>&1
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${helpdoc_out}/cmd/doc-sh.md" "usage: fx doc-sh --detailed-flag-from-script"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${helpdoc_out}/cmd/doc-target.md" "usage: fx doc-target"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${helpdoc_out}/cmd/doc-target.md" "scripts/developer/BUILD.bazel"
+
+  # Verify legacy and registered commands are merged in a single alphabetical order (doc-sh, doc-smid, doc-target).
+  local build_readme_order
+  build_readme_order="$(grep -E '^\[doc-(sh|smid|target)\]' "${helpdoc_out}/build/README.md" | cut -d']' -f1 | tr -d '[' | tr '\n' ',')"
+  BT_EXPECT_EQ "${build_readme_order}" "doc-sh,doc-smid,doc-target,"
+
+  local helpdoc_vendor_out="${BT_TEMP_DIR}/_helpdoc_vendor_out"
+  "${fx}" helpdoc --vendor "${helpdoc_vendor_out}" >/dev/null 2>&1
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${helpdoc_vendor_out}/cmd/vdoc.md" "usage: fx vendor acme vdoc --vendor-detailed-flag"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${helpdoc_vendor_out}/cmd/vdoc.sh.md"
+
+  local depfile="${BT_TEMP_DIR}/_helpdoc.d"
+  local archive="${BT_TEMP_DIR}/_helpdoc.tar.gz"
+  "${fx}" helpdoc --depfile "${depfile}" --archive "${archive}" >/dev/null 2>&1
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${depfile}" "fx_host_tools.json"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${depfile}" "doc_sh.sh"
+}
+
+TEST_vars_sh_clears_ambient_pythonhome_and_pythonsafepath() {
+  mkdir -p "${BT_TEMP_DIR}/tools/devshell/host_tools/env_probe"
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/env_probe/env_probe.sh" <<'EOF'
+#!/bin/bash
+echo "PYTHONHOME=${PYTHONHOME-<UNSET>}"
+echo "PYTHONSAFEPATH=${PYTHONSAFEPATH-<UNSET>}"
+echo "PYTHONPATH=${PYTHONPATH-<UNSET>}"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/host_tools/env_probe/env_probe.sh"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "env-probe": {
+    "category": "Build",
+    "script": "//tools/devshell/host_tools/env_probe/env_probe.sh",
+    "summary": "probe Python env vars"
+  }
+}
+EOF
+
+  local out
+  out="$(PYTHONHOME="${BT_TEMP_DIR}/nonexistent/prebuilt_python" PYTHONSAFEPATH=1 "${fx}" env-probe 2>&1)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "PYTHONHOME=<UNSET>"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "PYTHONSAFEPATH=<UNSET>"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "PYTHONPATH=${BT_TEMP_DIR}"
 }
 
 BT_RUN_TESTS "$@"

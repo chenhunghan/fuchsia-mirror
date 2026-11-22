@@ -320,7 +320,7 @@
   driver when they share the same <a href=\"/docs/glossary#driver-host\">driver host</a>."
   full_description: ""
   see_also: [
-    "<a href=\"/docs/concepts/drivers/driver_framework.md#driver_host\">Driver framework (DFv2)</a>"
+    "<a href=\"/docs/concepts/drivers/driver_framework.md#driver-host\">Driver framework (DFv2)</a>"
   ]
   related_guides: [""]
   area: ["System", "Devices", "Drivers", "Driver SDK"]
@@ -748,7 +748,7 @@
   <a href=\"/docs/glossary#channel\">channels</a>. It also provides a set of primitives mirroring
   Zircon kernel objects and a threading model for <a href=\"/docs/glossary#driver\">drivers</a>
   which allows for the sharing of Zircon threads."
-  see_also: ["<a href=\"/docs/concepts/drivers/driver_framework.md#driver_runtime\">Driver runtime</a>"]
+  see_also: ["<a href=\"/docs/concepts/drivers/driver_framework.md#driver-runtime\">Driver runtime</a>"]
   related_guides: [""]
   area: ["System", "Devices", "Drivers", "Driver SDK"]
 

@@ -143,8 +143,12 @@ rust_syscall_tests = [
     includes = [ "//src/starnix/tests/syscalls/rust/meta/usb_test.shard.cml" ]
     deps = [
       "//src/starnix/lib/linux_uapi",
+      "//src/starnix/modules/usbfs/testing:usbfs_linux_trace_exec",
+      "//src/starnix/modules/usbfs/testing:usbfs_trace_schema",
       "//third_party/rust_crates:libc",
+      "//third_party/rust_crates:serde_json",
       "//third_party/rust_crates:serial_test",
+      "//third_party/rust_crates:test-case",
       "//third_party/rust_crates:zerocopy",
     ]
   },
@@ -196,13 +200,18 @@ rustc_binary("fake_usb_device_bin") {
     "//sdk/fidl/fuchsia.hardware.usb.descriptor:fuchsia.hardware.usb.descriptor_rust",
     "//sdk/fidl/fuchsia.hardware.usb.endpoint:fuchsia.hardware.usb.endpoint_rust",
     "//sdk/fidl/fuchsia.hardware.usb.request:fuchsia.hardware.usb.request_rust",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/rust/zx",
+    "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-runtime",
     "//src/lib/fuchsia-sync",
+    "//src/starnix/modules/usbfs/testing:usbfs_trace_schema",
+    "//src/storage/lib/vfs/rust:vfs",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:serde_json",
   ]
 }
 
@@ -271,8 +280,6 @@ fuchsia_test_package("linux_syscalls_rust_tests") {
   foreach(test_name, all_test_names) {
     test_components += [ ":linux_${test_name}" ]
   }
-  subpackages = starnix_test_subpackages
-  subpackages += [ "//src/starnix/containers/debian:debian_package" ]
   deps = [ "//src/lib/testing/expectation:expectation_comparer" ]
   test_specs = {
     log_settings = {

@@ -419,29 +419,16 @@ class Daemon:
         finally:
             loop.remove_signal_handler(signal.SIGUSR1)
 
-    async def run(self) -> int:
-        if UDS_PATH.exists():
-            UDS_PATH.unlink()
+    def _notify_ready_fd(self) -> None:
+        if self.ready_fd is None:
+            return
+        try:
+            os.write(self.ready_fd, b"1")
+            os.close(self.ready_fd)
+        except OSError as e:
+            print(f"Failed to write to ready-fd: {e}")
 
-        server = await asyncio.start_unix_server(
-            self.handle_uds_client, UDS_PATH
-        )
-        print(f"Daemon listening on {UDS_PATH}")
-
-        if self.ready_fd is not None:
-            try:
-                os.write(self.ready_fd, b"1")
-                os.close(self.ready_fd)
-            except OSError as e:
-                print(f"Failed to write to ready-fd: {e}")
-
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, self.stop_event.set)
-        loop.add_signal_handler(signal.SIGTERM, self.stop_event.set)
-
-        # Wait for stop event (sent by handle_stop)
-        await self.stop_event.wait()
-
+    async def _teardown_resources(self) -> None:
         if self.connect_to_existing and self.zxdb_writer:
             try:
                 args = ZxdbDetachArguments(all=True)
@@ -449,7 +436,6 @@ class Daemon:
             except Exception:
                 pass
 
-        # Cleanup
         if self.active_handlers:
             _done, pending = await asyncio.wait(
                 self.active_handlers, timeout=5.0
@@ -478,6 +464,24 @@ class Daemon:
 
             if self.repo_name:
                 await package_server.stop(self.repo_name)
+
+    async def run(self) -> int:
+        if UDS_PATH.exists():
+            UDS_PATH.unlink()
+
+        server = await asyncio.start_unix_server(
+            self.handle_uds_client, UDS_PATH
+        )
+        print(f"Daemon listening on {UDS_PATH}")
+        self._notify_ready_fd()
+
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT, self.stop_event.set)
+        loop.add_signal_handler(signal.SIGTERM, self.stop_event.set)
+
+        # Wait for stop event (sent by handle_stop)
+        await self.stop_event.wait()
+        await self._teardown_resources()
 
         server.close()
         # Set shutdown_complete_event first to allow handle_uds_client to unblock

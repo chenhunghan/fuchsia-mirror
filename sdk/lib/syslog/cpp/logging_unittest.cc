@@ -9,6 +9,8 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <type_traits>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -368,6 +370,37 @@ TEST_F(LoggingFixture, MacroCompilationTest) {
   FX_LOG_KV(DEBUG, "test log", FX_KV("key", static_cast<int16_t>(zero)));
   FX_LOG_KV(DEBUG, "test log", FX_KV("key", static_cast<int32_t>(zero)));
   FX_LOG_KV(DEBUG, "test log", FX_KV("key", static_cast<int64_t>(zero)));
+}
+
+TEST(StructuredLogging, KeyValueCtadAndExplicit) {
+  constexpr KeyValue kv_str_lit("literal_key", "literal_val");
+  static_assert(std::is_same_v<decltype(kv_str_lit), const KeyValue<const char*, const char*>>);
+  EXPECT_STREQ(kv_str_lit.key(), "literal_key");
+  EXPECT_STREQ(kv_str_lit.value(), "literal_val");
+
+  const char* cstr = "cstr_val";
+  KeyValue kv_cstr("cstr_key", cstr);
+  static_assert(std::is_same_v<decltype(kv_cstr), KeyValue<const char*, const char*>>);
+  EXPECT_STREQ(kv_cstr.key(), "cstr_key");
+  EXPECT_STREQ(kv_cstr.value(), "cstr_val");
+
+  constexpr std::string_view sv = "sv_val";
+  constexpr KeyValue kv_sv("sv_key", sv);
+  static_assert(std::is_same_v<decltype(kv_sv), const KeyValue<const char*, std::string_view>>);
+  EXPECT_STREQ(kv_sv.key(), "sv_key");
+  EXPECT_EQ(kv_sv.value(), "sv_val");
+
+  constexpr KeyValue kv_int("int_key", 42);
+  static_assert(std::is_same_v<decltype(kv_int), const KeyValue<const char*, int>>);
+  EXPECT_EQ(kv_int.value(), 42);
+
+  constexpr KeyValue kv_bool("bool_key", true);
+  static_assert(std::is_same_v<decltype(kv_bool), const KeyValue<const char*, bool>>);
+  EXPECT_TRUE(kv_bool.value());
+
+  constexpr KeyValue<const char*, int64_t> kv_explicit("explicit_key", 99);
+  EXPECT_STREQ(kv_explicit.key(), "explicit_key");
+  EXPECT_EQ(kv_explicit.value(), 99);
 }
 
 TEST(StructuredLogging, LOGS) {

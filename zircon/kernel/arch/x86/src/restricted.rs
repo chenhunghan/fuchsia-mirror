@@ -6,15 +6,17 @@
 
 //! Restricted execution mode state management, transitions, and register handling for x86_64.
 
+use core::mem::MaybeUninit;
+
 use debug::ltracef;
 use kprint::kprint;
 use zx_status::Status;
 use zx_types::{zx_restricted_state_t, zx_thread_state_general_regs_t};
 
+use super::debugger::{get_general_regs, set_general_regs};
 use super::registers::{
     X86_FLAGS_IF, X86_FLAGS_USER, X86_MSR_IA32_FS_BASE, X86_MSR_IA32_KERNEL_GS_BASE,
 };
-use super::restricted_ffi::{arch_get_general_regs, arch_set_general_regs};
 use super::x86::{read_msr, write_msr};
 use super::{Iframe, SyscallRegs, USER_CODE_64_SELECTOR, USER_DATA_SELECTOR, feature, vm};
 use crate::kernel::thread::current_get;
@@ -292,12 +294,24 @@ pub fn save_restricted_iframe_state(state: &mut zx_restricted_state_t, frame: &I
 }
 
 /// Saves restricted mode register state during exception handling.
-pub fn save_restricted_exception_state(state: &mut zx_restricted_state_t) {
-    let mut regs = zx_thread_state_general_regs_t::default();
-    // SAFETY: Reads general registers of the current thread into `regs`, which is handling an
-    // exception with saved user state.
-    let status = unsafe { arch_get_general_regs(current_get(), &mut regs) };
-    assert_eq!(Status::ok(status), Ok(()));
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - The calling thread (`current_get()`) is a live user `Thread` stopped in an exception with
+///   saved user state (and any non-null `suspended_general_regs` frame valid, writable, and
+///   unaliased for the duration of the call).
+/// - No chain lock transaction is active on the calling CPU.
+pub unsafe fn save_restricted_exception_state(state: &mut zx_restricted_state_t) {
+    let mut regs = MaybeUninit::<zx_thread_state_general_regs_t>::uninit();
+    // SAFETY: Caller guarantees `current_get()` is a live `Thread` stopped in an exception with
+    // saved user state and no active chain lock transaction, and `regs` is a stack local disjoint
+    // from the thread's state.
+    let status = unsafe { get_general_regs(current_get(), &mut regs) };
+    assert_eq!(status, Ok(()));
+    // SAFETY: `assert_eq!(status, Ok(()))` above verified `get_general_regs` returned `Ok(())`,
+    // which initializes all bytes of `regs`.
+    let regs = unsafe { regs.assume_init_ref() };
 
     state.rdi = regs.rdi;
     state.rsi = regs.rsi;
@@ -319,15 +333,23 @@ pub fn save_restricted_exception_state(state: &mut zx_restricted_state_t) {
     state.flags = regs.rflags & X86_FLAGS_USER;
 
     debug_assert!(!crate::arch_rs::ints_disabled());
-    crate::arch_rs::disable_ints();
-    // SAFETY: Interrupts are explicitly disabled above around `get_fsgsbase`, and `CR4.FSGSBASE`
-    // is enabled on CPUs with `X86_FEATURE_FSGSBASE`.
+    let _irq_guard = crate::arch_rs::InterruptDisableGuard::new();
+    // SAFETY: `_irq_guard` disables interrupts around `get_fsgsbase` (restoring the prior
+    // interrupt state on drop), and a live user `Thread` only executes on a CPU where
+    // `x86_init_percpu` has enabled `CR4.FSGSBASE` when `X86_FEATURE_FSGSBASE` is supported.
     (state.fs_base, state.gs_base) = unsafe { get_fsgsbase() };
-    crate::arch_rs::enable_ints();
 }
 
 /// Redirects an exception in restricted mode back to normal mode's `vector_table`.
-pub fn redirect_restricted_exception_to_normal(
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - The calling thread (`current_get()`) is a live user `Thread` stopped in an exception with
+///   saved user state (and any non-null `suspended_general_regs` frame valid, writable, and
+///   unaliased for the duration of the call).
+/// - No chain lock transaction is active on the calling CPU.
+pub unsafe fn redirect_restricted_exception_to_normal(
     arch_state: &ArchSavedNormalState,
     vector_table: usize,
     context: usize,
@@ -355,9 +377,11 @@ pub fn redirect_restricted_exception_to_normal(
         fs_base: arch_state.normal_fs_base,
         gs_base: arch_state.normal_gs_base,
     };
-    // SAFETY: Sets general registers on the current thread during exception handling.
-    let status = unsafe { arch_set_general_regs(current_get(), &regs) };
-    debug_assert_eq!(Status::ok(status), Ok(()));
+    // SAFETY: Caller guarantees `current_get()` is a live `Thread` stopped in an exception with
+    // saved user state and no active chain lock transaction, and `regs` is a stack local disjoint
+    // from the thread's state.
+    let status = unsafe { set_general_regs(current_get(), &regs) };
+    debug_assert_eq!(status, Ok(()));
 }
 
 /// Returns to normal mode (`enter_full`) at `vector_table` with `(context, code)`. Does not return.

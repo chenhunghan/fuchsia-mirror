@@ -75,7 +75,7 @@ CRATE_ANNOTATIONS = {
     ],
     "crc32fast": [
         crate.annotation(
-            version = "1.5.3",
+            version = "1.5.4",
             rustc_flags = [
                 "--cfg=stable_arm_crc32_intrinsics",
             ],
@@ -139,17 +139,9 @@ CRATE_ANNOTATIONS = {
             ],
         ),
     ],
-    "indexmap": [
-        crate.annotation(
-            version = "1.9.3",
-            rustc_flags = [
-                "--cfg=has_std",
-            ],
-        ),
-    ],
     "libc": [
         crate.annotation(
-            version = "0.2.190",
+            version = "0.2.191",
             gen_build_script = False,
             rustc_flags = crate.select(
                 common = [
@@ -308,10 +300,27 @@ CRATE_ANNOTATIONS = {
     ],
     "openssl-sys": [
         crate.annotation(
-            version = "0.9.117",
+            version = "0.9.118",
             rustc_flags = [
                 "--cfg=boringssl",
             ],
+        ),
+    ],
+    "pest_stack_guard": [
+        crate.annotation(
+            version = "1.0.1",
+            gen_build_script = False,
+            rustc_flags = crate.select(
+                common = [],
+                selects = {
+                    "@platforms//os:linux": [
+                        "--cfg=native_stack_guard",
+                    ],
+                    "@platforms//os:macos": [
+                        "--cfg=native_stack_guard",
+                    ],
+                },
+            ),
         ),
     ],
     "pin-init": [
@@ -340,6 +349,12 @@ CRATE_ANNOTATIONS = {
                 "--cfg=span_locations",
                 "--cfg=wrap_proc_macro",
             ],
+        ),
+    ],
+    "psm": [
+        crate.annotation(
+            version = "*",
+            gen_build_script = False,
         ),
     ],
     "ref-cast": [
@@ -414,6 +429,12 @@ CRATE_ANNOTATIONS = {
             ],
         ),
     ],
+    "stacker": [
+        crate.annotation(
+            version = "*",
+            gen_build_script = False,
+        ),
+    ],
     "thiserror": [
         crate.annotation(
             version = "1.0.69",
@@ -485,7 +506,7 @@ CRATE_ANNOTATIONS = {
                 selects = {
                     "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [
                         "//third_party/rust_crates/ask2patch/memchr",
-                        "//third_party/rust_crates/forks/libc-0.2.190:libc",
+                        "//third_party/rust_crates/forks/libc-0.2.191:libc",
                         "//third_party/rust_crates/vendor/bytes-1.12.1:bytes",
                         "//third_party/rust_crates/vendor/mio-1.2.4:mio",
                         "//third_party/rust_crates/vendor/num_cpus-1.17.0:num_cpus",
@@ -494,7 +515,7 @@ CRATE_ANNOTATIONS = {
                     ],
                     "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [
                         "//third_party/rust_crates/ask2patch/memchr",
-                        "//third_party/rust_crates/forks/libc-0.2.190:libc",
+                        "//third_party/rust_crates/forks/libc-0.2.191:libc",
                         "//third_party/rust_crates/vendor/bytes-1.12.1:bytes",
                         "//third_party/rust_crates/vendor/mio-1.2.4:mio",
                         "//third_party/rust_crates/vendor/num_cpus-1.17.0:num_cpus",
@@ -605,9 +626,9 @@ CRATE_ANNOTATIONS = {
     ],
     "zip": [
         crate.annotation(
-            version = "9.0.5",
+            version = "9.4.1",
             rustc_env = {
-                "CARGO_PKG_VERSION": "9.0.5",
+                "CARGO_PKG_VERSION": "9.4.1",
             },
         ),
     ],

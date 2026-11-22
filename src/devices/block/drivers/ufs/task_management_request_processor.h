@@ -5,8 +5,8 @@
 #ifndef SRC_DEVICES_BLOCK_DRIVERS_UFS_TASK_MANAGEMENT_REQUEST_PROCESSOR_H_
 #define SRC_DEVICES_BLOCK_DRIVERS_UFS_TASK_MANAGEMENT_REQUEST_PROCESSOR_H_
 
-#include <lib/ddk/hw/arch_ops.h>
 #include <lib/driver/logging/cpp/logger.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <lib/trace/event.h>
 
 #include "request_processor.h"
@@ -60,14 +60,14 @@ class TaskManagementRequestProcessor : public RequestProcessor {
   void SetDoorBellRegister(uint8_t slot_num) override {
     // Order the UTMRD stores in uncached Normal memory before the MMIO doorbell store in Device
     // memory; see TransferRequestProcessor::SetDoorBellRegister().
-    hw_wmb();
+    WriteDataMemoryBarrier();
     UtmrListDoorBellReg::Get().FromValue(1u << slot_num).WriteTo(&register_);
   }
   uint32_t ReadDoorBellRegister() override {
     const uint32_t doorbell = UtmrListDoorBellReg::Get().ReadFrom(&register_).door_bell();
     // Order the register load before the UTMRD loads that follow; see
     // TransferRequestProcessor::ReadDoorBellRegister().
-    hw_rmb();
+    ReadDataMemoryBarrier();
     return doorbell;
   }
 };

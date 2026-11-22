@@ -164,13 +164,15 @@ class BindManagerTestBase : public DriverManagerTestBase {
   // Should only be called when there's no ongoing bind. The node should not
   // already exist.
   void AddAndOrphanNode(std::string name, bool enable_multibind = false,
-                        std::shared_ptr<driver_manager::BindResultTracker> tracker = nullptr);
+                        std::shared_ptr<driver_manager::BindResultTracker> tracker = nullptr,
+                        std::vector<fuchsia_driver_framework::NodeProperty2> extra_properties = {});
 
   // Create a node and invoke Bind() for it.
   // If EXPECT_BIND_START, the function verifies that it started a new bind process.
   // If EXPECT_QUEUED, the function verifies that it queued new bind request.
   void AddAndBindNode(std::string name, bool enable_multibind = false,
-                      std::shared_ptr<driver_manager::BindResultTracker> tracker = nullptr);
+                      std::shared_ptr<driver_manager::BindResultTracker> tracker = nullptr,
+                      std::vector<fuchsia_driver_framework::NodeProperty2> extra_properties = {});
   void AddAndBindNode_EXPECT_BIND_START(
       std::string name, bool enable_multibind = false,
       std::shared_ptr<driver_manager::BindResultTracker> tracker = nullptr);

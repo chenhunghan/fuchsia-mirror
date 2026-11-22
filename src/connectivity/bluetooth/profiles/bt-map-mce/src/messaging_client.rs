@@ -520,7 +520,6 @@ mod tests {
     use bt_obex::header::{Header, HeaderSet};
     use bt_obex::operation::{OpCode, RequestPacket, ResponseCode, ResponsePacket};
     use fidl::endpoints::{create_proxy_and_stream, create_request_stream};
-    use fidl_fuchsia_bluetooth_bredr::{ProfileMarker, ProfileRequest, ProfileRequestStream};
     use fidl_fuchsia_bluetooth_map::{
         AccessorSetNotificationRegistrationRequest, MasInstance, MessageType as FidlMessageType,
         MessagingClientProxy, NotificationRegistrationMarker,
@@ -531,6 +530,7 @@ mod tests {
     use packet_encoding::{Decodable, Encodable};
     use std::pin::pin;
     use test_case::test_case;
+    use test_profile_server::{ConnectChannel, TestProfileServer};
 
     use crate::message_access_service::tests::send_ok_response;
     use crate::message_notification_service::tests::send_packet;
@@ -580,14 +580,13 @@ mod tests {
         exec: &mut fasync::TestExecutor,
         initial_obex_connect_success: bool,
         transport: Transport,
-    ) -> (ProfileRequestStream, MessagingClient, Channel, MessagingClientProxy) {
-        let (profile_proxy, mut profile_requests) = create_proxy_and_stream::<ProfileMarker>();
+    ) -> (TestProfileServer, MessagingClient, Channel, MessagingClientProxy) {
+        let (profile_proxy, mut profile_server) = TestProfileServer::create_endpoints();
 
         let mut messaging_client = MessagingClient::new(profile_proxy);
 
         // Can connect to MAS instance.
-        let (local, mut remote) = create_test_channels(transport);
-        {
+        let remote = {
             let connect_fut = messaging_client.connect_new_mas(
                 PeerId(TEST_PEER_ID),
                 MasConfig::new(
@@ -606,15 +605,13 @@ mod tests {
             let _ = exec.run_until_stalled(&mut connect_fut).expect_pending("should be pending");
 
             // We should have sent a connect request.
-            let profile_req =
-                expect_stream_item(exec, &mut profile_requests).expect("should have sent request");
-            match profile_req {
-                ProfileRequest::Connect { peer_id, connection: _, responder } => {
-                    assert_eq!(peer_id, PeerId(TEST_PEER_ID).into());
-                    responder.send(Ok(local.try_into().unwrap())).unwrap();
-                }
-                _ => panic!("should be connect request"),
-            }
+            let mut profile_fut = pin!(profile_server.expect_connect_request());
+            let mut remote = exec
+                .run_until_stalled(&mut profile_fut)
+                .expect("should have sent request")
+                .assert_peer(PeerId(TEST_PEER_ID))
+                .assert_channel(ConnectChannel::L2CapPsm(0x1))
+                .accept_with_transport(transport);
 
             let _ = exec.run_until_stalled(&mut connect_fut).expect_pending("should be pending");
 
@@ -628,13 +625,14 @@ mod tests {
                 .run_until_stalled(&mut connect_fut)
                 .expect("should be ready")
                 .expect("should succeed");
-        }
+            remote
+        };
 
         let (msg_client_proxy, msg_client_request_stream) =
             create_proxy_and_stream::<MessagingClientMarker>();
 
         messaging_client.set_fidl_stream(msg_client_request_stream).expect("should succeed");
-        (profile_requests, messaging_client, remote, msg_client_proxy)
+        (profile_server, messaging_client, remote, msg_client_proxy)
     }
 
     // Fakes an incoming MNS connection from remote peer.

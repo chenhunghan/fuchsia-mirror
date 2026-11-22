@@ -33,7 +33,7 @@ characters" means and where the caret currently is.
 
 Fuchsia's in-tree runtimes currently do not have a consensus on what the basic
 unit of string manipulation should be (see
-[Prior art and references](#prior_art_and_references)). The standard SDKs of
+[Prior art and references](#prior-art-and-references)). The standard SDKs of
 several other, non-Fuchsia platforms that we reviewed are also inconsistent on
 this question, and furthermore are influenced by legacy design choices, in many
 cases predating modern Unicode standards.
@@ -136,7 +136,7 @@ runtimes that use UTF‑16 encoding feature an additional division option:
     whether it is a single-code-unit scalar value, or part of a two-code-unit
     [*surrogate pair*][unicode-surrogate-pair]{:.external}.
 
-[fidl-string-encoding]: /docs/development/api/fidl.md#string_encoding_string_contents_and_length_bounds
+[fidl-string-encoding]: /docs/development/api/fidl.md#string-encoding-string-contents-and-length-bounds
 [fidl-string]: /docs/reference/fidl/language/language.md#strings
 [unicode-surrogate-code-point]: https://unicode.org/glossary/#surrogate_code_point
 [unicode-code-point]: https://unicode.org/glossary/#code_point
@@ -221,7 +221,7 @@ For use cases that frequently access string lengths and anticipate the presence
 of long strings, it may be prudent to cache length values or otherwise
 preprocess strings in order to achieve *amortized* constant time.
 
-## Ergonomics
+## Ergonomics {:#ergonomics}
 
 Unicode scalar values have the following advantages for text editing and
 composition:
@@ -233,7 +233,7 @@ composition:
     the accent but not the base letter.
 
 See
-[Drawbacks, alternatives, and unknowns](#drawbacks_alternatives_and_unknowns)
+[Drawbacks, alternatives, and unknowns](#drawbacks-alternatives-and-unknowns)
 for comparisons to the other options.
 
 ## Backwards Compatibility
@@ -302,7 +302,7 @@ The API documentation for `fuchsia.input.text` classes will explicitly highlight
 the units used for any data types involving string positions, ranges, and
 lengths.
 
-## Drawbacks, alternatives, and unknowns
+## Drawbacks, alternatives, and unknowns {:#drawbacks-alternatives-and-unknowns}
 
 ### Bytes
 
@@ -390,7 +390,7 @@ lengths.
 -   As with individual bytes, it is easy to inadvertently split scalar values
     into unmatched UTF‑16 surrogates.
 
-## Prior art and references
+## Prior art and references {:#prior-art-and-references}
 
 ### Flutter
 

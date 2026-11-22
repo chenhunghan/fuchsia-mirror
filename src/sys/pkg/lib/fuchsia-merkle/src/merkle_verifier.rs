@@ -2,73 +2,92 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::util::{hash_block, hash_block_aligned, make_hash_hasher, update_with_zeros};
-use crate::{BLOCK_SIZE, HASH_SIZE, Hash, MerkleRootBuilder};
+use crate::Hash;
+use crate::util::{BoringSslSha256, hash_block_aligned};
+use fuchsia_merkle_core::{AlignedByteSource, VerifyError};
+use std::mem::{align_of, size_of};
 use storage_ptr_slice::PtrByteSlice;
 use zx_status::Status;
+
+#[inline]
+fn status_from_verify_error(err: VerifyError) -> Status {
+    match err {
+        VerifyError::InvalidArgs => Status::INVALID_ARGS,
+        VerifyError::IoDataIntegrity => Status::IO_DATA_INTEGRITY,
+    }
+}
+
+struct PtrByteSliceSource<'a>(PtrByteSlice<'a>);
+
+impl AlignedByteSource for PtrByteSliceSource<'_> {
+    #[inline]
+    fn buffer_len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline]
+    fn hash_aligned_block(
+        &self,
+        offset: u64,
+        byte_pos: usize,
+        buffer_len: usize,
+        unaligned_len: usize,
+    ) -> fuchsia_merkle_core::Hash {
+        let block = self.0.subslice(byte_pos..byte_pos + buffer_len);
+        fuchsia_merkle_core::Hash(
+            hash_block_aligned(offset, block, buffer_len, unaligned_len).into(),
+        )
+    }
+}
 
 /// Verifies data against the leaf hashes of a merkle tree.
 #[derive(Clone)]
 pub struct MerkleVerifier {
-    hashes: Box<[Hash]>,
+    inner: fuchsia_merkle_core::MerkleVerifier,
 }
+
+// FxBlob embeds ReadSizedMerkleVerifier and enforces a strict per-blob size budget.
+const _: () = assert!(size_of::<MerkleVerifier>() == 2 * size_of::<usize>());
+// Matching size and alignment let `Vec`'s in-place iterator specialization convert `Box<[Hash]>`
+// into `Box<[fuchsia_merkle_core::Hash]>` without allocating a second buffer.
+const _: () = assert!(size_of::<Hash>() == size_of::<fuchsia_merkle_core::Hash>());
+const _: () = assert!(align_of::<Hash>() == align_of::<fuchsia_merkle_core::Hash>());
 
 impl MerkleVerifier {
     /// Constructs a [`MerkleVerifier`] from the root and leaf hashes of a merkle tree.
     ///
     /// Returns `INVALID_ARGS` if the leaf hash count would overflow a 64-bit byte offset, or
     /// `IO_DATA_INTEGRITY` if the leaf hashes are empty or inconsistent with the root.
+    #[allow(clippy::boxed_local)]
     pub fn new(root: Hash, hashes: Box<[Hash]>) -> Result<Self, Status> {
-        if hashes.is_empty() {
-            return Err(Status::IO_DATA_INTEGRITY);
-        }
-        if (hashes.len() as u64).checked_mul(BLOCK_SIZE as u64).is_none() {
-            return Err(Status::INVALID_ARGS);
-        }
-        if rebuild_root(&hashes) != root {
-            Err(Status::IO_DATA_INTEGRITY)
-        } else {
-            Ok(Self { hashes })
-        }
+        // Because `Hash` and `fuchsia_merkle_core::Hash` both have size 32, alignment 1, and no
+        // `Drop` glue, `Box::into_vec` -> `into_iter().map().collect::<Vec<_>>()` ->
+        // `into_boxed_slice()` reuses `hashes`'s heap allocation in place without reallocating (and
+        // folds to a no-op in optimized builds) while avoiding `unsafe`.
+        let core_hashes: Box<[fuchsia_merkle_core::Hash]> = hashes
+            .into_vec()
+            .into_iter()
+            .map(|h| fuchsia_merkle_core::Hash(h.into()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        fuchsia_merkle_core::MerkleVerifier::new::<BoringSslSha256>(
+            fuchsia_merkle_core::Hash(root.into()),
+            core_hashes,
+        )
+        .map(|inner| Self { inner })
+        .map_err(status_from_verify_error)
     }
 
     /// Verifies a `data` slice against the Merkle tree, assuming it corresponds to original data
     /// starting at `offset`.
     ///
     /// # Requirements:
-    /// - The `offset` must be aligned to `BLOCK_SIZE`.
-    /// - The length of `data` must be a multiple of `BLOCK_SIZE`, *except* if `data` contains the
-    ///   final chunk of the original data source.
+    /// - The `offset` must be aligned to [`crate::BLOCK_SIZE`].
+    /// - The length of `data` must be a multiple of [`crate::BLOCK_SIZE`], *except* if `data`
+    ///   contains the final chunk of the original data source.
+    #[inline]
     pub fn verify(&self, offset: usize, data: &[u8]) -> Result<(), Status> {
-        if !offset.is_multiple_of(BLOCK_SIZE) {
-            return Err(Status::INVALID_ARGS);
-        }
-        if data.is_empty() {
-            if offset != 0 || self.hashes.len() != 1 {
-                return Err(Status::INVALID_ARGS);
-            }
-            return if self.hashes[0] == hash_block(&[], 0) {
-                Ok(())
-            } else {
-                Err(Status::IO_DATA_INTEGRITY)
-            };
-        }
-        let ending = data.len().checked_add(offset).ok_or(Status::INVALID_ARGS)?;
-        let hash_end_index = ending.div_ceil(BLOCK_SIZE);
-        if (!ending.is_multiple_of(BLOCK_SIZE) && hash_end_index != self.hashes.len())
-            || hash_end_index > self.hashes.len()
-        {
-            return Err(Status::INVALID_ARGS);
-        }
-
-        for (i, chunk) in data.chunks(BLOCK_SIZE).enumerate() {
-            let hash = hash_block(chunk, (offset + i * BLOCK_SIZE) as u64);
-            if self.hashes[offset / BLOCK_SIZE + i] != hash {
-                return Err(Status::IO_DATA_INTEGRITY);
-            }
-        }
-
-        Ok(())
+        self.inner.verify::<BoringSslSha256>(offset, data).map_err(status_from_verify_error)
     }
 
     /// Verifies aligned, zero-padded data against the Merkle tree.
@@ -81,46 +100,16 @@ impl MerkleVerifier {
     /// to pass.
     ///
     /// Note: Does not support the null blob (empty 0-length blob, `unaligned_len == 0`).
+    #[inline]
     pub fn verify_aligned(
         &self,
         offset: usize,
         data: PtrByteSlice<'_>,
         unaligned_len: usize,
     ) -> Result<(), Status> {
-        let len = data.len();
-        len.checked_add(offset).ok_or(Status::INVALID_ARGS)?;
-        if !offset.is_multiple_of(BLOCK_SIZE)
-            || !len.is_multiple_of(4096)
-            || unaligned_len == 0
-            || unaligned_len > len
-            || len.div_ceil(BLOCK_SIZE) > unaligned_len.div_ceil(BLOCK_SIZE)
-        {
-            return Err(Status::INVALID_ARGS);
-        }
-        let ending = offset + unaligned_len;
-        let hash_end_index = ending.div_ceil(BLOCK_SIZE);
-        if (!ending.is_multiple_of(BLOCK_SIZE) && hash_end_index != self.hashes.len())
-            || hash_end_index > self.hashes.len()
-        {
-            return Err(Status::INVALID_ARGS);
-        }
-
-        for (i, block) in data.chunks(BLOCK_SIZE).enumerate() {
-            let block_buffer_len = block.len();
-            let block_unaligned_len =
-                std::cmp::min(block_buffer_len, unaligned_len - i * BLOCK_SIZE);
-            let hash = hash_block_aligned(
-                (offset + i * BLOCK_SIZE) as u64,
-                block,
-                block_buffer_len,
-                block_unaligned_len,
-            );
-            if self.hashes[offset / BLOCK_SIZE + i] != hash {
-                return Err(Status::IO_DATA_INTEGRITY);
-            }
-        }
-
-        Ok(())
+        self.inner
+            .verify_aligned(offset, &PtrByteSliceSource(data), unaligned_len)
+            .map_err(status_from_verify_error)
     }
 }
 
@@ -129,86 +118,48 @@ impl std::fmt::Debug for MerkleVerifier {
         // The leaf hashes are unlikely to be useful for debugging and could be megabytes of data.
         // The root of the merkle tree uniquely identifies the blob and the hash count can quickly
         // give a rough idea of the size of the blob.
-        let root = rebuild_root(&self.hashes);
+        let root = Hash::from_array(
+            fuchsia_merkle_core::rebuild_root::<BoringSslSha256>(self.inner.hashes()).0,
+        );
         f.debug_struct("MerkleVerifier")
             .field("root", &root)
-            .field("hash_count", &self.hashes.len())
+            .field("hash_count", &self.inner.hash_count())
             .finish()
     }
 }
 
-fn rebuild_root(leaf_hashes: &[Hash]) -> Hash {
-    let mut builder = MerkleRootBuilder::default();
-    for hash in leaf_hashes {
-        builder.push_hash(*hash);
-    }
-    builder.complete(&[])
-}
-
-fn hash_hashes(
-    hashes_per_hash: usize,
-    bytes_per_hash: u32,
-    index: usize,
-    hashes: impl ExactSizeIterator<Item = Hash>,
-) -> Hash {
-    let mut hasher = make_hash_hasher(bytes_per_hash, 1, (index as u64) * (bytes_per_hash as u64));
-    let hash_count = hashes.len();
-    for hash in hashes {
-        hasher.update(hash.as_bytes());
-    }
-    if hash_count != hashes_per_hash {
-        update_with_zeros(&mut hasher, (hashes_per_hash - hash_count) * HASH_SIZE);
-    }
-    Hash::from_array(hasher.digest())
-}
-
 /// Verifies reads against a merkle tree.
 ///
-/// [`MerkleVerifier`] verifies data at a granularity of [`BLOCK_SIZE`]. Consequently, it stores one
-/// hash (of size [`HASH_SIZE`]) for each data block. This hash storage consumes memory equal to
-/// 1/256th of the original data size.
+/// [`MerkleVerifier`] verifies data at a granularity of [`crate::BLOCK_SIZE`]. Consequently, it
+/// stores one hash (of size [`crate::HASH_SIZE`]) for each data block. This hash storage consumes
+/// memory equal to 1/256th of the original data size.
 ///
 /// [`ReadSizedMerkleVerifier`] optimizes memory usage when reads are always aligned and are
-/// guaranteed to be a multiple of the [`BLOCK_SIZE`]. Instead of storing a hash for every
-/// [`BLOCK_SIZE`] blocks like [`MerkleVerifier`], it stores only one hash for each read sized
-/// chunk. For example, 128KiB aligned reads would require storing 1/16th the number of hashes.
+/// guaranteed to be a multiple of the [`crate::BLOCK_SIZE`]. Instead of storing a hash for every
+/// [`crate::BLOCK_SIZE`] blocks like [`MerkleVerifier`], it stores only one hash for each read
+/// sized chunk. For example, 128KiB aligned reads would require storing 1/16th the number of
+/// hashes.
 #[derive(Clone)]
 pub struct ReadSizedMerkleVerifier {
-    read_size: usize,
-    bytes_per_hash: u32,
-    hashes: Box<[Hash]>,
+    inner: fuchsia_merkle_core::ReadSizedMerkleVerifier,
 }
+
+const _: () = assert!(size_of::<ReadSizedMerkleVerifier>() == 4 * size_of::<usize>());
 
 impl ReadSizedMerkleVerifier {
     /// Constructs a [`ReadSizedMerkleVerifier`] from an existing [`MerkleVerifier`] and a
     /// `read_size`.
     ///
-    /// Returns an error if `read_size` is zero, not a multiple of [`BLOCK_SIZE`], or so large that
-    /// its level-1 hash block size exceeds `u32::MAX`.
+    /// Returns an error if `read_size` is zero, not a multiple of [`crate::BLOCK_SIZE`], or so
+    /// large that its level-1 hash block size exceeds `u32::MAX`.
+    #[inline]
     pub fn new(verifier: MerkleVerifier, read_size: usize) -> Result<Self, Status> {
-        if read_size == 0 || !read_size.is_multiple_of(BLOCK_SIZE) {
-            return Err(Status::INVALID_ARGS);
-        }
-        let hashes_per_hash = read_size / BLOCK_SIZE;
-        let bytes_per_hash = hashes_per_hash
-            .checked_mul(HASH_SIZE)
-            .and_then(|n| u32::try_from(n).ok())
-            .ok_or(Status::INVALID_ARGS)?;
-        let mut level_1_hashes =
-            Vec::with_capacity(verifier.hashes.len().div_ceil(hashes_per_hash));
-        for (i, hashes) in verifier.hashes.chunks(hashes_per_hash).enumerate() {
-            level_1_hashes.push(hash_hashes(
-                hashes_per_hash,
-                bytes_per_hash,
-                i,
-                hashes.iter().copied(),
-            ));
-        }
-        Ok(ReadSizedMerkleVerifier {
+        fuchsia_merkle_core::ReadSizedMerkleVerifier::new::<BoringSslSha256>(
+            verifier.inner,
             read_size,
-            bytes_per_hash,
-            hashes: level_1_hashes.into_boxed_slice(),
-        })
+        )
+        .map(|inner| Self { inner })
+        .map_err(status_from_verify_error)
     }
 
     /// Verifies a `data` slice against the Merkle tree, assuming it corresponds to original data
@@ -218,57 +169,9 @@ impl ReadSizedMerkleVerifier {
     /// - The `offset` must be aligned to the configured read size granularity.
     /// - The length of `data` must be a multiple of the read size, *except* if `data` represents
     ///   the final chunk of the original data source (in which case it can be shorter).
+    #[inline]
     pub fn verify(&self, offset: usize, data: &[u8]) -> Result<(), Status> {
-        let end = offset.checked_add(data.len()).ok_or(Status::INVALID_ARGS)?;
-        if !offset.is_multiple_of(self.read_size) {
-            // The offset must read aligned.
-            return Err(Status::INVALID_ARGS);
-        }
-
-        let hashes_per_hash = self.read_size / BLOCK_SIZE;
-        if data.is_empty() {
-            if offset != 0 || self.hashes.len() != 1 {
-                return Err(Status::INVALID_ARGS);
-            }
-            let expected = hash_hashes(
-                hashes_per_hash,
-                self.bytes_per_hash,
-                0,
-                std::iter::once(hash_block(&[], 0)),
-            );
-            return if self.hashes[0] == expected {
-                Ok(())
-            } else {
-                Err(Status::IO_DATA_INTEGRITY)
-            };
-        }
-
-        let hash_start_index = offset / self.read_size;
-        let hash_end_index = end.div_ceil(self.read_size);
-
-        if !end.is_multiple_of(self.read_size) && hash_end_index != self.hashes.len() {
-            // The end is not aligned and it's not the end of the data.
-            return Err(Status::INVALID_ARGS);
-        }
-        if hash_end_index > self.hashes.len() {
-            return Err(Status::INVALID_ARGS);
-        }
-
-        for (i, chunk) in data.chunks(self.read_size).enumerate() {
-            let hash = hash_hashes(
-                hashes_per_hash,
-                self.bytes_per_hash,
-                hash_start_index + i,
-                chunk.chunks(BLOCK_SIZE).enumerate().map(|(j, chunk)| {
-                    hash_block(chunk, (offset + self.read_size * i + j * BLOCK_SIZE) as u64)
-                }),
-            );
-            if hash != self.hashes[hash_start_index + i] {
-                return Err(Status::IO_DATA_INTEGRITY);
-            }
-        }
-
-        Ok(())
+        self.inner.verify::<BoringSslSha256>(offset, data).map_err(status_from_verify_error)
     }
 
     /// Verifies aligned, zero-padded data against the Merkle tree.
@@ -281,62 +184,16 @@ impl ReadSizedMerkleVerifier {
     /// to pass.
     ///
     /// Note: Does not support the null blob (empty 0-length blob, `unaligned_len == 0`).
+    #[inline]
     pub fn verify_aligned(
         &self,
         offset: usize,
         data: PtrByteSlice<'_>,
         unaligned_len: usize,
     ) -> Result<(), Status> {
-        let len = data.len();
-        offset.checked_add(len).ok_or(Status::INVALID_ARGS)?;
-        if !offset.is_multiple_of(self.read_size)
-            || !len.is_multiple_of(4096)
-            || unaligned_len == 0
-            || unaligned_len > len
-            || len.div_ceil(BLOCK_SIZE) > unaligned_len.div_ceil(BLOCK_SIZE)
-        {
-            return Err(Status::INVALID_ARGS);
-        }
-
-        let end = offset + unaligned_len;
-        let hash_start_index = offset / self.read_size;
-        let hash_end_index = end.div_ceil(self.read_size);
-
-        if !end.is_multiple_of(self.read_size) && hash_end_index != self.hashes.len() {
-            // The end is not aligned and it's not the end of the data.
-            return Err(Status::INVALID_ARGS);
-        }
-        if hash_end_index > self.hashes.len() {
-            return Err(Status::INVALID_ARGS);
-        }
-
-        let hashes_per_hash = self.read_size / BLOCK_SIZE;
-        for (i, chunk) in data.chunks(self.read_size).enumerate() {
-            let chunk_offset = i * self.read_size;
-            let block_base_offset = offset + chunk_offset;
-            let chunk_unaligned_len = std::cmp::min(self.read_size, unaligned_len - chunk_offset);
-            let hash = hash_hashes(
-                hashes_per_hash,
-                self.bytes_per_hash,
-                hash_start_index + i,
-                chunk.chunks(BLOCK_SIZE).enumerate().map(|(j, block)| {
-                    let block_buffer_len = block.len();
-                    let block_unaligned_len =
-                        std::cmp::min(block_buffer_len, chunk_unaligned_len - j * BLOCK_SIZE);
-                    hash_block_aligned(
-                        (block_base_offset + j * BLOCK_SIZE) as u64,
-                        block,
-                        block_buffer_len,
-                        block_unaligned_len,
-                    )
-                }),
-            );
-            if hash != self.hashes[hash_start_index + i] {
-                return Err(Status::IO_DATA_INTEGRITY);
-            }
-        }
-
-        Ok(())
+        self.inner
+            .verify_aligned::<BoringSslSha256, _>(offset, &PtrByteSliceSource(data), unaligned_len)
+            .map_err(status_from_verify_error)
     }
 }
 
@@ -346,8 +203,8 @@ impl std::fmt::Debug for ReadSizedMerkleVerifier {
         // The root of the merkle tree can't be recovered either. The read size and hash count can
         // give a rough idea of the size of the blob.
         f.debug_struct("ReadAlignedMerkleVerifier")
-            .field("read_size", &self.read_size)
-            .field("hash_count", &self.hashes.len())
+            .field("read_size", &self.inner.read_size())
+            .field("hash_count", &self.inner.hash_count())
             .finish()
     }
 }
@@ -355,9 +212,17 @@ impl std::fmt::Debug for ReadSizedMerkleVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::hash_block;
+    use crate::{BLOCK_SIZE, HASH_SIZE, MerkleRootBuilder};
     use anyhow::{Context, Error, anyhow};
     use assert_matches::assert_matches;
     use test_case::test_case;
+
+    fn rebuild_root(leaf_hashes: &[Hash]) -> Hash {
+        let core_hashes: Vec<fuchsia_merkle_core::Hash> =
+            leaf_hashes.iter().map(|h| fuchsia_merkle_core::Hash((*h).into())).collect();
+        Hash::from_array(fuchsia_merkle_core::rebuild_root::<BoringSslSha256>(&core_hashes).0)
+    }
 
     fn create_data(size: usize) -> Vec<u8> {
         const USIZE_SIZE: usize = size_of::<usize>();

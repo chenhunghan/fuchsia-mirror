@@ -1,22 +1,24 @@
 ---
 name: update-fuchsia-rust-deps
 description: >
-  Comprehensive workflow for auditing and updating third-party Rust crate
-  dependencies in //third_party/rust_crates using fx rust-3p-outdated and fx
-  update-rustc-third-party. Covers filtering outdated crates, handling direct
-  versus transitive-only and empty/ or forks/ crates, filing tracking bugs in
-  Buganizer, updating gn.package, Bazel annotations, and license exceptions,
-  checking for new OSRB dependencies, verifying with clippy and fx build,
-  managing multi-repository graceful migrations, and preparing or rebasing
-  review-friendly Gerrit CLs.
+  Audits and updates third-party Rust crate dependencies in
+  //third_party/rust_crates with fx rust-3p-outdated and fx update-rustc-
+  third-party, including mandatory default supply-chain security audits,
+  Buganizer tracking bugs, gn.package/Bazel/license metadata updates, OSRB
+  dependency checks, clippy and fx build verification, and multi-repository
+  migrations. Use when upgrading outdated Rust crates or vendoring updated
+  //third_party/rust_crates versions. Don't use for reviewing existing Gerrit
+  dependency CLs (use review-fuchsia-rust-dep-updates) or splitting a finished
+  commit in isolation (use split-fuchsia-rust-dep-updates).
 ---
 
 # Updating Fuchsia Rust Dependencies
 
 This top-level skill describes the end-to-end workflow for upgrading third-party
-Rust crate dependencies under `third_party/rust_crates/`, verifying that the
-tree compiles and lints cleanly, gracefully handling out-of-tree or
-multi-repository dependents, and structuring commits for Gerrit code review.
+Rust crate dependencies under `third_party/rust_crates/`, auditing every crate
+diff by default for supply-chain security risks, verifying that the tree
+compiles and lints cleanly, gracefully handling out-of-tree or multi-repository
+dependents, and structuring commits for Gerrit code review.
 
 **Note**: Do **not** spawn parallel subagents to update multiple crates or
 switch branches concurrently in a single Fuchsia checkout, and never run more
@@ -98,7 +100,9 @@ Lists (CLs) manageable.
 ### Per-Crate Update Workflow (One by One)
 
 Perform the following steps sequentially for each crate, coupled crate group, or
-stack.
+stack. Once all updates are complete, always switch the local checkout back to
+`JIRI_HEAD` (`git checkout JIRI_HEAD`) rather than leaving it on the last
+`update-<crate>` branch.
 
 #### Step 1: Create a clean branch from `JIRI_HEAD`
 
@@ -188,11 +192,115 @@ Record the returned `<bug_id>` for the commit message `Fixed: <bug_id>` footer.
   `third_party/rust_crates/empty/<stub>/Cargo.toml` (or add a new stub if
   multiple major versions coexist).
 
-#### Step 4: Regenerate vendored crates and build files
+#### Step 4: Audit crate diffs for supply-chain security risks (Mandatory)
 
-Run `fx update-rustc-third-party` (if an existing crate already on `main` in
-`Cargo.toml` was published within the last 14 days, pass `--no-min-publish-age`
-so `cargo-gnaw` does not reject the existing crate):
+You **must** audit and review every added or updated crate for supply-chain
+security implications **by default** on every update; do not wait for the user
+to ask.
+
+Perform this audit **right after `cargo update` (Step 3) and before running `fx
+update-rustc-third-party` (Step 5), `fx clippy`, or `fx build`**:
+
+- `fx update-rustc-third-party` builds and runs
+  `//tools/cargo-gnaw:cargo-gnaw-bin`, compiling any updated crates in
+  `cargo-gnaw`'s dependency closure (including procedural macros such as
+  `serde_derive` and `argh_derive`), and invokes `cargo check`
+  (`BuildScript::execute`) on host `build.rs` scripts whenever `[gn.package]` is
+  not yet populated.
+- Procedural macro crates (`proc-macro = true` / `rustc_macro`) execute
+  arbitrary code on the host during `fx clippy` and `fx build`.
+- Unlike GN (`cargo-gnaw`), Bazel's `crates_vendor` (`rules_rust`) generates
+  `cargo_build_script` targets and **executes upstream `build.rs` on the host by
+  default** during Bazel builds / `fx build` unless `gen_build_script = False`
+  is explicitly set in
+  `build/bazel/update-rustc-third-party/crate_annotation_overwrites.bzl`.
+
+First inspect `git diff third_party/rust_crates/Cargo.lock` to list every added
+or updated crate. Fetch the `.crate` archive(s) without compiling anything, diff
+against the in-tree `vendor/` directory, and run a programmatic check for
+invisible Unicode characters (which terminal `git diff` hides or visually
+reorders):
+
+```posix-terminal
+prebuilt/third_party/rust/linux-x64/bin/cargo fetch \
+  --manifest-path third_party/rust_crates/Cargo.toml
+
+(
+  CRATE="<crate>"
+  OLD_VER="<old_version>"
+  NEW_VER="<new_version>"
+  TMP_NEW=$(mktemp -d)
+  trap 'rm -rf "$TMP_NEW"' EXIT
+  CRATE_TAR=$(ls -t "${CARGO_HOME:-$HOME/.cargo}"/registry/cache/*/"${CRATE}-${NEW_VER}.crate" | head -n 1)
+  tar -xzf "$CRATE_TAR" -C "$TMP_NEW"
+  OLD_DIR="third_party/rust_crates/vendor/${CRATE}-${OLD_VER/+/-}"
+  git diff --no-index "$OLD_DIR" "$TMP_NEW/${CRATE}-${NEW_VER}" || true
+  ./scripts/fuchsia-vendored-python -c '
+import pathlib, sys
+BAD = {0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0xFEFF, *range(0x202A, 0x202F), *range(0x2066, 0x206A)}
+hits = [f"{p}:{i}: U+{ord(c):04X}" for p in pathlib.Path(sys.argv[1]).rglob("*") if p.is_file()
+        for i, l in enumerate(p.read_bytes().decode("utf-8", "ignore").splitlines(), 1) for c in l if ord(c) in BAD]
+if hits: sys.exit("Suspicious Unicode:\n" + "\n".join(hits))
+' "$TMP_NEW/${CRATE}-${NEW_VER}"
+)
+```
+
+Edge cases when running the diff above:
+
+- **SemVer build metadata (`+`):** `update-rustc-third-party` replaces `+` with
+  `-` in `vendor/` directory names (for example,
+  `vendor/wasi-0.11.0-wasi-snapshot-preview1`), whereas `.crate` archives retain
+  `+`.
+- **Brand-new crates:** If no prior `vendor/<crate>-*` directory exists (a new
+  transitive crate or OSRB-approved addition), inspect all files under
+  `$TMP_NEW/${CRATE}-${NEW_VER}` directly instead of running `git diff`.
+- **Auditing after `fx update-rustc-third-party` has already removed `<old>`:**
+  Extract `JIRI_HEAD:third_party/rust_crates/vendor/<crate>-<old_dir_ver>` with
+  `git archive` into a temporary directory and `git diff --no-index` against
+  `third_party/rust_crates/vendor/<crate>-<new_dir_ver>`.
+
+Audit **all** changed crates in the update against this checklist:
+
+1.  **Provenance & manifest metadata (`.cargo_vcs_info.json`, `Cargo.toml`):**
+    Verify `.cargo_vcs_info.json` contains a clean upstream commit `sha1` (flag
+    missing VCS info or `"dirty": true` tarballs). Inspect `Cargo.toml` for
+    unexpected changes to `authors`, `repository`, `links`, `proc-macro = true`,
+    custom target paths (`[lib] path`, `[[bin]] path`, `build = "..."`), default
+    features, `[dependencies]`, `[build-dependencies]`, or target-specific
+    dependencies.
+2.  **Host execution surface (`proc-macro` & `build.rs`):** Read 100% of changed
+    lines in procedural macro crates (`rustc_macro`) and in any added or
+    modified `build.rs`, `build/`, or custom `build = "..."` scripts before
+    running `fx update-rustc-third-party` or building. Even when
+    `gen_build_script = False` disables Bazel host execution, tampered build
+    scripts remain a primary indicator of a compromised crates.io release.
+3.  **Full crate source & red-flag scan (all `.rs` and build-script files):**
+    Review all production source changes across the entire crate (not only
+    `src/`, as crates may place entry points at the crate root or custom paths,
+    and never rely solely on `CHANGELOG.md` or `--stat`) for:
+    - **Trojan Source / hidden Unicode:** Bidirectional control characters
+      (`U+202A`..`U+202E`, `U+2066`..`U+2069`) or zero-width characters
+      (`U+200B`..`U+200F`, `U+FEFF`), verified via the Python scan above.
+    - **Unexplained capabilities or payloads:** Unexpected network, process,
+      environment, or filesystem calls (`std::net`, `std::process::Command`,
+      `std::env`, `std::fs`, dynamic library loading), obfuscated string/byte
+      literals, or binary blobs via `include_bytes!` / `include_str!`.
+    - **Memory-safety changes:** New or expanded `unsafe` blocks, inline
+      assembly (`asm!`, `global_asm!`), `mem::transmute`, or raw pointer
+      arithmetic, confirming safety invariants remain sound.
+4.  **Default reporting & stop-on-suspicion:** Always include a concise
+    per-crate supply-chain audit summary when reporting update results to the
+    user. If anything suspicious, obfuscated, or unexplainable appears, **stop
+    immediately** (do **not** run `fx update-rustc-third-party`, `fx clippy`,
+    `fx build`, or upload to Gerrit) and report the exact file and lines to the
+    user.
+
+#### Step 5: Regenerate vendored crates and build files
+
+Once the Step 4 supply-chain audit passes, run `fx update-rustc-third-party` (if
+an existing crate already on `main` in `Cargo.toml` was published within the
+last 14 days, pass `--no-min-publish-age` so `cargo-gnaw` does not reject the
+existing crate):
 
 ```posix-terminal
 .jiri_root/bin/fx update-rustc-third-party --no-min-publish-age
@@ -212,13 +320,13 @@ What this script does:
 5.  Runs `cargo-gnaw` to regenerate `third_party/rust_crates/BUILD.gn`.
 
 **Handling `cargo-gnaw` build script errors:** If `cargo-gnaw` fails because the
-new version added or modified a `build.rs` script, inspect the new
+new version added or modified a `build.rs` script, inspect the already-audited
 `third_party/rust_crates/vendor/<crate>-<new_version>/build.rs` and add or
 update the appropriate `[gn.package.<crate>."<new_version>"]` section in
 `third_party/rust_crates/Cargo.toml` (and, if needed,
 `crate_annotation_overwrites.bzl`), then re-run `fx update-rustc-third-party`.
 
-#### Step 5: Check for new dependencies or license changes requiring OSRB
+#### Step 6: Check for new dependencies or license changes requiring OSRB
 
 Inspect `git status --short`:
 
@@ -484,7 +592,8 @@ git commit -F <scratch_file> && rm -f <scratch_file>
 
 ### Uploading & Rebasing When Multiple CLs Are in Flight
 
-1.  **Upload to Gerrit (only if no new OSRB dependency was pulled in):**
+1.  **Upload to Gerrit (only if no new OSRB dependency was pulled in and the
+    Step 4 supply-chain audit passed):**
 
     ```posix-terminal
     git push origin HEAD:refs/for/main%l=Commit-Queue+1
@@ -503,5 +612,20 @@ git commit -F <scratch_file> && rm -f <scratch_file>
     - To rebase an open `[rust-3p]` CL cleanly after another `[rust-3p]` CL
       lands: fetch `origin/main`, reset the branch to `origin/main` (or
       `JIRI_HEAD`), re-apply the `Cargo.toml` and in-tree caller changes, re-run
-      `cargo update` and `fx update-rustc-third-party`, verify with `fx build`,
-      and push a new patchset preserving the original `Change-Id`.
+      `cargo update`, re-run the Step 4 supply-chain audit on any crate versions
+      newly resolved during the rebase, run `fx update-rustc-third-party`,
+      verify with `fx build`, and push a new patchset preserving the original
+      `Change-Id`.
+
+3.  **Restore the Local Checkout to `JIRI_HEAD` When Finished:**
+    - Once all local crate updates (and any Gerrit uploads or rebases) are
+      complete, always switch the working tree back to `JIRI_HEAD` before
+      returning control to the user:
+
+      ```posix-terminal
+      git checkout JIRI_HEAD
+      ```
+
+    - Never leave the checkout on whichever `update-<crate>` branch happened to
+      be created last, since any subsequent changes the user makes would
+      otherwise unintentionally build on top of that crate-update branch.

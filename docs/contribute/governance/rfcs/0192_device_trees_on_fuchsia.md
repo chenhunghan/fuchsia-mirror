@@ -325,7 +325,7 @@ On Fuchsia:
 *   *ranges* - used within the board driver to determine how child address
     ranges map into the parent.
 
-#### Interrupts
+#### Interrupts {:#interrupts}
 
 Interrupts bindings will be as defined by section 2.4 of the
 [specification][dt-specification].
@@ -507,7 +507,7 @@ node "regulator" {
 }
 ```
 
-#### Clocks and other resources
+#### Clocks and other resources {:#clocks-and-other-resources}
 
 These devices can have more than one instance assigned to them.
 
@@ -673,7 +673,7 @@ We will also fuzz the devicetree parser.
 We will also provide tooling to validate a devicetree against known
 [devicetree schemas][dt-schema].
 
-## Documentation
+## Documentation {:#documentation}
 
 We will document Fuchsia's use of devicetrees and our approach to supporting
 them in a document on fuchsia.dev. Specifically, we want board owners to

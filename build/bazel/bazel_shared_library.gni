@@ -1,0 +1,503 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/bazel/bazel_build_action.gni")
+import("//build/build_id.gni")
+import("//build/sdk/config.gni")
+
+# Support for importing Bazel-built Fuchsia C/C++ shared libraries into GN.
+#
+# Bazel builds Fuchsia platform code in a single configuration whose variant
+# flags (e.g. sanitizers) match `fuchsia_default_variant_toolchain`. Thus a
+# Bazel-built shared library can only replace the GN-built one in the
+# corresponding `-shared` toolchain, called the "builder toolchain" here:
+#
+#   * The `default_toolchain`, used to invoke Bazel build actions (e.g.
+#     `//build/toolchain/fuchsia:x64`).
+#
+#   * The `builder toolchain`, which is where Fuchsia shared libraries are built
+#     by default. If no global variant is enabled, this would be
+#     `//build/toolchain/fuchsia:x64-shared`. If a global variant like
+#     `asan-ubsan` is enabled, this would be
+#     `//build/toolchain/fuchsia:x64-asan-ubsan-shared`.
+#
+#   * The `novariant` toolchain, used to build shared libraries that use
+#     `exclude_toolchain_tags` to refuse instrumentation (e.g.
+#     `//build/toolchain/fuchsia:x64-novariant-shared`).
+#
+# Bazel builds shared libraries that match the builder toolchain only, and the
+# corresponding GN action invoking Bazel must be in the `default_toolchain`. In
+# all other `-shared` toolchains (e.g. the novariant toolchain, or toolchains
+# for per-target `select_variant` entries), the library must still be built by
+# GN.
+#
+# Importing a library requires two GN targets, which are expected to be defined
+# with the same base name as the regular GN shared library target, e.g.
+# `//sdk/lib/fdio:fdio`:
+#
+#   * In `default_toolchain`, `bazel_shared_library_copy_outputs()` defines a
+#     target that builds the Bazel library and copies its outputs into the
+#     builder toolchain's `root_out_dir`, using the exact same file layout as
+#     GN's `solink` tool.
+#
+#   * In the builder toolchain, `bazel_shared_library_import()` replaces the
+#     GN `shared_library()` target, and provides the same link inputs and
+#     metadata (binaries, debug symbols, distribution entries, etc).
+#
+# In the `default_toolchain` (e.g. `//build/toolchain/fuchsia:x64`), the regular
+# `shared_library()` template from //build/config/BUILDCONFIG.gn redirects to
+# the builder toolchain (or to another variant-specific toolchain) as usual.
+#
+# `bazel_shared_library()` wraps these templates into a drop-in replacement for
+# `shared_library()` that accepts a `bazel_target` parameter.
+
+# The GN toolchain in which Bazel-built shared libraries replace GN-built ones.
+bazel_shared_library_builder_toolchain =
+    "${fuchsia_default_variant_toolchain}-shared"
+
+# Whether Bazel-built shared libraries can be imported at all in this build.
+#
+# Sub-builds (see //build/subbuild.gni, e.g. the IDK sub-builds for other API
+# levels and CPU architectures) run `gn gen` and Ninja directly, without
+# //build/regenerator.py, so they have no Bazel workspace or Ninja
+# delayed-action worker, and cannot run bazel_action() targets. The Bazel
+# library is also only built for the "PLATFORM" API level. Thus, sub-builds
+# always build the library with GN.
+bazel_shared_library_copies_enabled = is_fuchsia && !sdk_inside_sub_build
+
+# Whether Bazel-built shared libraries should be imported in the current
+# toolchain.
+use_bazel_shared_libraries_in_current_toolchain =
+    bazel_shared_library_copies_enabled &&
+    current_toolchain == bazel_shared_library_builder_toolchain
+
+# Builds a Bazel shared library and copies its outputs to the builder
+# toolchain's `root_out_dir`.
+#
+# Must be called in `default_toolchain`, where `bazel_action()` is supported.
+#
+# Parameters
+#
+#   bazel_target (required)
+#     A Bazel label to a `shared_library_gn_outputs()` target, see
+#     //build/bazel/rules/cc/shared_library.bzl. The target must be in the same
+#     Bazel package as the `cc_shared_library()` that it wraps. Relative labels
+#     are resolved relative to the current directory.
+#     Type: Bazel label string.
+#
+#   output_name (required)
+#     The name of the library, without the `lib` prefix or `.so` suffix.
+#     Type: string
+#
+#   deps, testonly, visibility
+#     Usual GN meaning.
+#
+template("bazel_shared_library_copy_outputs") {
+  assert(current_toolchain == default_toolchain,
+         "This template can only be called in the default toolchain.")
+  assert(defined(invoker.bazel_target), "bazel_target must be defined.")
+  assert(defined(invoker.output_name), "output_name must be defined.")
+
+  _lib_name = "lib${invoker.output_name}.so"
+  _out_dir = rebase_path(
+          get_label_info(":any(${bazel_shared_library_builder_toolchain})",
+                         "root_out_dir"),
+          root_build_dir)
+
+  bazel_build_action(target_name) {
+    forward_variables_from(invoker,
+                           [
+                             "bazel_target",
+                             "deps",
+                             "testonly",
+                             "visibility",
+                           ])
+    bazel_config = "fuchsia_platform"
+
+    # Allow copying to the builder toolchain's root_out_dir.
+    ninja_base_dir = root_build_dir
+
+    # The dependencies of the Bazel action (e.g. the sysroot used by Bazel for
+    # all variants) are not runtime dependencies of the library, and must not
+    # be collected by metadata walks that start from a library target.
+    metadata = {
+      distribution_entries_barrier = []
+      link_output_barrier = []
+      sdk_runtime_deps_barrier = []
+    }
+
+    # LINT.IfChange(gn_outputs)
+    copy_outputs = [
+      {
+        # The stripped library.
+        bazel = "{{BAZEL_TARGET_OUT_PATH}}/${_lib_name}"
+        ninja = "${_out_dir}/${_lib_name}"
+      },
+      {
+        # The unstripped library.
+        bazel = "{{BAZEL_TARGET_OUT_DIR}}/${_lib_name}"
+        ninja = "${_out_dir}/lib.unstripped/${_lib_name}"
+      },
+      {
+        bazel = "{{BAZEL_TARGET_OUT_DIR}}/link_stub/${_lib_name}"
+        ninja = "${_out_dir}/link_stub/${_lib_name}"
+      },
+      {
+        # This unstripped IFS file matches the one generated by GN's `solink`.
+        bazel =
+            "{{BAZEL_TARGET_OUT_DIR}}/lib${invoker.output_name}.full_ifs.ifs"
+        ninja = "${_out_dir}/lib${invoker.output_name}.ifs"
+      },
+    ]
+
+    # LINT.ThenChange(//build/bazel/rules/cc/shared_library.bzl:gn_outputs)
+  }
+}
+
+# Replaces a GN `shared_library()` with one built by Bazel.
+#
+# Must be called in `bazel_shared_library_builder_toolchain`. The outputs are
+# expected to be produced by a `bazel_shared_library_copy_outputs()` target
+# in the default toolchain.
+#
+# This defines a target that can be used in `deps` like a `shared_library()`
+# target, with the same outputs and metadata.
+#
+# Parameters
+#
+#   copy_outputs_target (required)
+#     The label, without a toolchain, of the corresponding
+#     `bazel_shared_library_copy_outputs()` target.
+#     Type: GN label.
+#
+#   output_name (optional)
+#     The name of the library, without the `lib` prefix or `.so` suffix.
+#     Type: string
+#     Default: target_name
+#
+#   install_name (optional)
+#     The name of the library when installed in a Fuchsia package.
+#     Type: string
+#     Default: "lib${output_name}.so"
+#
+#   metadata (optional)
+#     Additional metadata. As for shared_library(), these values override the
+#     defaults for `distribution_entries` and `sdk_runtime_deps`.
+#
+#   public, public_configs, public_deps, data_deps, testonly, visibility,
+#   applicable_licenses
+#     Usual GN meaning.
+#
+template("bazel_shared_library_import") {
+  assert(use_bazel_shared_libraries_in_current_toolchain,
+         "This template can only be called in the builder toolchain " +
+             "(${bazel_shared_library_builder_toolchain}).")
+  assert(defined(invoker.copy_outputs_target),
+         "copy_outputs_target must be defined.")
+
+  if (defined(invoker.output_name)) {
+    _output_name = invoker.output_name
+  } else {
+    _output_name = target_name
+  }
+  _lib_name = "lib${_output_name}.so"
+
+  _install_name = _lib_name
+  if (defined(invoker.install_name)) {
+    _install_name = invoker.install_name
+  }
+
+  # LINT.IfChange(output_layout)
+  _stripped_file = "${root_out_dir}/${_lib_name}"
+  _unstripped_file = "${root_out_dir}/lib.unstripped/${_lib_name}"
+  _link_stub_file = "${root_out_dir}/link_stub/${_lib_name}"
+
+  # LINT.ThenChange(//build/config/BUILDCONFIG.gn,
+  # //build/toolchain/clang_toolchain.gni)
+
+  # NOTE: Unlike GN's `solink` tool, which writes the stamp file next to the
+  # stripped library, build_id_entry() writes it next to the unstripped one.
+  # The metadata below points to the right location.
+  # LINT.IfChange(build_id_stamp)
+  _build_id_stamp = "${_unstripped_file}.build-id.stamp"
+
+  # LINT.ThenChange(//build/build_id.gni)
+
+  _rebased_stripped_file = rebase_path(_stripped_file, root_build_dir)
+  _rebased_unstripped_file = rebase_path(_unstripped_file, root_build_dir)
+  _rebased_build_id_stamp = rebase_path(_build_id_stamp, root_build_dir)
+
+  _copy_outputs_label =
+      get_label_info(invoker.copy_outputs_target, "label_no_toolchain") +
+      "(${default_toolchain})"
+
+  # Add the library to the `.build-id` directory, and write the build ID stamp
+  # file, as GN's `solink` tool does.
+  # NOTE: build_id_entry() sets `hermetic_deps = false`, so its users must be
+  # in the //build:non_hermetic_deps allowlist.
+  _main_target = target_name
+  _build_id_target = "${target_name}.build_id"
+
+  build_id_entry(_build_id_target) {
+    forward_variables_from(invoker, [ "testonly" ])
+    visibility = [ ":${_main_target}" ]
+    debug = _unstripped_file
+    stripped = _stripped_file
+    deps = [ _copy_outputs_label ]
+  }
+
+  _label = get_label_info(":${target_name}", "label_with_toolchain")
+
+  # The link stub must reach the same links as the output of a GN
+  # shared_library() would:
+  #
+  #   * Through non-linkable targets (source_set() and static_library()
+  #     targets), up to the first linkable target. The `libs` of the source_set()
+  #     below provide this, like `{{solibs}}` do for shared_library().
+  #
+  #   * Across linkable targets, along `public_deps` (e.g. to the dependents of a
+  #     Rust dylib that has the library in its `public_deps`). The `libs` of a
+  #     source_set() stop at the first linkable target, so the link stub is also
+  #     passed through a public config, which follows the same path.
+  #
+  # Neither goes through other target types, such as actions or packages. In
+  # particular, `all_dependent_configs` must not be used: it reaches every
+  # dependent, including host binaries that depend on Fuchsia packages for
+  # test data, which would then link against Fuchsia link stubs.
+  #
+  # The config also passes the link stub in `ldflags`, to control the link
+  # order. GN only places the outputs of shared_library() targets in
+  # `{{solibs}}`, in dependency order. The `libs` come after all `{{solibs}}` on
+  # the link line instead, which changes the order of DT_NEEDED entries in
+  # linked binaries. This matters because the dynamic linker resolves each
+  # symbol to its first definition in load order, and e.g. libc.so defines weak
+  # stubs for many libfdio.so functions, so libfdio.so must come before libc.so.
+  # `ldflags` come before all other link inputs, which makes the library the
+  # first DT_NEEDED entry for C/C++ binaries that get the config, such as
+  # executables, which depend on //sdk/lib/fdio directly. The `libs` entries are
+  # still needed so that Ninja relinks dependents when the link stub changes
+  # (the linker ignores the duplicate).
+  # NOTE: ldflags are not used by Rust targets, which only use `libs`.
+  _link_config = "${target_name}.link"
+
+  config(_link_config) {
+    visibility = [ ":${_main_target}" ]
+    libs = [ _link_stub_file ]
+    ldflags = [ rebase_path(_link_stub_file, root_build_dir) ]
+  }
+
+  # Acts like a shared_library() for linking purposes, similar to
+  # ifs_shared_library().
+  source_set(target_name) {
+    forward_variables_from(invoker,
+                           [
+                             "applicable_licenses",
+                             "data_deps",
+                             "public",
+                             "public_configs",
+                             "public_deps",
+                             "testonly",
+                             "visibility",
+                           ])
+
+    # As in _fuchsia_shared_library() in //build/config/BUILDCONFIG.gn, allow
+    # the shared_library() redirect group in other toolchains (e.g. the
+    # default toolchain) to depend on this target.
+    if (defined(visibility)) {
+      visibility += [ ":${target_name}" ]
+    }
+
+    # Link against the link stub, as GN does for its own shared libraries. See
+    # the comment above `_link_config`.
+    libs = [ _link_stub_file ]
+    if (!defined(public_configs)) {
+      public_configs = []
+    }
+    public_configs += [ ":${_link_config}" ]
+
+    # These are public so that targets that depend on this one can use the
+    # library's files as inputs (e.g. SDK atoms), as with shared_library().
+    if (!defined(public_deps)) {
+      public_deps = []
+    }
+    public_deps += [
+      ":${_build_id_target}",
+      _copy_outputs_label,
+    ]
+
+    # LINT.IfChange(shared_library_metadata)
+    metadata = {
+      binaries = []
+      debug_symbol_files = []
+
+      libprefix = [ toolchain_variant.libprefix ]
+
+      # Used by link_output_rspfile(), see its documentation for details.
+      link_output_path = [ _rebased_unstripped_file ]
+      link_output_barrier = []
+
+      if (defined(invoker.metadata)) {
+        forward_variables_from(invoker.metadata, "*")
+      }
+
+      # Used by the distribution_manifest template.
+      if (!defined(distribution_entries)) {
+        distribution_entries = [
+          {
+            source = _rebased_stripped_file
+            destination = "lib/${toolchain_variant.libprefix}${_install_name}"
+            label = _label
+          },
+        ]
+      }
+
+      # Used by sdk_verify_runtime_deps().
+      if (!defined(sdk_runtime_deps)) {
+        sdk_runtime_deps = [
+          {
+            label = _label
+            source = _rebased_stripped_file
+          },
+        ]
+      }
+
+      # Used by the //:binaries target.
+      binaries += [
+        {
+          type = "shared_library"
+          label = _label
+          cpu = current_cpu
+          os = current_os
+          debug = _rebased_unstripped_file
+          dist = _rebased_stripped_file
+          elf_build_id = _rebased_build_id_stamp
+        },
+      ]
+
+      # Used by the //:debug_symbols target.
+      debug_symbol_files += [
+        {
+          label = _label
+          os = current_os
+          cpu = current_cpu
+          dest_path = "lib/${toolchain_variant.libprefix}${_install_name}"
+          debug = _rebased_unstripped_file
+          elf_build_id_file = _rebased_build_id_stamp
+        },
+      ]
+
+      # Don't collect rlibs from transitive deps.
+      rust_barrier = []
+    }
+
+    # LINT.ThenChange(//build/config/BUILDCONFIG.gn)
+  }
+}
+
+# Defines a GN `shared_library()` that is replaced by a Bazel-built shared
+# library in `bazel_shared_library_builder_toolchain`, and built by GN in all
+# other toolchains (and in sub-builds).
+#
+# Parameters
+#
+#   bazel_target (required)
+#     A Bazel label to a `shared_library_gn_outputs()` target. See
+#     `bazel_shared_library_copy_outputs()`.
+#     Type: Bazel label string.
+#
+#   All other parameters are the same as `shared_library()`.
+#
+# NOTE: In the builder toolchain, this defines `${target_name}.build_id` with
+# `build_id_entry()`, which sets `hermetic_deps = false`. That target must be
+# added to the `//build:non_hermetic_deps` allowlist.
+#
+template("bazel_shared_library") {
+  assert(defined(invoker.bazel_target), "bazel_target must be defined.")
+
+  _main_target = target_name
+  if (defined(invoker.output_name)) {
+    _output_name = invoker.output_name
+  } else {
+    _output_name = target_name
+  }
+
+  # Remove any "lib" prefix, as shared_library() does (see
+  # _fuchsia_shared_library() in //build/config/BUILDCONFIG.gn).
+  _prefixless = string_replace("###${_output_name}", "###lib", "")
+  if (_prefixless != "###${_output_name}") {
+    _output_name = _prefixless
+  }
+
+  _copy_outputs_target = "${target_name}.bazel_shared_library"
+
+  if (bazel_shared_library_copies_enabled &&
+      current_toolchain == default_toolchain) {
+    bazel_shared_library_copy_outputs(_copy_outputs_target) {
+      forward_variables_from(invoker,
+                             [
+                               "bazel_target",
+                               "testonly",
+                             ])
+      output_name = _output_name
+      visibility = [
+        ":${_main_target}",
+        ":${_main_target}.build_id",
+      ]
+    }
+  } else {
+    not_needed([
+                 "_main_target",
+                 "_output_name",
+               ])
+  }
+
+  if (use_bazel_shared_libraries_in_current_toolchain) {
+    # Only the parameters that apply to the imported library are forwarded.
+    # The others (e.g. `sources`, `deps`, `configs`) only describe how GN
+    # would build the library, and forwarding them would make
+    # bazel_shared_library_import() fail with unused variable errors.
+    bazel_shared_library_import(target_name) {
+      forward_variables_from(invoker,
+                             [
+                               "applicable_licenses",
+                               "data_deps",
+                               "install_name",
+                               "metadata",
+                               "public",
+                               "public_configs",
+                               "public_deps",
+                               "testonly",
+                               "visibility",
+                             ])
+      copy_outputs_target = ":${_copy_outputs_target}"
+      output_name = _output_name
+    }
+    not_needed(invoker, "*")
+  } else {
+    not_needed([ "_copy_outputs_target" ])
+    not_needed(invoker, [ "bazel_target" ])
+
+    shared_library(target_name) {
+      # Explicitly forward variables that are commonly defined at file scope,
+      # which forward_variables_from(invoker, "*") would not pick up. See
+      # _fuchsia_shared_library() in //build/config/BUILDCONFIG.gn.
+      forward_variables_from(invoker,
+                             [
+                               "applicable_licenses",
+                               "visibility",
+                             ])
+      forward_variables_from(invoker,
+                             "*",
+                             [
+                               "applicable_licenses",
+                               "bazel_target",
+                               "visibility",
+                             ])
+    }
+  }
+}
+
+set_defaults("bazel_shared_library") {
+  configs = default_shared_library_configs
+}

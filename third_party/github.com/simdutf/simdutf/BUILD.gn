@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+# LINT.IfChange
 config("simdutf_config") {
   include_dirs = [ "src/include" ]
 }
@@ -16,3 +17,4 @@ source_set("simdutf") {
   # Suppress warnings in third-party code.
   configs += [ "//build/config:Wno-extra-semi" ]
 }
+# LINT.ThenChange(BUILD.bazel)

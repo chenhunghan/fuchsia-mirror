@@ -2,9 +2,139 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/bt-init.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+exports_files(
+    ["meta/bt-init.shard.cml"],
+    visibility = ["//src/connectivity/bluetooth/tests/bt-manifest-integration-tests:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "bt_init",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/connectivity/bluetooth/testing/bt-test-harness:__pkg__",
+        "//src/connectivity/bluetooth/tests/bt-manifest-integration-tests:__pkg__",
+    ],
+    deps = [
+        ":bt_init_config",
+        "//sdk/fidl/fuchsia.bluetooth.bredr:fuchsia.bluetooth.bredr_rust",
+        "//sdk/fidl/fuchsia.bluetooth.snoop:fuchsia.bluetooth.snoop_rust",
+        "//sdk/fidl/fuchsia.bluetooth.sys:fuchsia.bluetooth.sys_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
+        "//sdk/fidl/fuchsia.hardware.bluetooth:fuchsia.hardware.bluetooth_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "bt_init",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "bt-init",
+    includes = [
+        "meta/bt-init.shard.cml",
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/bt-init.cml",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "bt_init_config",
+    cm_label = ":manifest",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [":bin_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "testonly_manifest",
+    component_name = "bt-init-testonly",
+    includes = [
+        "meta/bt-init.shard.cml",
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/bt-init-testonly.cml",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component(
+    name = "testonly_component",
+    compiled_manifest = ":testonly_manifest",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [":bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    crate_name = "bt_init_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "tests",
+    package_name = "bt-init-unittests",
+    unit_tests = [":bin_test"],
+    visibility = [
+        "//:__pkg__",
+        "//src/connectivity/bluetooth:__subpackages__",
+    ],
 )

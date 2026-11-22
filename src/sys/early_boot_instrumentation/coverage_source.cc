@@ -17,7 +17,9 @@
 #include <lib/stdcompat/source_location.h>
 #include <lib/stdcompat/span.h>
 #include <lib/syslog/cpp/macros.h>
+#include <lib/vfs/cpp/pseudo_dir.h>
 #include <lib/vfs/cpp/service.h>
+#include <lib/vfs/cpp/vmo_file.h>
 #include <lib/zbi-format/internal/debugdata.h>
 #include <lib/zbi-format/zbi.h>
 #include <lib/zbitl/items/debugdata.h>
@@ -41,8 +43,6 @@
 #include <utility>
 
 #include <fbl/unique_fd.h>
-#include <sdk/lib/vfs/cpp/pseudo_dir.h>
-#include <sdk/lib/vfs/cpp/vmo_file.h>
 
 namespace early_boot_instrumentation {
 namespace {

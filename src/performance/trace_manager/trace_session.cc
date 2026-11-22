@@ -28,6 +28,30 @@ overloaded(Ts...) -> overloaded<Ts...>;
 
 namespace tracing {
 
+namespace {
+
+// The helpers below write from the buffer of a tracee that was removed while the write was held
+// (see |TraceSession::RunOrDeferBufferSave()|). Its provider is gone, so there is nobody to
+// notify, but the data is still in the buffer. Errors are only logged.
+
+void StreamingTransferFromBuffer(SharedBuffer& buffer,
+                                 const std::shared_ptr<const BufferForwarder>& output,
+                                 uint32_t wrapped_count, uint64_t durable_data_end) {
+  if (!buffer.StreamingTransfer(output, wrapped_count, durable_data_end)) {
+    FX_LOGS(WARNING) << "Failed to save buffer of a removed provider";
+  }
+}
+
+void TransferAllFromBuffer(const SharedBuffer& buffer,
+                           const std::shared_ptr<const BufferForwarder>& output) {
+  if (TransferStatus status = buffer.TransferAll(output).first;
+      status != TransferStatus::kComplete) {
+    FX_LOGS(ERROR) << "Failed to write buffer of a removed provider: " << status;
+  }
+}
+
+}  // namespace
+
 TraceSession::TraceSession(async::Executor& executor, std::shared_ptr<BufferForwarder> destination,
                            std::vector<std::string> enabled_categories,
                            size_t buffer_size_megabytes,
@@ -102,6 +126,22 @@ void TraceSession::AddProvider(TraceProviderBundle* provider) {
                [weak = weak_ptr_factory_.GetWeakPtr()](const std::string& alert_name) {
                  if (weak && weak->alert_callback_) {
                    weak->alert_callback_(alert_name);
+                 }
+               },
+               [weak = weak_ptr_factory_.GetWeakPtr(),
+                weak_tracee = std::get<std::unique_ptr<Tracee>>(tracees_.back())->GetWeakPtr()](
+                   uint32_t wrapped_count, uint64_t durable_data_end) {
+                 if (weak && weak_tracee) {
+                   weak->RunOrDeferBufferSave([weak_tracee, buffer = weak_tracee->buffer(),
+                                               output = weak->buffer_forwarder_, wrapped_count,
+                                               durable_data_end]() {
+                     if (weak_tracee) {
+                       weak_tracee->TransferBuffer(wrapped_count, durable_data_end);
+                     } else {
+                       StreamingTransferFromBuffer(*buffer, output, wrapped_count,
+                                                   durable_data_end);
+                     }
+                   });
                  }
                })) {
     tracees_.pop_back();
@@ -178,13 +218,26 @@ void TraceSession::AddProvider(ProviderConnection* provider) {
           FX_LOGS(DEBUG) << std::format(
               "Buffer save request from {}, wrapped_count={}, durable_data_end={:x}",
               *weak_tracee->connection(), wrapped_count, durable_data_end);
-          if (weak_tracee->TransferBuffer(wrapped_count, durable_data_end).is_error()) {
-            weak_tracee->Terminate([weak_session, provider]() {
-              if (weak_session) {
-                weak_session->OnV2ProviderTerminated(provider);
-              }
-            });
+          if (!weak_session) {
+            return;
           }
+          // TODO(https://fxbug.dev/584864662): This mirrors the V1 save above except that
+          // TraceeV2::TransferBuffer() reports failure instead of aborting internally. Once both
+          // tracees report save failures the same way, share one implementation.
+          weak_session->RunOrDeferBufferSave([weak_session, weak_tracee, provider,
+                                              buffer = weak_tracee->buffer(),
+                                              output = weak_session->buffer_forwarder_,
+                                              wrapped_count, durable_data_end]() {
+            if (!weak_tracee) {
+              StreamingTransferFromBuffer(*buffer, output, wrapped_count, durable_data_end);
+            } else if (weak_tracee->TransferBuffer(wrapped_count, durable_data_end).is_error()) {
+              weak_tracee->Terminate([weak_session, provider]() {
+                if (weak_session) {
+                  weak_session->OnV2ProviderTerminated(provider);
+                }
+              });
+            }
+          });
         } else {
           FX_LOGS(WARNING) << std::format("{}: Received buffer save request in state ", *provider)
                            << weak_tracee->state();
@@ -451,20 +504,40 @@ void TraceSession::CheckAllProvidersStarted() {
 
 void TraceSession::NotifyStarted() {
   TransitionToState(State::kStarted);
-  if (start_callback_) {
-    FX_LOGS(DEBUG) << "Marking session as having started";
-    session_start_timeout_.Cancel();
-    auto callback = std::move(start_callback_);
-    callback(fit::ok());
+  session_start_timeout_.Cancel();
+  CompletePendingStart();
+}
+
+void TraceSession::RunOrDeferBufferSave(fit::closure save) {
+  if (start_callback_ && buffer_forwarder_->WritesWaitForConsumer()) {
+    deferred_buffer_saves_.push_back(std::move(save));
+    return;
   }
+  save();
+}
+
+void TraceSession::WriteBufferOfRemovedTracee(std::shared_ptr<SharedBuffer> buffer) {
+  RunOrDeferBufferSave([weak = weak_ptr_factory_.GetWeakPtr(), buffer = std::move(buffer)]() {
+    if (weak && weak->write_results_on_terminate_) {
+      TransferAllFromBuffer(*buffer, weak->buffer_forwarder_);
+    }
+  });
 }
 
 void TraceSession::CompletePendingStart() {
-  // Tracing did begin, however briefly. Complete StartTracing before stopping
-  // or terminating so the client sees replies in request order.
-  if (start_callback_) {
-    auto callback = std::move(start_callback_);
-    callback(fit::ok());
+  if (!start_callback_) {
+    return;
+  }
+  FX_LOGS(DEBUG) << "Replying to StartTracing";
+  auto callback = std::move(start_callback_);
+  callback(fit::ok());
+  // The consumer has its reply and can read the socket, so the saves held while the reply was
+  // pending can be written now. |start_callback_| is already empty, so these run even if |state_|
+  // is still kStarting.
+  std::vector<fit::closure> saves = std::move(deferred_buffer_saves_);
+  deferred_buffer_saves_.clear();
+  for (fit::closure& save : saves) {
+    save();
   }
 }
 
@@ -639,10 +712,7 @@ void TraceSession::OnProviderTerminated(TraceProviderBundle* bundle) {
       // If the last Stop request saved the results, don't save them again.
       // But don't write results if the tracee was never started.
       if (tracee->was_started() && !tracee->results_written()) {
-        // Since the provider is terminated, ignore any error writing
-        // provider data. This is most likely caused by the socket
-        // being closed. WriteProviderData will log the details.
-        WriteProviderData(tracee.get());
+        WriteBufferOfRemovedTracee(tracee->buffer());
       }
     }
     tracees_.erase(it);
@@ -677,10 +747,7 @@ void TraceSession::OnV2ProviderTerminated(ProviderConnection* connection) {
       // If the last Stop request saved the results, don't save them again.
       // But don't write results if the tracee was never started.
       if (tracee->was_started() && !tracee->results_written()) {
-        // Since the provider is terminated, ignore any error writing
-        // provider data. This is most likely caused by the socket
-        // being closed. WriteProviderData will log the details.
-        WriteV2ProviderData(tracee.get());
+        WriteBufferOfRemovedTracee(tracee->buffer());
       }
     }
     tracees_.erase(it);

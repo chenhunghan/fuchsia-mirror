@@ -56,3 +56,14 @@ def test_new_build_gn_without_fidl():
         ),
     })
     asserts.eq(res.findings, ())
+
+def test_new_fidl_library_in_subrepo_ignored():
+    res = testing.run(
+        _check,
+        subdir = "vendor/foo",
+        vars = {"fuchsia_dir": "../.."},
+        files = {
+            "sdk/fidl/example.foo/BUILD.gn": testing.file(content = _FIDL_BUILD_GN, action = "A"),
+        },
+    )
+    asserts.eq(res.findings, ())

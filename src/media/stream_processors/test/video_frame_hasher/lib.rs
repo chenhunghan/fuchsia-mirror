@@ -22,7 +22,6 @@ pub enum Error {
     FormatHasNonZeroDisplayOrigin,
     FrameSizeOverflow,
     UnsupportedPixelFormat(images2::PixelFormat),
-    FormatHasNoPlane { plane_requested: usize, planes_in_format: usize },
 }
 
 impl fmt::Display for Error {

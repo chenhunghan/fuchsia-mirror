@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <lib/ddk/hw/arch_ops.h>
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/fit/defer.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <lib/zircon-internal/thread_annotations.h>
 #include <lib/zx/profile.h>
 #include <lib/zx/thread.h>
@@ -108,7 +108,7 @@ zx_status_t IntelHDAController::ResetControllerHardwareInternal() {
 
     // Explicitly disable all top level interrupt sources.
     REG_WR(&regs()->intctl, 0u);
-    hw_mb();
+    DataMemoryBarrier();
 
     // Count the number of streams present in the hardware and
     // unconditionally stop and reset all of them.
@@ -139,7 +139,7 @@ zx_status_t IntelHDAController::ResetControllerHardwareInternal() {
 
   // Assert the reset signal and wait for the controller to ack.
   REG_CLR_BITS(&regs()->gctl, HDA_REG_GCTL_HWINIT);
-  hw_mb();
+  DataMemoryBarrier();
 
   res = WaitCondition(
       INTEL_HDA_RESET_TIMEOUT_NSEC, INTEL_HDA_RESET_POLL_TIMEOUT_NSEC,
@@ -155,7 +155,7 @@ zx_status_t IntelHDAController::ResetControllerHardwareInternal() {
 
   // Deassert the reset signal and wait for the controller to ack.
   REG_SET_BITS<uint32_t>(&regs()->gctl, HDA_REG_GCTL_HWINIT);
-  hw_mb();
+  DataMemoryBarrier();
 
   res = WaitCondition(
       INTEL_HDA_RESET_TIMEOUT_NSEC, INTEL_HDA_RESET_POLL_TIMEOUT_NSEC,
@@ -184,7 +184,7 @@ zx_status_t IntelHDAController::ResetCORBRdPtrLocked() {
 
   /* Set the reset bit, then wait for ack from the HW.  See Section 3.3.21 */
   REG_WR(&regs()->corbrp, HDA_REG_CORBRP_RST);
-  hw_mb();
+  DataMemoryBarrier();
 
   if ((res = WaitCondition(INTEL_HDA_RING_BUF_RESET_TIMEOUT_NSEC, INTEL_HDA_RESET_POLL_TIMEOUT_NSEC,
                            [this]() -> bool {
@@ -195,7 +195,7 @@ zx_status_t IntelHDAController::ResetCORBRdPtrLocked() {
 
   /* Clear the reset bit, then wait for ack */
   REG_WR(&regs()->corbrp, 0u);
-  hw_mb();
+  DataMemoryBarrier();
 
   if ((res = WaitCondition(INTEL_HDA_RING_BUF_RESET_TIMEOUT_NSEC, INTEL_HDA_RESET_POLL_TIMEOUT_NSEC,
                            [this]() -> bool {

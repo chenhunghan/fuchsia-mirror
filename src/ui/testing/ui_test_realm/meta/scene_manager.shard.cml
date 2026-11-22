@@ -52,6 +52,13 @@
             to: [ "#input-helper" ],
         },
         {
+            protocol: [ "fuchsia.input.injection.InputDeviceRegistry" ],
+            from: "parent",
+            as: "fuchsia.input.injection.InputDeviceRegistry-starnix",
+            to: [ "#input-helper" ],
+            availability: "optional",
+        },
+        {
             protocol: [ "fuchsia.ui.display.singleton.Info" ],
             from: "#scenic",
             to: [ "#input-helper" ],

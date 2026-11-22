@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
@@ -40,9 +41,15 @@ rustc_library(
     ],
 )
 
+cml_shard(
+    name = "meta/client.shard",
+    shard = "meta/client.shard.cml",
+    visibility = ["//src/ui/lib/input_pipeline:__pkg__"],
+)
+
 expect_includes(
     name = "lib_includes",
-    includes = ["meta/client.shard.cml"],
+    includes = [":meta/client.shard"],
 )
 
 # Needs reviewer attention (bazel2gn skip): Keeping the dual-built GN

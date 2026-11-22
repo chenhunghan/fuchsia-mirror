@@ -2,11 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules:zx_library.bzl", "cc_source_library_zx")
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
 
 package(default_applicable_licenses = ["//:license"])
 
-cc_source_library_zx(
+fx_cc_source_library_zx(
     name = "mbr",
     hdrs = ["include/mbr/mbr.h"],
     includes = ["include"],

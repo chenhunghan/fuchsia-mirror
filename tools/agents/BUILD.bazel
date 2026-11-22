@@ -1,0 +1,294 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":agents_agent_hooks_engine_test",
+        ":agents_agent_hooks_policy_test",
+        ":agents_config_test",
+        ":agents_e2e_githooks_test",
+        ":agents_e2e_permissions_test",
+        ":agents_git_staging_test",
+        ":agents_githooks_adapters_test",
+        ":agents_githooks_installer_test",
+        ":agents_githooks_reporters_test",
+        ":agents_githooks_runner_test",
+        ":agents_main_test",
+        ":agents_paths_test",
+        ":agents_permissions_test",
+        ":agents_services_test",
+        ":agents_setup_test",
+        ":agents_state_test",
+    ],
+    visibility = ["//tools:__pkg__"],
+)
+
+py_library(
+    name = "agents_lib",
+    srcs = [
+        "__init__.py",
+        "commands/__init__.py",
+        "commands/setup.py",
+        "lib/__init__.py",
+        "lib/agent_hooks/__init__.py",
+        "lib/agent_hooks/engine/__init__.py",
+        "lib/agent_hooks/engine/parser.py",
+        "lib/agent_hooks/engine/router.py",
+        "lib/agent_hooks/engine/shell_lexer.py",
+        "lib/agent_hooks/grant_policy.py",
+        "lib/agent_hooks/installer.py",
+        "lib/agent_hooks/pre_tool_use.py",
+        "lib/agent_hooks/schemas.py",
+        "lib/config.py",
+        "lib/git_staging/__init__.py",
+        "lib/git_staging/engine.py",
+        "lib/githooks/__init__.py",
+        "lib/githooks/adapters.py",
+        "lib/githooks/installer.py",
+        "lib/githooks/reporters.py",
+        "lib/githooks/runner.py",
+        "lib/paths.py",
+        "lib/permissions.py",
+        "lib/services.py",
+        "lib/state.py",
+        "main.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# Stage testing/*.py under an agents_testing/ package directory so tests can
+# `import agents_testing` without renaming the source directory or exposing
+# top-level tools/agents/ modules on sys.path.
+copy_file(
+    name = "copy_agents_testing_init",
+    testonly = True,
+    src = "testing/__init__.py",
+    out = "_agents_testing_pkg/agents_testing/__init__.py",
+)
+
+copy_file(
+    name = "copy_agents_testing_base",
+    testonly = True,
+    src = "testing/base.py",
+    out = "_agents_testing_pkg/agents_testing/base.py",
+)
+
+copy_file(
+    name = "copy_agents_testing_runner",
+    testonly = True,
+    src = "testing/runner.py",
+    out = "_agents_testing_pkg/agents_testing/runner.py",
+)
+
+copy_file(
+    name = "copy_agents_testing_workspace",
+    testonly = True,
+    src = "testing/workspace.py",
+    out = "_agents_testing_pkg/agents_testing/workspace.py",
+)
+
+py_library(
+    name = "agents_testing",
+    testonly = True,
+    srcs = [
+        "_agents_testing_pkg/agents_testing/__init__.py",
+        "_agents_testing_pkg/agents_testing/base.py",
+        "_agents_testing_pkg/agents_testing/runner.py",
+        "_agents_testing_pkg/agents_testing/workspace.py",
+    ],
+    imports = ["_agents_testing_pkg"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_py_test(
+    name = "agents_main_test",
+    testonly = True,
+    srcs = ["tests/main_test.py"],
+    main = "tests/main_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_setup_test",
+    testonly = True,
+    srcs = ["tests/setup_test.py"],
+    main = "tests/setup_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_config_test",
+    testonly = True,
+    srcs = ["tests/config_test.py"],
+    main = "tests/config_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_paths_test",
+    testonly = True,
+    srcs = ["tests/paths_test.py"],
+    main = "tests/paths_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_permissions_test",
+    testonly = True,
+    srcs = ["tests/permissions_test.py"],
+    main = "tests/permissions_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_services_test",
+    testonly = True,
+    srcs = ["tests/services_test.py"],
+    main = "tests/services_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_state_test",
+    testonly = True,
+    srcs = ["tests/state_test.py"],
+    main = "tests/state_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_git_staging_test",
+    testonly = True,
+    srcs = ["tests/git_staging_test.py"],
+    main = "tests/git_staging_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_githooks_reporters_test",
+    srcs = ["tests/githooks_reporters_test.py"],
+    main = "tests/githooks_reporters_test.py",
+    deps = [":agents_lib"],
+)
+
+host_py_test(
+    name = "agents_githooks_adapters_test",
+    testonly = True,
+    srcs = ["tests/githooks_adapters_test.py"],
+    main = "tests/githooks_adapters_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_githooks_runner_test",
+    testonly = True,
+    srcs = ["tests/githooks_runner_test.py"],
+    main = "tests/githooks_runner_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_githooks_installer_test",
+    testonly = True,
+    srcs = ["tests/githooks_installer_test.py"],
+    main = "tests/githooks_installer_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_test_data_files(
+    name = "e2e_githooks_scripts",
+    testonly = True,
+    srcs = [
+        "//scripts/shac:commit_msg_checker.py",
+        "//scripts/shac:json_format.py",
+    ],
+    dest_dir = "scripts/shac",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_py_test(
+    name = "agents_e2e_githooks_test",
+    srcs = ["tests/e2e_githooks_test.py"],
+    main = "tests/e2e_githooks_test.py",
+    test_data = [":e2e_githooks_scripts"],
+    deps = [":agents_lib"],
+)
+
+host_py_test(
+    name = "agents_agent_hooks_engine_test",
+    testonly = True,
+    srcs = ["tests/agent_hooks_engine_test.py"],
+    main = "tests/agent_hooks_engine_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_agent_hooks_policy_test",
+    testonly = True,
+    srcs = ["tests/agent_hooks_policy_test.py"],
+    main = "tests/agent_hooks_policy_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
+
+host_py_test(
+    name = "agents_e2e_permissions_test",
+    testonly = True,
+    srcs = ["tests/e2e_permissions_test.py"],
+    main = "tests/e2e_permissions_test.py",
+    main_callable = "parallel_main",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)

@@ -1,0 +1,94 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# [START part_1_solution_build_dep]
+fx_cc_library(
+    name = "lib",
+    srcs = ["reverser.cc"],
+    hdrs = ["reverser.h"],
+    deps = [
+        "//examples/diagnostics/inspect/codelab/fidl:fuchsia.examples.inspect_hlcpp",
+        "//sdk/lib/inspect/component/cpp",
+    ],
+    alwayslink = True,
+)
+# [END part_1_solution_build_dep]
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    gn_output_name = "inspect_cpp_codelab_part_2",
+    deps = [
+        ":lib",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "inspect_cpp_codelab_part_2",
+)
+
+fx_component_manifest(
+    name = "part_2_manifest",
+    component_name = "part_2",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/part_2.cml",
+)
+
+fx_component(
+    name = "part_2",
+    compiled_manifest = ":part_2_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_cc_test_binary(
+    name = "unittests",
+    srcs = ["reverser_unittests.cc"],
+    gn_output_name = "inspect_cpp_codelab_part_2_unittests",
+    deps = [
+        ":lib",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "integration_test",
+    srcs = ["tests/integration_test.cc"],
+    # Needed for angled workspace-root `#include <examples/...>`.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    gn_output_name = "inspect_cpp_codelab_part_2_integration_test",
+    deps = [
+        "//examples/diagnostics/inspect/codelab/cpp/testing:inspect-cpp-codelab-testing",
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_hlcpp",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)

@@ -344,6 +344,12 @@ class SimFirmware {
   // Send a trailing LINK down event.
   void TriggerFirmwareLinkDownEvent();
 
+  // Send a MIC error event on the client interface from |addr|.
+  void TriggerFirmwareMicError(uint16_t flags, const wlan::common::MacAddr& addr);
+
+  // Send a MIC error event on the SoftAP interface from |addr|.
+  void TriggerFirmwareSoftApMicError(uint16_t flags, const wlan::common::MacAddr& addr);
+
   void SetSuspendHook(fit::function<zx_status_t()> suspend_hook) {
     suspend_hook_ = std::move(suspend_hook);
   }

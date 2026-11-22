@@ -10,6 +10,5 @@ fidl_library(
     name = "test.structuredconfig.receiver",
     testonly = True,
     srcs = ["receiver.test.fidl"],
-    enable_hlcpp = True,
     visibility = ["//src/sys/component_manager/tests/structured_config:__subpackages__"],
 )

@@ -23,10 +23,15 @@ extra_linker_flags(
     visibility = ["//visibility:private"],
 )
 
+# Suppress the default -lc and resolve implicit libraries (such as -lm) to
+# empty stubs, while keeping the default sysroot startup files (Scrt1.o).
+# Targets providing an alternative libc propagate this so dependents do not
+# link against the sysroot libc.so, without omitting Scrt1.o from C++ links or
+# diverging from Rust's built-in Fuchsia target spec (which always links
+# Scrt1.o).
 compiler_build_flags(
     name = "nolibc",
     ldflags = [
-        "-nostartfiles",
         "-nolibc",
         # Don't use -nostdlib, because the builtins (or libgcc) are what we want
         # and are otherwise annoying to find and specify.  It's just the -lc that
@@ -49,6 +54,18 @@ compiler_build_flags(
         "-Lnative=build/config/zircon/libc-stub",
     ],
     subflags = [":nolibc.link_inputs"],
+    visibility = ["//visibility:public"],
+)
+
+# Standalone environments and targets that neither link against the sysroot
+# libc nor use the default sysroot startup files (either defining their own
+# _start or supplying an explicit crt1 object).
+compiler_build_flags(
+    name = "nolibc-nostartfiles",
+    ldflags = [
+        "-nostartfiles",
+    ],
+    subflags = [":nolibc"],
     visibility = ["//visibility:public"],
 )
 # LINT.ThenChange(BUILD.gn:nolibc)
@@ -135,7 +152,7 @@ build_flags(
     name = "user-executable",
     subflags = [
         ":no-dynamic-linker",
-        ":nolibc",
+        ":nolibc-nostartfiles",
     ],
     visibility = ["//visibility:public"],
 )

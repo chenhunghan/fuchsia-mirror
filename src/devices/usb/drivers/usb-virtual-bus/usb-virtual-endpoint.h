@@ -76,6 +76,9 @@ class UsbEpServer : public fidl::Server<fuchsia_hardware_usb_endpoint::Endpoint>
   void GetInfo(GetInfoCompleter::Sync& completer) override {
     completer.Reply(fit::as_error(ZX_ERR_NOT_SUPPORTED));
   }
+  void GetAlignmentInfo(GetAlignmentInfoCompleter::Sync& completer) override {
+    completer.Reply(fit::as_error(ZX_ERR_NOT_SUPPORTED));
+  }
   void RegisterVmos(RegisterVmosRequest& request, RegisterVmosCompleter::Sync& completer) override;
   void UnregisterVmos(UnregisterVmosRequest& request,
                       UnregisterVmosCompleter::Sync& completer) override;

@@ -78,6 +78,18 @@ class Counter : public fidl::WireServer<fuchsia_kernel::Counter>,
         dispatcher_, std::move(request->tree_iterator), std::vector<std::string>{});
   }
 
+  void ListBlobChildNames(ListBlobChildNamesRequestView request,
+                          ListBlobChildNamesCompleter::Sync& completer) override {
+    // Always return 0 names
+    inspect::TreeNameIterator::StartSelfManagedServer(
+        dispatcher_, std::move(request->tree_iterator), std::vector<std::string>{});
+  }
+
+  void OpenBlobChild(OpenBlobChildRequestView request,
+                     OpenBlobChildCompleter::Sync& completer) override {
+    completer.ReplyError(ZX_ERR_NOT_FOUND);
+  }
+
   void handle_unknown_method(fidl::UnknownMethodMetadata<fuchsia_inspect::Tree> md,
                              fidl::UnknownMethodCompleter::Sync& completer) override {
     completer.Close(ZX_ERR_UNAVAILABLE);

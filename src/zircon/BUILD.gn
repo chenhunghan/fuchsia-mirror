@@ -23,5 +23,6 @@ group("e2e_tests") {
 }
 
 bazel_test_suite("bazel_tests") {
+  host_tests = [ "//src/zircon:host_tests" ]
   target_tests = [ "//src/zircon:target_tests" ]
 }

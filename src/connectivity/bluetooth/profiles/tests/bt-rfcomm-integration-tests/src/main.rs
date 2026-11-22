@@ -351,11 +351,12 @@ async fn passthrough_search_discovers_advertisement() {
         )
         .await;
 
-    let (other_id, _test_driven_peer_channel, _, _) = connect_requests
+    let (payload, responder) = connect_requests
         .select_next_some()
         .await
         .expect("connection request")
         .into_connected()
         .unwrap();
-    assert_eq!(other_id, rfcomm_under_test.peer_id().into());
+    responder.send().unwrap();
+    assert_eq!(payload.peer_id, Some(rfcomm_under_test.peer_id().into()));
 }

@@ -239,14 +239,16 @@ void AddLogRedactionCanary(const std::string& log_redaction_canary, Document* me
 
 Metadata::Metadata(async_dispatcher_t* dispatcher, timekeeper::Clock* clock,
                    UtcClockReadyWatcherBase* utc_clock_ready_watcher, RedactorBase* redactor,
-                   const bool is_first_instance,
                    const std::set<std::string>& default_snapshot_annotations,
                    const feedback::AttachmentKeys& attachment_allowlist)
     : log_redaction_canary_(redactor->UnredactedCanary()),
       default_snapshot_annotations_(default_snapshot_annotations),
       attachment_allowlist_(attachment_allowlist),
       utc_provider_(utc_clock_ready_watcher, clock,
-                    PreviousBootFile::FromCache(is_first_instance, kUtcBootDifferenceFile)) {
+                    UtcTimeProvider::UtcBootDifferencePaths{
+                        .current_boot = kCurrentUtcBootDifferencePath,
+                        .previous_boot = kPreviousUtcBootDifferencePath,
+                    }) {
   redactor->Redact(log_redaction_canary_);
 }
 

@@ -2,9 +2,114 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/role_manager.bootstrap_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_library(
+    name = "config",
+    srcs = ["src/config.cc"],
+    hdrs = ["src/config.h"],
+    # src/config.cc uses angled `#include <src/lib/files/...>`, which GN resolves
+    # via root `-I.` while Bazel only adds `-iquote .`.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    visibility = [":__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/files",
+        "//third_party/rapidjson",
+        "//third_party/re2",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "role",
+    srcs = [
+        "src/resource.cc",
+        "src/role.cc",
+    ],
+    hdrs = [
+        "src/resource.h",
+        "src/role.h",
+    ],
+    visibility = [":__subpackages__"],
+    deps = [
+        ":config",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+        "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_cpp",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = [
+        "src/main.cc",
+        "src/profile.cc",
+        "src/profile.h",
+    ],
+    gn_output_name = "role_manager",
+    deps = [
+        ":config",
+        ":role",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+        "//sdk/fidl/fuchsia.scheduler.deprecated:fuchsia.scheduler.deprecated_cpp",
+        "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_cpp",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "role_manager",
+)
+
+fx_component_manifest(
+    name = "role_manager_manifest",
+    component_name = "role_manager",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/role_manager.cml",
+)
+
+fx_component(
+    name = "role_manager",
+    compiled_manifest = ":role_manager_manifest",
+    visibility = [":__subpackages__"],
+    deps = [":bin_packaged"],
 )

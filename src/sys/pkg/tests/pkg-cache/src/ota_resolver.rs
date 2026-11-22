@@ -294,6 +294,9 @@ async fn inspect_success() {
                         "attempts": 1u64,
                     },
                 },
+                "queue": {
+                    "length": 1u64,
+                },
                 "recent": {
                     "0": {
                         "start_boot_ns": AnyProperty,
@@ -348,6 +351,9 @@ async fn inspect_success() {
         "root": contains {
             "blob_fetcher": {
                 "active": {},
+                "queue": {
+                    "length": 0u64,
+                },
                 "recent": {
                     "0": {
                         "start_boot_ns": AnyProperty,
@@ -432,6 +438,9 @@ async fn inspect_failure() {
         "root": contains {
             "blob_fetcher": {
                 "active": {},
+                "queue": {
+                    "length": 0u64,
+                },
                 "recent": {
                     "0": {
                         "start_boot_ns": AnyProperty,

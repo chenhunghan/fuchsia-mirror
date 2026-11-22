@@ -7,6 +7,7 @@
 #include <lib/syslog/cpp/macros.h>
 
 #include <sstream>
+#include <string_view>
 
 #include "src/connectivity/network/mdns/service/common/mdns_names.h"
 #include "src/connectivity/network/mdns/service/common/type_converters.h"
@@ -22,6 +23,10 @@ const char kSchema[] = R"({
   "properties": {
     "perform_host_name_probe": {
       "type": "boolean"
+    },
+    "media": {
+      "type": "string",
+      "enum": ["wired", "wireless", "both"]
     },
     "publications": {
       "type": "array",
@@ -92,6 +97,19 @@ const char kMediaValueBoth[] = "both";
 // TODO(https://fxbug.dev/42065146): Remove this when alt_services is no longer needed.
 const char kAltServicesKey[] = "alt_services";
 
+Media ParseMedia(const rapidjson::Value& value) {
+  FX_DCHECK(value.IsString());
+  std::string_view media_string = value.GetString();
+  if (media_string == kMediaValueWired) {
+    return Media::kWired;
+  }
+  if (media_string == kMediaValueWireless) {
+    return Media::kWireless;
+  }
+  FX_DCHECK(media_string == kMediaValueBoth);
+  return Media::kBoth;
+}
+
 }  // namespace
 
 //  static
@@ -144,6 +162,13 @@ void Config::IntegrateDocument(const rapidjson::Document& document, const DnsNam
   if (document.HasMember(kPerformHostNameProbeKey)) {
     FX_DCHECK(document[kPerformHostNameProbeKey].IsBool());
     SetPerformHostNameProbe(document[kPerformHostNameProbeKey].GetBool());
+    if (parser_.HasError()) {
+      return;
+    }
+  }
+
+  if (document.HasMember(kMediaKey)) {
+    SetMedia(ParseMedia(document[kMediaKey]));
     if (parser_.HasError()) {
       return;
     }
@@ -259,15 +284,7 @@ void Config::IntegratePublication(const rapidjson::Value& value, const DnsName& 
 
   Media media = Media::kBoth;
   if (value.HasMember(kMediaKey)) {
-    FX_DCHECK(value[kMediaKey].IsString());
-    std::string media_string = value[kMediaKey].GetString();
-    if (media_string == kMediaValueWired) {
-      media = Media::kWired;
-    } else if (media_string == kMediaValueWireless) {
-      media = Media::kWireless;
-    } else {
-      FX_DCHECK(media_string == kMediaValueBoth);
-    }
+    media = ParseMedia(value[kMediaKey]);
   }
 
   for (const auto& existing : publications_) {
@@ -310,6 +327,15 @@ void Config::SetPerformHostNameProbe(bool perform_host_name_probe) {
   }
 
   perform_host_name_probe_ = perform_host_name_probe;
+}
+
+void Config::SetMedia(Media media) {
+  if (media_.has_value() && media_.value() != media) {
+    parser_.ReportError((std::stringstream() << "Conflicting " << kMediaKey << " value.").str());
+    return;
+  }
+
+  media_ = media;
 }
 
 }  // namespace mdns

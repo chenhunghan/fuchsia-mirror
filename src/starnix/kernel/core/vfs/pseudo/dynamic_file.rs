@@ -315,6 +315,12 @@ impl<Source: SequenceFileSource> DynamicFileState<Source> {
 #[derive(Debug, Default)]
 pub struct DynamicFileBuf(VecDeque<u8>);
 impl DynamicFileBuf {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
     pub fn reserve(&mut self, additional: usize) {
         self.0.reserve(additional);
     }

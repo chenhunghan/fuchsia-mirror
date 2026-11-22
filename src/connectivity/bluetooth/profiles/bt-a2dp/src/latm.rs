@@ -177,10 +177,18 @@ impl Layer {
             0 => AudioSpecificConfig::parse(input),
             _ => {
                 let (input, asc_len) = parse_latm_get_value(input)?;
-                let (input, audio_specific_config) = AudioSpecificConfig::parse(input)?;
+                let (mut input, audio_specific_config) = AudioSpecificConfig::parse(input)?;
 
-                let (input, _): (_, usize) =
-                    take(asc_len - audio_specific_config.bits_read).parse(input)?;
+                let Some(mut remaining_bits) = asc_len.checked_sub(audio_specific_config.bits_read)
+                else {
+                    return Err(nom::Err::Failure(make_error(input, ErrorKind::Verify)));
+                };
+                while remaining_bits > 0 {
+                    let chunk = std::cmp::min(remaining_bits, 32);
+                    let (next_input, _): (_, u32) = take(chunk).parse(input)?;
+                    input = next_input;
+                    remaining_bits -= chunk;
+                }
                 Ok((input, audio_specific_config))
             }
         }
@@ -194,7 +202,7 @@ impl Layer {
         all_streams_same_time_framing: usize,
     ) -> IResult<BitsCtx<'_>, Layer> {
         let (input, use_same_config) =
-            cond(layer_index > 0 && program_index > 0, take(1usize)).parse(input)?;
+            cond(layer_index > 0 || program_index > 0, take(1usize)).parse(input)?;
 
         let use_same_config: u8 = use_same_config.unwrap_or_default();
 
@@ -244,10 +252,10 @@ impl AudioSpecificConfig {
         let start_input = input;
         let (input, mut audio_object_type) = take(5usize).parse(input)?;
         let (input, audio_object_type_ext): (_, std::option::Option<usize>) =
-            cond(audio_object_type == 32, take(6usize)).parse(input)?;
+            cond(audio_object_type == 31, take(6usize)).parse(input)?;
 
         if let Some(audio_object_type_ext) = audio_object_type_ext {
-            audio_object_type += audio_object_type_ext;
+            audio_object_type = 32 + audio_object_type_ext;
         }
 
         let (input, sampling_frequency_index) = take(4usize).parse(input)?;
@@ -402,10 +410,14 @@ impl<'a> Payload<'a> {
         for program in &mut stream_mux_config.programs {
             for layer in &mut program.layers {
                 if layer.frame_length_type == 0 {
+                    layer.mux_slot_length_bytes = 0;
                     loop {
                         let (input_inner, tmp): (_, usize) = take(8usize).parse(input)?;
                         input = input_inner;
-                        layer.mux_slot_length_bytes += tmp;
+                        layer.mux_slot_length_bytes =
+                            layer.mux_slot_length_bytes.checked_add(tmp).ok_or_else(|| {
+                                nom::Err::Failure(make_error(input, ErrorKind::TooLarge))
+                            })?;
                         if tmp != 0xff {
                             break;
                         }
@@ -442,7 +454,11 @@ impl<'a> Payload<'a> {
                             }
 
                             payloads.push(Payload::ByteAligned(&input.0[..frame_length]));
+                            input.0 = &input.0[frame_length..];
                         } else {
+                            if input.0.len().saturating_sub(1) < frame_length {
+                                return Err(nom::Err::Failure(make_error(input, ErrorKind::Eof)));
+                            }
                             let (input_inner, payload) =
                                 count(take(8usize), frame_length).parse(input)?;
                             input = input_inner;
@@ -463,7 +479,15 @@ impl<'a> Payload<'a> {
                                     payloads.push(Payload::ByteAligned(
                                         &input.0[0..layer.mux_slot_length_bytes],
                                     ));
+                                    input.0 = &input.0[layer.mux_slot_length_bytes..];
                                 } else {
+                                    if input.0.len().saturating_sub(1) < layer.mux_slot_length_bytes
+                                    {
+                                        return Err(nom::Err::Failure(make_error(
+                                            input,
+                                            ErrorKind::Eof,
+                                        )));
+                                    }
                                     let (input_inner, payload) =
                                         count(take(8usize), layer.mux_slot_length_bytes)
                                             .parse(input)?;
@@ -763,5 +787,63 @@ mod test {
         };
 
         assert_eq!(AudioMuxElement::try_from_bytes(input).expect("parsed ok"), parsed)
+    }
+
+    #[test]
+    fn test_stream_mux_config_asc_len_underflow_and_overflow() {
+        // audioMuxVersion = 1 (bit 0 = 1), audioMuxVersionA = 0 (bit 1 = 0),
+        // taraBufferFullness = latm_value(0) (10 bits = 00_00000000),
+        // allStreamsSameTimeFraming = 1 (bit 12 = 1),
+        // numSubFrames = 0 (6 bits = 000000),
+        // numProgram = 0 (4 bits = 0000),
+        // numLayer = 0 (3 bits = 000),
+        // asc_len = latm_value(0) -> 0 bits (10 bits = 00_00000000), which is < bits_read (16 bits for AAC-LC).
+        // Followed by AudioSpecificConfig (object type 2 = 00010, freq index 4 = 0100, chan 2 = 0010, GASpecificConfig 000).
+        let underflow_input: BitsCtx<'_> = (&[0x80, 0x08, 0x00, 0x00, 0x01, 0x21, 0x00, 0x00], 0);
+        assert!(StreamMuxConfig::parse(underflow_input).is_err());
+
+        // asc_len = 100 bits (> 64 bits after subtracting 16 bits_read, so take(usize) would panic on 64-bit u64):
+        // latm_value: bytes_for_value = 0 (2 bits = 00), value = 100 (8 bits = 0b0110_0100).
+        let mut overflow_bytes = vec![0u8; 32];
+        overflow_bytes[0..7].copy_from_slice(&[0x80, 0x08, 0x00, 0x06, 0x41, 0x21, 0x00]);
+        let overflow_input: BitsCtx<'_> = (&overflow_bytes, 0);
+        assert!(StreamMuxConfig::parse(overflow_input).is_ok());
+        let truncated_overflow_input: BitsCtx<'_> = (&overflow_bytes[..10], 0);
+        assert!(StreamMuxConfig::parse(truncated_overflow_input).is_err());
+    }
+
+    #[test]
+    fn test_audio_specific_config_extended_object_type_rejected() {
+        // audioObjectType = 31 (5 bits = 11111) uses 6-bit escape extension, which is unsupported.
+        let input: BitsCtx<'_> = (&[0xF8, 0x00, 0x00, 0x00], 0);
+        assert!(AudioSpecificConfig::parse(input).is_err());
+    }
+
+    #[test]
+    fn test_payload_truncated_and_multi_subframe() {
+        // Header claiming 915 bytes of payload, but only 20 bytes total provided.
+        let header: &[u8] = &[71, 252, 0, 0, 176, 144, 128, 3, 0, 255, 255, 255, 150];
+        let mut truncated = vec![0u8; 20];
+        truncated[0..header.len()].copy_from_slice(header);
+        assert!(AudioMuxElement::try_from_bytes(&truncated).is_err());
+
+        // Byte-aligned multi-subframe parsing advances input slice between subframes.
+        let mut stream_mux_config = StreamMuxConfig {
+            all_streams_same_time_framing: 1,
+            num_subframes: 2,
+            programs: vec![Program {
+                layers: vec![Layer { frame_length_type: 0, ..Layer::default() }],
+            }],
+            ..StreamMuxConfig::default()
+        };
+        let input_bytes: &[u8] = &[0x02, 0xAA, 0xBB, 0x02, 0xCC, 0xDD];
+        let (leftovers, payloads) =
+            AudioMuxElement::parse_payloads((input_bytes, 0), &mut stream_mux_config)
+                .expect("two subframes should parse");
+        assert_eq!(leftovers, (&[][..], 0));
+        assert_eq!(
+            payloads,
+            vec![Payload::ByteAligned(&[0xAA, 0xBB]), Payload::ByteAligned(&[0xCC, 0xDD])]
+        );
     }
 }

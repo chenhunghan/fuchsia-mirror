@@ -64,12 +64,6 @@ struct HeaderPrefix {
      * messages rather than the header. */
 }
 
-impl HeaderPrefix {
-    fn set_msg_type<T: Into<u8>>(&mut self, msg_type: T) {
-        self.msg_type = msg_type.into();
-    }
-}
-
 /// Peek at an ICMP header to see what message type is present.
 ///
 /// Since `IcmpPacket` is statically typed with the message type expected, this
@@ -574,18 +568,13 @@ impl<B: SplitByteSlice, I: IcmpIpExt, M: IcmpMessage<I>>
         raw: IcmpPacketRaw<I, B, M>,
         args: IcmpParseArgs<I::Addr>,
     ) -> ParseResult<Self> {
-        let IcmpPacketRaw { header, message_body, _marker } = raw;
-        if !M::EXPECTS_BODY && !message_body.is_empty() {
-            return Err(ParseError::Format);
-        }
-        let _: M::Code = M::code_from_u8(header.prefix.code).ok_or(ParseError::Format)?;
-        let checksum = Self::compute_checksum(&header, &message_body, args.src_ip, args.dst_ip)
-            .ok_or(ParseError::Format)?;
-        if checksum != [0, 0] {
-            return Err(ParseError::Checksum);
-        }
-        let message_body = M::Body::parse(message_body)?;
-        Ok(IcmpPacket { header, message_body, _marker })
+        let checksum = ChecksumVerificationResult::from_checksum(Self::compute_checksum(
+            &raw.header,
+            &raw.message_body,
+            args.src_ip,
+            args.dst_ip,
+        ));
+        Self::try_from_raw_with_checksum(raw, checksum)
     }
 }
 
@@ -629,8 +618,59 @@ impl<I: IcmpIpExt, B: SplitByteSlice, M: IcmpMessage<I>> IcmpPacket<I, B, M> {
     }
 }
 
-fn compute_checksum_fragmented<I: IcmpIpExt, BB: packet::Fragment, M: IcmpMessage<I>>(
-    header: &Header<M>,
+/// The result of verifying an ICMP packet's checksum.
+///
+/// [`Icmpv4Packet::parse`] and [`Icmpv6Packet::parse`] verify the checksum
+/// once over the whole message before dispatching on the message type so
+/// that checksum calculation is not duplicated across every concrete
+/// [`IcmpMessage`] parser. Because [`IcmpPacket`] validates header fields
+/// before reporting checksum errors, this type defers converting checksum
+/// failures into a [`ParseError`] (via [`Self::valid`]) until after header
+/// validation, preserving error precedence.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[must_use]
+enum ChecksumVerificationResult {
+    Valid,
+    InvalidChecksum,
+    LengthOverflow,
+}
+
+impl ChecksumVerificationResult {
+    fn from_checksum(checksum: Option<[u8; 2]>) -> Self {
+        match checksum {
+            Some([0, 0]) => Self::Valid,
+            Some(_) => Self::InvalidChecksum,
+            None => Self::LengthOverflow,
+        }
+    }
+
+    fn valid(self) -> ParseResult<()> {
+        match self {
+            Self::Valid => Ok(()),
+            Self::InvalidChecksum => Err(ParseError::Checksum),
+            Self::LengthOverflow => Err(ParseError::Format),
+        }
+    }
+}
+
+/// Verifies the checksum of a whole serialized ICMP message, including the
+/// checksum field itself.
+fn verify_message_checksum<I: IcmpIpExt>(
+    src_ip: I::Addr,
+    dst_ip: I::Addr,
+    message: &[u8],
+) -> ChecksumVerificationResult {
+    let mut body = [message];
+    ChecksumVerificationResult::from_checksum(compute_checksum_fragmented::<I, _>(
+        &[],
+        &body.as_fragmented_byte_slice(),
+        src_ip,
+        dst_ip,
+    ))
+}
+
+fn compute_checksum_fragmented<I: IcmpIpExt, BB: packet::Fragment>(
+    header: &[u8],
     message_body: &FragmentedByteSlice<'_, BB>,
     src_ip: I::Addr,
     dst_ip: I::Addr,
@@ -639,16 +679,14 @@ fn compute_checksum_fragmented<I: IcmpIpExt, BB: packet::Fragment, M: IcmpMessag
     if I::VERSION.is_v6() {
         c.add_bytes(src_ip.bytes());
         c.add_bytes(dst_ip.bytes());
-        let icmpv6_len = mem::size_of::<Header<M>>() + message_body.len();
+        let icmpv6_len = header.len() + message_body.len();
         let mut len_bytes = [0; 4];
         NetworkEndian::write_u32(&mut len_bytes, icmpv6_len.try_into().ok()?);
         c.add_bytes(&len_bytes[..]);
         c.add_bytes(&[0, 0, 0]);
         c.add_bytes(&[Ipv6Proto::Icmpv6.into()]);
     }
-    c.add_bytes(&[header.prefix.msg_type, header.prefix.code]);
-    c.add_bytes(&header.prefix.checksum);
-    c.add_bytes(header.message.as_bytes());
+    c.add_bytes(header);
     for p in message_body.iter_fragments() {
         c.add_bytes(p);
     }
@@ -667,7 +705,38 @@ impl<I: IcmpIpExt, B: SplitByteSlice, M: IcmpMessage<I>> IcmpPacket<I, B, M> {
         dst_ip: I::Addr,
     ) -> Option<[u8; 2]> {
         let mut body = [message_body];
-        compute_checksum_fragmented(header, &body.as_fragmented_byte_slice(), src_ip, dst_ip)
+        compute_checksum_fragmented::<I, _>(
+            header.as_bytes(),
+            &body.as_fragmented_byte_slice(),
+            src_ip,
+            dst_ip,
+        )
+    }
+
+    /// Like [`FromRaw::try_from_raw_with`], but with a precomputed
+    /// [`ChecksumVerificationResult`] over the whole message.
+    fn try_from_raw_with_checksum(
+        raw: IcmpPacketRaw<I, B, M>,
+        checksum: ChecksumVerificationResult,
+    ) -> ParseResult<Self> {
+        let IcmpPacketRaw { header, message_body, _marker } = raw;
+        if !M::EXPECTS_BODY && !message_body.is_empty() {
+            return Err(ParseError::Format);
+        }
+        let _: M::Code = M::code_from_u8(header.prefix.code).ok_or(ParseError::Format)?;
+        checksum.valid()?;
+        let message_body = M::Body::parse(message_body)?;
+        Ok(IcmpPacket { header, message_body, _marker })
+    }
+
+    /// Like [`ParsablePacket::parse`], but with a precomputed
+    /// [`ChecksumVerificationResult`] over the whole message.
+    fn parse_with_checksum<BV: BufferView<B>>(
+        buffer: BV,
+        checksum: ChecksumVerificationResult,
+    ) -> ParseResult<Self> {
+        let raw = IcmpPacketRaw::parse(buffer, ())?;
+        IcmpPacket::try_from_raw_with_checksum(raw, checksum)
     }
 }
 
@@ -791,41 +860,55 @@ impl<I: IcmpIpExt, M: IcmpMessage<I>> IcmpPacketBuilder<I, M> {
 
     fn serialize_header(
         &self,
-        mut header: &mut [u8],
+        header: &mut [u8],
         message_body: Option<FragmentedBytesMut<'_, '_>>,
     ) {
-        use packet::BufferViewMut;
+        serialize_icmp_header_inner::<I>(
+            header,
+            M::TYPE.into(),
+            self.code.into(),
+            self.msg.as_bytes(),
+            M::EXPECTS_BODY,
+            self.src_ip,
+            self.dst_ip,
+            message_body,
+        );
+    }
+}
 
-        // Implements BufferViewMut, giving us take_obj_xxx_zero methods.
-        let mut prefix = &mut header;
+fn serialize_icmp_header_inner<I: IcmpIpExt>(
+    header: &mut [u8],
+    msg_type: u8,
+    code: u8,
+    msg_bytes: &[u8],
+    expects_body: bool,
+    src_ip: I::Addr,
+    dst_ip: I::Addr,
+    message_body: Option<FragmentedBytesMut<'_, '_>>,
+) {
+    let hdr_len = mem::size_of::<HeaderPrefix>() + msg_bytes.len();
+    let hdr = header.get_mut(..hdr_len).expect("too few bytes for ICMP message");
+    let (prefix, rest) =
+        HeaderPrefix::mut_from_prefix(hdr).expect("too few bytes for ICMP message");
+    // Write every byte of `hdr` so no previously stored buffer contents leak.
+    *prefix = HeaderPrefix { msg_type, code, checksum: [0; 2] };
+    rest.copy_from_slice(msg_bytes);
 
-        // SECURITY: Use _zero constructors to ensure we zero memory to prevent
-        // leaking information from packets previously stored in this buffer.
-        let mut header =
-            prefix.take_obj_front_zero::<Header<M>>().expect("too few bytes for ICMP message");
-        header.prefix.set_msg_type(M::TYPE);
-        header.prefix.code = self.code.into();
-        header.message = self.msg;
-
-        if let Some(message_body) = message_body {
-            assert!(
-                M::EXPECTS_BODY || message_body.is_empty(),
-                "body provided for message that doesn't take a body"
-            );
-            let checksum = compute_checksum_fragmented(
-                &header,
-                &message_body,
-                self.src_ip,
-                self.dst_ip,
-            )
+    if let Some(message_body) = message_body {
+        assert!(
+            expects_body || message_body.is_empty(),
+            "body provided for message that doesn't take a body"
+        );
+        let checksum = compute_checksum_fragmented::<I, _>(hdr, &message_body, src_ip, dst_ip)
             .unwrap_or_else(|| {
                 panic!(
                     "total ICMP packet length of {} overflows 32-bit length field of pseudo-header",
-                    Ref::bytes(&header).len() + message_body.len(),
+                    hdr.len() + message_body.len(),
                 )
             });
-            header.prefix.checksum = checksum;
-        }
+        let (prefix, _rest) =
+            HeaderPrefix::mut_from_prefix(hdr).expect("too few bytes for ICMP message");
+        prefix.checksum = checksum;
     }
 }
 
@@ -872,6 +955,122 @@ impl<I: IcmpIpExt, M: IcmpMessage<I>, C: IcmpSerializationContext> PartialPacket
 {
     fn partial_serialize(&self, _context: &mut C, _body_len: usize, buffer: &mut [u8]) {
         self.serialize_header(buffer, None);
+    }
+}
+
+/// Marker trait for ICMP error and redirect messages with a 4-byte
+/// rest-of-header field and a quoted IP packet body.
+pub trait IcmpErrorMessage<I: IcmpIpExt>:
+    IcmpMessage<I, Body<&'static [u8]> = OriginalPacket<&'static [u8]>> + crate::private::Sealed
+{
+}
+
+macro_rules! impl_icmp_error_message {
+    ($msg:ty, $($ip:ty),+) => {
+        impl crate::private::Sealed for $msg {}
+        $(impl IcmpErrorMessage<$ip> for $msg {})+
+    };
+}
+
+impl_icmp_error_message!(IcmpDestUnreachable, Ipv4, Ipv6);
+impl_icmp_error_message!(IcmpTimeExceeded, Ipv4, Ipv6);
+impl_icmp_error_message!(Icmpv4ParameterProblem, Ipv4);
+impl_icmp_error_message!(Icmpv4Redirect, Ipv4);
+impl_icmp_error_message!(Icmpv6PacketTooBig, Ipv6);
+impl_icmp_error_message!(Icmpv6ParameterProblem, Ipv6);
+
+/// The length in bytes of the message (rest-of-header) field of the ICMP error
+/// messages built by [`IcmpSimpleErrorPacketBuilder`].
+const ICMP_ERROR_MESSAGE_BODY: usize = 4;
+
+/// A type-erased builder for ICMP error packets with a 4-byte rest-of-header
+/// field and a quoted IP packet body.
+#[derive(Debug, PartialEq, Clone)]
+pub struct IcmpSimpleErrorPacketBuilder<I: IcmpIpExt> {
+    src_ip: I::Addr,
+    dst_ip: I::Addr,
+    msg_type: u8,
+    code: u8,
+    msg_bytes: [u8; ICMP_ERROR_MESSAGE_BODY],
+}
+
+impl<I: IcmpIpExt> IcmpSimpleErrorPacketBuilder<I> {
+    /// Constructs a new `IcmpSimpleErrorPacketBuilder` from a typed ICMP error
+    /// message.
+    pub fn new_from_msg<M: IcmpErrorMessage<I>>(
+        src_ip: I::Addr,
+        dst_ip: I::Addr,
+        msg: M,
+        code: M::Code,
+    ) -> Self {
+        const { assert!(mem::size_of::<M>() == ICMP_ERROR_MESSAGE_BODY && M::EXPECTS_BODY) };
+        let mut msg_bytes = [0u8; ICMP_ERROR_MESSAGE_BODY];
+        msg_bytes.copy_from_slice(msg.as_bytes());
+        Self { src_ip, dst_ip, msg_type: M::TYPE.into(), code: code.into(), msg_bytes }
+    }
+
+    /// Sets the source IP address of the ICMP packet.
+    pub fn set_src_ip(&mut self, addr: I::Addr) {
+        self.src_ip = addr;
+    }
+
+    /// Sets the destination IP address of the ICMP packet.
+    pub fn set_dst_ip(&mut self, addr: I::Addr) {
+        self.dst_ip = addr;
+    }
+}
+
+impl<I: IcmpIpExt> NestablePacketBuilder for IcmpSimpleErrorPacketBuilder<I> {
+    fn constraints(&self) -> PacketConstraints {
+        PacketConstraints::new(
+            mem::size_of::<HeaderPrefix>() + ICMP_ERROR_MESSAGE_BODY,
+            0,
+            0,
+            u32::MAX as usize,
+        )
+    }
+}
+
+impl<I: IcmpIpExt, C: IcmpSerializationContext> PacketBuilder<C>
+    for IcmpSimpleErrorPacketBuilder<I>
+{
+    fn context_state(&self) -> C::ContextState {
+        C::envelope_to_state(IcmpEnvelope)
+    }
+
+    fn serialize(
+        &self,
+        _context: &mut C,
+        target: &mut SerializeTarget<'_>,
+        message_body: FragmentedBytesMut<'_, '_>,
+    ) {
+        serialize_icmp_header_inner::<I>(
+            target.header,
+            self.msg_type,
+            self.code,
+            &self.msg_bytes,
+            true,
+            self.src_ip,
+            self.dst_ip,
+            Some(message_body),
+        );
+    }
+}
+
+impl<I: IcmpIpExt, C: IcmpSerializationContext> PartialPacketBuilder<C>
+    for IcmpSimpleErrorPacketBuilder<I>
+{
+    fn partial_serialize(&self, _context: &mut C, _body_len: usize, buffer: &mut [u8]) {
+        serialize_icmp_header_inner::<I>(
+            buffer,
+            self.msg_type,
+            self.code,
+            &self.msg_bytes,
+            true,
+            self.src_ip,
+            self.dst_ip,
+            None,
+        );
     }
 }
 
@@ -939,7 +1138,10 @@ impl IdAndSeq {
 #[cfg(test)]
 mod tests {
     use ip_test_macro::ip_test;
-    use packet::{EmptyBuf, NoOpSerializationContext, ParseBuffer, Serializer, SliceBufViewMut};
+    use net_types::ip::IpInvariant;
+    use packet::{
+        Buf, EmptyBuf, NoOpSerializationContext, ParseBuffer, Serializer, SliceBufViewMut,
+    };
     use test_case::test_case;
 
     use super::*;
@@ -994,6 +1196,63 @@ mod tests {
     }
 
     #[ip_test(I)]
+    #[test_case(|_| (), Ok(()); "valid")]
+    #[test_case(|b| b[2] ^= 0xFF, Err(ParseError::Checksum); "bad_checksum")]
+    // NB: Changing the code also invalidates the checksum, but the code is
+    // validated first.
+    #[test_case(|b| b[1] = 1, Err(ParseError::Format); "bad_code_and_checksum")]
+    #[test_case(|b| b.truncate(6), Err(ParseError::Format); "truncated_header")]
+    fn test_parse_dynamic_matches_typed<I: IcmpIpExt>(
+        corrupt: fn(&mut Vec<u8>),
+        expected: ParseResult<()>,
+    ) {
+        let mut bytes = IcmpPacketBuilder::<I, _>::new(
+            *I::LOOPBACK_ADDRESS,
+            *I::LOOPBACK_ADDRESS,
+            IcmpZeroCode,
+            IcmpEchoRequest::new(1, 1),
+        )
+        .wrap_body(Buf::new(vec![1, 2, 3, 4, 5], ..))
+        .serialize_vec_outer(&mut NoOpSerializationContext)
+        .unwrap()
+        .as_ref()
+        .to_vec();
+        corrupt(&mut bytes);
+
+        let typed = (&mut &bytes[..])
+            .parse_with::<_, IcmpPacket<I, _, IcmpEchoRequest>>(IcmpParseArgs::new(
+                *I::LOOPBACK_ADDRESS,
+                *I::LOOPBACK_ADDRESS,
+            ))
+            .map(|_| ());
+        let IpInvariant(dynamic) = I::map_ip_out(
+            &bytes[..],
+            |mut bytes| {
+                IpInvariant(
+                    bytes
+                        .parse_with::<_, Icmpv4Packet<_>>(IcmpParseArgs::new(
+                            *Ipv4::LOOPBACK_ADDRESS,
+                            *Ipv4::LOOPBACK_ADDRESS,
+                        ))
+                        .map(|_| ()),
+                )
+            },
+            |mut bytes| {
+                IpInvariant(
+                    bytes
+                        .parse_with::<_, Icmpv6Packet<_>>(IcmpParseArgs::new(
+                            *Ipv6::LOOPBACK_ADDRESS,
+                            *Ipv6::LOOPBACK_ADDRESS,
+                        ))
+                        .map(|_| ()),
+                )
+            },
+        );
+        assert_eq!(typed, expected);
+        assert_eq!(dynamic, expected);
+    }
+
+    #[ip_test(I)]
     #[test_case([0,0]; "zeroed_checksum")]
     #[test_case([123, 234]; "garbage_checksum")]
     fn test_try_write_checksum<I: IcmpIpExt>(corrupt_checksum: [u8; 2]) {
@@ -1027,5 +1286,149 @@ mod tests {
             .expect("parse packet raw should succeed");
         assert!(message.try_write_checksum(*I::LOOPBACK_ADDRESS, *I::LOOPBACK_ADDRESS));
         assert_eq!(&icmp_message_with_checksum[..], &icmp_message_without_checksum[..]);
+    }
+
+    #[ip_test(I)]
+    fn test_compute_checksum_fragmented_matches_contiguous<I: IcmpIpExt>() {
+        let src_ip = *I::LOOPBACK_ADDRESS;
+        let dst_ip = *I::LOOPBACK_ADDRESS;
+        let header = Header {
+            prefix: HeaderPrefix {
+                msg_type: <IcmpEchoRequest as IcmpMessage<I>>::TYPE.into(),
+                code: 0,
+                checksum: [0xAB, 0xCD],
+            },
+            message: IcmpEchoRequest::new(0x1234, 0x5678),
+        };
+        let body = [1u8, 2, 3, 4, 5, 6, 7];
+
+        // Compute the reference checksum over the contiguous pseudo-header,
+        // header and body bytes.
+        let mut reference = Checksum::new();
+        if I::VERSION.is_v6() {
+            reference.add_bytes(src_ip.bytes());
+            reference.add_bytes(dst_ip.bytes());
+            let icmpv6_len = u32::try_from(header.as_bytes().len() + body.len()).unwrap();
+            reference.add_bytes(&icmpv6_len.to_be_bytes());
+            reference.add_bytes(&[0, 0, 0, Ipv6Proto::Icmpv6.into()]);
+        }
+        let mut packet = header.as_bytes().to_vec();
+        packet.extend_from_slice(&body);
+        reference.add_bytes(&packet);
+
+        let expected = Some(reference.checksum());
+        assert_eq!(
+            IcmpPacket::<I, &[u8], IcmpEchoRequest>::compute_checksum(
+                &header, &body, src_ip, dst_ip,
+            ),
+            expected,
+        );
+
+        // Odd-sized fragments exercise carrying a trailing byte across
+        // fragments.
+        let (first, rest) = body.split_at(1);
+        let (second, third) = rest.split_at(3);
+        let mut fragments = [first, second, third];
+        assert_eq!(
+            compute_checksum_fragmented::<I, _>(
+                header.as_bytes(),
+                &fragments.as_fragmented_byte_slice(),
+                src_ip,
+                dst_ip,
+            ),
+            expected,
+        );
+    }
+
+    fn assert_simple_error_matches_typed<I: IcmpIpExt, M: IcmpErrorMessage<I>>(
+        src_ip: I::Addr,
+        dst_ip: I::Addr,
+        updated_src_ip: I::Addr,
+        updated_dst_ip: I::Addr,
+        code: M::Code,
+        msg: M,
+    ) {
+        let body = [1u8, 2, 3, 4, 5, 6, 7, 8, 9];
+
+        let typed = IcmpPacketBuilder::<I, M>::new(src_ip, dst_ip, code, msg)
+            .wrap_body(packet::Buf::new(body.to_vec(), ..))
+            .serialize_vec_outer(&mut NoOpSerializationContext)
+            .map_err(|(err, _)| err)
+            .unwrap();
+        let raw = IcmpSimpleErrorPacketBuilder::<I>::new_from_msg(src_ip, dst_ip, msg, code)
+            .wrap_body(packet::Buf::new(body.to_vec(), ..))
+            .serialize_vec_outer(&mut NoOpSerializationContext)
+            .map_err(|(err, _)| err)
+            .unwrap();
+        assert_eq!(raw.as_ref(), typed.as_ref());
+
+        // Verify updating addresses updates the IPv6 pseudo-header checksum
+        // identically.
+        let mut typed_builder = IcmpPacketBuilder::<I, M>::new(src_ip, dst_ip, code, msg);
+        typed_builder.set_src_ip(updated_src_ip);
+        typed_builder.set_dst_ip(updated_dst_ip);
+        let mut raw_builder =
+            IcmpSimpleErrorPacketBuilder::<I>::new_from_msg(src_ip, dst_ip, msg, code);
+        raw_builder.set_src_ip(updated_src_ip);
+        raw_builder.set_dst_ip(updated_dst_ip);
+
+        // Verify partial serialization writes every header byte and leaves a
+        // zeroed checksum.
+        let mut typed_partial = [0xFFu8; 8];
+        let mut raw_partial = [0xAAu8; 8];
+        PartialPacketBuilder::partial_serialize(
+            &typed_builder,
+            &mut NoOpSerializationContext,
+            body.len(),
+            &mut typed_partial,
+        );
+        PartialPacketBuilder::partial_serialize(
+            &raw_builder,
+            &mut NoOpSerializationContext,
+            body.len(),
+            &mut raw_partial,
+        );
+        assert_eq!(raw_partial, typed_partial);
+        assert_eq!(&raw_partial[2..4], &[0, 0]);
+
+        let typed_updated = typed_builder
+            .wrap_body(packet::Buf::new(body.to_vec(), ..))
+            .serialize_vec_outer(&mut NoOpSerializationContext)
+            .map_err(|(err, _)| err)
+            .unwrap();
+        let raw_updated = raw_builder
+            .wrap_body(packet::Buf::new(body.to_vec(), ..))
+            .serialize_vec_outer(&mut NoOpSerializationContext)
+            .map_err(|(err, _)| err)
+            .unwrap();
+        assert_eq!(raw_updated.as_ref(), typed_updated.as_ref());
+    }
+
+    #[test]
+    fn test_simple_error_packet_builder_matches_typed_builder() {
+        assert_simple_error_matches_typed::<Ipv4, _>(
+            Ipv4Addr::new([192, 0, 2, 1]),
+            Ipv4Addr::new([192, 0, 2, 2]),
+            Ipv4Addr::new([198, 51, 100, 1]),
+            Ipv4Addr::new([198, 51, 100, 2]),
+            Icmpv4DestUnreachableCode::DestPortUnreachable,
+            IcmpDestUnreachable::default(),
+        );
+        assert_simple_error_matches_typed::<Ipv4, _>(
+            Ipv4Addr::new([192, 0, 2, 1]),
+            Ipv4Addr::new([192, 0, 2, 2]),
+            Ipv4Addr::new([198, 51, 100, 1]),
+            Ipv4Addr::new([198, 51, 100, 2]),
+            Icmpv4ParameterProblemCode::PointerIndicatesError,
+            Icmpv4ParameterProblem::new(12),
+        );
+        assert_simple_error_matches_typed::<Ipv6, _>(
+            Ipv6Addr::from_bytes([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            Ipv6Addr::from_bytes([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+            Ipv6Addr::from_bytes([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]),
+            Ipv6Addr::from_bytes([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]),
+            IcmpZeroCode,
+            Icmpv6PacketTooBig::new(1280),
+        );
     }
 }

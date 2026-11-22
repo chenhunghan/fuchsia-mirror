@@ -10,7 +10,9 @@ use crate::mm::{FutexTable, MappingSummary, MlockPinFlavor};
 use crate::power::{SuspendResumeManagerHandle, create_watcher_for_wake_events};
 use crate::ptrace::StopState;
 use crate::security::{self, AuditLogger};
-use crate::task::container_namespace::ContainerNamespace;
+use crate::task::container_namespace::{
+    ContainerNamespace, NamespaceNodePurpose, check_ns_dir_path,
+};
 use crate::task::limits::SystemLimits;
 use crate::task::memory_attribution::MemoryAttributionManager;
 use crate::task::net::NetstackDevices;
@@ -64,7 +66,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::ops::Deref;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use zx::{CpuFeatureFlags, CpuSveFeatureFlags};
@@ -963,10 +964,15 @@ impl Kernel {
         self.generic_netlink.get_or_init(|| {
             let (generic_netlink, worker_params) = GenericNetlink::new();
             let enable_nl80211 = self.features.wifi;
+            let suspend_resume_manager = self.suspend_resume_manager.clone();
             self.kthreads.spawn_future(
                 move || async move {
-                    crate::vfs::socket::run_generic_netlink_worker(worker_params, enable_nl80211)
-                        .await;
+                    crate::vfs::socket::run_generic_netlink_worker(
+                        worker_params,
+                        enable_nl80211,
+                        suspend_resume_manager,
+                    )
+                    .await;
                     log_error!("Generic Netlink future unexpectedly exited");
                 },
                 "generic_netlink_worker",
@@ -1207,35 +1213,41 @@ impl Kernel {
     /// path (/bar). The caller of this method can expect /bar to be initialized.
     pub fn open_ns_dir(
         &self,
+        current_task: &CurrentTask,
         path: &str,
         open_flags: fio::Flags,
+        purpose: NamespaceNodePurpose,
     ) -> Result<(fio::DirectorySynchronousProxy, String), Errno> {
-        let ns_path = PathBuf::from(path);
-        match self.container_namespace.find_closest_channel(&ns_path) {
-            Ok((root_channel, remaining_subdir)) => {
-                let (_, server_end) = create_endpoints::<fio::DirectoryMarker>();
-                fdio::open_at(
-                    &root_channel,
-                    &remaining_subdir,
-                    open_flags,
-                    server_end.into_channel(),
-                )
-                .map_err(|e| {
-                    log_error!("Failed to intialize the subdirs: {}", e);
-                    errno!(EIO)
-                })?;
+        let (ns_root, remaining_subdir) =
+            self.container_namespace.find_closest_entry(path).map_err(|err| {
+                log_debug!("Unable to find a channel for {}. Received error: {}", path, err);
+                errno!(ENOENT)
+            })?;
 
-                Ok((fio::DirectorySynchronousProxy::new(root_channel), remaining_subdir))
-            }
-            Err(err) => {
-                log_error!(
-                    "Unable to find a channel for {}. Received error: {}",
-                    ns_path.display(),
-                    err
-                );
-                Err(errno!(ENOENT))
-            }
+        check_ns_dir_path(path, purpose)?;
+        security::check_container_namespace_access(current_task, path, purpose)?;
+
+        let root_channel =
+            self.container_namespace.get_namespace_channel(ns_root).map_err(|err| {
+                log_error!("Unable to clone channel for {} (root {}): {}", path, ns_root, err);
+                errno!(ENOENT)
+            })?;
+
+        let root_proxy = fio::DirectorySynchronousProxy::new(root_channel);
+        if !remaining_subdir.is_empty() {
+            syncio::directory_open_directory_sync(
+                &root_proxy,
+                remaining_subdir,
+                open_flags,
+                zx::MonotonicInstant::INFINITE,
+            )
+            .map_err(|status| {
+                log_error!("Failed to initialize the subdirs: {}", status);
+                from_status_like_fdio!(status)
+            })?;
         }
+
+        Ok((root_proxy, remaining_subdir.to_owned()))
     }
 
     /// Returns an iterator of the command line arguments.
@@ -1443,6 +1455,7 @@ impl HwCaps {
 #[cfg(test)]
 mod test {
     use super::*;
+    use fidl::endpoints::Proxy;
 
     #[test]
     fn test_parse_cmdline() {
@@ -1645,5 +1658,202 @@ mod test {
             assert_eq!(all_but_one.arch64.hwcap, expected_sve_hwcap, "{flag:?}");
             assert_eq!(all_but_one.arch64.hwcap2, all_sve_hwcap2 & !hwcap2_bit, "{flag:?}");
         }
+    }
+
+    #[::fuchsia::test]
+    async fn open_ns_dir_validates_before_cloning() {
+        crate::testing::spawn_kernel_and_run(async move |current_task| {
+            let (pkg_client, pkg_server) = zx::Channel::create();
+            let (svc_client, svc_server) = zx::Channel::create();
+            let (lifecycle_client, lifecycle_server) = zx::Channel::create();
+            let (data_client, data_server) = zx::Channel::create();
+            let (nested_client, nested_server) = zx::Channel::create();
+            let container_namespace = ContainerNamespace::from(vec![
+                fidl_fuchsia_component_runner::ComponentNamespaceEntry {
+                    path: Some("/pkg".to_string()),
+                    directory: Some(ClientEnd::new(pkg_client)),
+                    ..Default::default()
+                },
+                fidl_fuchsia_component_runner::ComponentNamespaceEntry {
+                    path: Some("/svc".to_string()),
+                    directory: Some(ClientEnd::new(svc_client)),
+                    ..Default::default()
+                },
+                fidl_fuchsia_component_runner::ComponentNamespaceEntry {
+                    path: Some("/tmp_lifecycle".to_string()),
+                    directory: Some(ClientEnd::new(lifecycle_client)),
+                    ..Default::default()
+                },
+                fidl_fuchsia_component_runner::ComponentNamespaceEntry {
+                    path: Some("/data".to_string()),
+                    directory: Some(ClientEnd::new(data_client)),
+                    ..Default::default()
+                },
+                fidl_fuchsia_component_runner::ComponentNamespaceEntry {
+                    path: Some("/foo/bar".to_string()),
+                    directory: Some(ClientEnd::new(nested_client)),
+                    ..Default::default()
+                },
+            ]);
+            let kernel = Kernel::new(
+                b"".into(),
+                KernelFeatures::default(),
+                SystemLimits::default(),
+                container_namespace,
+                SchedulerManager::empty_for_tests(),
+                None,
+                fuchsia_inspect::Node::default(),
+                security::testing::kernel_state(None),
+                /* time_adjustment_proxy = */ None,
+                /* device_tree = */ None,
+            )
+            .expect("failed to create test kernel");
+
+            for missing_path in [
+                "/missing",
+                "/foo",
+                "/svc",
+                "/svc/fuchsia.logger.LogSink",
+                "/tmp_lifecycle",
+                "/tmp_lifecycle/sub",
+                "/data/../pkg",
+            ] {
+                for purpose in [
+                    NamespaceNodePurpose::DirectoryMount { read_only: true },
+                    NamespaceNodePurpose::DirectoryMount { read_only: false },
+                    NamespaceNodePurpose::VolumeKeys,
+                ] {
+                    assert_eq!(
+                        kernel
+                            .open_ns_dir(
+                                current_task,
+                                missing_path,
+                                fio::Flags::PROTOCOL_DIRECTORY,
+                                purpose,
+                            )
+                            .err(),
+                        Some(errno!(ENOENT)),
+                        "expected ENOENT for {missing_path} ({purpose:?})"
+                    );
+                }
+            }
+
+            for (denied_path, purpose) in [
+                ("/pkg", NamespaceNodePurpose::DirectoryMount { read_only: true }),
+                ("/pkg/data", NamespaceNodePurpose::DirectoryMount { read_only: true }),
+                ("/pkg/meta", NamespaceNodePurpose::DirectoryMount { read_only: true }),
+                ("/pkg/data/system", NamespaceNodePurpose::DirectoryMount { read_only: false }),
+                ("/pkg", NamespaceNodePurpose::VolumeKeys),
+                ("/pkg/data/system", NamespaceNodePurpose::VolumeKeys),
+            ] {
+                assert_eq!(
+                    kernel
+                        .open_ns_dir(
+                            current_task,
+                            denied_path,
+                            fio::Flags::PROTOCOL_DIRECTORY,
+                            purpose,
+                        )
+                        .err(),
+                    Some(errno!(EACCES)),
+                    "expected EACCES for {denied_path} ({purpose:?})"
+                );
+            }
+
+            // Rejected calls must not have sent any `Cloneable.Clone` messages on namespace
+            // channels.
+            let mut buf = zx::MessageBuf::new();
+            for server in
+                [&pkg_server, &svc_server, &lifecycle_server, &data_server, &nested_server]
+            {
+                assert_eq!(server.read(&mut buf), Err(zx::Status::SHOULD_WAIT));
+            }
+
+            // Allowed exact-root lookups clone only the closest matching namespace channel and
+            // return an empty `remaining_subdir` without invoking `directory_open_directory_sync`.
+            let (_proxy, subdir) = kernel
+                .open_ns_dir(
+                    current_task,
+                    "/data",
+                    fio::Flags::PROTOCOL_DIRECTORY,
+                    NamespaceNodePurpose::DirectoryMount { read_only: false },
+                )
+                .expect("expected /data lookup to succeed");
+            assert_eq!(subdir, "");
+            assert_eq!(data_server.read(&mut buf), Ok(()));
+            for server in
+                [&pkg_server, &svc_server, &lifecycle_server, &data_server, &nested_server]
+            {
+                assert_eq!(server.read(&mut buf), Err(zx::Status::SHOULD_WAIT));
+            }
+
+            let (_proxy, subdir) = kernel
+                .open_ns_dir(
+                    current_task,
+                    "/foo/bar",
+                    fio::Flags::PROTOCOL_DIRECTORY,
+                    NamespaceNodePurpose::DirectoryMount { read_only: true },
+                )
+                .expect("expected /foo/bar lookup to succeed");
+            assert_eq!(subdir, "");
+            assert_eq!(nested_server.read(&mut buf), Ok(()));
+            for server in
+                [&pkg_server, &svc_server, &lifecycle_server, &data_server, &nested_server]
+            {
+                assert_eq!(server.read(&mut buf), Err(zx::Status::SHOULD_WAIT));
+            }
+
+            // Non-empty `remaining_subdir` lookups initialize the subdirectory against the cloned
+            // root channel.
+            let real_pkg_channel: zx::Channel = fuchsia_fs::directory::open_in_namespace(
+                "/pkg",
+                fio::PERM_READABLE | fio::PERM_EXECUTABLE,
+            )
+            .expect("failed to open /pkg")
+            .into_channel()
+            .expect("into_channel")
+            .into();
+            let real_ns = ContainerNamespace::from(vec![
+                fidl_fuchsia_component_runner::ComponentNamespaceEntry {
+                    path: Some("/data".to_string()),
+                    directory: Some(ClientEnd::new(real_pkg_channel)),
+                    ..Default::default()
+                },
+            ]);
+            let real_kernel = Kernel::new(
+                b"".into(),
+                KernelFeatures::default(),
+                SystemLimits::default(),
+                real_ns,
+                SchedulerManager::empty_for_tests(),
+                None,
+                fuchsia_inspect::Node::default(),
+                security::testing::kernel_state(None),
+                /* time_adjustment_proxy = */ None,
+                /* device_tree = */ None,
+            )
+            .expect("failed to create test kernel");
+            let (_proxy, subdir) = real_kernel
+                .open_ns_dir(
+                    current_task,
+                    "/data/meta",
+                    fio::Flags::PROTOCOL_DIRECTORY,
+                    NamespaceNodePurpose::DirectoryMount { read_only: true },
+                )
+                .expect("expected /data/meta lookup to succeed");
+            assert_eq!(subdir, "meta");
+            assert_eq!(
+                real_kernel
+                    .open_ns_dir(
+                        current_task,
+                        "/data/missing_subdir",
+                        fio::Flags::PROTOCOL_DIRECTORY,
+                        NamespaceNodePurpose::DirectoryMount { read_only: true },
+                    )
+                    .err(),
+                Some(errno!(ENOENT))
+            );
+        })
+        .await;
     }
 }

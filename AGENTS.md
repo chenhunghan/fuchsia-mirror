@@ -10,13 +10,13 @@ To run a build, run `fx build`. The Fuchsia platform uses the GN and Bazel
 build systems. You must not generate Cargo.toml, CMakeLists.txt, or Makefile
 build files.
 
-By default, `fx build` triggers an incremental build. In most cases, `fx build`
-is sufficient for building. If you need a full build, use `fx clean-build`,
-but avoid it as much as possible as it is very slow.
-
-Prefer target-scoped builds (e.g. `fx build //path/to/dir:target`) for faster
-iteration. Append `--host` for host tools. If a target is unknown, follow
-`fx build` suggestions or fall back to a full `fx build`.
+Prefer target-scoped builds (e.g., `fx build //path/to/dir:target`, or
+`fx build --host //path/to/dir:target` for host tools) or `fx test <target>`
+for faster iteration. Follow any `"Did you mean"` suggestions if a target is
+unknown; only fall back to an unscoped `fx build` when editing cross-cutting
+targets or when no narrower target can be identified. By default, `fx build`
+triggers an incremental build; avoid `fx clean-build` unless strictly necessary,
+as a full rebuild is very slow.
 
 To run a test, run `fx -t <target> test <name of test>` (see
 [`src/testing/skills/fx-test/SKILL.md`](src/testing/skills/fx-test/SKILL.md)).
@@ -80,9 +80,10 @@ the relevant repository, e.g. `//` or `//vendor/google`) or `rg`, excluding
 
 ## Code Authoring Requirements
 
-1.  **Verify with Build:** After implementation of a change, run `fx build` to
-    confirm your changes compile correctly. This is a final verification step,
-    not a tool for initial API discovery.
+1.  **Verify with Build:** After implementation of a change, run a scoped
+    `fx build //path/to/dir:target` (or `fx test <target>`) to confirm your
+    changes compile correctly. This is a final verification step, not a tool for
+    initial API discovery.
 
     If you author new targets in BUILD.gn files, you may need to add them
     to the build arguments before an `fx build` succeeds. To do this,
@@ -135,6 +136,38 @@ instead of writing duplicate functionality.
 *   **Do not detach tasks**: Do not use
     `fuchsia_async::Task::spawn(...).detach();`. Detaching tasks is considered
     bad style and can lead to bugs. Use `scope.spawn(...);` instead.
+
+### Python Development
+
+When authoring or reviewing Python (`.py`) code, follow the
+[`fuchsia-python-best-practices`](.agents/skills/fuchsia-python-best-practices/SKILL.md)
+skill as well as
+[`docs/development/languages/python/python_style.md`](docs/development/languages/python/python_style.md)
+and [`docs/development/languages/python/testing.md`](docs/development/languages/python/testing.md).
+
+### Bazel Development
+
+When authoring or reviewing non-SDK Bazel (`BUILD.bazel`, `.bazel`, and `.bzl`)
+files, follow the
+[`fuchsia-bazel-guidelines`](build/bazel/.agents/skills/fuchsia-bazel-guidelines/SKILL.md)
+skill and the
+[Bazel style guide](docs/development/languages/bazel/style/README.md).
+
+*   **`.bzl` files, rules, and macros**: When authoring or modifying `.bzl`
+    files, also read and follow
+    [`fuchsia-bzl-file-guidelines`](build/bazel/.agents/skills/fuchsia-bzl-file-guidelines/SKILL.md),
+    [`fuchsia-bazel-rules-and-macros-guidelines`](build/bazel/rules/.agents/skills/fuchsia-bazel-rules-and-macros-guidelines/SKILL.md),
+    and
+    [`docs/development/languages/bazel/style/rules_macros.md`](docs/development/languages/bazel/style/rules_macros.md).
+    Keep changes to shared `.bzl` rules/macros in dedicated CLs separate from
+    production target definitions.
+*   **Fuchsia Bazel SDK (`//build/bazel_sdk/`)**: Files in the Fuchsia Bazel
+    SDK follow separate out-of-tree SDK conventions; read and follow
+    [`fuchsia-bazel-sdk-guidelines`](build/bazel_sdk/.agents/skills/fuchsia-bazel-sdk-guidelines/SKILL.md).
+*   **Static checks and rule tests**: Run `fx format-code` and
+    `fx host-tool shac check` locally before committing, and run
+    `fx bazel test` directly on platform rule/analysis test targets (which do
+    not fail `fx build` or run under `fx test`).
 
 ## Finding or moving a FIDL method
 
@@ -203,9 +236,20 @@ subcommands at various levels of its hierarchy.
 
 `fx build` wraps GN, Bazel, and Ninja to build Fuchsia.
 
-When running `fx build` give your shell command tool longer wait intervals than
-the default. Consider waiting 1+ minutes at minimum each time you build
-depending on the number of targets you're building.
+*   **Wait asynchronously, never poll:** Non-trivial builds take longer than a
+    few seconds and will background automatically if your shell tool has a short
+    initial wait cap (e.g., 10s). Set a long completion notification timeout if
+    supported (such as `NotificationTimeoutSeconds` = `600`-`1800` for
+    `fx build`), **end your turn immediately with no further tool calls**, and
+    wait for the completion notification. Never poll `manage_task("status")`,
+    run `ps`, read task logs in a loop, or set `schedule` timers to wait.
+*   **Expect quiet output in agent environments:** `fx` detects agent runners
+    and enables quiet mode automatically (`FX_BUILD_QUIET=1`, `--quiet` or
+    Bazel `--config=quiet`, and `--no-status` for Ninja). Aside from
+    `Lock acquired, proceeding with build.` (which may itself be stdout-buffered
+    in non-TTY runners) and `Build completed.`, `fx build` suppresses progress
+    lines until an action emits diagnostics or finishes. Silence during an
+    active build is normal progress, not a hang.
 
 ### Code formatting
 
@@ -217,8 +261,12 @@ It need only be run as a final step before committing, prior to pushing your
 code, or before returning control to the user.
 
 **Always** run `fx format-code` from the specific **git repository root** of
-your changes (e.g., `vendor/google` or the main repository root). Running it
-from the project root only formats the main repository.
+your changes (e.g., `vendor/google` or the main repository root). Without
+explicit files it only formats modified files in the repository enclosing the
+current directory; pass `--all-repositories` to also cover every other active
+repository in the checkout. Do **not** use `--all` for routine formatting: it
+formats **all tracked files** in the repository, not just your modified files,
+and is slow. `fx lint` takes the same flags.
 
 ### Linting
 
@@ -231,8 +279,11 @@ for iteration. It is usually a bit faster than running `fx build`.
 running), managing the package repository, and running actual tests. You do not
 need to manually start an emulator or package server beforehand.
 
-When running `fx test` give your shell command tool longer wait intervals than
-the default. Consider waiting 2+ minutes at minimum each time you test.
+Because `fx test` triggers an incremental `fx build` first (unless `--no-build`
+is passed), follow the same wait rule as `fx build`: set a long notification
+timeout (e.g., `NotificationTimeoutSeconds` = `600`-`1800`) and end your turn
+to wait for completion rather than polling `manage_task("status")` or setting
+`schedule` timers.
 
 If more than one device is present, you can choose the correct one by name as
 the first argument to `fx`: `fx -t <device name> test ...`.

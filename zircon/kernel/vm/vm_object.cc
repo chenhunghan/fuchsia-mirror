@@ -31,6 +31,36 @@
 
 VmObject::GlobalList VmObject::all_vmos_ = {};
 
+fbl::SinglyLinkedListCustomTraits<fbl::RefPtr<VmObject>, VmDeferredDeleter::ListTraits>
+    VmDeferredDeleter::delete_list_;
+bool VmDeferredDeleter::running_delete_ = false;
+
+fbl::SinglyLinkedListNodeState<fbl::RefPtr<VmObject>>& VmDeferredDeleter::ListTraits::node_state(
+    VmObject& vmo) {
+  return vmo.deferred_deleter_.deferred_delete_state_;
+}
+
+void VmDeferredDeleter::DoDeferredDelete(fbl::RefPtr<VmObject> vmo) {
+  Guard<CriticalMutex> guard{DeferredDeleteLock::Get()};
+  // If a parent has multiple children then it's possible for a given object to already be
+  // queued for deletion.
+  if (!vmo->deferred_deleter_.deferred_delete_state_.InContainer()) {
+    delete_list_.push_front(ktl::move(vmo));
+  } else {
+    // We know a refptr is being held by the container (which we are holding the lock to), so can
+    // safely drop the vmo ref.
+    vmo.reset();
+  }
+  if (!running_delete_) {
+    running_delete_ = true;
+    while (!delete_list_.is_empty()) {
+      fbl::RefPtr<VmObject> ptr = delete_list_.pop_front();
+      guard.CallUnlocked([&ptr] { ptr.reset(); });
+    }
+    running_delete_ = false;
+  }
+}
+
 VmObject::VmObject(uint32_t options) : options_(options) { LTRACEF("%p\n", this); }
 
 VmObject::~VmObject() {

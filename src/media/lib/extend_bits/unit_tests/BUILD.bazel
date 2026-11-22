@@ -7,6 +7,14 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [
+        ":extend-bits-tests",
+    ],
+    visibility = ["//src/media:__pkg__"],
+)
+
 fx_cc_test_binary(
     name = "extend_bits_tests",
     srcs = ["extend_bits_tests.cc"],
@@ -18,11 +26,8 @@ fx_cc_test_binary(
     ],
 )
 
-# TODO(https://fxbug.dev/574121341): Run in GN too.
-# @bazel2gn:skip
 fx_unittest_package(
     name = "extend-bits-tests",
-    package_name = "extend-bits-tests",
     unit_tests = [":extend_bits_tests"],
     visibility = ["//src/media:__pkg__"],
 )

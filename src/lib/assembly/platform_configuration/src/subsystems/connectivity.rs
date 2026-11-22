@@ -63,17 +63,16 @@ impl DefineSubsystemConfiguration<PlatformConnectivityConfig> for ConnectivitySu
         }
 
         // Whether WLAN and Netstack redact MAC addresses, BSSIDs and SSIDs in
-        // logs and Inspect. Enabled by default on all non-eng builds; user
-        // builds cannot opt out.
+        // logs and Inspect. While redaction is being rolled out it is enabled
+        // by default only on userdebug builds; user and eng builds default to
+        // raw identifiers. Products may override the default on any build type.
+        // TODO(https://fxbug.dev/576752502): Enable by default on user builds
+        // once the salt is provided at startup.
         let redact_network_identifiers =
-            match (context.build_type, connectivity_config.redact_network_identifiers) {
-                (BuildType::User, Some(false)) => {
-                    bail!("'redact_network_identifiers' cannot be disabled on user builds")
-                }
-                (BuildType::User | BuildType::UserDebug, None) => true,
-                (BuildType::Eng, None) => false,
-                (_, Some(b)) => b,
-            };
+            connectivity_config.redact_network_identifiers.unwrap_or(match context.build_type {
+                BuildType::UserDebug => true,
+                BuildType::User | BuildType::Eng => false,
+            });
         builder.set_config_capability(
             "fuchsia.connectivity.RedactNetworkIdentifiers",
             Config::new(ConfigValueType::Bool, redact_network_identifiers.into()),
@@ -508,6 +507,40 @@ mod tests {
             assert_eq!(
                 completed.configuration_capabilities.get("fuchsia.wlan.Wpa1Supported"),
                 Some(&Config::new(ConfigValueType::Bool, legacy_privacy_support.into())),
+            );
+        }
+    }
+
+    #[test]
+    fn test_redact_network_identifiers() {
+        for (build_type, requested, expected) in [
+            (BuildType::User, None, false),
+            (BuildType::User, Some(true), true),
+            (BuildType::User, Some(false), false),
+            (BuildType::UserDebug, None, true),
+            (BuildType::UserDebug, Some(false), false),
+            (BuildType::Eng, None, false),
+            (BuildType::Eng, Some(true), true),
+        ] {
+            let context = ConfigurationContext {
+                feature_set_level: &FeatureSetLevel::Standard,
+                build_type: &build_type,
+                ..ConfigurationContext::default_for_tests()
+            };
+            let config = PlatformConnectivityConfig {
+                redact_network_identifiers: requested,
+                ..Default::default()
+            };
+            let mut builder = ConfigurationBuilderImpl::default();
+            ConnectivitySubsystemConfig::define_configuration(&context, &config, &mut builder)
+                .unwrap();
+            let completed = builder.build();
+            assert_eq!(
+                completed
+                    .configuration_capabilities
+                    .get("fuchsia.connectivity.RedactNetworkIdentifiers"),
+                Some(&Config::new(ConfigValueType::Bool, expected.into())),
+                "build_type={build_type:?}, requested={requested:?}",
             );
         }
     }

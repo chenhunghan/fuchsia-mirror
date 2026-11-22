@@ -8,7 +8,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from unittest import mock
 
-import fuchsia
+from build.rbe import fuchsia
 
 # Most tests here just make sure there are no Python syntax or typing errors.
 # There is no need to test change-detection of constant values.

@@ -144,7 +144,6 @@ void FidlTestFunction::SetConfigured(SetConfiguredRequest& request,
       completer.Reply(zx::ok());
       return;
     }
-    configured_ = true;
     fuchsia_hardware_usb_function::EndpointConfiguration config;
     fuchsia_hardware_usb_function::EndpointDescriptor desc;
     desc.bm_attributes(descriptor_.bulk_out.bm_attributes);
@@ -173,21 +172,47 @@ void FidlTestFunction::SetConfigured(SetConfiguredRequest& request,
         function_->ConfigureEndpoint({descriptor_.bulk_in.b_endpoint_address, std::move(config)});
     if (result.is_error()) {
       fdf::error("ConfigureEndpoint failed {}", result.error_value().FormatDescription().c_str());
+      std::ignore = function_->DisableEndpoint({descriptor_.bulk_out.b_endpoint_address});
       completer.Reply(zx::error(result.error_value().is_framework_error()
                                     ? result.error_value().framework_error().status()
                                     : ZX_ERR_INTERNAL));
       return;
     }
+    configured_ = true;
 
   } else {
     configured_ = false;
+    zx_status_t status = ZX_OK;
+    for (const uint8_t ep_addr :
+         {descriptor_.bulk_out.b_endpoint_address, descriptor_.bulk_in.b_endpoint_address}) {
+      fidl::Result result = function_->DisableEndpoint({ep_addr});
+      if (result.is_error()) {
+        const zx_status_t err = result.error_value().is_framework_error()
+                                    ? result.error_value().framework_error().status()
+                                    : result.error_value().domain_error();
+        if (err != ZX_ERR_PEER_CLOSED && err != ZX_ERR_CANCELED && err != ZX_ERR_IO_NOT_PRESENT) {
+          fdf::error("DisableEndpoint 0x{:02x} failed {}", ep_addr,
+                     result.error_value().FormatDescription().c_str());
+          if (status == ZX_OK) {
+            status = err;
+          }
+        }
+      }
+    }
+    completer.Reply(zx::make_result(status));
+    return;
   }
   completer.Reply(zx::ok());
 }
 
 void FidlTestFunction::SetInterface(SetInterfaceRequest& request,
                                     SetInterfaceCompleter::Sync& completer) {
-  completer.Reply(zx::ok());
+  if (request.interface() == descriptor_.interface.b_interface_number &&
+      request.alt_setting() == descriptor_.interface.b_alternate_setting) {
+    completer.Reply(zx::ok());
+  } else {
+    completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
+  }
 }
 
 void FidlTestFunction::handle_unknown_method(

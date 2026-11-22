@@ -39,6 +39,10 @@ userspace_policy("binder_policy") {
   sources = [ "binder_policy.conf" ]
 }
 
+userspace_policy("bounds_policy") {
+  sources = [ "bounds_policy.conf" ]
+}
+
 userspace_policy("bpf_policy") {
   sources = [ "bpf_policy.conf" ]
 }
@@ -49,6 +53,10 @@ userspace_policy("capabilities_policy") {
 
 userspace_policy("cgroupfs_policy") {
   sources = [ "cgroupfs_policy.conf" ]
+}
+
+userspace_policy("constraints_policy") {
+  sources = [ "constraints_policy.conf" ]
 }
 
 userspace_policy("fcntl_policy") {
@@ -144,6 +152,10 @@ userspace_policy("pipe_policy") {
   sources = [ "pipe_policy.conf" ]
 }
 
+userspace_policy("procfs_policy") {
+  sources = [ "procfs_policy.conf" ]
+}
+
 userspace_policy("ptrace_policy") {
   sources = [ "ptrace_policy.conf" ]
 }
@@ -195,9 +207,11 @@ group("policies") {
     ":append_policy",
     ":audit_access_policy",
     ":binder_policy",
+    ":bounds_policy",
     ":bpf_policy",
     ":capabilities_policy",
     ":cgroupfs_policy",
+    ":constraints_policy",
     ":fcntl_policy",
     ":file_transition_policy",
     ":fs_test_policy",
@@ -221,6 +235,7 @@ group("policies") {
     ":perf_event_policy",
     ":pidfd_policy",
     ":pipe_policy",
+    ":procfs_policy",
     ":ptrace_policy",
     ":sched_policy",
     ":selinuxfs_policy",

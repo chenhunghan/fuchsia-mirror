@@ -37,13 +37,14 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 if (is_host) {
   python_library("colorama") {
     sources = [
-      "__init__.py",
-      "ansi.py",
-      "ansitowin32.py",
-      "initialise.py",
-      "win32.py",
-      "winterm.py",
+      "colorama/colorama/__init__.py",
+      "colorama/colorama/ansi.py",
+      "colorama/colorama/ansitowin32.py",
+      "colorama/colorama/initialise.py",
+      "colorama/colorama/win32.py",
+      "colorama/colorama/winterm.py",
     ]
+    imports = [ "colorama" ]
     visibility = [
       ":*",
       "//scripts/fxtest/python:*",
@@ -54,6 +55,5 @@ if (is_host) {
       "//third_party/colorama/tests:*",
     ]
     enable_mypy = false
-    source_root = "colorama/colorama"
   }
 }

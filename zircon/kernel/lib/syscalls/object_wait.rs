@@ -36,7 +36,9 @@ pub fn sys_object_wait_one(
     ltracef!("handle {:?}\n", handle_value);
 
     pin_init::stack_pin_init!(let event = Event::init_unsignaled());
-    let mut wait_signal_observer = WaitSignalObserver::new();
+    let event = event.into_ref();
+    let wait_signal_observer = core::pin::pin!(WaitSignalObserver::new());
+    let wait_signal_observer = wait_signal_observer.into_ref();
 
     let slack_deadline = ProcessDispatcher::with_current(|up| {
         let handle_table = up.handle_table();
@@ -49,7 +51,13 @@ pub fn sys_object_wait_one(
             return Err(Status::ACCESS_DENIED);
         }
 
-        wait_signal_observer.begin(guard.token(), event.as_ref().get_ref(), &handle, signals)?;
+        // SAFETY: `wait_signal_observer` is freshly constructed (not registered), stack-pinned
+        // strictly after `event`, and never leaked or forgotten; `handle.dispatcher()`'s lock is
+        // not held; and `end` is called unconditionally below (with no locks held) before
+        // `wait_signal_observer` is dropped and before `event` is destroyed.
+        unsafe {
+            wait_signal_observer.begin(guard.token(), event.get_ref(), &handle, signals)?;
+        }
 
         let slack = up.get_timer_slack_policy();
         Ok(Deadline::new(InstantUnknown(deadline), slack))
@@ -93,7 +101,7 @@ pub fn sys_object_wait_many(
         let now = crate::platform_rs::timer::current_mono_time();
         {
             let _blocked = AutoBlocked::new(Blocked::WAIT_MANY);
-            crate::kernel::thread::sleep_etc(&slack_deadline, Interruptible::YES, now.0)?;
+            crate::kernel::thread::sleep_etc(&slack_deadline, Interruptible::YES, now)?;
         }
         return Err(Status::TIMED_OUT);
     }
@@ -110,15 +118,16 @@ pub fn sys_object_wait_many(
 
     // WaitSignalObserver is heavier than it looks so make sure we know how
     // much stack InlineArray is going to use, given limited kernel stack size.
-    zr::static_assert!(core::mem::size_of::<WaitSignalObserver>() * MAX_INLINE_OBSERVERS < 640);
-
-    pin_init::stack_try_pin_init!(
-        let observers = InlineArray::<WaitSignalObserver, MAX_INLINE_OBSERVERS>::init(count)
-    );
-    let observers = observers.map_err(|_| Status::NO_MEMORY)?;
-    let observers = observers.as_mut_slice_pinned();
+    zr::static_assert!(core::mem::size_of::<WaitSignalObserver<'_>>() * MAX_INLINE_OBSERVERS < 640);
 
     pin_init::stack_pin_init!(let event = Event::init_unsignaled());
+    let event = event.into_ref();
+
+    pin_init::stack_try_pin_init!(
+        let observers = InlineArray::<WaitSignalObserver<'_>, MAX_INLINE_OBSERVERS>::init(count)
+    );
+    let observers = observers.map_err(|_| Status::NO_MEMORY)?;
+    let observers = observers.into_ref().get_ref().as_slice();
 
     // We may need to unwind (which can be done outside the lock).
     let mut num_added = 0;
@@ -126,7 +135,7 @@ pub fn sys_object_wait_many(
         let handle_table = up.handle_table();
         ksync::lock!(let guard = handle_table.read_lock());
 
-        for (ix, item) in items[..count].iter().enumerate() {
+        for (obs, item) in observers.iter().zip(items.iter()) {
             let handle = handle_table
                 .get_handle_locked(guard.token(), up, HandleValue::new(item.handle))
                 .ok_or(Status::BAD_HANDLE)?;
@@ -134,15 +143,31 @@ pub fn sys_object_wait_many(
                 return Err(Status::ACCESS_DENIED);
             }
 
-            observers[ix].begin(guard.token(), event.as_ref().get_ref(), &handle, item.waitfor)?;
+            // SAFETY: `obs` is a freshly constructed (not yet registered) element of the
+            // stack-pinned `InlineArray` (declared strictly after `event`), which never moves,
+            // leaks, or forgets its inline or heap-allocated elements before dropping them in
+            // place. `handle.dispatcher()`'s lock is not held, and `end` is called on every
+            // registered observer (both on the `begin_result` unwind path and after `event.wait`,
+            // with no locks held) before the `InlineArray` is dropped and before `event` is
+            // destroyed.
+            unsafe {
+                core::pin::Pin::new_unchecked(obs).begin(
+                    guard.token(),
+                    event.get_ref(),
+                    &handle,
+                    item.waitfor,
+                )?;
+            }
             num_added += 1;
         }
         Ok(())
     });
 
     if let Err(err) = begin_result {
-        for obs in &mut observers[..num_added] {
-            obs.end();
+        for obs in &observers[..num_added] {
+            // SAFETY: `obs` is an element of the stack-pinned `InlineArray`, which never moves its
+            // inline or heap-allocated elements before dropping them in place.
+            unsafe { core::pin::Pin::new_unchecked(obs) }.end();
         }
         return Err(err);
     }
@@ -158,9 +183,11 @@ pub fn sys_object_wait_many(
 
     // Regardless of wait outcome, we must call End().
     let mut combined = 0;
-    for (ix, obs) in observers.iter_mut().enumerate() {
-        let pending = obs.end();
-        items[ix].pending = pending;
+    for (obs, item) in observers.iter().zip(items.iter_mut()) {
+        // SAFETY: `obs` is an element of the stack-pinned `InlineArray`, which never moves its
+        // inline or heap-allocated elements before dropping them in place.
+        let pending = unsafe { core::pin::Pin::new_unchecked(obs) }.end();
+        item.pending = pending;
         combined |= pending;
     }
 

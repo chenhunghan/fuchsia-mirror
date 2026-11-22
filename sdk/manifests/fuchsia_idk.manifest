@@ -80,8 +80,10 @@ cc_source_library://pkg/driver_metadata_cpp (unstable)
 cc_source_library://pkg/driver_mmio_cpp
 cc_source_library://pkg/driver_node_cpp
 cc_source_library://pkg/driver_outgoing_cpp
+cc_source_library://pkg/driver_pci_cpp (unstable)
 cc_source_library://pkg/driver_platform_device_cpp (unstable)
 cc_source_library://pkg/driver_power_cpp (unstable)
+cc_source_library://pkg/driver_resource_vote_cpp (unstable)
 cc_source_library://pkg/driver_runtime
 cc_source_library://pkg/driver_runtime_cpp
 cc_source_library://pkg/driver_runtime_env
@@ -91,6 +93,7 @@ cc_source_library://pkg/driver_runtime_testing_cpp
 cc_source_library://pkg/driver_symbols
 cc_source_library://pkg/driver_testing_cpp
 cc_source_library://pkg/driver_testing_scoped_global_logger_cpp
+cc_source_library://pkg/fbl_deprecated (unstable)
 cc_source_library://pkg/fidl
 cc_source_library://pkg/fidl_base
 cc_source_library://pkg/fidl_cpp
@@ -104,6 +107,7 @@ cc_source_library://pkg/fidl_cpp_wire
 cc_source_library://pkg/fidl_driver
 cc_source_library://pkg/fidl_driver_natural
 cc_source_library://pkg/fidl_driver_transport
+cc_source_library://pkg/fzl (unstable)
 cc_source_library://pkg/hwreg
 cc_source_library://pkg/images_cpp
 cc_source_library://pkg/inspect
@@ -130,6 +134,7 @@ cc_source_library://pkg/trace-vthread-headersonly
 cc_source_library://pkg/utf-utils
 cc_source_library://pkg/vfs_cpp
 cc_source_library://pkg/virtgralloc_headers
+cc_source_library://pkg/vmo_store (unstable)
 cc_source_library://pkg/zbi-format
 cc_source_library://pkg/zx
 companion_host_tool://tools/qemu_uefi_internal/arm64
@@ -208,6 +213,7 @@ fidl_library://fidl/fuchsia.driver.metadata (unstable)
 fidl_library://fidl/fuchsia.driver.registrar
 fidl_library://fidl/fuchsia.driver.test
 fidl_library://fidl/fuchsia.driver.token (unstable)
+fidl_library://fidl/fuchsia.ebpf (unstable)
 fidl_library://fidl/fuchsia.element
 fidl_library://fidl/fuchsia.factory
 fidl_library://fidl/fuchsia.factory.wlan
@@ -327,6 +333,7 @@ fidl_library://fidl/fuchsia.net.interfaces
 fidl_library://fidl/fuchsia.net.matchers (unstable)
 fidl_library://fidl/fuchsia.net.mdns
 fidl_library://fidl/fuchsia.net.reachability
+fidl_library://fidl/fuchsia.net.resources (unstable)
 fidl_library://fidl/fuchsia.net.routes
 fidl_library://fidl/fuchsia.net.stackmigrationdeprecated
 fidl_library://fidl/fuchsia.pkg.resolution

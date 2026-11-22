@@ -39,7 +39,6 @@ fuchsia_driver_dml("msd-vsi-vip-dml") {
 }
 
 fuchsia_driver_component("msd_vsi") {
-  info = "meta/msd_vsi-info.json"
   deps = [ ":msd_vsi-driver" ]
   dml_label = ":msd-vsi-vip-dml"
 }
@@ -55,7 +54,6 @@ fuchsia_cc_driver("msd_vsi_test-driver") {
 }
 
 fuchsia_driver_component("msd_vsi_test") {
-  info = "meta/msd_vsi_test-info.json"
   testonly = true
   component_name = "libmsd_vsi_test"
   deps = [ ":msd_vsi_test-driver" ]

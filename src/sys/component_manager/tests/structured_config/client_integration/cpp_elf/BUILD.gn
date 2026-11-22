@@ -4,11 +4,10 @@
 
 import("//build/components.gni")
 
-# Kept in GN because there are no in-tree
-# `fuchsia_structured_config_cpp_elf_lib` or `fuchsia_structured_config_values`
-# Bazel rules for `:config_lib` and `:values` (`:bin` and `:test_component`
-# depend on `:config_lib`), and `:cpp_elf` embeds the GN-only
-# `//src/sys/component_manager:component-manager-realm-builder-cmp`.
+# Kept in GN because there is no in-tree
+# `fuchsia_structured_config_cpp_elf_lib` Bazel rule for `:config_lib` (`:bin`
+# and `:test_component` depend on `:config_lib`), and `:cpp_elf` embeds the
+# GN-only `//src/sys/component_manager:component-manager-realm-builder-cmp`.
 executable("bin") {
   testonly = true
   output_name = "structured_config_cpp_elf"
@@ -35,12 +34,6 @@ fuchsia_structured_config_cpp_elf_lib("config_lib") {
   cm_label = ":manifest"
 }
 
-fuchsia_structured_config_values("values") {
-  testonly = true
-  cm_label = ":manifest"
-  values_source = "../config/values.json5"
-}
-
 fuchsia_component("test_component") {
   testonly = true
   cm_label = ":manifest"
@@ -51,8 +44,6 @@ fuchsia_test_package("cpp_elf") {
   package_name = "sc_cpp_elf_client_integration_test"
   test_components = [ ":test_component" ]
   deps = [
-    ":values",
-
     # https://fxbug.dev/42052321: Dep included for affected tests presubmit
     "//src/sys/component_manager:component-manager-realm-builder-cmp",
   ]

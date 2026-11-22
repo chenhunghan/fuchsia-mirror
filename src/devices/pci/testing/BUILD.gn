@@ -7,9 +7,22 @@ import("//build/cpp/library_headers.gni")
 import("//build/test.gni")
 
 library_headers("pci-protocol-fake-headers") {
+  testonly = true
   include_dir = "."
   headers = [ "pci_protocol_fake.h" ]
-  public_deps = [ "//src/devices/pci/lib/cpp:headers" ]
+  public_deps = [
+    "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_cpp_testing",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/driver/fake-bti/cpp",
+    "//sdk/lib/driver/fake-resource/cpp",
+    "//sdk/lib/driver/pci/cpp",
+    "//src/devices/pci/lib/cpp:headers",
+    "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/sync",
+    "//zircon/system/ulib/zx",
+  ]
 }
 
 source_set("pci-protocol-fake") {
@@ -17,17 +30,7 @@ source_set("pci-protocol-fake") {
     "protocol/fidl.cc",
     "protocol/internal.cc",
   ]
-  public_deps = [
-    ":pci-protocol-fake-headers",
-    "//sdk/lib/async:async-cpp",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/driver/fake-bti/cpp",
-    "//sdk/lib/driver/fake-resource/cpp",
-    "//src/devices/pci/lib/cpp:headers",
-    "//src/devices/pci/lib/device-protocol-pci",
-    "//zircon/system/ulib/fbl",
-  ]
+  public_deps = [ ":pci-protocol-fake-headers" ]
   deps = [ "//sdk/lib/stdcompat" ]
   testonly = true
 }
@@ -39,7 +42,7 @@ test("pci-protocol-fake-test") {
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/driver/mmio/cpp",
-    "//src/devices/pci/lib/device-protocol-pci",
+    "//sdk/lib/driver/pci/cpp",
     "//src/devices/pci/testing:pci-protocol-fake",
     "//zircon/system/public",
     "//zircon/system/ulib/zxtest",

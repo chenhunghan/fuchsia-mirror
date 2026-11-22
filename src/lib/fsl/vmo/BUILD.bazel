@@ -6,6 +6,17 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    [
+        "file_unittest.cc",
+        "shared_vmo_unittest.cc",
+        "sized_vmo_unittest.cc",
+        "strings_unittest.cc",
+        "vector_unittest.cc",
+    ],
+    visibility = ["//src/lib/fsl:__pkg__"],
+)
+
 cc_library(
     name = "vmo",
     srcs = [
@@ -28,6 +39,7 @@ cc_library(
     ],
     visibility = ["//src/lib/fsl:__subpackages__"],
     deps = [
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
         "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
         "//sdk/lib/syslog/cpp",
         "//src/lib/files",

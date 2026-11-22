@@ -23,13 +23,7 @@ rustc_library(
         "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-component",
-        # GN callers use the default `//src/lib/fuchsia-component-test` target,
-        # which is a group that also pulls in the realm builder shard and
-        # server component. Bazel has no equivalent of that group yet, so
-        # depend on the library directly.
-        # TODO(https://fxbug.dev/543568916): Drop the path_overwrite once the
-        # Bazel package exposes the same default target as GN.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:futures",
     ],

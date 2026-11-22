@@ -77,7 +77,7 @@ source_set("grpc_services") {
     "//sdk/fidl/fuchsia.bluetooth.bredr:fuchsia.bluetooth.bredr_cpp",
     "//sdk/fidl/fuchsia.bluetooth.le:fuchsia.bluetooth.le_cpp",
     "//sdk/fidl/fuchsia.bluetooth.sys:fuchsia.bluetooth.sys_cpp",
-    "//src/connectivity/bluetooth/testing/bt-affordances:affordances-c",
+    "//src/connectivity/bluetooth/testing/bt-affordances:affordances-c_headers",
     "//third_party/protobuf:protobuf_full",
   ]
   configs += [ ":include_bindings" ]

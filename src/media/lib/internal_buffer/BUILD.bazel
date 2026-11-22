@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "internal_buffer",
+    srcs = [
+        "internal_buffer.cc",
+    ],
+    hdrs = [
+        "internal_buffer.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/fit-promise",
+    ],
+    # Uses Fuchsia-only FIDL and Zircon sysmem headers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//build/cpp:__pkg__",
+        "//src/media/drivers/amlogic_decoder:__pkg__",
+        "//vendor:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_hlcpp",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+        "//sdk/lib/fit",
+        "//sdk/lib/memory_barriers",
+        # GN `bind_library()` generates `:fuchsia.amlogic.platform.sysmem.heap_cpp`, while Bazel uses `_cc`.
+        "//src/devices/bind/fuchsia.amlogic.platform.sysmem.heap:fuchsia.amlogic.platform.sysmem.heap_cc",  # @bazel2gn:path_overwrite://src/devices/bind/fuchsia.amlogic.platform.sysmem.heap:fuchsia.amlogic.platform.sysmem.heap_cpp
+        # GN `bind_library()` generates `:fuchsia.sysmem.heap_cpp`, while Bazel uses `_cc`.
+        "//src/devices/bind/fuchsia.sysmem.heap:fuchsia.sysmem.heap_cc",  # @bazel2gn:path_overwrite://src/devices/bind/fuchsia.sysmem.heap:fuchsia.sysmem.heap_cpp
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/sysmem-version",
+    ],
+    alwayslink = True,
+)

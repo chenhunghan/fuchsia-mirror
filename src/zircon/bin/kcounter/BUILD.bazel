@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "kcounter",
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fdio/rust:fdio",
+        "//src/zircon/bin/kcounter/lib:kcounter-lib",
+        "//third_party/rust_crates/vendor:libc",
+        "//zircon/kernel/lib/counters/abi:counters-abi",
+    ],
+)

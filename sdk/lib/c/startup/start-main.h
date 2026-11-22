@@ -20,7 +20,7 @@ namespace LIBC_NAMESPACE_DECL {
 // This must use only the basic machine ABI because it's called in phase one
 // from StartCompilerAbi (startup-trampoline.h).
 PageRoundedSize InitialStackSize()
-    // TODO(https://fxbug.dev/342469121): The asm linkage is only needed while
+    // TODO(https://fxbug.dev/349433421): The asm linkage is only needed while
     // the legacy and new implementations coexist in the build.  This function
     // will be directly included into the hermetic_source_set() when there
     // aren't two different versions of it.
@@ -32,7 +32,7 @@ PageRoundedSize InitialStackSize()
 // must use asm linkage to be called across that hermetic boundary.  It takes
 // ownership of these handles by storing them in libc global state that can't
 // be accessed directly from hermetic (phase one proper) code.
-void SetStartHandles(zx::process process_self, zx::vmar allocation_vmar, zx::thread thread_self)
+void SetStartHandles(zx::process process_self, zx::vmar allocation_vmar)
     LIBC_ASM_LINKAGE_DECLARE(SetStartHandles);
 
 // This is called by startup-trampoline.S (the public __libc_start_main) after

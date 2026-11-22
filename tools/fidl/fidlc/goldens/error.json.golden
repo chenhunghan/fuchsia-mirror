@@ -21,7 +21,7 @@
     {
       "name": "test.error/Example",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/error.test.fidl",
         "line": 3,
         "column": 17,
         "length": 7
@@ -36,7 +36,7 @@
           "name": "foo",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/error.test.fidl",
             "line": 4,
             "column": 12,
             "length": 3
@@ -115,7 +115,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/error.test.fidl",
         "line": 4,
         "column": 16,
         "length": 32
@@ -138,7 +138,7 @@
           },
           "name": "s",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/error.test.fidl",
             "line": 5,
             "column": 9,
             "length": 1
@@ -171,7 +171,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/error.test.fidl",
         "line": 6,
         "column": 12,
         "length": 31
@@ -194,7 +194,7 @@
           },
           "name": "y",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/error.test.fidl",
             "line": 7,
             "column": 9,
             "length": 1
@@ -230,7 +230,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/error.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/error.test.fidl",
         "line": 6,
         "column": 11,
         "length": 33

@@ -82,7 +82,7 @@ impl Driver for InterruptHandlingDriver {
         Ok(Self { _node: node, _interrupt_handler: interrupt_handler })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("InterruptHandlingDriver::stop() was invoked.");
     }
 }

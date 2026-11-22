@@ -29,6 +29,9 @@ closed protocol Client {
     /// + request `body_timeout` the timeout to use when waiting for every chunk of bytes while
     ///     downloading the HTTP response body.
     /// + request `resumption_attempt_limit` the number of resumption attempts to make.
+    /// + request `cancel` an optional eventpair whose peer may be closed by the caller to cancel
+    ///     an in-flight download. When `ZX_EVENTPAIR_PEER_CLOSED` is observed, the server aborts
+    ///     the download, drops `destination`, and replies with `CANCELED`.
     /// - response `size` the size in bytes of the downloaded file.
     strict DownloadBlob(resource struct {
         url fuchsia.url.Url;
@@ -36,6 +39,7 @@ closed protocol Client {
         header_timeout zx.Time;
         body_timeout zx.Time;
         resumption_attempt_limit uint32;
+        cancel zx.Handle:<EVENTPAIR, zx.Rights.WAIT, optional>;
     }) -> (struct {
         size uint64;
     }) error strict enum {
@@ -53,5 +57,8 @@ closed protocol Client {
 
         /// Download failed for unspecified reasons.
         OTHER = 5;
+
+        /// Download was canceled by closing the peer of `cancel`.
+        CANCELED = 6;
     };
 };

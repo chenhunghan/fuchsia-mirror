@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "transaction",
+    srcs = [
+        "buffered_operations_builder.cc",
+        "transaction_handler.cc",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "device_transaction_handler.cc",
+        ],
+        "//conditions:default": [],
+    }),
+    hdrs = [
+        "buffered_operations_builder.h",
+        "transaction_handler.h",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "device_transaction_handler.h",
+        ],
+        "//conditions:default": [],
+    }),
+    implementation_deps = select({
+        "@platforms//os:fuchsia": [
+            "//src/storage/lib/trace:cpp",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//src/storage:__subpackages__"],
+    deps = [
+        "//src/storage/lib/buffer",
+        "//src/storage/lib/operation",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//src/storage/lib/block_client/cpp:interface",
+        ],
+        "//conditions:default": [],
+    }),
+)

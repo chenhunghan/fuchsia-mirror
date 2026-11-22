@@ -107,7 +107,7 @@ class UnionPayload {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
   };
 
@@ -191,7 +191,7 @@ class ComposedProtocolTwoWayAnonComposedRequest {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
   };
 
@@ -315,7 +315,7 @@ class ComposedProtocolTwoWayAnonComposedWithErrorResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
   };
 
@@ -359,7 +359,7 @@ class ComposedProtocolTwoWayAnonComposedWithErrorResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -412,7 +412,7 @@ class ComposedProtocolOnAnonComposedRequest {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
   };
 
@@ -456,7 +456,7 @@ class ComposedProtocolTwoWayNamedComposedWithErrorResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -509,7 +509,7 @@ class MainProtocolTwoWayLocalWithErrorResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -602,9 +602,9 @@ class MainProtocolTwoWayAnonRequest {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   MainProtocolTwoWayAnonRequest(MainProtocolTwoWayAnonRequest&& other) noexcept;
@@ -728,9 +728,9 @@ class MainProtocolTwoWayAnonWithErrorResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   MainProtocolTwoWayAnonWithErrorResponse(MainProtocolTwoWayAnonWithErrorResponse&& other) noexcept;
@@ -774,7 +774,7 @@ class MainProtocolTwoWayAnonWithErrorResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -827,9 +827,9 @@ class MainProtocolOnAnonRequest {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   MainProtocolOnAnonRequest(MainProtocolOnAnonRequest&& other) noexcept;

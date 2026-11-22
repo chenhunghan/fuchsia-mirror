@@ -189,7 +189,7 @@ class PizzaOrPasta {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kPizza = 1,  // 0x1
     kPasta = 2,  // 0x2
   };
@@ -242,7 +242,7 @@ class ExplicitPizzaOrPasta {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kPizza = 1,  // 0x1
     kPasta = 4,  // 0x4
   };
@@ -295,10 +295,10 @@ class FlexiblePizzaOrPasta {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kPizza = 1,  // 0x1
     kPasta = 2,  // 0x2
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   FlexiblePizzaOrPasta(FlexiblePizzaOrPasta&& other) noexcept;
@@ -350,7 +350,7 @@ class StrictPizzaOrPasta {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kPizza = 1,  // 0x1
     kPasta = 2,  // 0x2
   };
@@ -403,7 +403,7 @@ class Union {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kPrimitive = 1,                         // 0x1
     kStringNeedsConstructor = 2,            // 0x2
     kVectorStringAlsoNeedsConstructor = 3,  // 0x3
@@ -465,11 +465,11 @@ class FlexibleUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kPrimitive = 1,                         // 0x1
     kStringNeedsConstructor = 2,            // 0x2
     kVectorStringAlsoNeedsConstructor = 3,  // 0x3
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   FlexibleUnion(FlexibleUnion&& other) noexcept;
@@ -529,7 +529,7 @@ class StrictUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kPrimitive = 1,                         // 0x1
     kStringNeedsConstructor = 2,            // 0x2
     kVectorStringAlsoNeedsConstructor = 3,  // 0x3
@@ -591,7 +591,7 @@ class FieldCollision {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kFieldCollisionTag = 1,  // 0x1
   };
 
@@ -635,7 +635,7 @@ class ExplicitUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kPrimitive = 1,               // 0x1
     kStringNeedsConstructor = 3,  // 0x3
   };
@@ -688,7 +688,7 @@ class ReverseOrdinalUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kFirst = 1,   // 0x1
     kSecond = 2,  // 0x2
   };
@@ -790,10 +790,10 @@ class FlexibleFoo {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kS = 1,  // 0x1
     kI = 2,  // 0x2
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   FlexibleFoo(FlexibleFoo&& other) noexcept;
@@ -845,7 +845,7 @@ class StrictFoo {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kS = 1,  // 0x1
     kI = 2,  // 0x2
   };
@@ -898,10 +898,10 @@ class ExplicitFoo {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kI = 1,  // 0x1
     kS = 2,  // 0x2
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   ExplicitFoo(ExplicitFoo&& other) noexcept;
@@ -953,7 +953,7 @@ class ExplicitStrictFoo {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kI = 2,  // 0x2
     kS = 3,  // 0x3
   };
@@ -1006,10 +1006,10 @@ class OlderSimpleUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kI = 1,  // 0x1
     kF = 2,  // 0x2
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   OlderSimpleUnion(OlderSimpleUnion&& other) noexcept;
@@ -1061,11 +1061,11 @@ class NewerSimpleUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kI = 1,  // 0x1
     kS = 2,  // 0x2
     kV = 3,  // 0x3
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   NewerSimpleUnion(NewerSimpleUnion&& other) noexcept;
@@ -1125,7 +1125,7 @@ class StrictSimpleUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kI = 1,  // 0x1
     kF = 2,  // 0x2
     kS = 3,  // 0x3
@@ -1236,9 +1236,9 @@ class UnionContainingEmptyStruct {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kEmpty = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnionContainingEmptyStruct(UnionContainingEmptyStruct&& other) noexcept;
@@ -1282,7 +1282,7 @@ class StrictBoundedUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kV = 1,  // 0x1
   };
 
@@ -1473,10 +1473,10 @@ class ExplicitFlexibleUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kI = 1,  // 0x1
     kF = 4,  // 0x4
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   ExplicitFlexibleUnion(ExplicitFlexibleUnion&& other) noexcept;
@@ -1607,9 +1607,9 @@ class UnionWithAttributes {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kX = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnionWithAttributes(UnionWithAttributes&& other) noexcept;
@@ -1653,8 +1653,8 @@ class EmptyFlexibleUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+  enum class Tag : fidl_union_tag_t {
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   EmptyFlexibleUnion(EmptyFlexibleUnion&& other) noexcept;

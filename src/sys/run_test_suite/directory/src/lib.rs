@@ -8,8 +8,8 @@ mod v1;
 
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::hash_map::Iter;
 use std::collections::HashMap;
+use std::collections::hash_map::Iter;
 use std::fs::{DirBuilder, File};
 use std::io::Error;
 use std::path::{Path, PathBuf};
@@ -98,6 +98,9 @@ pub struct SuiteResult<'a> {
     pub common: Cow<'a, CommonResult>,
     pub cases: Vec<TestCaseResult<'a>>,
     pub tags: Cow<'a, Vec<TestTag>>,
+    /// The runner name from the test root's manifest, e.g. `gtest_runner`. May be absent or
+    /// unrecognized; consumers should then fall back to the default format.
+    pub runner: Option<Cow<'a, str>>,
 }
 
 /// A serializable test case result.
@@ -368,6 +371,7 @@ mod test {
                                 duration_milliseconds: None,
                             }),
                         }],
+                        runner: None,
                     }],
                 }
             });
@@ -440,6 +444,7 @@ mod test {
                                 duration_milliseconds: None,
                             }),
                         }],
+                        runner: None,
                     }],
                 }
             });
@@ -475,6 +480,7 @@ mod test {
                             duration_milliseconds: None,
                         }),
                     }],
+                    runner: None,
                 }],
             });
         }
@@ -508,6 +514,7 @@ mod test {
                         duration_milliseconds: Some(6),
                     }),
                 }],
+                runner: None,
             }],
         });
     }
@@ -535,6 +542,32 @@ mod test {
                     TestTag { key: "realm".to_string(), value: "system".to_string() },
                 ]),
                 cases: vec![],
+                runner: None,
+            }],
+        });
+    }
+
+    #[test]
+    fn runner_specified() {
+        round_trip_test_all_versions(|dir_builder| TestRunResult {
+            common: Cow::Owned(CommonResult {
+                name: RUN_NAME.to_string(),
+                artifact_dir: dir_builder.new_artifact_dir().expect("new dir"),
+                outcome: Outcome::Passed.into(),
+                start_time: Some(1),
+                duration_milliseconds: Some(2),
+            }),
+            suites: vec![SuiteResult {
+                common: Cow::Owned(CommonResult {
+                    name: "suite".to_string(),
+                    artifact_dir: dir_builder.new_artifact_dir().expect("new dir"),
+                    outcome: Outcome::Passed.into(),
+                    start_time: Some(3),
+                    duration_milliseconds: Some(4),
+                }),
+                tags: Cow::Owned(vec![]),
+                cases: vec![],
+                runner: Some(Cow::Borrowed("gtest_runner")),
             }],
         });
     }

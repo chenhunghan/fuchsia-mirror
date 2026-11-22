@@ -3,14 +3,14 @@
 // found in the LICENSE file.
 
 use anyhow::{Context as _, Error};
-use fidl_fuchsia_hardware_adb::{ProviderMarker, ProviderRequest, ProviderRequestStream};
+use fidl_fuchsia_hardware_adb::{ProviderRequest, ProviderRequestStream};
 use fidl_fuchsia_recovery_android::UpdaterMarker;
 use fuchsia_async as fasync;
 use fuchsia_component::client::connect_to_protocol;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_fs::file::{AsyncReadAt, AsyncReadAtExt as _};
 use futures::lock::Mutex;
-use futures::{StreamExt as _, TryFutureExt as _};
+use futures::{StreamExt as _, TryFutureExt as _, TryStreamExt as _};
 use std::sync::Arc;
 
 mod http_server;
@@ -79,6 +79,25 @@ impl SideloadServer {
         .detach();
         Ok(())
     }
+
+    /// Serves the requests on `stream` until the client closes the connection.
+    ///
+    /// Stops and returns an error if a FIDL error occurs while reading a request or sending a
+    /// response.
+    async fn serve(self, mut stream: ProviderRequestStream) -> Result<(), Error> {
+        while let Some(request) = stream
+            .try_next()
+            .await
+            .context("error reading fuchsia.hardware.adb.Provider request")?
+        {
+            let ProviderRequest::ConnectToService { socket, args, responder } = request;
+            log::info!("Connecting to service with args: {:?}", args);
+            responder
+                .send(self.connect_to_service(socket, args).await.map_err(|s| s.into_raw()))
+                .context("Failed to send response")?;
+        }
+        Ok(())
+    }
 }
 
 /// Find the offset of the first occurrence of the 8 bytes FAR magic header in the given file.
@@ -108,23 +127,16 @@ async fn find_far_offset(
     }
 }
 
-#[async_trait::async_trait]
-impl fidl_server::AsyncRequestHandler<ProviderMarker> for SideloadServer {
-    async fn handle_request(&self, request: ProviderRequest) -> Result<(), Error> {
-        let ProviderRequest::ConnectToService { socket, args, responder } = request;
-        log::info!("Connecting to service with args: {:?}", args);
-        responder
-            .send(self.connect_to_service(socket, args).await.map_err(|s| s.into_raw()))
-            .context("Failed to send response")?;
-        Ok(())
-    }
-}
-
 #[fuchsia::main]
 async fn main() -> Result<(), Error> {
+    // Each connection is served by its own task. Connections that are still being served when
+    // `main` returns are aborted when `scope` is dropped.
+    let scope = fasync::Scope::new();
     let mut fs = ServiceFs::new_local();
     fs.dir("svc").add_fidl_service(|stream: ProviderRequestStream| {
-        fidl_server::serve_async_detached(stream, SideloadServer {})
+        scope.spawn(
+            SideloadServer {}.serve(stream).unwrap_or_else(|error| log::error!("{error:?}")),
+        );
     });
 
     fs.take_and_serve_directory_handle()?;
@@ -137,9 +149,28 @@ async fn main() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fidl::endpoints::create_proxy_and_stream;
+    use fidl_fuchsia_hardware_adb::ProviderMarker;
     use fuchsia_fs::file::Adapter;
     use futures::io::Cursor;
     use test_case::test_case;
+
+    #[fuchsia::test]
+    async fn test_serve() {
+        let (provider, stream) = create_proxy_and_stream::<ProviderMarker>();
+        let server_task = fasync::Task::spawn(SideloadServer {}.serve(stream));
+
+        // Each request starts a sideload that waits to read the file from its socket, so keep the
+        // other end of each socket open until the end of the test.
+        let (socket, _adb_socket_1) = fidl::Socket::create_stream();
+        assert_eq!(provider.connect_to_service(socket, Some("8192:4096")).await.unwrap(), Ok(()));
+        let (socket, _adb_socket_2) = fidl::Socket::create_stream();
+        assert_eq!(provider.connect_to_service(socket, Some("8192:4096")).await.unwrap(), Ok(()));
+
+        // Serving ends without an error once the client closes the connection.
+        drop(provider);
+        server_task.await.unwrap();
+    }
 
     #[test_case(0, 100; "at start")]
     #[test_case(50, 100; "in middle")]

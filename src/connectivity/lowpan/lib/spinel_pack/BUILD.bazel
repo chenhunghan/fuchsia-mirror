@@ -9,6 +9,18 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":spinel-pack-tests"],
+    visibility = ["//src/connectivity/lowpan:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [":spinel_pack_host_test"],
+    visibility = ["//src/connectivity/lowpan:__pkg__"],
+)
+
 rustc_library(
     name = "spinel_pack",
     srcs = [
@@ -38,11 +50,9 @@ rustc_test(
 wrap_host_rust_test(
     name = "spinel_pack_host_test",
     binary_name = "spinel_pack_test",
-    visibility = ["//src/connectivity:__pkg__"],
 )
 
 fx_unittest_package(
     name = "spinel-pack-tests",
     unit_tests = [":spinel_pack_test"],
-    visibility = ["//src/connectivity:__pkg__"],
 )

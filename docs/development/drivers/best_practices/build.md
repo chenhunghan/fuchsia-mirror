@@ -103,35 +103,15 @@ fuchsia_driver_component("component") {
 
 ## Including your driver in the build.
 
-In order to include your driver in the build, it needs to go into
-two special places.
-
-The first is
-[`//build/drivers/all_drivers_list.txt`](/build/drivers/all_drivers_list.txt).
-If you don't do this, then you will see a build error reminding you about this.
-The `all_drivers_list.txt` file should contain all of the driver labels included
-in the fuchsia repository. This list is kept up-to-date so the Driver Framework
-team can ensure that all drivers continue to be supported and updated.
-
-If your driver can only build for x64 then please add it to:
-
-`//build/drivers/all_drivers_lists_x64.txt`
-
-If your driver can only build for arm64 then please add it to:
-
-`//build/drivers/all_drivers_lists_arm64.txt`
-
-The second location is:
-[`//bundles:drivers-build-only`](//bundles/BUILD.gn).
-There will also be a build error if you forget to add your driver here.
-To add to this list, you should make sure to add your driver component to
-the local driver group in your source location.
+To make sure your driver keeps building in the Fuchsia CQ, add your driver
+component to the local driver group in your source location, which is included
+in [`//bundles/drivers:drivers-build-only`](/bundles/drivers/BUILD.gn).
 
 For example, for a new driver added under `//src/ui/input/drivers`, you would
 add an entry to `//src/ui/input/drivers`.
 
 For the `drivers-build-only` target, you need to be sure that you're including
-the path to your `fuchsia_driver_components()` target, and not point to your
+the path to your `fuchsia_driver_component()` target, and not point to your
 `fuchsia_cc_driver()` target directly.
 
 ## Including your driver in an image

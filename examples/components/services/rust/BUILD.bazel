@@ -2,9 +2,72 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "branch-bin",
+    srcs = ["src/branch.rs"],
+    crate_root = "src/branch.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/components/services/fidl:fuchsia.examples.services_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "branch-bin_packaged",
+    testonly = True,
+    binary = ":branch-bin",
+    binary_name = "branch_bin_rust",
+)
+
+fx_component_manifest(
+    name = "branch_manifest",
+    testonly = True,
+    component_name = "default",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/branch.cml",
+)
+
+fx_component(
+    name = "branch_component",
+    testonly = True,
+    compiled_manifest = ":branch_manifest",
+    deps = [":branch-bin_packaged"],
+)
+
+fx_package(
+    name = "branch",
+    testonly = True,
+    components = [":branch_component"],
+    visibility = ["//examples/components/services:__pkg__"],
+)
 
 rustc_binary(
     name = "provider-bin",
@@ -13,6 +76,7 @@ rustc_binary(
     crate_name = "provider_bin_rust",
     crate_root = "src/provider.rs",
     edition = "2024",
+    tags = ["manual"],
     deps = [
         "//examples/components/services/fidl:fuchsia.examples.services_rust",
         "//src/lib/fuchsia",
@@ -21,4 +85,54 @@ rustc_binary(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",
     ],
+)
+
+fx_packaged_binary(
+    name = "provider-bin_packaged",
+    binary = ":provider-bin",
+    binary_name = "provider_bin_rust",
+)
+
+fx_component_manifest(
+    name = "provider-a_manifest",
+    testonly = True,
+    component_name = "default",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/provider-a.cml",
+)
+
+fx_component(
+    name = "provider-a_component",
+    testonly = True,
+    compiled_manifest = ":provider-a_manifest",
+    deps = [":provider-bin_packaged"],
+)
+
+fx_package(
+    name = "provider-a",
+    testonly = True,
+    components = [":provider-a_component"],
+    visibility = ["//examples/components/services:__pkg__"],
+)
+
+fx_component_manifest(
+    name = "provider-b_manifest",
+    testonly = True,
+    component_name = "default",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/provider-b.cml",
+)
+
+fx_component(
+    name = "provider-b_component",
+    testonly = True,
+    compiled_manifest = ":provider-b_manifest",
+    deps = [":provider-bin_packaged"],
+)
+
+fx_package(
+    name = "provider-b",
+    testonly = True,
+    components = [":provider-b_component"],
+    visibility = ["//examples/components/services:__pkg__"],
 )

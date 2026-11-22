@@ -41,6 +41,7 @@ group("tests") {
     "thermal:tests",
     "tracefs:tests",
     "usbfs:tests",
+    "wakeup_test:tests",
   ]
 }
 
@@ -50,7 +51,10 @@ rustc_library("modules") {
   version = "0.1.0"
   source_root = "lib.rs"
 
-  sources = [ "lib.rs" ]
+  sources = [
+    "lib.rs",
+    "soc.rs",
+  ]
 
   configs += [ "//src/starnix/build:kernel_library_config" ]
 

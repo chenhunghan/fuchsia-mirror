@@ -317,19 +317,29 @@ impl<'a, R: Read, W: Write> State<'a, R, W> {
                     }
                 }
                 KEY_ESC => {
-                    if i < completions.len() {
-                        self.refresh_line();
-                    }
                     let Some(b1) = control::read_byte(self.reader).ok().flatten() else {
+                        if i < completions.len() {
+                            self.refresh_line();
+                        }
                         return 0;
                     };
                     if b1 == b'[' || b1 == b'O' {
                         let Some(b2) = control::read_byte(self.reader).ok().flatten() else {
+                            if i < completions.len() {
+                                self.refresh_line();
+                            }
                             return 0;
                         };
+                        if i < completions.len() {
+                            self.buffer = completions[i].clone();
+                            self.cursor_position = self.buffer.len();
+                        }
                         self.handle_escape_sequence(b1, b2);
                         return 0;
                     } else {
+                        if i < completions.len() {
+                            self.refresh_line();
+                        }
                         return b1;
                     }
                 }

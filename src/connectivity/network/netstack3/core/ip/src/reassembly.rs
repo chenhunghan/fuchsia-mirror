@@ -30,7 +30,7 @@
 //! + 40 byte IPv6 header). If a link supports an MTU greater than the maximum
 //! size of a non-jumbogram packet, the packet should not be fragmented.
 
-use alloc::collections::{BTreeSet, BinaryHeap};
+use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt::Debug;
@@ -42,7 +42,7 @@ use log::debug;
 use net_types::ip::{GenericOverIp, Ip, IpAddr, IpVersionMarker, Ipv4, Ipv6};
 use netstack3_base::{
     CoreTimerContext, HandleableTimer, InstantBindingsTypes, IpExt, LocalTimerHeap,
-    TimerBindingsTypes, TimerContext,
+    TimerBindingsTypes, TimerContext, VecSet,
 };
 use netstack3_hashmap::hash_map::{Entry, HashMap};
 use packet::{BufferViewMut, ParsablePacket as _};
@@ -407,19 +407,13 @@ struct FragmentCacheData {
     /// `missing_blocks` to a list with a single element representing all
     /// blocks, (0, MAX_VALUE). In this case, MAX_VALUE will be set to
     /// `core::u16::MAX`.
-    missing_blocks: BTreeSet<BlockRange>,
+    missing_blocks: VecSet<BlockRange>,
 
     /// Received fragment blocks.
     ///
-    /// We use a binary heap for help when reassembling packets. When we
-    /// reassemble packets, we will want to fill up a new buffer with all the
-    /// body fragments. The easiest way to do this is in order, from the
-    /// fragment with offset 0 to the fragment with the highest offset. Since we
-    /// only need to enforce the order when reassembling, we use a min-heap so
-    /// we have a defined order (increasing fragment offset values) when
-    /// popping. `BinaryHeap` is technically a max-heap, but we use the negative
-    /// of the offset values as the key for the heap. See
-    /// [`PacketBodyFragment::new`].
+    /// We use a binary heap ordered by fragment `offset` so that
+    /// `into_sorted_vec()` yields body fragments in ascending offset order when
+    /// reassembling.
     body_fragments: BinaryHeap<PacketBodyFragment>,
 
     /// The header data for the reassembled packet.
@@ -441,12 +435,8 @@ struct FragmentCacheData {
 
 impl Default for FragmentCacheData {
     fn default() -> FragmentCacheData {
-        // NB: Use `insert` rather than `collect` because `BTreeSet`'s
-        // `FromIterator` impl sorts its input, pulling in the stable sort code.
-        let mut missing_blocks = BTreeSet::new();
-        let _: bool = missing_blocks.insert(BlockRange { start: 0, end: u16::MAX });
         FragmentCacheData {
-            missing_blocks,
+            missing_blocks: VecSet::with_single(BlockRange { start: 0, end: u16::MAX }),
             body_fragments: BinaryHeap::new(),
             header: None,
             total_size: 0,
@@ -457,7 +447,12 @@ impl Default for FragmentCacheData {
 
 impl FragmentCacheData {
     /// Attempts to find a gap where the provided `BlockRange` will fit in.
-    fn find_gap(&self, BlockRange { start, end }: BlockRange) -> FindGapResult {
+    fn find_gap(
+        &self,
+        BlockRange { start, end }: BlockRange,
+        body_len: usize,
+        m_flag: bool,
+    ) -> FindGapResult {
         let result = self.missing_blocks.iter().find_map(|gap| {
             // This gap completely contains the provided range.
             if gap.start <= start && gap.end >= end {
@@ -472,26 +467,23 @@ impl FragmentCacheData {
 
             // If neither of the above are true, this gap must overlap with
             // the provided range.
-            return Some(FindGapResult::Overlap);
+            return Some(FindGapResult::Invalid);
         });
 
         match result {
             Some(result) => result,
             None => {
-                // Searching the missing blocks didn't find a suitable gap nor
-                // an overlap. Check for an out-of-bounds range before
-                // concluding that this range must be a duplicate.
-
-                // Note: `last` *must* exist and *must* represent the final
-                // fragment. If we had not yet received the final fragment, the
-                // search through the `missing_blocks` would be guaranteed to
-                // return `Some` (because it would contain a range with an end
-                // equal to u16::Max).
-                let last = self.body_fragments.peek().unwrap();
-                if last.offset < start {
-                    FindGapResult::OutOfBounds
-                } else {
+                // Searching `missing_blocks` found neither a containing gap nor
+                // a partial gap overlap, so `start..=end` lies entirely within
+                // already-received blocks or past the end of the final
+                // fragment. Check for an exact duplicate before concluding the
+                // fragment is invalid.
+                if self.body_fragments.iter().any(|frag| {
+                    frag.offset == start && frag.data.len() == body_len && frag.m_flag == m_flag
+                }) {
                     FindGapResult::Duplicate
+                } else {
+                    FindGapResult::Invalid
                 }
             }
         }
@@ -502,18 +494,12 @@ impl FragmentCacheData {
 enum FindGapResult {
     // The provided `BlockRange` fits inside of an existing gap. The gap may be
     // completely or partially filled by the provided `BlockRange`.
-    Found {
-        gap: BlockRange,
-    },
-    // The provided `BlockRange` overlaps with data we've already received.
-    // Specifically, an overlap occurs if the provided `BlockRange` is partially
-    // contained within a gap.
-    Overlap,
-    /// The provided `BlockRange` has an end beyond the known end of the packet.
-    OutOfBounds,
-    // The provided `BlockRange` has already been received. Specifically, a
-    // duplicate occurs if the provided `BlockRange` is completely disjoint from
-    // all known gaps.
+    Found { gap: BlockRange },
+    // The provided `BlockRange` overlaps with data we've already received, or
+    // extends beyond the end of the final fragment.
+    Invalid,
+    // An already-received fragment has the same offset, body length, and
+    // `m_flag`.
     //
     // RFC 8200, Section 4.5 states:
     //   It should be noted that fragments may be duplicated in the
@@ -648,8 +634,9 @@ impl<I: ReassemblyIpExt, BT: FragmentBindingsTypes> IpPacketFragmentCache<I, BT>
         let (fragment_data, timer_not_yet_scheduled) = self.get_or_create(key);
 
         // Find the gap where `packet` belongs.
-        let found_gap = match fragment_data.find_gap(fragment_blocks_range) {
-            FindGapResult::Overlap | FindGapResult::OutOfBounds => {
+        let body_len = packet.body().len();
+        let found_gap = match fragment_data.find_gap(fragment_blocks_range, body_len, m_flag) {
+            FindGapResult::Invalid => {
                 // Drop all reassembly data as per RFC 8200 section 4.5 (IPv6).
                 // See RFC 5722 for more information.
                 //
@@ -796,7 +783,7 @@ impl<I: ReassemblyIpExt, BT: FragmentBindingsTypes> IpPacketFragmentCache<I, BT>
         body.extend_from_slice(packet.body());
         added_bytes += body.len();
         fragment_data.total_size += added_bytes;
-        fragment_data.body_fragments.push(PacketBodyFragment::new(offset, body));
+        fragment_data.body_fragments.push(PacketBodyFragment::new(offset, m_flag, body));
 
         // If we still have missing fragments, let the caller know that we are
         // still waiting on some fragments. Otherwise, we let them know we are
@@ -921,13 +908,14 @@ fn get_header<B: SplitByteSlice, I: IpExt>(packet: &I::Packet<B>) -> Vec<u8> {
 #[derive(Debug, PartialEq, Eq)]
 struct PacketBodyFragment {
     offset: u16,
+    m_flag: bool,
     data: Vec<u8>,
 }
 
 impl PacketBodyFragment {
     /// Constructs a new `PacketBodyFragment` to be stored in a `BinaryHeap`.
-    fn new(offset: u16, data: Vec<u8>) -> Self {
-        PacketBodyFragment { offset, data }
+    fn new(offset: u16, m_flag: bool, data: Vec<u8>) -> Self {
+        PacketBodyFragment { offset, m_flag, data }
     }
 }
 
@@ -1112,6 +1100,28 @@ mod tests {
         m_flag: bool,
     }
 
+    struct ByteFragmentSpec {
+        /// The ID of the fragment.
+        id: u16,
+        /// The offset of the fragment, in units of `FRAGMENT_BLOCK_SIZE`.
+        offset: u16,
+        /// The size of the fragment, in bytes.
+        size_bytes: usize,
+        /// The value of the M flag. "True" indicates more fragments.
+        m_flag: bool,
+    }
+
+    impl From<FragmentSpec> for ByteFragmentSpec {
+        fn from(FragmentSpec { id, offset, size, m_flag }: FragmentSpec) -> Self {
+            Self {
+                id,
+                offset,
+                size_bytes: usize::from(size) * usize::from(FRAGMENT_BLOCK_SIZE),
+                m_flag,
+            }
+        }
+    }
+
     fn expected_packet_size<I: TestIpExt>(num_fragment_blocks: u16) -> usize {
         usize::from(num_fragment_blocks) * usize::from(FRAGMENT_BLOCK_SIZE) + I::HEADER_LENGTH
     }
@@ -1120,18 +1130,15 @@ mod tests {
     fn process_ipv4_fragment<CC: FragmentContext<Ipv4, BC>, BC: FragmentBindingsContext>(
         core_ctx: &mut CC,
         bindings_ctx: &mut BC,
-        FragmentSpec { id, offset, size, m_flag }: FragmentSpec,
+        spec: impl Into<ByteFragmentSpec>,
         mut builder: Ipv4PacketBuilder,
         expected_result: ExpectedResult<Ipv4>,
     ) {
+        let ByteFragmentSpec { id, offset, size_bytes, m_flag } = spec.into();
         builder.id(id);
         builder.fragment_offset(FragmentOffset::new(offset).unwrap());
         builder.mf_flag(m_flag);
-        let body = generate_body_fragment(
-            id,
-            offset,
-            usize::from(size) * usize::from(FRAGMENT_BLOCK_SIZE),
-        );
+        let body = generate_body_fragment(id, offset, size_bytes);
 
         let mut buffer = builder
             .wrap_body(Buf::new(body, ..))
@@ -1163,15 +1170,14 @@ mod tests {
     }
 
     /// Generates and processes an IPv6 fragment packet.
-    ///
-    /// `fragment_offset` and `size` are both in units of `FRAGMENT_BLOCK_SIZE`.
     fn process_ipv6_fragment<CC: FragmentContext<Ipv6, BC>, BC: FragmentBindingsContext>(
         core_ctx: &mut CC,
         bindings_ctx: &mut BC,
-        FragmentSpec { id, offset, size, m_flag }: FragmentSpec,
+        spec: impl Into<ByteFragmentSpec>,
         builder: Ipv6PacketBuilder,
         expected_result: ExpectedResult<Ipv6>,
     ) {
+        let ByteFragmentSpec { id, offset, size_bytes, m_flag } = spec.into();
         let builder = Ipv6PacketBuilderWithFragmentHeader::new(
             builder,
             FragmentOffset::new(offset).unwrap(),
@@ -1179,11 +1185,7 @@ mod tests {
             id.into(),
         );
 
-        let body = generate_body_fragment(
-            id,
-            offset,
-            usize::from(size) * usize::from(FRAGMENT_BLOCK_SIZE),
-        );
+        let body = generate_body_fragment(id, offset, size_bytes);
 
         let mut buffer = builder
             .wrap_body(Buf::new(body, ..))
@@ -1222,7 +1224,7 @@ mod tests {
         fn process_ip_fragment<CC: FragmentContext<Self, BC>, BC: FragmentBindingsContext>(
             core_ctx: &mut CC,
             bindings_ctx: &mut BC,
-            spec: FragmentSpec,
+            spec: impl Into<ByteFragmentSpec>,
             expected_result: ExpectedResult<Self>,
         );
     }
@@ -1235,7 +1237,7 @@ mod tests {
         fn process_ip_fragment<CC: FragmentContext<Self, BC>, BC: FragmentBindingsContext>(
             core_ctx: &mut CC,
             bindings_ctx: &mut BC,
-            spec: FragmentSpec,
+            spec: impl Into<ByteFragmentSpec>,
             expected_result: ExpectedResult<Ipv4>,
         ) {
             process_ipv4_fragment(core_ctx, bindings_ctx, spec, get_ipv4_builder(), expected_result)
@@ -1249,7 +1251,7 @@ mod tests {
         fn process_ip_fragment<CC: FragmentContext<Self, BC>, BC: FragmentBindingsContext>(
             core_ctx: &mut CC,
             bindings_ctx: &mut BC,
-            spec: FragmentSpec,
+            spec: impl Into<ByteFragmentSpec>,
             expected_result: ExpectedResult<Ipv6>,
         ) {
             process_ipv6_fragment(core_ctx, bindings_ctx, spec, get_ipv6_builder(), expected_result)
@@ -1929,6 +1931,57 @@ mod tests {
     }
 
     #[ip_test(I)]
+    #[test_case(true)]
+    #[test_case(false)]
+    fn test_ip_duplicate_fragment_different_m_flag<I: TestIpExt>(first_m_flag: bool) {
+        let FakeCtxImpl { mut core_ctx, mut bindings_ctx } = new_context::<I>();
+        let id = 5;
+        // Non-zero offset so `!m_flag` is still treated as a fragment.
+        let offset = 1;
+        let size = 1;
+
+        I::process_ip_fragment(
+            &mut core_ctx,
+            &mut bindings_ctx,
+            FragmentSpec { id, offset, size, m_flag: first_m_flag },
+            ExpectedResult::NeedMore,
+        );
+
+        I::process_ip_fragment(
+            &mut core_ctx,
+            &mut bindings_ctx,
+            FragmentSpec { id, offset, size, m_flag: !first_m_flag },
+            ExpectedResult::Invalid,
+        );
+    }
+
+    #[ip_test(I)]
+    #[test_case(3, 5)]
+    #[test_case(5, 3)]
+    fn test_ip_duplicate_fragment_different_sub_block_len<I: TestIpExt>(
+        first_size_bytes: usize,
+        second_size_bytes: usize,
+    ) {
+        let FakeCtxImpl { mut core_ctx, mut bindings_ctx } = new_context::<I>();
+        let id = 5;
+        let offset = 1;
+
+        I::process_ip_fragment(
+            &mut core_ctx,
+            &mut bindings_ctx,
+            ByteFragmentSpec { id, offset, size_bytes: first_size_bytes, m_flag: false },
+            ExpectedResult::NeedMore,
+        );
+
+        I::process_ip_fragment(
+            &mut core_ctx,
+            &mut bindings_ctx,
+            ByteFragmentSpec { id, offset, size_bytes: second_size_bytes, m_flag: false },
+            ExpectedResult::Invalid,
+        );
+    }
+
+    #[ip_test(I)]
     #[test_case(1)]
     #[test_case(10)]
     #[test_case(100)]
@@ -1955,23 +2008,29 @@ mod tests {
     }
 
     #[ip_test(I)]
-    #[test_case(50, 100; "overlaps_front")]
-    #[test_case(150, 100; "overlaps_back")]
-    #[test_case(50, 200; "overlaps_both")]
-    fn test_ip_overlapping_fragment<I: TestIpExt>(offset: u16, size: u16) {
+    #[test_case(&[(100, 100)], 50, 100; "overlaps_front")]
+    #[test_case(&[(100, 100)], 150, 100; "overlaps_back")]
+    #[test_case(&[(100, 100)], 50, 200; "overlaps_both")]
+    #[test_case(&[(100, 100)], 100, 50; "overlaps_subset_front")]
+    #[test_case(&[(100, 100)], 125, 50; "overlaps_subset_middle")]
+    #[test_case(&[(100, 100)], 150, 50; "overlaps_subset_back")]
+    #[test_case(&[(100, 50), (150, 50)], 100, 100; "overlaps_multiple_spans_both")]
+    #[test_case(&[(100, 50), (150, 50)], 125, 50; "overlaps_multiple_straddles")]
+    fn test_ip_overlapping_fragment<I: TestIpExt>(cached: &[(u16, u16)], offset: u16, size: u16) {
         let FakeCtxImpl { mut core_ctx, mut bindings_ctx } = new_context::<I>();
         let id = 5;
 
-        // Process fragment #0
-        I::process_ip_fragment(
-            &mut core_ctx,
-            &mut bindings_ctx,
-            FragmentSpec { id, offset: 100, size: 100, m_flag: true },
-            ExpectedResult::NeedMore,
-        );
+        for &(cached_offset, cached_size) in cached {
+            I::process_ip_fragment(
+                &mut core_ctx,
+                &mut bindings_ctx,
+                FragmentSpec { id, offset: cached_offset, size: cached_size, m_flag: true },
+                ExpectedResult::NeedMore,
+            );
+        }
 
-        // Process a fragment that overlaps with fragment 0. It should be deemed
-        // invalid.
+        // Process a fragment that overlaps with the cached fragment(s). It
+        // should be deemed invalid.
         I::process_ip_fragment(
             &mut core_ctx,
             &mut bindings_ctx,

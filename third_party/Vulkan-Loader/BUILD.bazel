@@ -1,0 +1,130 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+_LOADER_COPTS = [
+    "-fno-sanitize=function",
+    "-Wno-conversion",
+    "-Wno-extra-semi",
+    "-Wno-sign-compare",
+    "-Wno-strict-prototypes",
+    "-Wno-unreachable-code",
+    "-Wno-unused-function",
+    "-Wno-unused-variable",
+    "-Wno-write-strings",
+]
+
+_LOADER_DEFINES = [
+    "HAVE_ALLOCA_H",
+    "LOADER_USE_UNSAFE_FILE_SEARCH=1",
+    "VK_ENABLE_BETA_EXTENSIONS",
+] + select({
+    "@platforms//os:fuchsia": [
+        "SYSCONFDIR=\\\"/vulkan-loader-configuration\\\"",
+        "EXTRASYSCONFDIR=\\\"/pkg/data\\\"",
+    ],
+    "@platforms//os:linux": [
+        "_GNU_SOURCE",
+        "HAVE_SECURE_GETENV",
+        "LOADER_ENABLE_LINUX_SORT",
+        "SYSCONFDIR=\\\"/etc\\\"",
+        "FALLBACK_CONFIG_DIRS=\\\"/etc/xdg\\\"",
+        "FALLBACK_DATA_DIRS=\\\"/usr/local/share:/usr/share\\\"",
+    ],
+    "//conditions:default": [],
+})
+
+fx_cc_library(
+    name = "dlopen_fuchsia",
+    srcs = [
+        "src/loader/dlopen_fuchsia.cc",
+        "src/loader/loader_fuchsia_service.cc",
+    ],
+    hdrs = glob(["src/loader/**/*.h"]),
+    copts = _LOADER_COPTS,
+    defines = _LOADER_DEFINES,
+    includes = [
+        "src/loader",
+        "src/loader/generated",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.vulkan.loader:fuchsia.vulkan.loader_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//third_party/Vulkan-Headers:vulkan_headers",
+    ],
+)
+
+fx_cc_library(
+    name = "libvulkan",
+    srcs = [
+        "src/loader/adapters.h",
+        "src/loader/allocation.c",
+        "src/loader/allocation.h",
+        "src/loader/cJSON.c",
+        "src/loader/cJSON.h",
+        "src/loader/debug_utils.c",
+        "src/loader/debug_utils.h",
+        "src/loader/extension_manual.c",
+        "src/loader/extension_manual.h",
+        "src/loader/generated/vk_layer_dispatch_table.h",
+        "src/loader/generated/vk_loader_extensions.h",
+        "src/loader/generated/vk_object_types.h",
+        "src/loader/gpa_helper.c",
+        "src/loader/gpa_helper.h",
+        "src/loader/loader.c",
+        "src/loader/loader.h",
+        "src/loader/loader_common.h",
+        "src/loader/loader_environment.c",
+        "src/loader/loader_environment.h",
+        "src/loader/loader_json.c",
+        "src/loader/loader_json.h",
+        "src/loader/log.c",
+        "src/loader/log.h",
+        "src/loader/settings.c",
+        "src/loader/settings.h",
+        "src/loader/stack_allocation.h",
+        "src/loader/terminator.c",
+        "src/loader/trampoline.c",
+        "src/loader/unknown_function_handling.c",
+        "src/loader/unknown_function_handling.h",
+        "src/loader/vk_loader_layer.h",
+        "src/loader/vk_loader_platform.h",
+        "src/loader/wsi.c",
+        "src/loader/wsi.h",
+    ] + select({
+        "@platforms//os:fuchsia": ["src/loader/loader_extensions_fuchsia.cc"],
+        "@platforms//os:linux": [
+            "src/loader/loader_linux.c",
+            "src/loader/loader_linux.h",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = _LOADER_COPTS,
+    defines = _LOADER_DEFINES,
+    includes = [
+        "src/loader",
+        "src/loader/generated",
+    ],
+    textual_hdrs = [
+        "src/loader/generated/vk_loader_extensions.c",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//third_party/Vulkan-Headers:vulkan_headers",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            ":dlopen_fuchsia",
+            "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+            "//sdk/fidl/fuchsia.vulkan.loader:fuchsia.vulkan.loader_cpp",
+            "//sdk/lib/fdio",
+        ],
+        "//conditions:default": [],
+    }),
+)

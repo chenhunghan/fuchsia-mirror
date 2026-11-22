@@ -156,7 +156,7 @@ class SymbolName : public std::string_view {
 
 // This type can be used as a constructor tag to zero-construct an object whose
 // default constructor would otherwise not be zero initializable. This can
-// allow and object to be placed in bss. See
+// allow an object to be placed in bss. See
 // `SymbolInfo::SymbolInfo(LinkerZeroInitialized)` for more.
 struct LinkerZeroInitialized {};
 inline constexpr LinkerZeroInitialized kLinkerZeroInitialized{};
@@ -181,7 +181,7 @@ template <typename T, typename RawElement>
 concept SymbolHashTableApi =
     // The hash table object is constructed from validated raw file data: a
     // span<Word> for DT_HASH; a span<Addr> for DT_GNU_HASH.
-    std::constructible_from<std::span<const RawElement>> &&  //
+    std::constructible_from<T, std::span<const RawElement>> &&  //
     requires(const T& table) {
       // Valid() returns true if the raw table is usable: it's safe to pass it
       // to the constructor.

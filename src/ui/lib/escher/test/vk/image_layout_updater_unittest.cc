@@ -7,7 +7,6 @@
 #include <gtest/gtest.h>
 
 #include "src/ui/lib/escher/escher.h"
-#include "src/ui/lib/escher/renderer/batch_gpu_downloader.h"
 #include "src/ui/lib/escher/resources/resource_recycler.h"
 #include "src/ui/lib/escher/test/common/gtest_escher.h"
 #include "src/ui/lib/escher/test/common/test_with_vk_validation_layer.h"

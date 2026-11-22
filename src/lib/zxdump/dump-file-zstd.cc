@@ -209,7 +209,7 @@ fit::result<Error, ByteView> DumpFile::Zstd::Read(FileRange where, bool permanen
     buffered = {buffer_.data(), buffer_range_.size};
 
     if (result.is_error()) {
-      return read_result.take_error();
+      return result.take_error();
     }
 
     if (!result.value()) {

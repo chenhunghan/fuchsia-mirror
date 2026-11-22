@@ -437,14 +437,20 @@ async fn bootstrap_generic_sme<D: DeviceOps>(
     );
     let mut usme_bootstrap_stream = server.into_stream();
 
-    let (generic_sme_server, legacy_privacy_support, responder) =
+    let (generic_sme_server, legacy_privacy_support, network_identifier_redaction, responder) =
         match usme_bootstrap_stream.next().await {
             Some(Ok(fidl_sme::UsmeBootstrapRequest::Start {
                 generic_sme_server,
                 legacy_privacy_support,
+                network_identifier_redaction,
                 responder,
                 ..
-            })) => (generic_sme_server, legacy_privacy_support, responder),
+            })) => (
+                generic_sme_server,
+                legacy_privacy_support,
+                network_identifier_redaction,
+                responder,
+            ),
             Some(Err(e)) => {
                 error!("Received an error on USME bootstrap request stream: {}", e);
                 return Err(zx::Status::BAD_STATE);
@@ -456,6 +462,9 @@ async fn bootstrap_generic_sme<D: DeviceOps>(
                 return Err(zx::Status::BAD_STATE);
             }
         };
+
+    // Install the redactor before the SME or MLME can format any network identifiers.
+    wlan_sme::install_network_identifier_redaction(network_identifier_redaction.as_deref());
 
     let inspector =
         Inspector::new(fuchsia_inspect::InspectorConfig::default().size(INSPECT_VMO_SIZE_BYTES));
@@ -662,7 +671,7 @@ mod tests {
         let (generic_sme_proxy, generic_sme_server) =
             fidl::endpoints::create_proxy::<fidl_sme::GenericSmeMarker>();
         let inspect_vmo_fut =
-            usme_bootstrap_proxy.start(generic_sme_server, &sent_legacy_privacy_support);
+            usme_bootstrap_proxy.start(generic_sme_server, &sent_legacy_privacy_support, None);
         let mut inspect_vmo_fut = pin!(inspect_vmo_fut);
         assert!(matches!(
             TestExecutor::poll_until_stalled(&mut inspect_vmo_fut).await,
@@ -765,7 +774,10 @@ mod tests {
             fidl_sme::LegacyPrivacySupport { wep_supported: false, wpa1_supported: false };
         let (generic_sme_proxy, generic_sme_server) =
             fidl::endpoints::create_proxy::<fidl_sme::GenericSmeMarker>();
-        (generic_sme_proxy, usme_client_proxy.start(generic_sme_server, &legacy_privacy_support))
+        (
+            generic_sme_proxy,
+            usme_client_proxy.start(generic_sme_server, &legacy_privacy_support, None),
+        )
     }
 
     #[test_case(FakeDeviceConfig::default().with_mock_query_response(Err(zx::Status::IO_DATA_INTEGRITY)), zx::Status::IO_DATA_INTEGRITY)]

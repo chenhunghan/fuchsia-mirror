@@ -26,6 +26,10 @@ pub mod test {
         /// All transmitted OEM commands; each will have the "oem " prefix automatically inserted
         /// to match real fastboot behavior.
         pub oem_commands: Vec<String>,
+        /// Explicit timeouts passed to `oem_with_timeout`, paired with the `"oem <cmd>"` string.
+        pub oem_timeouts: Vec<(String, Duration)>,
+        /// OEM commands configured to return `FastbootError::OemCommandFailed`.
+        failing_oem_commands: HashMap<String, String>,
         pub bootloader_reboots: usize,
         pub boots: usize,
         pub continue_boots: usize,
@@ -61,16 +65,45 @@ pub mod test {
         ) {
             vars.into_iter().for_each(|(var, val)| self.set_var(var.into(), val.into()))
         }
+
+        /// Configures `oem <command>` to return `Err(FastbootError::OemCommandFailed)`.
+        pub fn fail_oem(&mut self, command: impl Into<String>, message: impl Into<String>) {
+            self.failing_oem_commands.insert(command.into(), message.into());
+        }
     }
 
     #[derive(Debug)]
     pub struct TestFastbootInterface {
         state: Arc<Mutex<FakeServiceCommands>>,
+        supports_gbl_async_tasks: bool,
     }
 
     impl TestFastbootInterface {
         pub fn new(state: Arc<Mutex<FakeServiceCommands>>) -> Self {
-            Self { state }
+            Self { state, supports_gbl_async_tasks: true }
+        }
+
+        pub fn set_supports_gbl_async_tasks(&mut self, enabled: bool) {
+            self.supports_gbl_async_tasks = enabled;
+        }
+
+        fn oem_impl<'a>(
+            &'a mut self,
+            command: &'a str,
+            timeout: Option<Duration>,
+        ) -> BoxFuture<'a, Result<(), FastbootError>> {
+            Box::pin(async move {
+                let mut state = self.state.lock().unwrap();
+                let formatted = format!("oem {}", command);
+                state.oem_commands.push(formatted.clone());
+                if let Some(timeout) = timeout {
+                    state.oem_timeouts.push((formatted.clone(), timeout));
+                }
+                if let Some(message) = state.failing_oem_commands.get(command).cloned() {
+                    return Err(FastbootError::OemCommandFailed { command: formatted, message });
+                }
+                Ok(())
+            })
         }
     }
 
@@ -249,11 +282,19 @@ pub mod test {
         }
 
         fn oem<'a>(&'a mut self, command: &'a str) -> BoxFuture<'a, Result<(), FastbootError>> {
-            Box::pin(async move {
-                let mut state = self.state.lock().unwrap();
-                state.oem_commands.push(format!("oem {}", command));
-                Ok(())
-            })
+            self.oem_impl(command, None)
+        }
+
+        fn oem_with_timeout<'a>(
+            &'a mut self,
+            command: &'a str,
+            timeout: Duration,
+        ) -> BoxFuture<'a, Result<(), FastbootError>> {
+            self.oem_impl(command, Some(timeout))
+        }
+
+        fn supports_gbl_async_tasks(&self) -> bool {
+            self.supports_gbl_async_tasks
         }
 
         fn stream<'a>(
@@ -274,7 +315,7 @@ pub mod test {
 
     pub fn setup() -> (Arc<Mutex<FakeServiceCommands>>, TestFastbootInterface) {
         let state = Arc::new(Mutex::new(FakeServiceCommands::default()));
-        let interface = TestFastbootInterface { state: state.clone() };
+        let interface = TestFastbootInterface::new(state.clone());
         (state, interface)
     }
 }

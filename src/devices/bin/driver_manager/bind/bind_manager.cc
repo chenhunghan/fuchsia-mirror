@@ -6,13 +6,83 @@
 
 #include <fidl/fuchsia.driver.framework/cpp/fidl.h>
 
+#include <algorithm>
+
 #include "src/devices/bin/driver_manager/resource.h"
 #include "src/devices/lib/log/log.h"
 
 namespace fdd = fuchsia_driver_development;
+namespace fdfw = fuchsia_driver_framework;
 namespace fdi = fuchsia_driver_index;
 
 namespace driver_manager {
+
+namespace {
+
+bool PropertyValuesEqual(const fdfw::NodePropertyValue& a, const fdfw::NodePropertyValue& b) {
+  if (a.Which() != b.Which()) {
+    return false;
+  }
+  switch (a.Which()) {
+    case fdfw::NodePropertyValue::Tag::kIntValue:
+      return a.int_value().value() == b.int_value().value();
+    case fdfw::NodePropertyValue::Tag::kStringValue:
+      return a.string_value().value() == b.string_value().value();
+    case fdfw::NodePropertyValue::Tag::kBoolValue:
+      return a.bool_value().value() == b.bool_value().value();
+    case fdfw::NodePropertyValue::Tag::kEnumValue:
+      return a.enum_value().value() == b.enum_value().value();
+    default:
+      // Conservatively allow unknown union arms through to driver-index.
+      return true;
+  }
+}
+
+bool MayPropertiesMatchParentSpec(cpp20::span<const fdfw::NodeProperty2> props,
+                                  const fdfw::ParentSpec2& parent_spec) {
+  for (const fdfw::BindRule2& rule : parent_spec.bind_rules()) {
+    const fdfw::NodeProperty2* matched_prop = nullptr;
+    // Scan in reverse because driver-index overwrites duplicate BIND_PROTOCOL keys with the last
+    // entry in the property list.
+    for (auto it = props.rbegin(); it != props.rend(); ++it) {
+      if (it->key() == rule.key()) {
+        matched_prop = &(*it);
+        break;
+      }
+    }
+
+    const bool dev_prop_contains_value =
+        matched_prop != nullptr &&
+        std::ranges::any_of(rule.values(), [&](const fdfw::NodePropertyValue& val) {
+          return PropertyValuesEqual(val, matched_prop->value());
+        });
+
+    switch (rule.condition()) {
+      case fdfw::Condition::kAccept: {
+        if (!dev_prop_contains_value) {
+          const bool accepts_false =
+              std::ranges::any_of(rule.values(), [](const fdfw::NodePropertyValue& val) {
+                return val.bool_value().has_value() && !val.bool_value().value();
+              });
+          if (!accepts_false) {
+            return false;
+          }
+        }
+        break;
+      }
+      case fdfw::Condition::kReject:
+        if (dev_prop_contains_value) {
+          return false;
+        }
+        break;
+      case fdfw::Condition::kUnknown:
+        return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
 
 BindManager::BindManager(BindManagerBridge* bridge, NodeManager* node_manager,
                          async_dispatcher_t* dispatcher)
@@ -48,6 +118,88 @@ void BindManager::TryBindAllAvailable(NodeBindingInfoResultCallback result_callb
   std::shared_ptr<BindResultTracker> tracker = std::make_shared<BindResultTracker>(
       bind_resource_set_.NumOfAvailableResources(), std::move(next_attempt));
   TryBindAllAvailableInternal(tracker);
+  TryResolvePendingNodes(/* force= */ true);
+}
+
+bool BindManager::MayResourceMatchAnyParentSpec(const Resource& resource,
+                                                cpp20::span<const fdfw::ParentSpec2> parent_specs) {
+  auto matches_any = [&](cpp20::span<const fdfw::NodeProperty2> props) {
+    return std::ranges::any_of(parent_specs, [&](const fdfw::ParentSpec2& spec) {
+      return MayPropertiesMatchParentSpec(props, spec);
+    });
+  };
+
+  if (resource.is_self_resource()) {
+    std::shared_ptr node = resource.owner().lock();
+    if (!node || node->type() != NodeType::kNormal) {
+      return false;
+    }
+  }
+  return matches_any(resource.properties());
+}
+
+std::vector<BindRequest> BindManager::CollectMatchingAvailableResources(
+    cpp20::span<const fdfw::ParentSpec2> parent_specs) const {
+  std::vector<BindRequest> matched;
+  if (bind_resource_set_.NumOfAvailableResources() == 0) {
+    return matched;
+  }
+
+  for (const auto& [id, resource_weak] : bind_resource_set_.CurrentMultibindResources()) {
+    std::shared_ptr resource = resource_weak.lock();
+    if (!resource || !MayResourceMatchAnyParentSpec(*resource, parent_specs)) {
+      continue;
+    }
+    std::shared_ptr node = resource->owner().lock();
+    ZX_ASSERT(node);
+    matched.push_back(BindRequest{
+        .node_moniker = node->MakeComponentMoniker(),
+        .resource = resource_weak,
+        .composite_only = true,
+    });
+  }
+
+  for (const auto& [id, resource_weak] : bind_resource_set_.CurrentOrphanedResources()) {
+    std::shared_ptr resource = resource_weak.lock();
+    if (!resource || !MayResourceMatchAnyParentSpec(*resource, parent_specs)) {
+      continue;
+    }
+    std::shared_ptr node = resource->owner().lock();
+    ZX_ASSERT(node);
+    matched.push_back(BindRequest{
+        .node_moniker = node->MakeComponentMoniker(),
+        .resource = resource_weak,
+        .composite_only = false,
+    });
+  }
+
+  return matched;
+}
+
+void BindManager::TryBindForParentSpecs(cpp20::span<const fdfw::ParentSpec2> parent_specs) {
+  ZX_ASSERT(!parent_specs.empty());
+
+  if (bind_resource_set_.is_bind_ongoing()) {
+    pending_spec_bind_filters_.insert(pending_spec_bind_filters_.end(), parent_specs.begin(),
+                                      parent_specs.end());
+    return;
+  }
+
+  std::vector<BindRequest> matched = CollectMatchingAvailableResources(parent_specs);
+  if (matched.empty()) {
+    TryResolvePendingNodes(/* force= */ false);
+    return;
+  }
+
+  bind_resource_set_.StartNextBindProcess();
+  std::shared_ptr<BindResultTracker> tracker = std::make_shared<BindResultTracker>(
+      matched.size(), [this](fidl::VectorView<fuchsia_driver_development::wire::NodeBindingInfo>) {
+        ProcessPendingBindRequests();
+      });
+  for (auto& request : matched) {
+    request.tracker = tracker;
+    BindInternal(std::move(request));
+  }
   TryResolvePendingNodes(/* force= */ true);
 }
 
@@ -401,7 +553,8 @@ zx::result<CompositeParents> BindManager::BindResourceToSpec(fidl::AnyArena& are
 
 void BindManager::ProcessPendingBindRequests() {
   ZX_ASSERT(bind_resource_set_.is_bind_ongoing());
-  if (pending_bind_requests_.empty() && pending_orphan_rebind_callbacks_.empty()) {
+  if (pending_bind_requests_.empty() && pending_orphan_rebind_callbacks_.empty() &&
+      pending_spec_bind_filters_.empty()) {
     bind_resource_set_.EndBindProcess();
     TryResolvePendingNodes(/* force= */ false);
     return;
@@ -415,13 +568,26 @@ void BindManager::ProcessPendingBindRequests() {
   }
 
   bool have_bind_all_orphans_request = !pending_orphan_rebind_callbacks_.empty();
+  std::vector<BindRequest> filtered_spec_requests;
+  if (have_bind_all_orphans_request) {
+    pending_spec_bind_filters_.clear();
+  } else if (!pending_spec_bind_filters_.empty()) {
+    std::vector<fdfw::ParentSpec2> filters = std::move(pending_spec_bind_filters_);
+    filtered_spec_requests = CollectMatchingAvailableResources(filters);
+    if (pending_bind_requests_.empty() && filtered_spec_requests.empty()) {
+      bind_resource_set_.EndBindProcess();
+      TryResolvePendingNodes(/* force= */ false);
+      return;
+    }
+  }
+
   // Begin the next bind process.
   bind_resource_set_.StartNextBindProcess();
-  TryResolvePendingNodes(have_bind_all_orphans_request);
+  TryResolvePendingNodes(have_bind_all_orphans_request || !filtered_spec_requests.empty());
   size_t bind_tracker_size =
       have_bind_all_orphans_request
           ? pending_bind_requests_.size() + bind_resource_set_.NumOfAvailableResources()
-          : pending_bind_requests_.size();
+          : pending_bind_requests_.size() + filtered_spec_requests.size();
 
   // If there are no nodes to bind, then we'll run through all the callbacks and end the bind
   // process.
@@ -458,6 +624,11 @@ void BindManager::ProcessPendingBindRequests() {
       tracker->ReportNoBind();
     };
     BindInternal(std::move(request), std::move(match_complete_callback));
+  }
+
+  for (auto& request : filtered_spec_requests) {
+    request.tracker = tracker;
+    BindInternal(std::move(request));
   }
 
   // If there are any pending callbacks for TryBindAllAvailable(), begin a new attempt.

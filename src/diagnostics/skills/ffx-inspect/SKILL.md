@@ -1,8 +1,11 @@
 ---
 name: ffx-inspect
 description: >
-  Browse, query, filter, search, and diff Fuchsia Component Inspect data locally
-  using JSON exports and jq.
+  Browse, query, filter, search, and diff Fuchsia Component Inspect data
+  locally using JSON exports and jq. Use when inspecting component state or
+  diffing Inspect snapshots on a running Fuchsia target. Don't use for reading
+  device logs (use ffx-log), multi-pillar diagnostics audits, or unpacking
+  full device snapshots (use verify-snapshot).
 ---
 
 # Fuchsia Component Inspect Skill (`ffx-inspect`)
@@ -14,15 +17,15 @@ Inspect API.
 To avoid repeated hits to the target device and reduce developer environment
 load, this skill implements a **two-step local processing strategy**:
 
-1. Dump the full inspect state once as a JSON file.
-2. Query, filter, and compare the JSON locally using `jq` and standard diffing
-   tools.
+1.  Dump the full inspect state once as a JSON file.
+2.  Query, filter, and compare the JSON locally using `jq` and standard diffing
+    tools.
 
 > **Important:**
 > Always use `ffx --machine json inspect show` to capture the inspect data, and save it to
 > a temporary file in the workspace or `/tmp`. Clean up these temporary files
 > when you are done.
-> 
+>
 > The agent or user can capture a new snapshot of the inspect state from the
 > device at any time (for example, to see if states changed after triggering an action).
 
@@ -79,19 +82,19 @@ jq 'map(delpaths([paths | select(length > 3)]))' /tmp/inspect_dump.json
 To find values that changed between two inspect runs (for example,
 `/tmp/run1.json` and `/tmp/run2.json`):
 
-1. **Flatten and filter volatile fields** (such as timestamps) from both runs
-   into sorted text files:
+1.  **Flatten and filter volatile fields** (such as timestamps) from both runs
+    into sorted text files:
 
-   ```posix-terminal
-   jq -r '.[] | .moniker as $m | paths(scalars) as $p | select($p[-1] | tostring | test("timestamp|time"; "i") | not) | "\($m):\($p[1:] | join("/")) = \(. | getpath($p))"' /tmp/run1.json | sort > /tmp/run1_flat.txt
-   jq -r '.[] | .moniker as $m | paths(scalars) as $p | select($p[-1] | tostring | test("timestamp|time"; "i") | not) | "\($m):\($p[1:] | join("/")) = \(. | getpath($p))"' /tmp/run2.json | sort > /tmp/run2_flat.txt
-   ```
+    ```posix-terminal
+    jq -r '.[] | .moniker as $m | paths(scalars) as $p | select($p[-1] | tostring | test("timestamp|time"; "i") | not) | "\($m):\($p[1:] | join("/")) = \(. | getpath($p))"' /tmp/run1.json | sort > /tmp/run1_flat.txt
+    jq -r '.[] | .moniker as $m | paths(scalars) as $p | select($p[-1] | tostring | test("timestamp|time"; "i") | not) | "\($m):\($p[1:] | join("/")) = \(. | getpath($p))"' /tmp/run2.json | sort > /tmp/run2_flat.txt
+    ```
 
-2. **Diff the flattened text files**:
+2.  **Diff the flattened text files**:
 
-   ```posix-terminal
-   diff -u /tmp/run1_flat.txt /tmp/run2_flat.txt
-   ```
+    ```posix-terminal
+    diff -u /tmp/run1_flat.txt /tmp/run2_flat.txt
+    ```
 
 ---
 

@@ -41,6 +41,8 @@ class Mixer {
     Default = 0,
     SampleAndHold,
     WindowedSinc,
+    HighPassWindowedSinc,
+    LowPassWindowedSinc,
   };
 
   // Returns a no-op mixer.

@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/golang/glog"
+	"go.fuchsia.dev/fuchsia/tools/lib/productbundle"
 )
 
 // A Build represents a Fuchsia build, consisting of all the resources needed
@@ -76,22 +77,47 @@ func NewClusterFuzzLegacyBuild() (Build, error) {
 	if !found {
 		return nil, fmt.Errorf("%s not set", clusterFuzzBundleDirEnvVar)
 	}
+	absBundleDir, err := filepath.Abs(bundleDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve absolute path for %q: %s", bundleDir, err)
+	}
+	bundleDir = absBundleDir
 
 	buildDir := filepath.Join(bundleDir, "build")
 	targetDir := filepath.Join(bundleDir, "target", "x64")
 	clangDir := filepath.Join(buildDir, "buildtools", "linux-x64", "clang")
+
+	blkPath := filepath.Join(targetDir, "fvm.blk")
+	for _, candidate := range []string{"fxfs.sparse.blk", "fxfs.blk", "fvm.blk"} {
+		if p := filepath.Join(targetDir, candidate); fileExists(p) {
+			blkPath = p
+			break
+		}
+	}
+
+	kernelPath := filepath.Join(targetDir, "multiboot.bin")
+	for _, candidate := range []string{"linux-x86-boot-shim.bin", "qemu-boot-shim.bin", "multiboot.bin"} {
+		if p := filepath.Join(targetDir, candidate); fileExists(p) {
+			kernelPath = p
+			break
+		}
+	}
+
+	symbolizerDir := filepath.Join(buildDir, "zircon", "prebuilt", "downloads", "symbolize", "linux-x64")
+	symbolizerPath := filepath.Join(symbolizerDir, "symbolizer")
+
 	build := &BaseBuild{
 		Paths: map[string]string{
-			"zbi":             filepath.Join(targetDir, "fuchsia.zbi"),
-			"fvm":             filepath.Join(buildDir, "out", "default.zircon", "tools", "fvm"),
-			"zbitool":         filepath.Join(buildDir, "out", "default.zircon", "tools", "zbi"),
-			"blk":             filepath.Join(targetDir, "fvm.blk"),
-			"qemu":            filepath.Join(bundleDir, "qemu-for-fuchsia", "bin", "qemu-system-x86_64"),
-			"kernel":          filepath.Join(targetDir, "multiboot.bin"),
-			"llvm-symbolizer": filepath.Join(clangDir, "bin", "llvm-symbolizer"),
-			"symbolizer":      filepath.Join(buildDir, "zircon", "prebuilt", "downloads", "symbolize", "linux-x64", "symbolize"),
-			"tests.json":      filepath.Join(buildDir, "out", "default", "tests.json"),
-			"ffx":             filepath.Join(bundleDir, "ffx"),
+			"zbi":        filepath.Join(targetDir, "fuchsia.zbi"),
+			"fvm":        filepath.Join(buildDir, "out", "default.zircon", "tools", "fvm"),
+			"simg2img":   filepath.Join(bundleDir, "simg2img"),
+			"zbitool":    filepath.Join(buildDir, "out", "default.zircon", "tools", "zbi"),
+			"blk":        blkPath,
+			"qemu":       filepath.Join(bundleDir, "qemu-for-fuchsia", "bin", "qemu-system-x86_64"),
+			"kernel":     kernelPath,
+			"symbolizer": symbolizerPath,
+			"tests.json": filepath.Join(buildDir, "out", "default", "tests.json"),
+			"ffx":        filepath.Join(bundleDir, "ffx"),
 		},
 		IDs: []string{
 			filepath.Join(clangDir, "lib", "debug", ".build_id"),
@@ -115,11 +141,73 @@ var Archs = map[string]struct {
 	Binary string
 	Kernel string
 }{
-	"x64":   {"qemu-system-x86_64", "multiboot.bin"},
+	"x64":   {"qemu-system-x86_64", "linux-x86-boot-shim.bin"},
 	"arm64": {"qemu-system-aarch64", "qemu-boot-shim.bin"},
 }
 
 var hostDir = map[string]string{"arm64": "host_arm64", "amd64": "host_x64"}[runtime.GOARCH]
+
+type productBundleMetadata struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+func resolveProductBundleImages(buildDir, productName, boardName string) (zbiPath, blkPath, kernelPath string, err error) {
+	pbManifestPath := filepath.Join(buildDir, "product_bundles.json")
+	data, err := os.ReadFile(pbManifestPath)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to read %q: %s", pbManifestPath, err)
+	}
+	var entries []productBundleMetadata
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return "", "", "", fmt.Errorf("failed to parse %q: %s", pbManifestPath, err)
+	}
+	if len(entries) == 0 {
+		return "", "", "", fmt.Errorf("no product bundles in %q", pbManifestPath)
+	}
+
+	selected := entries[0]
+	if productName != "" && boardName != "" {
+		wantName := productName + "." + boardName
+		found := false
+		for _, entry := range entries {
+			if entry.Name == wantName {
+				selected = entry
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", "", "", fmt.Errorf("product bundle %q not found in %q", wantName, pbManifestPath)
+		}
+	}
+
+	pbDir := selected.Path
+	if !filepath.IsAbs(pbDir) {
+		pbDir = filepath.Join(buildDir, pbDir)
+	}
+	pb, err := productbundle.Load(pbDir)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	zbiPath, err = pb.GetSystemAImage("zbi", "zircon-a")
+	if err != nil {
+		return "", "", "", err
+	}
+	kernelPath, err = pb.GetSystemAImage("kernel", "qemu-kernel")
+	if err != nil {
+		return "", "", "", err
+	}
+	blkPath, err = pb.GetSystemAImage("blk", "fxfs.fastboot")
+	if err != nil {
+		blkPath, err = pb.GetSystemAImage("blk", "storage-full")
+	}
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to find system_a blk image (fxfs.fastboot or storage-full) in %q", pbDir)
+	}
+	return zbiPath, blkPath, kernelPath, nil
+}
 
 // NewLocalFuchsiaBuild will create a BaseBuild with path layouts corresponding
 // to a local Fuchsia checkout
@@ -129,6 +217,11 @@ func NewLocalFuchsiaBuild() (Build, error) {
 		// Fall back to relative path from this file
 		fuchsiaDir = filepath.Join("..", "..")
 	}
+	absFuchsiaDir, err := filepath.Abs(fuchsiaDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve absolute path for %q: %s", fuchsiaDir, err)
+	}
+	fuchsiaDir = absFuchsiaDir
 
 	fxBuildDir := filepath.Join(fuchsiaDir, ".fx-build-dir")
 	contents, err := os.ReadFile(fxBuildDir)
@@ -160,12 +253,19 @@ func NewLocalFuchsiaBuild() (Build, error) {
 	defer file.Close()
 
 	properties := map[string]string{}
+	// Matches fx.config lines of the form KEY='VALUE', KEY=VALUE, or KEY=:
+	// m[1] is the variable name, m[2] is the single-quoted value, and m[3]
+	// is the unquoted value.
 	re := regexp.MustCompile(`^([^=]+)=(?:'([^']+)'|(.+))?$`)
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		m := re.FindStringSubmatch(scanner.Text())
 		if m != nil {
-			properties[m[1]] = m[2]
+			val := m[2]
+			if val == "" {
+				val = m[3]
+			}
+			properties[m[1]] = val
 		}
 	}
 
@@ -191,18 +291,33 @@ func NewLocalFuchsiaBuild() (Build, error) {
 	qemuDir := filepath.Join(prebuiltDir, "third_party/qemu", platform)
 	imgDir := filepath.Join(buildDir, "obj", "build", "images", "fuchsia", "fuchsia")
 
+	zbiPath := filepath.Join(imgDir, "fuchsia.zbi")
+	blkPath := filepath.Join(imgDir, "fvm.blk")
+	kernelPath := filepath.Join(buildDir, kernel)
+
+	if fileExists(filepath.Join(buildDir, "product_bundles.json")) {
+		pbZbi, pbBlk, pbKernel, err := resolveProductBundleImages(
+			buildDir, properties["FUCHSIA_PRODUCT_NAME"], properties["FUCHSIA_BOARD_NAME"])
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve product bundle images: %s", err)
+		}
+		zbiPath = pbZbi
+		blkPath = pbBlk
+		kernelPath = pbKernel
+	}
+
 	build := &BaseBuild{
 		Paths: map[string]string{
-			"zbi":             filepath.Join(imgDir, "fuchsia.zbi"),
-			"fvm":             filepath.Join(buildDir, hostDir, "fvm"),
-			"zbitool":         filepath.Join(buildDir, hostDir, "zbi"),
-			"blk":             filepath.Join(imgDir, "fvm.blk"),
-			"qemu":            filepath.Join(qemuDir, "bin", binary),
-			"kernel":          filepath.Join(buildDir, kernel),
-			"llvm-symbolizer": filepath.Join(clangDir, "bin", "llvm-symbolizer"),
-			"symbolizer":      filepath.Join(buildDir, hostDir, "symbolize"),
-			"tests.json":      filepath.Join(buildDir, "tests.json"),
-			"ffx":             ffxPath,
+			"zbi":        zbiPath,
+			"fvm":        filepath.Join(buildDir, hostDir, "fvm"),
+			"simg2img":   filepath.Join(prebuiltDir, "third_party/libsparse/bin/simg2img"),
+			"zbitool":    filepath.Join(buildDir, hostDir, "zbi"),
+			"blk":        blkPath,
+			"qemu":       filepath.Join(qemuDir, "bin", binary),
+			"kernel":     kernelPath,
+			"symbolizer": filepath.Join(buildDir, hostDir, "symbolizer"),
+			"tests.json": filepath.Join(buildDir, "tests.json"),
+			"ffx":        ffxPath,
 		},
 		IDs: []string{
 			filepath.Join(clangDir, "lib", "debug", ".build-id"),
@@ -292,12 +407,6 @@ func (b *BaseBuild) loadV2Fuzzers() (map[string]*Fuzzer, error) {
 
 	fuzzers := make(map[string]*Fuzzer)
 
-	// During transition, only load v2 fuzzers opportunistically
-	if !fileExists(jsonPath) {
-		glog.Warningf("Skipping v2 fuzzers, because %q does not exist", jsonPath)
-		return fuzzers, nil
-	}
-
 	glog.Infof("Loading fuzzers from %q", jsonPath)
 
 	jsonBlob, err := os.ReadFile(jsonPath)
@@ -384,18 +493,16 @@ func (b *BaseBuild) Symbolize(in io.ReadCloser, out io.Writer) error {
 	// early exit occurs later in the output-processing chain.
 	defer in.Close()
 
-	paths, err := b.Path("symbolizer", "llvm-symbolizer")
+	paths, err := b.Path("symbolizer")
 	if err != nil {
 		return err
 	}
 
-	symbolizer, llvmSymbolizer := paths[0], paths[1]
-
-	args := []string{"-llvm-symbolizer", llvmSymbolizer}
+	args := make([]string, 0, 2*len(b.IDs))
 	for _, dir := range b.IDs {
-		args = append(args, "-build-id-dir", dir)
+		args = append(args, "--build-id-dir", dir)
 	}
-	cmd := NewCommand(symbolizer, args...)
+	cmd := NewCommand(paths[0], args...)
 	cmd.Stdin = in
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {

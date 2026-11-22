@@ -51,7 +51,7 @@ zx::result<> AmlTrip::Start(fdf::DriverContext context) {
   auto dict_result = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
       "fuchsia.hardware.trippoint.TripDeviceMetadata");
   if (dict_result.is_ok()) {
-    auto parsed = aml_trip_metadata::Aml_tripMetadata::Parse(dict_result.value());
+    auto parsed = aml_trip_metadata::TripDeviceMetadata::Parse(dict_result.value());
     if (!parsed.has_value()) {
       fdf::error("Failed to parse TripDeviceMetadata from Dictionary");
       return zx::error(ZX_ERR_INTERNAL);

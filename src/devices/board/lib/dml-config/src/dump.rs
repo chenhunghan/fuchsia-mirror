@@ -475,8 +475,9 @@ fn stringify_composite_node_spec(spec: &fdf_framework::CompositeNodeSpec, out: &
     let _ = writeln!(out, "  }}");
 }
 
-/// Formats prepared DML devices and IOMMUs into the `.dml.parsed` / `.dt.parsed` golden text
-/// format, preserving the publish order of `devices`.
+/// Formats prepared DML devices and IOMMUs into the `.dml.parsed` golden text format (matching
+/// `.dt.parsed` syntax), sorting `platform_bus_nodes` and `composite_node_specs` by name and
+/// `iommus` by ID.
 pub fn format_dml_parsed(
     devices: &[PreparedDevice],
     iommus: Option<&[Iommu]>,
@@ -485,11 +486,12 @@ pub fn format_dml_parsed(
     let mut out = String::new();
 
     let _ = writeln!(&mut out, "platform_bus_nodes {{");
-    for (_, _, node_opt) in devices {
-        if let Some(node) = node_opt {
-            stringify_pbus_node(node, custom_metadata, &mut out);
-            let _ = writeln!(&mut out);
-        }
+    let mut nodes: Vec<&fpbus::Node> =
+        devices.iter().filter_map(|(_, _, node_opt)| node_opt.as_ref()).collect();
+    nodes.sort_by_key(|node| node.name.as_deref().unwrap_or("unnamed"));
+    for node in nodes {
+        stringify_pbus_node(node, custom_metadata, &mut out);
+        let _ = writeln!(&mut out);
     }
     let _ = writeln!(&mut out, "}}\n");
 
@@ -497,20 +499,21 @@ pub fn format_dml_parsed(
     let _ = writeln!(&mut out, "}}\n");
 
     let _ = writeln!(&mut out, "composite_node_specs {{");
-    for (_, spec_opt, _) in devices {
-        if let Some(spec) = spec_opt {
-            stringify_composite_node_spec(spec, &mut out);
-            let _ = writeln!(&mut out);
-        }
+    let mut specs: Vec<&fdf_framework::CompositeNodeSpec> =
+        devices.iter().filter_map(|(_, spec_opt, _)| spec_opt.as_ref()).collect();
+    specs.sort_by_key(|spec| spec.name.as_deref().unwrap_or("unnamed"));
+    for spec in specs {
+        stringify_composite_node_spec(spec, &mut out);
+        let _ = writeln!(&mut out);
     }
     let _ = writeln!(&mut out, "}}\n");
 
     let _ = writeln!(&mut out, "iommus {{");
     if let Some(iommus) = iommus {
-        let mut sorted: Vec<&Iommu> = iommus.iter().collect();
-        sorted.sort_by_key(|i| i.id.unwrap_or(0));
-        for iommu in sorted {
-            let Some(id) = iommu.id else { continue };
+        let mut sorted: Vec<(u32, &Iommu)> =
+            iommus.iter().filter_map(|i| i.id.map(|id| (id, i))).collect();
+        sorted.sort_by_key(|(id, _)| *id);
+        for (id, iommu) in sorted {
             let iommu_str = match &iommu.iommu_type {
                 Some(IommuType::ArmSmmu(arm_smmu)) => {
                     format!("arm_smmu: {{ base_address: 0x{:x} }}", arm_smmu.base_address)
@@ -595,7 +598,6 @@ mod tests {
     use super::*;
     use crate::parser::DEFAULT_DML_PARSER_CONFIG;
     use crate::{AggregateEntry, ArmSmmu, Device, ResourceEntry, StaticMetadata, StubIommu};
-    use fidl_fuchsia_driver_metadata_common as fdr;
 
     #[test]
     fn test_dump_dml_config_formats_nodes_specs_and_iommus() {
@@ -753,5 +755,157 @@ iommus {{
 "
         );
         assert_eq!(dumped, expected);
+    }
+
+    fn extract_block_names(dumped: &str, section: &str) -> Vec<String> {
+        let section_header = format!("{section} {{");
+        let mut in_section = false;
+        let mut names = Vec::new();
+        for line in dumped.lines() {
+            if line == section_header {
+                in_section = true;
+                continue;
+            }
+            if in_section {
+                if line == "}" {
+                    break;
+                }
+                if let Some(rest) = line.strip_prefix("  \"")
+                    && let Some(name) = rest.strip_suffix("\" {")
+                {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn test_dump_dml_config_sorts_nodes_and_specs_regardless_of_publish_order() {
+        let device = |name: &str, publish_priority: Option<u32>| Device {
+            name: Some(name.to_string()),
+            compatible: Some(format!("acme,{name}")),
+            publish_priority,
+            ..Default::default()
+        };
+
+        let config = BoardConfig {
+            devices: Some(vec![
+                device("delta", None),
+                device("zeta", Some(10)),
+                device("alpha", Some(5)),
+                device("mu", None),
+            ]),
+            aggregates: Some(vec![AggregateEntry {
+                provider: Some("mu".to_string()),
+                service: Some("fuchsia.hardware.gpio.Service".to_string()),
+                resources: Some(vec![ResourceEntry {
+                    name: Some("mu-gpio".to_string()),
+                    node: Some("zeta".to_string()),
+                    constraint: Some(fdr::Dictionary::default()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        let prepared =
+            prepare_dml_devices(&config, &DEFAULT_DML_PARSER_CONFIG, None, None, &[]).unwrap();
+        let publish_names: Vec<&str> = prepared.iter().map(|(name, _, _)| name.as_str()).collect();
+        assert_eq!(publish_names, ["mu", "zeta", "alpha", "delta"]);
+
+        let dumped =
+            dump_dml_config(&config, &DEFAULT_DML_PARSER_CONFIG, None, None, &[], None).unwrap();
+        assert_eq!(
+            extract_block_names(&dumped, "platform_bus_nodes"),
+            vec!["alpha", "delta", "mu", "zeta"]
+        );
+        assert_eq!(
+            extract_block_names(&dumped, "composite_node_specs"),
+            vec!["alpha", "delta", "mu", "zeta"]
+        );
+    }
+
+    #[test]
+    fn test_format_dml_parsed_sorts_unnamed_entries() {
+        let make_device = |key: &str, name: Option<&str>| -> PreparedDevice {
+            (
+                key.to_string(),
+                Some(fdf_framework::CompositeNodeSpec {
+                    name: name.map(str::to_string),
+                    ..Default::default()
+                }),
+                Some(fpbus::Node { name: name.map(str::to_string), ..Default::default() }),
+            )
+        };
+
+        let devices = vec![
+            make_device("z", Some("zeta")),
+            make_device("u", None),
+            make_device("a", Some("alpha")),
+        ];
+        let dumped = format_dml_parsed(&devices, None, None);
+
+        assert_eq!(
+            extract_block_names(&dumped, "platform_bus_nodes"),
+            vec!["alpha", "unnamed", "zeta"]
+        );
+        assert_eq!(
+            extract_block_names(&dumped, "composite_node_specs"),
+            vec!["alpha", "unnamed", "zeta"]
+        );
+    }
+
+    #[test]
+    fn test_format_dml_parsed_filters_asymmetric_devices_and_idless_iommus() {
+        let spec = |name: &str| fdf_framework::CompositeNodeSpec {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+        let node = |name: &str| fpbus::Node { name: Some(name.to_string()), ..Default::default() };
+
+        let devices: Vec<PreparedDevice> = vec![
+            ("spec-only-z".to_string(), Some(spec("spec-z")), None),
+            ("node-only-z".to_string(), None, Some(node("node-z"))),
+            ("both-m".to_string(), Some(spec("both-m")), Some(node("both-m"))),
+            ("spec-only-a".to_string(), Some(spec("spec-a")), None),
+            ("node-only-a".to_string(), None, Some(node("node-a"))),
+        ];
+        let iommus = vec![
+            Iommu {
+                name: Some("high".to_string()),
+                id: Some(10),
+                iommu_type: Some(IommuType::StubIommu(StubIommu {})),
+                ..Default::default()
+            },
+            Iommu {
+                name: Some("missing-id".to_string()),
+                id: None,
+                iommu_type: Some(IommuType::StubIommu(StubIommu {})),
+                ..Default::default()
+            },
+            Iommu {
+                name: Some("low".to_string()),
+                id: Some(2),
+                iommu_type: Some(IommuType::StubIommu(StubIommu {})),
+                ..Default::default()
+            },
+        ];
+
+        let dumped = format_dml_parsed(&devices, Some(&iommus), None);
+
+        assert_eq!(
+            extract_block_names(&dumped, "platform_bus_nodes"),
+            vec!["both-m", "node-a", "node-z"]
+        );
+        assert_eq!(
+            extract_block_names(&dumped, "composite_node_specs"),
+            vec!["both-m", "spec-a", "spec-z"]
+        );
+        let iommus_section = dumped.split("iommus {").nth(1).unwrap();
+        let iommu_ids: Vec<&str> =
+            iommus_section.lines().filter_map(|line| line.trim().strip_prefix("id = ")).collect();
+        assert_eq!(iommu_ids, vec!["2", "10"]);
     }
 }

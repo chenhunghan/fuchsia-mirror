@@ -90,5 +90,171 @@ impl Driver for Vim3DmlDriver {
         Ok(Self { _node: node, _pbus: pbus })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidl_fuchsia_driver_metadata as fdr;
+    use fidl_fuchsia_hardware_sdmmc as fsdmmc;
+
+    fn load_prepared_devices() -> Vec<dml_config::parser::PreparedDevice> {
+        let board_config_bytes =
+            std::fs::read("/pkg/config/board-config.fidl").expect("board-config.fidl must exist");
+        let board_config: BoardConfig =
+            fidl::unpersist(&board_config_bytes).expect("board-config.fidl must deserialize");
+        dml_config::parser::prepare_dml_devices(
+            &board_config,
+            &DEFAULT_DML_PARSER_CONFIG,
+            Some(&driver_specific_data::VIM3_DRIVER_METADATA),
+            None,
+            &[],
+        )
+        .expect("prepare_dml_devices must succeed")
+    }
+
+    fn find_spec<'a>(
+        prepared: &'a [dml_config::parser::PreparedDevice],
+        name: &str,
+    ) -> &'a fdf_framework::CompositeNodeSpec {
+        prepared
+            .iter()
+            .find(|(dev_name, _, _)| dev_name == name)
+            .and_then(|(_, spec, _)| spec.as_ref())
+            .unwrap_or_else(|| panic!("missing composite spec {name}"))
+    }
+
+    fn find_pbus_node<'a>(
+        prepared: &'a [dml_config::parser::PreparedDevice],
+        name: &str,
+    ) -> &'a fpbus::Node {
+        prepared
+            .iter()
+            .find(|(dev_name, _, _)| dev_name == name)
+            .and_then(|(_, _, node)| node.as_ref())
+            .unwrap_or_else(|| panic!("missing platform bus node {name}"))
+    }
+
+    fn spec_has_parent_rule_string(
+        spec: &fdf_framework::CompositeNodeSpec,
+        key: &str,
+        expected: &str,
+    ) -> bool {
+        spec.parents2.as_deref().unwrap_or(&[]).iter().any(|parent| {
+            parent.bind_rules.iter().any(|rule| {
+                rule.key == key
+                    && rule.values.iter().any(|v| {
+                        matches!(v, fdf_framework::NodePropertyValue::StringValue(s) if s == expected)
+                    })
+            })
+        })
+    }
+
+    fn spec_has_parent_rule_int(
+        spec: &fdf_framework::CompositeNodeSpec,
+        key: &str,
+        expected: u32,
+    ) -> bool {
+        spec.parents2.as_deref().unwrap_or(&[]).iter().any(|parent| {
+            parent.bind_rules.iter().any(|rule| {
+                rule.key == key
+                    && rule.values.contains(&fdf_framework::NodePropertyValue::IntValue(expected))
+            })
+        })
+    }
+
+    #[test]
+    fn test_vim3_clock_init_and_pwm_pin_states_parents() {
+        let prepared = load_prepared_devices();
+
+        const CLOCK_INIT_STEP: u32 = 0x494B4C43;
+        let usb_phy = find_spec(&prepared, "usb-phy-ffe09000");
+        assert!(
+            spec_has_parent_rule_int(usb_phy, "fuchsia.BIND_INIT_STEP", CLOCK_INIT_STEP),
+            "usb-phy-ffe09000 must depend on fuchsia.clock.Init: {:?}",
+            usb_phy.parents2
+        );
+
+        let audio = find_spec(&prepared, "audio-controller-ff642000");
+        assert!(
+            spec_has_parent_rule_int(audio, "fuchsia.BIND_INIT_STEP", CLOCK_INIT_STEP),
+            "audio-controller-ff642000 must depend on fuchsia.clock.Init: {:?}",
+            audio.parents2
+        );
+
+        let pwm_ctrl = find_spec(&prepared, "pwm-ffd1b000");
+        assert_eq!(
+            pwm_ctrl.parents2.as_deref().map_or(0, |p| p.len()),
+            1,
+            "pwm-ffd1b000 must only have its pdev parent"
+        );
+
+        for reg_name in ["pwm_a-regulator", "pwm_a0_d-regulator"] {
+            let reg = find_spec(&prepared, reg_name);
+            assert_eq!(
+                reg.parents2.as_deref().map_or(0, |p| p.len()),
+                3,
+                "{reg_name} must have 3 parents (pdev, pwm, pin-states-0): {:?}",
+                reg.parents2
+            );
+            assert!(
+                spec_has_parent_rule_string(
+                    reg,
+                    "fuchsia.Service",
+                    "fuchsia.hardware.pin.PinStatesService"
+                ),
+                "{reg_name} missing pin-states-0 parent: {:?}",
+                reg.parents2
+            );
+        }
+    }
+
+    #[test]
+    fn test_vim3_i2c_and_sdmmc_metadata() {
+        let prepared = load_prepared_devices();
+
+        let i2c_node = find_pbus_node(&prepared, "i2c-1c000");
+        let i2c_meta = i2c_node
+            .metadata
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .find(|m| m.id.as_deref() == Some("fuchsia.hardware.i2c.businfo.I2CBusMetadata"))
+            .expect("i2c-1c000 missing I2CBusMetadata");
+        let dict: fdr::Dictionary = fidl::unpersist(i2c_meta.data.as_deref().unwrap())
+            .expect("I2CBusMetadata dictionary must deserialize");
+        let entries = dict.entries.expect("I2CBusMetadata entries must exist");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == "provider" && e.value == fdr::DictionaryValue::Int64(1)),
+            "i2c-1c000 must set provider = 1: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == "channels._count" && e.value == fdr::DictionaryValue::Int64(0)),
+            "i2c-1c000 must set channels._count = 0: {entries:?}"
+        );
+
+        for (node_name, expected_id, expected_removable) in [
+            ("mmc-ffe07000", "mmc@ffe07000", false),
+            ("mmc-ffe05000", "mmc@ffe05000", true),
+            ("mmc-ffe03000", "mmc@ffe03000", true),
+        ] {
+            let mmc_node = find_pbus_node(&prepared, node_name);
+            let mmc_meta = mmc_node
+                .metadata
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .find(|m| m.id.as_deref() == Some("fuchsia.hardware.sdmmc.SdmmcMetadata"))
+                .unwrap_or_else(|| panic!("{node_name} missing SdmmcMetadata"));
+            let parsed: fsdmmc::SdmmcMetadata =
+                fidl::unpersist(mmc_meta.data.as_deref().unwrap()).unwrap();
+            assert_eq!(parsed.instance_identifier.as_deref(), Some(expected_id));
+            assert_eq!(parsed.removable, Some(expected_removable));
+        }
+    }
 }

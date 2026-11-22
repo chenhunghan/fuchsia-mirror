@@ -49,7 +49,6 @@ fuchsia_cc_driver("virtio_socket-driver") {
 }
 
 fuchsia_driver_component("virtio_socket") {
-  info = "meta/virtio_socket-info.json"
   component_name = "virtio_socket"
   manifest = "meta/virtio-socket.cml"
   deps = [ ":virtio_socket-driver" ]

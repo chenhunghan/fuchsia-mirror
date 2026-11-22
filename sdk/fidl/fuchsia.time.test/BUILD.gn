@@ -29,6 +29,5 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 
 fidl("fuchsia.time.test") {
   sources = [ "rtc.fidl" ]
-  enable_hlcpp = true
   visibility = [ "*" ]
 }

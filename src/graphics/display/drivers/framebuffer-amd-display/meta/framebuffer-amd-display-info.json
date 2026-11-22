@@ -1,9 +1,0 @@
-{
-    "short_description": "PCI AMD framebuffer display driver",
-    "manufacturer": "AMD",
-    "families": [],
-    "models": [],
-    "areas": [
-        "Display"
-    ]
-}

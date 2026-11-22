@@ -33,6 +33,7 @@ wrapping.
 import argparse
 import dataclasses
 import filecmp
+import itertools
 import os
 import shutil
 import subprocess
@@ -313,12 +314,11 @@ class Action(object):
         if self.command and "=" in self.command[0]:
             substituted_command += ["/usr/bin/env"]
 
-        # TODO(nathaniel): Maybe clarify this by migrating to itertools.pairwise.
         substituted_command += [
             lexically_rewrite_token(
                 tok, lambda x: str(replace_output_filename(x, prev_opt))
             )
-            for prev_opt, tok in zip(["", *self.command[:-1]], self.command)
+            for prev_opt, tok in itertools.pairwise(("", *self.command))
         ]
 
         return substituted_command, renamed_outputs

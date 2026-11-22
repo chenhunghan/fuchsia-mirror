@@ -26,8 +26,6 @@ group("tests") {
     ":bazel_tests",
     "data:tests",
     "fake-log-sink:tests",
-    "fidl_log_message_parser/integration",
-    "fidl_log_message_parser/tests",
     "fuchsia-async-inspect:tests",
     "hierarchy:tests",
     "inspect:tests",

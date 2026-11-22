@@ -2,6 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+group("tests") {
+  testonly = true
+  deps = [ ":media_audio_cpp_unittests" ]
+}
+
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -37,6 +42,7 @@ source_set("cpp") {
     "types.h",
   ]
   deps = [
+    "//sdk/fidl/fuchsia.media.audio:fuchsia.media.audio_cpp",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fxl",
   ]
@@ -44,5 +50,32 @@ source_set("cpp") {
     ":*",
     "//src/media/audio/*",
   ]
-  public_deps = [ "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp" ]
+  public_deps = [
+    "//sdk/fidl/fuchsia.media:fuchsia.media_cpp",
+    "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+  ]
+}
+
+executable("unittest_bin") {
+  testonly = true
+  sources = [
+    "perceived_level_unittest.cc",
+    "types_unittest.cc",
+  ]
+  output_name = "media_audio_cpp_unittests"
+  deps = [
+    ":cpp",
+    "//sdk/fidl/fuchsia.media.audio:fuchsia.media.audio_cpp",
+    "//src/lib/fxl/test:gtest_main",
+  ]
+}
+
+fuchsia_unittest_package("media_audio_cpp_unittests") {
+  package_name = "media_audio_cpp_unittests-gn"
+  component_name = "media_audio_cpp_unittests"
+  deps = [ ":unittest_bin" ]
+  visibility = [
+    ":*",
+    "//src/media:*",
+  ]
 }

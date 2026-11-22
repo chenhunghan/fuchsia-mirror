@@ -68,7 +68,7 @@ _gidl = rule(
             values = [
                 "cpp",
                 "hlcpp",
-                "llcpp",
+                "cpp_wire",
                 "dynfidl",
                 "rust",
                 "rust_codec",
@@ -76,7 +76,7 @@ _gidl = rule(
                 "python",
                 "fuzzer_corpus",
                 "driver_cpp",
-                "driver_llcpp",
+                "driver_cpp_wire",
                 "reference",
             ],
         ),
@@ -282,12 +282,12 @@ def gidl_hlcpp_conformance(*, name, fidl, **kwargs):
         **kwargs
     )
 
-def gidl_llcpp_conformance(*, name, fidl, **kwargs):
+def gidl_cpp_wire_conformance(*, name, fidl, **kwargs):
     """Declares a GIDL C++ wire (LLCPP) bindings conformance test library."""
     _gidl_cc_library_wrapper(
         name = name,
         type = "conformance",
-        language = "llcpp",
+        language = "cpp_wire",
         bindings_suffix = "_cpp",
         fidl = fidl,
         # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
@@ -318,12 +318,12 @@ def gidl_hlcpp_benchmarks(*, name, fidl, **kwargs):
         **kwargs
     )
 
-def gidl_llcpp_benchmarks(*, name, fidl, **kwargs):
+def gidl_cpp_wire_benchmarks(*, name, fidl, **kwargs):
     """Declares a GIDL C++ wire (LLCPP) bindings benchmark library."""
     _gidl_cc_library_wrapper(
         name = name,
         type = "benchmark",
-        language = "llcpp",
+        language = "cpp_wire",
         bindings_suffix = "_cpp",
         fidl = fidl,
         # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
@@ -359,13 +359,13 @@ def gidl_driver_cpp_benchmarks(*, name, fidl, **kwargs):
         **kwargs
     )
 
-def gidl_driver_llcpp_benchmarks(*, name, fidl, **kwargs):
+def gidl_driver_cpp_wire_benchmarks(*, name, fidl, **kwargs):
     """Declares a GIDL Driver C++ wire (LLCPP) bindings benchmark library."""
     _gidl_cc_library_wrapper(
         name = name,
         type = "benchmark",
-        language = "driver_llcpp",
-        # GIDL driver_llcpp benchmarks always include `<fidl/.../cpp/driver/wire.h>`,
+        language = "driver_cpp_wire",
+        # GIDL driver_cpp_wire benchmarks always include `<fidl/.../cpp/driver/wire.h>`,
         # even for FIDL libraries without `contains_drivers = True`.
         bindings_suffix = "_cpp_driver_headers",
         fidl = fidl,

@@ -40,7 +40,7 @@ This would look as follows in JSON:
 }
 ```
 
-### Namespacing
+### Namespacing {:#namespacing}
 
 The namespacing section consists of the information that can be applied to the entire
 schema, across all data types; this information serves to describe the namespace of the source
@@ -50,7 +50,7 @@ that generated this diagnostics data. The namespacing section is made up of two 
   in the schema applies to.
 - A `data source` describing which diagnostics service generated the data.
 
-### Metadata
+### Metadata {:#metadata}
 
 The metadata section consists of properties with statically known and documented schemas for which
 a single value cannot be shared across all nested schemas. Each of the data sources adds its own
@@ -143,7 +143,7 @@ This would look as follows in JSON:
 }
 ```
 
-### Payload
+### Payload {:#payload}
 
 The payload section contains the actual diagnostics data being reported. The payload is structured
 hierarchically, and the context or ttopic of the data is encoded by its location within the

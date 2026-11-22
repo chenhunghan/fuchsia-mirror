@@ -2,12 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <limits>
+#include <memory>
+#include <utility>
+
 #include <gtest/gtest.h>
 
+#include "driver_logger_harness.h"
 #include "src/graphics/drivers/msd-arm-mali/src/msd_arm_buffer.h"
 
 class TestMsdArmBuffer {
  public:
+  TestMsdArmBuffer() : logger_harness_(DriverLoggerHarness::Create()) {}
   static void TestFlush() {
     auto buffer = MsdArmBuffer::Create(1024, "test-buffer");
     ASSERT_NE(nullptr, buffer);
@@ -56,6 +62,30 @@ class TestMsdArmBuffer {
     EXPECT_TRUE(buffer->committed_region_.empty());
     EXPECT_TRUE(buffer->flushed_region_.empty());
   }
+
+  static void TestSetCommittedPagesOverflow() {
+    const size_t page_size = zx_system_get_page_size();
+    auto buffer = MsdArmBuffer::Create(page_size * 4, "test-buffer");
+    ASSERT_NE(nullptr, buffer);
+    EXPECT_TRUE(buffer->SetCommittedPages(1, 3));
+
+    const uint64_t kPagesToWrapBytes = (std::numeric_limits<uint64_t>::max() / page_size) + 1;
+    for (const auto& [start, count] : {
+             std::pair<uint64_t, uint64_t>{0, 5},
+             {2, 3},
+             {0, kPagesToWrapBytes},
+             {1, std::numeric_limits<uint64_t>::max()},
+         }) {
+      EXPECT_FALSE(buffer->SetCommittedPages(start, count));
+      EXPECT_FALSE(buffer->CommitPageRange(start, count));
+      EXPECT_FALSE(buffer->DecommitPageRange(start, count));
+    }
+    EXPECT_EQ(1u, buffer->committed_region_.start());
+    EXPECT_EQ(4u, buffer->committed_region_.end());
+  }
+
+ private:
+  std::unique_ptr<DriverLoggerHarness> logger_harness_;
 };
 
 TEST(MsdArmBuffer, Flush) {
@@ -66,4 +96,9 @@ TEST(MsdArmBuffer, Flush) {
 TEST(MsdArmBuffer, Decommit) {
   TestMsdArmBuffer test;
   test.TestDecommit();
+}
+
+TEST(MsdArmBuffer, SetCommittedPagesOverflow) {
+  TestMsdArmBuffer test;
+  test.TestSetCommittedPagesOverflow();
 }

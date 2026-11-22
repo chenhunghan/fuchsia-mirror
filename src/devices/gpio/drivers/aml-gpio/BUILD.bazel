@@ -42,6 +42,8 @@ fx_cc_library(
         "aml-gpio.h",
     ],
     build_flags = ["//build/config/fuchsia:enable_zircon_asserts"],
+    # TODO(https://fxbug.dev/477786942): Fix -Wconversion warnings and remove.
+    copts = ["-Wno-conversion"],
     defines = [
         "_ALL_SOURCE",
     ],
@@ -107,18 +109,14 @@ fuchsia_cc_test(
     srcs = [
         "aml-gpio-test.cc",
     ],
-    # TODO(b/322398374) Remove this copts
-    copts = [
-        "-Wno-vla-cxx-extension",
-    ],
     deps = [
         ":common",
         "//src/lib/testing/predicates",
         "//zircon/system/ulib/ddk-platform-defs",
-        "//zircon/system/ulib/fzl",
         "@com_google_googletest//:gtest_main",
         "@fuchsia_sdk//pkg/driver_testing_cpp",
         "@fuchsia_sdk//pkg/fit-promise",
+        "@fuchsia_sdk//pkg/fzl",
         "@internal_sdk//pkg/mock-mmio-reg",
     ],
 )

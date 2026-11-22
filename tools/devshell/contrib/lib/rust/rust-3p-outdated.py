@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -261,10 +262,29 @@ if __name__ == "__main__":
     now = datetime.now(timezone.utc)
 
     cargo_process = subprocess.run(
-        [cargo_binary, "metadata", "--frozen", "--manifest-path", manifest],
+        [
+            cargo_binary,
+            "metadata",
+            "--frozen",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            manifest,
+        ],
         text=True,
         capture_output=True,
     )
+    if cargo_process.returncode != 0:
+        print(
+            f"Error: `cargo metadata` failed (exit code {cargo_process.returncode}):\n"
+            f"{cargo_process.stderr.strip()}\n\n"
+            "Hint: If Cargo.lock is out of sync with Cargo.toml, run "
+            "`fx update-rustc-third-party` to regenerate Cargo.lock and build files. "
+            "In case of an urgent security fix that requires landing it sooner than "
+            "the usual soak interval, the arg `--no-min-publish-age` can be appended.",
+            file=sys.stderr,
+        )
+        sys.exit(cargo_process.returncode)
     metadata = json.loads(cargo_process.stdout)
     resolve = metadata.get("resolve") or {}
     root_id = resolve.get("root")

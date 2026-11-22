@@ -18,7 +18,7 @@ use std::task::{Poll, ready};
 // LINT.IfChange
 const BUFFER_SIZE: usize = 256 * 1024;
 // LINT.ThenChange(
-//     //src/developer/ffx/lib/target/src/target_connector.rs,
+//     //src/developer/ffx/lib/target/src/transport_connector.rs,
 //     //src/developer/remote-control/runner/src/main.rs,
 //     //src/lib/fdomain/container/src/lib.rs
 // )

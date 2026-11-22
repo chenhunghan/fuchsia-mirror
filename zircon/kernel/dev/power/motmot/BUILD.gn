@@ -20,6 +20,7 @@ kernel_rust_mod("motmot-rs") {
   sources = [ "motmot.rs" ]
   deps = [
     "//sdk/rust/zx-status",
+    "//zircon/kernel/dev/psci:psci-rs",
     "//zircon/kernel/lib/debug",
   ]
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
@@ -31,7 +32,6 @@ source_set("motmot") {
   deps = [
     ":motmot-rs",
     "//zircon/kernel/dev/pdev/power",
-    "//zircon/kernel/dev/psci",
     "//zircon/kernel/lib/arch",
   ]
 }

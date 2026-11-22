@@ -651,7 +651,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_protocolrequest::Parent::GetChild>::TransactionalResponse(::fidl::ClientEnd<::test_protocolrequest::Child>&& c)
     : body(::fidl::WireResponse<::test_protocolrequest::Parent::GetChild>(std::move(c))) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_protocolrequest::kParent_GetChild_Ordinal, ::test_protocolrequest::kParent_GetChild_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_protocolrequest::kParent_GetChild_Ordinal, ::test_protocolrequest::kParent_GetChild_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_protocolrequest::Parent::GetChild>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_protocolrequest::kParent_GetChild_Ordinal, ::test_protocolrequest::kParent_GetChild_DynamicFlags);
@@ -716,7 +716,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_protocolrequest::Parent::GetChildRequest>::TransactionalResponse(::fidl::ServerEnd<::test_protocolrequest::Child>&& r)
     : body(::fidl::WireResponse<::test_protocolrequest::Parent::GetChildRequest>(std::move(r))) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_protocolrequest::kParent_GetChildRequest_Ordinal, ::test_protocolrequest::kParent_GetChildRequest_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_protocolrequest::kParent_GetChildRequest_Ordinal, ::test_protocolrequest::kParent_GetChildRequest_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_protocolrequest::Parent::GetChildRequest>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_protocolrequest::kParent_GetChildRequest_Ordinal, ::test_protocolrequest::kParent_GetChildRequest_DynamicFlags);
@@ -764,7 +764,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalRequest<::test_protocolrequest::Parent::TakeChild>::TransactionalRequest(::fidl::ClientEnd<::test_protocolrequest::Child>&& c)
     : body(::test_protocolrequest::wire::ParentTakeChildRequest{std::move(c)}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_protocolrequest::kParent_TakeChild_Ordinal, ::test_protocolrequest::kParent_TakeChild_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_protocolrequest::kParent_TakeChild_Ordinal, ::test_protocolrequest::kParent_TakeChild_DynamicFlags);
 }
 void ::fidl::internal::TransactionalRequest<::test_protocolrequest::Parent::TakeChild>::_CloseHandles() {
   body._CloseHandles();
@@ -794,7 +794,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalRequest<::test_protocolrequest::Parent::TakeChildRequest>::TransactionalRequest(::fidl::ServerEnd<::test_protocolrequest::Child>&& r)
     : body(::test_protocolrequest::wire::ParentTakeChildRequestRequest{std::move(r)}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_protocolrequest::kParent_TakeChildRequest_Ordinal, ::test_protocolrequest::kParent_TakeChildRequest_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_protocolrequest::kParent_TakeChildRequest_Ordinal, ::test_protocolrequest::kParent_TakeChildRequest_DynamicFlags);
 }
 void ::fidl::internal::TransactionalRequest<::test_protocolrequest::Parent::TakeChildRequest>::_CloseHandles() {
   body._CloseHandles();

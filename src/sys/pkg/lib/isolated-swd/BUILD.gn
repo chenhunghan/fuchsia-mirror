@@ -28,9 +28,9 @@ fuchsia_component("pkg-component") {
 }
 
 # Stays in GN because it uses GN-only targets (`isolated_swd_components`,
-# `//src/connectivity/network/dns:component`,
+# `//src/connectivity/network/dns:package`,
 # `//src/connectivity/network/netstack3:package-for-tests`,
-# `//src/connectivity/policy/http-client:component`,
+# `//src/connectivity/policy/http-client:package`,
 # `//src/storage/testing:storage_driver_test_realm`,
 # `//src/storage/tools/blobfs-compression`, and
 # `//src/sys/pkg/tests/pkg-resolver:empty-repo`).
@@ -38,8 +38,6 @@ fuchsia_test_package("isolated-swd-tests") {
   test_components = [ ":isolated-swd-tests-component" ]
 
   deps = [
-    "//src/connectivity/network/dns:component",
-    "//src/connectivity/policy/http-client:component",
     "//src/storage/testing:storage_driver_test_realm",
     "//src/storage/tools/blobfs-compression",
     "//src/sys/pkg/bin/fake-system-update-committer",
@@ -48,7 +46,11 @@ fuchsia_test_package("isolated-swd-tests") {
   ]
   deps += isolated_swd_components
   deps += [ ":pkg-component" ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
+    "//src/connectivity/policy/http-client:package",
+  ]
 
   test_specs = {
     log_settings = {
@@ -158,12 +160,10 @@ rustc_test("isolated-swd_test") {
          [
            "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
            "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
-           "//src/lib/fdio/rust:fdio",
            "//src/lib/fuchsia",
            "//src/lib/fuchsia-async",
            "//src/lib/fuchsia-component-test",
            "//src/lib/fuchsia-url",
-           "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
            "//src/sys/lib/cm_rust",
            "//src/sys/lib/fidl-fuchsia-pkg-ext",
            "//src/sys/pkg/lib/fuchsia-merkle",

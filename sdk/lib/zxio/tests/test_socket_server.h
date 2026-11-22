@@ -13,43 +13,6 @@
 
 namespace zxio_tests {
 
-class DatagramSocketServer final
-    : public fidl::testing::WireTestBase<fuchsia_posix_socket::DatagramSocket> {
- public:
-  explicit DatagramSocketServer(zx::socket socket) : socket_(std::move(socket)) {}
-
- private:
-  void NotImplemented_(const std::string& name, fidl::CompleterBase& completer) final {
-    ADD_FAILURE() << "unexpected message received: " << name;
-    completer.Close(ZX_ERR_NOT_SUPPORTED);
-  }
-
-  void Close(CloseCompleter::Sync& completer) override {
-    completer.ReplySuccess();
-    completer.Close(ZX_OK);
-  }
-
-  void Query(QueryCompleter::Sync& completer) final {
-    const std::string_view kProtocol =
-        fidl::DiscoverableProtocolName<fuchsia_posix_socket::DatagramSocket>;
-    // TODO(https://fxbug.dev/42052765): avoid the const cast.
-    uint8_t* data = reinterpret_cast<uint8_t*>(const_cast<char*>(kProtocol.data()));
-    completer.Reply(fidl::VectorView<uint8_t>::FromExternal(data, kProtocol.size()));
-  }
-
-  void Describe(DescribeCompleter::Sync& completer) final {
-    fidl::Arena alloc;
-    completer.Reply(fuchsia_posix_socket::wire::DatagramSocketDescribeResponse::Builder(alloc)
-                        .socket(std::move(socket_))
-                        .tx_meta_buf_size({})
-                        .rx_meta_buf_size({})
-                        .metadata_encoding_protocol_version({})
-                        .Build());
-  }
-
-  zx::socket socket_;
-};
-
 class PacketSocketServer final
     : public fidl::testing::WireTestBase<fuchsia_posix_socket_packet::Socket> {
  public:

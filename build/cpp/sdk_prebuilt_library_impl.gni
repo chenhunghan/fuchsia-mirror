@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_shared_library.gni")
 import("//build/config/fuchsia/target_api_level.gni")
 import("//build/cpp/verify_pragma_once.gni")
 import("//build/cpp/verify_public_headers.gni")
@@ -80,6 +81,13 @@ import("//build/sdk/sdk_atom_alias.gni")
 #     be excluded. See /build/sdk/plasa/plasa_fragment_cc.gni.
 #
 #     See https://fxbug.dev/42068255 for more details about this field.
+#
+#   bazel_target (optional)
+#     A Bazel label to a `shared_library_gn_outputs()` target. When set, the
+#     library is a `bazel_shared_library()`, which uses the Bazel-built library
+#     in the toolchain that matches Bazel's build configuration. See
+#     //build/bazel/bazel_shared_library.gni.
+#     May only be specified when `prebuilt_library_type` is "shared".
 #
 # ==============================================================================
 #
@@ -198,6 +206,9 @@ template("sdk_prebuilt_library_impl") {
   assert(defined(invoker.prebuilt_library_type),
          "The library type must be specified.")
   prebuilt_library_type = invoker.prebuilt_library_type
+
+  assert(!defined(invoker.bazel_target) || prebuilt_library_type == "shared",
+         "`bazel_target` is only supported for shared libraries.")
 
   assert(!defined(invoker.stable),
          "Libraries are always stable (except internal).")
@@ -348,7 +359,11 @@ template("sdk_prebuilt_library_impl") {
     all_allowlist_entries_group =
         "//build/sdk:partner_idk_versioned_static_libraries"
   } else if (prebuilt_library_type == "shared") {
-    underlying_target_type = "shared_library"
+    if (defined(invoker.bazel_target)) {
+      underlying_target_type = "bazel_shared_library"
+    } else {
+      underlying_target_type = "shared_library"
+    }
     prebuild_format = "shared"
     allowlist = "//build/sdk:partner_idk_shared_libraries_allowlist"
     all_allowlist_entries_group =
@@ -381,6 +396,10 @@ template("sdk_prebuilt_library_impl") {
       ]
     } else {
       not_needed([ "all_allowlist_entries_group" ])
+    }
+
+    if (!defined(deps)) {
+      deps = []
     }
 
     if (!defined(libcxx_linkage)) {

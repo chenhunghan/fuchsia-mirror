@@ -5,7 +5,7 @@ the kernel and userspace code.  C++ is mixed with C (and some assembly) in
 both places.  Some C++ language features are avoided or prohibited.  Use of
 the C++ standard library features is very circumspect.
 
-## Language features
+## Language features {:#language-features}
 
 - Not allowed
   - Exceptions
@@ -51,7 +51,7 @@ All pure C code (`.c` source files and headers used by them) is C 11.  Some
 special exceptions are made for code meant to be reused by out-of-tree boot
 loaders, which stick to a conservative C 89 subset for embedded code.
 
-## Standard Library
+## Standard library {:#standard-library}
 
 The C++ standard library API has many interfaces of widely varying
 characteristics.  We subdivide the standard library API into several
@@ -224,7 +224,7 @@ to be lean and space-efficient.
  * [`<filesystem>`](https://en.cppreference.com/w/cpp/header/filesystem)
  * [`<regex>`](https://en.cppreference.com/w/cpp/header/regex)
 
-## FBL
+## FBL {:#fbl}
 
 FBL is the Fuchsia Base Library, which is shared between kernel and userspace.
 As a result, FBL has very strict dependencies.  For example, FBL cannot depend

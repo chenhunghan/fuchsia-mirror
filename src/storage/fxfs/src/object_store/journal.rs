@@ -25,7 +25,8 @@ mod writer;
 use crate::checksum::{Checksum, Checksums};
 use crate::errors::FxfsError;
 use crate::filesystem::{
-    ApplyContext, ApplyMode, FlushReason, ForceMajor, FxFilesystem, SyncOptions,
+    ApplyContext, ApplyMode, FlushReason, ForceMajor, FxFilesystem, MAX_IN_FLIGHT_TRANSACTIONS,
+    SyncOptions,
 };
 use crate::hooks::HooksHandle;
 use crate::log::*;
@@ -39,7 +40,8 @@ use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
 use crate::object_store::journal::checksum_list::ChecksumList;
 use crate::object_store::journal::reader::{JournalReader, ReadResult};
 use crate::object_store::journal::super_block::{
-    SuperBlockHeader, SuperBlockInstance, SuperBlockManager,
+    MIN_SUPER_BLOCK_SIZE, SUPER_BLOCK_CHUNK_SIZE, SuperBlockHeader, SuperBlockInstance,
+    SuperBlockManager,
 };
 use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::object_manager::ObjectManager;
@@ -50,8 +52,8 @@ use crate::object_store::transaction::{
     ReservationOptions, TRANSACTION_MAX_JOURNAL_USAGE, Transaction, lock_keys,
 };
 use crate::object_store::{
-    AssocObj, AttributeId, DataObjectHandle, Extent, HandleOptions, HandleOwner, INVALID_OBJECT_ID,
-    Item, ItemRef, NewChildStoreOptions, ObjectStore, ReservedId,
+    AssocObj, AttributeId, DataObjectHandle, Extent, HandleOptions, INVALID_OBJECT_ID, Item,
+    ItemRef, LocalHandleOwner, NewChildStoreOptions, ObjectStore, ReservedId,
 };
 use crate::range::RangeExt;
 use crate::round::round_div;
@@ -85,12 +87,66 @@ pub const BLOCK_SIZE: BlockSize = BlockSize::SIZE_4KIB;
 const CHUNK_SIZE: u64 = 131_072;
 const_assert!(CHUNK_SIZE > TRANSACTION_MAX_JOURNAL_USAGE);
 
-// See the comment for the `reclaim_size` member of Inner.
-pub const DEFAULT_RECLAIM_SIZE: u64 = 524_288;
+// Minimum allowed `reclaim_size`. Compaction itself leaves one `root_store` flush, up to a
+// block of `pad_to_block` padding, and a superblock `finalize` truncation past the new
+// superblock's `journal_checkpoint` (> `BLOCK_SIZE`), so `reclaim_size` must be at least
+// `2 * BLOCK_SIZE` to avoid immediately re-triggering compaction while idle.
+pub const MIN_RECLAIM_SIZE: u64 = 2 * BLOCK_SIZE.get();
 
-// Temporary space that should be reserved for the journal.  For example: space that is currently
-// used in the journal file but cannot be deallocated yet because we are flushing.
-pub const RESERVED_SPACE: u64 = 1_048_576;
+// See the comment for `reclaim_size` in `JournalOptions`.
+pub const DEFAULT_RECLAIM_SIZE: u64 = 262_144;
+
+// Fixed system journal overhead across two compaction windows for operations that write to the
+// journal without calling `check_journal_space()` (`pad_to_block`, `Journal::pre_commit`
+// chunk/zero/reset records, `Allocator::flush`, `root_store` flush, superblock `finalize`, and
+// the sub-block prefix before the zeroed journal offset). Layer-size-proportional checksum
+// records written by `DirectWriter` during large tree compactions are covered by
+// `ObjectManager`'s per-tree system headroom.
+const COMPACTION_JOURNAL_OVERHEAD: u64 = 65_536;
+
+// Temporary space that should be reserved for the journal:
+//  - `4 * reclaim_size`: `check_journal_space()` allows transactions to advance up to
+//    `2 * reclaim_size` ahead of the super-block's journal checkpoint. One compaction can thus
+//    leave up to `2 * reclaim_size` in the previous window (which cannot be zeroed until a
+//    subsequent compaction and device flush), while a second window grows another
+//    `2 * reclaim_size` before reclamation catches up.
+//  - `2 * MAX_IN_FLIGHT_TRANSACTIONS * TRANSACTION_MAX_JOURNAL_USAGE`: up to
+//    `MAX_IN_FLIGHT_TRANSACTIONS` concurrent transactions may pass `check_journal_space()` just
+//    below `2 * reclaim_size` and overshoot that threshold across each of the two windows.
+//  - `CHUNK_SIZE`: the journal is preallocated in `CHUNK_SIZE` increments whenever less than
+//    `CHUNK_SIZE` of preallocated space remains; since the initial `CHUNK_SIZE` chunk is
+//    preallocated outside `metadata_reservation` at format/image-build time, net borrowed
+//    lookahead is `1 * CHUNK_SIZE`.
+//  - `COMPACTION_JOURNAL_OVERHEAD`: internal `skip_journal_checks` and block-padding journal
+//    writes across the two compaction windows.
+//  - `2 * per_super_block_growth + SUPER_BLOCK_CHUNK_SIZE`: both superblocks' initial
+//    `MIN_SUPER_BLOCK_SIZE + SUPER_BLOCK_CHUNK_SIZE` allocation is made outside
+//    `metadata_reservation` at format/image-build time. Since `root_parent_store` is not tracked
+//    in `ObjectManager::layer_sizes`, each `SuperBlockInstance` needs headroom for its serialized
+//    `root_parent_store` extent records beyond `MIN_SUPER_BLOCK_SIZE` (retained until the next
+//    compaction truncates to `data_len + SUPER_BLOCK_CHUNK_SIZE`), plus one
+//    `SUPER_BLOCK_CHUNK_SIZE` for the active superblock's preallocation lookahead before
+//    `SuperBlockWriter::finalize` truncates back. Under worst-case 4 KiB journal fragmentation,
+//    each 4 KiB journal block adds one `SuperBlockRecord::ObjectItem` (~36 bytes, bounded by
+//    < 64 bytes = 1/64 of total journal size, i.e., `journal_bytes + CHUNK_SIZE`), plus up to
+//    `BLOCK_SIZE` for other `root_parent_store` items and end padding, rounded up to a block.
+pub const fn reserved_space(reclaim_size: u64) -> u64 {
+    let journal_bytes = reclaim_size
+        .saturating_mul(4)
+        .saturating_add(2 * MAX_IN_FLIGHT_TRANSACTIONS * TRANSACTION_MAX_JOURNAL_USAGE)
+        .saturating_add(CHUNK_SIZE)
+        .saturating_add(COMPACTION_JOURNAL_OVERHEAD);
+    let total_journal_bytes = journal_bytes.saturating_add(CHUNK_SIZE);
+    let per_super_block_growth = BLOCK_SIZE.get().saturating_add(
+        total_journal_bytes
+            .div_ceil(64)
+            .div_ceil(BLOCK_SIZE.get())
+            .saturating_mul(BLOCK_SIZE.get()),
+    );
+    journal_bytes
+        .saturating_add(per_super_block_growth.saturating_mul(2))
+        .saturating_add(SUPER_BLOCK_CHUNK_SIZE)
+}
 
 // Whenever the journal is replayed (i.e. the system is unmounted and remounted), we reset the
 // journal stream, at which point any half-complete transactions are discarded.  We indicate a
@@ -142,7 +198,7 @@ pub enum JournalRecordV63 {
     /// We insert one of these records *after* a flush along with the *next* transaction to go
     /// through.  If that never comes (either due to graceful or hard shutdown), the journal reset
     /// on the next mount will serve the same purpose and count as a flush, although it is necessary
-    /// to defensively flush the device before replaying the journal (if possible, i.e. not
+    /// to defensively flush the device before writing anything after replay (if possible, i.e. not
     /// read-only) in case the block device connection was reused.
     DidFlushDevice(u64),
 
@@ -324,7 +380,7 @@ struct Inner {
     writer: JournalWriter,
 
     // Set when a reset is encountered during a read.
-    // Used at write pre_commit() time to ensure we write a version first thing after a reset.
+    // Used in write_and_apply_mutations() to ensure we write a version first thing after a reset.
     output_reset_version: bool,
 
     // Waker for the flush task.
@@ -362,11 +418,6 @@ struct Inner {
     // we ignore those mutations and continue with new good mutations.
     discard_offset: Option<u64>,
 
-    // In the steady state, the journal should fluctuate between being approximately half of this
-    // number and this number.  New super-blocks will be written every time about half of this
-    // amount is written to the journal.
-    reclaim_size: u64,
-
     image_builder_mode: Option<SuperBlockInstance>,
 
     // If true and `needs_barrier`, issue a pre-barrier on the first device write of each journal
@@ -403,9 +454,9 @@ impl Inner {
 }
 
 pub struct JournalOptions {
-    /// In the steady state, the journal should fluctuate between being approximately half of this
-    /// number and this number.  New super-blocks will be written every time about half of this
-    /// amount is written to the journal.
+    /// In the steady state, the journal should fluctuate between being approximately this number
+    /// and twice this number.  New super-blocks will be written every time about this amount is
+    /// written to the journal.
     pub reclaim_size: u64,
 
     // If true, issue a pre-barrier on the first device write of each journal write (which happens
@@ -498,7 +549,7 @@ pub trait JournalHandle: ReadObjectHandle {
 // Provide a stub implementation for DataObjectHandle so we can use it in
 // Journal::read_transactions.  Manual extent management is a NOP (which is OK since presumably the
 // DataObjectHandle already knows where its extents live).
-impl<S: HandleOwner> JournalHandle for DataObjectHandle<S> {
+impl<S: LocalHandleOwner> JournalHandle for DataObjectHandle<S> {
     fn end_offset(&self) -> Option<u64> {
         None
     }
@@ -517,6 +568,12 @@ impl Journal {
         options: JournalOptions,
         hooks: Arc<HooksHandle>,
     ) -> Journal {
+        assert!(
+            options.reclaim_size >= MIN_RECLAIM_SIZE,
+            "Journal reclaim_size ({}) must be at least {}",
+            options.reclaim_size,
+            MIN_RECLAIM_SIZE,
+        );
         let starting_checksum = rand::random_range(1..u64::MAX);
         Journal {
             objects: objects,
@@ -540,7 +597,6 @@ impl Journal {
                 flushed_offset: 0,
                 valid_to: 0,
                 discard_offset: None,
-                reclaim_size: options.reclaim_size,
                 image_builder_mode: None,
                 barriers_enabled: options.barriers_enabled,
                 needs_barrier: false,
@@ -1385,7 +1441,7 @@ impl Journal {
 
         let allocator = Arc::new(Allocator::new(filesystem.clone(), INIT_ALLOCATOR_OBJECT_ID));
         self.objects.set_allocator(allocator.clone());
-        self.objects.init_metadata_reservation().await?;
+        self.objects.init_metadata_reservation()?;
 
         let journal_handle;
         let super_block_a_handle;
@@ -1447,6 +1503,17 @@ impl Journal {
         .await
         .context("create journal")?;
         if self.inner.lock().image_builder_mode.is_none() {
+            for super_block in [&super_block_a_handle, &super_block_b_handle] {
+                let mut file_range =
+                    MIN_SUPER_BLOCK_SIZE..MIN_SUPER_BLOCK_SIZE + SUPER_BLOCK_CHUNK_SIZE;
+                super_block
+                    .preallocate_range(&mut transaction, &mut file_range)
+                    .await
+                    .context("preallocate super block")?;
+                if file_range.start < file_range.end {
+                    bail!("preallocate_range returned too little space");
+                }
+            }
             let mut file_range = 0..self.chunk_size();
             journal_handle
                 .preallocate_range(&mut transaction, &mut file_range)
@@ -1487,14 +1554,46 @@ impl Journal {
     /// all in-memory object store mutations to layer files, funding the metadata reservation for
     /// those layers, and writing the super-block.
     pub async fn finalize_image_builder(&self) -> Result<(), Error> {
+        let root_store = self.objects.root_store();
+        let super_block_a = ObjectStore::open_object(
+            &root_store,
+            SuperBlockInstance::A.object_id(),
+            HandleOptions { skip_journal_checks: true, ..Default::default() },
+            None,
+        )
+        .await
+        .context("open super block A")?;
+        let super_block_b = ObjectStore::open_object(
+            &root_store,
+            SuperBlockInstance::B.object_id(),
+            HandleOptions { skip_journal_checks: true, ..Default::default() },
+            None,
+        )
+        .await
+        .context("open super block B")?;
         let handle = self.handle.get().unwrap();
         let mut transaction = handle
             .store()
             .new_transaction(
-                lock_keys![LockKey::object(handle.store().store_object_id(), handle.object_id())],
+                lock_keys![
+                    LockKey::object(root_store.store_object_id(), super_block_a.object_id()),
+                    LockKey::object(root_store.store_object_id(), super_block_b.object_id()),
+                    LockKey::object(handle.store().store_object_id(), handle.object_id()),
+                ],
                 Options { skip_journal_checks: true, ..Default::default() },
             )
             .await?;
+        for super_block in [&super_block_a, &super_block_b] {
+            let mut file_range =
+                MIN_SUPER_BLOCK_SIZE..MIN_SUPER_BLOCK_SIZE + SUPER_BLOCK_CHUNK_SIZE;
+            super_block
+                .preallocate_range(&mut transaction, &mut file_range)
+                .await
+                .context("preallocate super block")?;
+            if file_range.start < file_range.end {
+                bail!("preallocate_range returned too little space");
+            }
+        }
         let mut file_range = 0..self.chunk_size();
         handle
             .preallocate_range(&mut transaction, &mut file_range)
@@ -1591,33 +1690,17 @@ impl Journal {
             return Ok(self.inner.lock().writer.journal_file_checkpoint().file_offset);
         }
 
-        self.pre_commit(transaction).await?;
+        self.pre_commit().await?;
         Ok(self.write_and_apply_mutations(transaction))
     }
 
-    // Before we commit, we might need to extend the journal or write pending records to the
-    // journal.
-    async fn pre_commit(&self, _transaction: &Transaction<'_>) -> Result<(), Error> {
+    // Before we commit, we might need to extend or zero the journal, or borrow space for journal
+    // overhead.
+    async fn pre_commit(&self) -> Result<(), Error> {
         let handle;
 
         let (size, zero_offset) = {
-            let mut inner = self.inner.lock();
-
-            // If this is the first write after a RESET, we need to output version first.
-            if std::mem::take(&mut inner.output_reset_version) {
-                LATEST_VERSION.serialize_into(&mut inner.writer)?;
-            }
-
-            if let Some(discard_offset) = inner.discard_offset {
-                JournalRecord::Discard(discard_offset).serialize_into(&mut inner.writer)?;
-                inner.discard_offset = None;
-            }
-
-            if inner.needs_did_flush_device {
-                let offset = inner.device_flushed_offset;
-                JournalRecord::DidFlushDevice(offset).serialize_into(&mut inner.writer)?;
-                inner.needs_did_flush_device = false;
-            }
+            let inner = self.inner.lock();
 
             handle = match self.handle.get() {
                 None => return Ok(()),
@@ -1626,6 +1709,9 @@ impl Journal {
 
             let file_offset = inner.writer.journal_file_checkpoint().file_offset;
 
+            // Note that `write_and_apply_mutations` might write a few small records (version,
+            // `Discard` and `DidFlushDevice`) before the transaction, which aren't accounted for
+            // here, but these are negligible compared to `chunk_size`.
             let size = handle.get_size();
             let size = if file_offset + self.chunk_size() > size { Some(size) } else { None };
 
@@ -1688,7 +1774,16 @@ impl Journal {
     }
 
     /// Flushes previous writes to the device and then writes out a new super-block.
-    /// Callers must ensure that we do not make concurrent calls.
+    ///
+    /// Callers must serialize calls to this function (compactions do so via `CompactionState`).
+    ///
+    /// `writer_mutex` must be held whilst padding the journal and snapshotting `checkpoint`,
+    /// `reserved_metadata_space`, `journal_file_offsets`, and the compacted root-parent store
+    /// layers so that all super-block header fields and root-parent mutations reflect the exact
+    /// same point in the journal stream (`checkpoint.file_offset`), serialized with
+    /// `write_and_apply_mutations`. `sync_mutex` is held across that snapshot and `flush_device`
+    /// so that all journal records and layer-file data up to `checkpoint.file_offset` are durable
+    /// on disk before the new super-block is written.
     async fn write_super_block(&self) -> Result<(), Error> {
         let root_parent_store = self.objects.root_parent_store();
 
@@ -1701,6 +1796,8 @@ impl Journal {
         let mut new_super_block_header;
         let checkpoint;
         let reserved_metadata_space;
+        let journal_file_offsets;
+        let min_checkpoint;
 
         {
             let _sync_guard = debug_assert_not_too_long!(self.sync_mutex.lock());
@@ -1709,6 +1806,7 @@ impl Journal {
                 checkpoint = self.pad_to_block()?;
                 reserved_metadata_space =
                     self.objects.reconcile_metadata_reservation(checkpoint.file_offset);
+                (journal_file_offsets, min_checkpoint) = self.objects.journal_file_offsets();
                 old_layers = super_block::compact_root_parent(&*root_parent_store)?;
             }
             self.flush_device(checkpoint.file_offset)
@@ -1720,8 +1818,6 @@ impl Journal {
 
         old_super_block_offset = new_super_block_header.journal_checkpoint.file_offset;
 
-        let (journal_file_offsets, min_checkpoint) = self.objects.journal_file_offsets();
-
         new_super_block_header.generation = new_super_block_header.generation.wrapping_add(1);
         new_super_block_header.super_block_journal_file_offset = checkpoint.file_offset;
         new_super_block_header.journal_checkpoint = min_checkpoint.unwrap_or(checkpoint);
@@ -1729,17 +1825,17 @@ impl Journal {
         new_super_block_header.journal_file_offsets = journal_file_offsets;
         new_super_block_header.reserved_metadata_space = reserved_metadata_space;
 
+        let filesystem = self.objects.root_parent_store().filesystem();
         self.super_block_manager
-            .save(
-                new_super_block_header.clone(),
-                self.objects.root_parent_store().filesystem(),
-                old_layers,
-            )
+            .save(new_super_block_header.clone(), filesystem.clone(), old_layers)
             .await?;
         {
             let mut inner = self.inner.lock();
             inner.super_block_header = new_super_block_header;
-            inner.zero_offset = Some(BLOCK_SIZE.align_down(old_super_block_offset));
+            let zero_offset = filesystem.block_size().align_down(old_super_block_offset);
+            if zero_offset > 0 {
+                inner.zero_offset = Some(zero_offset);
+            }
         }
 
         Ok(())
@@ -1838,7 +1934,7 @@ impl Journal {
 
             // Tell the allocator that we flushed the device so that it can now start using
             // space that was deallocated.
-            self.objects.allocator().did_flush_device(checkpoint_offset);
+            self.objects.allocator().did_flush_device(checkpoint_offset).await;
             if trace {
                 info!("J: did flush device");
             }
@@ -1850,6 +1946,23 @@ impl Journal {
     /// Returns a copy of the super-block header.
     pub fn super_block_header(&self) -> SuperBlockHeader {
         self.inner.lock().super_block_header.clone()
+    }
+
+    /// Arranges for the journal extents before the current super-block's checkpoint to be zeroed
+    /// (and so freed) by the next `pre_commit`.
+    ///
+    /// `Inner::zero_offset` is only tracked in memory, so this should be called when mounting
+    /// writable; otherwise these extents stay allocated until the next compaction.  It must not
+    /// be called until the current super-block is durable, i.e. the device has been flushed since
+    /// it was written.
+    pub fn zero_journal_before_checkpoint(&self) {
+        let block_size = self.objects.root_parent_store().block_size();
+        let mut inner = self.inner.lock();
+        let zero_offset =
+            block_size.align_down(inner.super_block_header.journal_checkpoint.file_offset);
+        if zero_offset > 0 {
+            inner.zero_offset = Some(zero_offset);
+        }
     }
 
     /// Waits for there to be sufficient space in the journal.
@@ -1869,7 +1982,7 @@ impl Journal {
                 }
                 if self.objects.last_end_offset()
                     - inner.super_block_header.journal_checkpoint.file_offset
-                    < inner.reclaim_size
+                    < self.objects.journal_reclaim_size().saturating_mul(2)
                 {
                     return Ok(());
                 }
@@ -1900,6 +2013,19 @@ impl Journal {
             let _guard = self.writer_mutex.lock();
             checkpoint_before = {
                 let mut inner = self.inner.lock();
+                // Write pending records here, under `writer_mutex`, so that `sync` and
+                // `write_super_block` cannot pad the journal between them and this transaction.
+                // If this is the first write after a RESET, we need to output version first.
+                if std::mem::take(&mut inner.output_reset_version) {
+                    LATEST_VERSION.serialize_into(&mut inner.writer).unwrap();
+                }
+                if let Some(discard_offset) = inner.discard_offset.take() {
+                    inner.writer.write_record(&JournalRecord::Discard(discard_offset)).unwrap();
+                }
+                if std::mem::take(&mut inner.needs_did_flush_device) {
+                    let offset = inner.device_flushed_offset;
+                    inner.writer.write_record(&JournalRecord::DidFlushDevice(offset)).unwrap();
+                }
                 if transaction.includes_write() {
                     inner.needs_barrier = true;
                 }
@@ -1947,12 +2073,19 @@ impl Journal {
 
                 inner.writer.journal_file_checkpoint()
             };
+
+            self.hooks.on_before_did_commit();
+
+            // Keep `writer_mutex` held through `did_commit_transaction` so `Journal::sync` cannot
+            // pad `inner.writer` and let `write_super_block` (`reconcile_metadata_reservation`)
+            // advance `last_end_offset` past `checkpoint_after.file_offset` or reclaim metadata
+            // reservation space before this transaction transfers its hold.
+            self.objects.did_commit_transaction(
+                transaction,
+                checkpoint_after.file_offset,
+                &object_usages,
+            );
         }
-        self.objects.did_commit_transaction(
-            transaction,
-            checkpoint_after.file_offset,
-            &object_usages,
-        );
 
         if let Some(waker) = self.inner.lock().flush_waker.take() {
             waker.wake();
@@ -1988,16 +2121,15 @@ impl Journal {
                     let journal_bytes = self.objects.last_end_offset()
                         - inner.super_block_header.journal_checkpoint.file_offset;
                     fxfs_trace::counter!("journal-bytes", 0, "total" => journal_bytes);
-                    // The / 2 is here because after compacting, we cannot reclaim the space until
-                    // the _next_ time we flush the device since the super-block is not guaranteed
-                    // to persist until then.
+                    // After compacting, we cannot reclaim the space until the _next_ time we flush
+                    // the device since the super-block is not guaranteed to persist until then.
                     if compact_fut.is_none()
                         && !inner.compaction_state.is_running()
                         && !inner.terminate
                         && !inner.disable_compactions
                         && !inner.compactions_paused
                         && inner.image_builder_mode.is_none()
-                        && journal_bytes > inner.reclaim_size / 2
+                        && journal_bytes > self.objects.journal_reclaim_size()
                     {
                         compact_fut = Some(Box::pin(self.compact()));
                         inner.compaction_state = CompactionState::Running;
@@ -2187,7 +2319,7 @@ impl Journal {
                                 inner.super_block_header.journal_checkpoint.file_offset,
                             ),
                             inner.flushed_offset,
-                            inner.reclaim_size,
+                            this.objects.journal_reclaim_size(),
                         )
                     };
                     let root = inspector.root();
@@ -2273,12 +2405,9 @@ mod yielder {
                 }
                 let outstanding = self.journal.objects.last_end_offset()
                     - inner.super_block_header.journal_checkpoint.file_offset;
-                let half_reclaim_size = inner.reclaim_size / 2;
-                if outstanding
-                    .checked_sub(half_reclaim_size)
-                    .is_some_and(|x| x >= half_reclaim_size / 2)
-                {
-                    // If we have got to the point where we have used up 3/4 of reclaim size in the
+                let reclaim_size = self.journal.objects.journal_reclaim_size();
+                if outstanding.checked_sub(reclaim_size).is_some_and(|x| x >= reclaim_size / 2) {
+                    // If we have got to the point where we have used up 1.5x of reclaim size in the
                     // journal, do not delay any further.  If we continue to yield we will get to
                     // the point where we block new transactions.
                     self.low_priority_task = None;
@@ -2593,7 +2722,7 @@ mod tests {
                     .create_child_file(&mut transaction, &format!("a {i}"))
                     .await
                     .expect("create_child_file failed");
-                if transaction.commit().await.expect("commit failed") > super::CHUNK_SIZE {
+                if transaction.commit().await.expect("commit failed").offset() > super::CHUNK_SIZE {
                     break;
                 }
                 i += 1;
@@ -2621,7 +2750,9 @@ mod tests {
                     .create_child_file(&mut transaction, &format!("b {i}"))
                     .await
                     .expect("create_child_file failed");
-                if transaction.commit().await.expect("commit failed") > 2 * super::CHUNK_SIZE {
+                if transaction.commit().await.expect("commit failed").offset()
+                    > 2 * super::CHUNK_SIZE
+                {
                     break;
                 }
                 i += 1;
@@ -2788,7 +2919,7 @@ mod tests {
             let device = DeviceHolder::new(FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE));
             let fs = FxFilesystemBuilder::new()
                 .journal_options(super::JournalOptions {
-                    reclaim_size: 65536,
+                    reclaim_size: 32768,
                     ..Default::default()
                 })
                 .format(device)
@@ -2837,7 +2968,7 @@ mod tests {
             });
 
             // Trigger journal compaction.
-            // We can do this by writing more data until outstanding > reclaim_size / 2.
+            // We can do this by writing more data until outstanding > reclaim_size.
             {
                 let root_store = fs.root_store();
                 let root_directory =
@@ -2930,7 +3061,7 @@ mod tests {
             let device = DeviceHolder::new(FakeDevice::new(216384, TEST_DEVICE_BLOCK_SIZE));
             let fs = FxFilesystemBuilder::new()
                 .journal_options(super::JournalOptions {
-                    reclaim_size: 65536,
+                    reclaim_size: 32768,
                     ..Default::default()
                 })
                 .format(device)
@@ -3048,7 +3179,7 @@ mod tests {
             use std::sync::Arc;
             use std::sync::atomic::{AtomicBool, Ordering};
 
-            let reclaim_size = 65536;
+            let reclaim_size = 32768;
             let device = DeviceHolder::new(FakeDevice::new(216384, TEST_DEVICE_BLOCK_SIZE));
             let fs = FxFilesystemBuilder::new()
                 .journal_options(super::JournalOptions { reclaim_size, ..Default::default() })
@@ -3097,7 +3228,7 @@ mod tests {
                 }
             });
 
-            // Trigger journal compaction, but this time we fill it up to 3/4 full.
+            // Trigger journal compaction, but this time we fill it up to 1.5x reclaim_size.
             {
                 let root_store = fs.root_store();
                 let root_directory =
@@ -3128,10 +3259,10 @@ mod tests {
                         fs.journal().objects.last_end_offset()
                             - inner.super_block_header.journal_checkpoint.file_offset
                     };
-                    if outstanding >= reclaim_size * 7 / 8 {
+                    if outstanding >= reclaim_size * 7 / 4 {
                         break;
                     }
-                    // We don't advance time here to try and reach 3/4 before compaction can yield.
+                    // We don't advance time here to try and reach 1.5x before compaction can yield.
                     i += 1;
                 }
             }
@@ -3496,14 +3627,13 @@ mod tests {
         // increases expected reservation): actual metadata_reservation must remain unchanged rather
         // than reserving more from the allocator at mount time, and fsck must succeed.
         {
-            let extra = 65536;
+            let extra_reclaim = 65536;
+            let extra = super::reserved_space(super::DEFAULT_RECLAIM_SIZE + extra_reclaim)
+                - super::reserved_space(super::DEFAULT_RECLAIM_SIZE);
             let fs2 = FxFilesystemBuilder::new()
-                .on_new_store(move |store| {
-                    store
-                        .filesystem()
-                        .ensure_local()
-                        .object_manager()
-                        .set_reserved_space(super::RESERVED_SPACE + extra);
+                .journal_options(super::JournalOptions {
+                    reclaim_size: super::DEFAULT_RECLAIM_SIZE + extra_reclaim,
+                    ..Default::default()
                 })
                 .open(snapshot2)
                 .await
@@ -3519,8 +3649,9 @@ mod tests {
         // metadata_reservation is capped at `required_reservation()`.
         {
             let fs2 = FxFilesystemBuilder::new()
-                .on_new_store(move |store| {
-                    store.filesystem().ensure_local().object_manager().set_reserved_space(0);
+                .journal_options(super::JournalOptions {
+                    reclaim_size: super::DEFAULT_RECLAIM_SIZE / 4,
+                    ..Default::default()
                 })
                 .open(snapshot3)
                 .await
@@ -3745,8 +3876,9 @@ mod tests {
         let store_id = store.store_object_id();
         let dir_id = store.root_directory_object_id();
 
-        // Populate `store` with > 512 KiB (`DEFAULT_RECLAIM_SIZE`) of inline extended attributes
-        // so minor compactions keep their base layer.
+        // Populate `store` with > 512 KiB
+        // (`crate::object_store::tree::MINOR_COMPACTION_MERGE_THRESHOLD`) of inline extended
+        // attributes so minor compactions keep their base layer.
         for batch in 0..28 {
             let mut transaction = store
                 .new_transaction(lock_keys![LockKey::object(store_id, dir_id)], Options::default())
@@ -4285,15 +4417,13 @@ mod tests {
         fs.sync(SyncOptions { flush_device: true, ..Default::default() })
             .await
             .expect("sync failed");
+        let snapshot_corrupt_ro = fs.device().snapshot().expect("snapshot failed");
+        let snapshot_legacy_ro = fs.device().snapshot().expect("snapshot failed");
         let snapshot_legacy = fs.device().snapshot().expect("snapshot failed");
         fs.close().await.expect("close failed");
 
-        // Seed `ReplayMetadataReservation::Borrowed` when `store_a` is opened in
-        // `on_replay_complete` (right before `init_metadata_reservation`) so
-        // `init_metadata_reservation` runs in `< V61` migration mode with `store_b`'s unflushed
-        // borrowing in `journal_checkpoints`.
-        let fs2 = FxFilesystemBuilder::new()
-            .on_new_store(move |store| {
+        let seed_legacy = |borrowed: u64| {
+            move |store: &ObjectStore| {
                 if store.store_object_id() == store_a_id {
                     store
                         .filesystem()
@@ -4301,15 +4431,50 @@ mod tests {
                         .object_manager()
                         .init_replay_metadata_reservation(
                             Version { major: 59, minor: 0 },
-                            &HashMap::from_iter([(0, expected_final_legacy_borrowed)]),
+                            &HashMap::from_iter([(0, borrowed)]),
                         );
                 }
-            })
+            }
+        };
+
+        // Read-only mounts reconcile `< V61` reservation state in `on_replay_complete` (and reject
+        // corrupt `legacy_borrowed > legacy_required`) without reserving from the allocator.
+        let err = FxFilesystemBuilder::new()
+            .read_only(true)
+            .on_new_store(seed_legacy(legacy_required + 1))
+            .open(snapshot_corrupt_ro)
+            .await
+            .map(|_| ())
+            .expect_err("corrupt legacy borrowed succeeded on read-only open");
+        assert!(FxfsError::Inconsistent.matches(&err), "{err:?}");
+
+        let expected_reservation = legacy_required - expected_final_legacy_borrowed;
+        let fs_ro = FxFilesystemBuilder::new()
+            .read_only(true)
+            .on_new_store(seed_legacy(expected_final_legacy_borrowed))
+            .open(snapshot_legacy_ro)
+            .await
+            .expect("read-only open failed");
+        assert_eq!(
+            fs_ro.object_manager().borrowed_metadata_space(),
+            new_required - expected_reservation
+        );
+        let (ro_b_a, ro_r_a) = fs_ro.object_manager().store_borrowed(store_a_id).unwrap();
+        let (ro_b_b, ro_r_b) = fs_ro.object_manager().store_borrowed(store_b_id).unwrap();
+        assert!(ro_b_a > 0 && ro_b_a < ro_r_a);
+        assert!(ro_b_b > 0 && ro_b_b < ro_r_b);
+        fs_ro.close().await.expect("close failed");
+
+        // Seed `ReplayMetadataReservation::Borrowed` when `store_a` is opened in
+        // `on_replay_complete` so reservation reconciliation at the end of `on_replay_complete`
+        // runs in `< V61` migration mode with `store_b`'s unflushed borrowing in
+        // `journal_checkpoints`.
+        let fs2 = FxFilesystemBuilder::new()
+            .on_new_store(seed_legacy(expected_final_legacy_borrowed))
             .open(snapshot_legacy)
             .await
             .expect("open failed");
 
-        let expected_reservation = legacy_required - expected_final_legacy_borrowed;
         assert_eq!(fs2.object_manager().metadata_reservation().amount(), expected_reservation);
         assert_eq!(
             fs2.object_manager().borrowed_metadata_space(),
@@ -4563,6 +4728,130 @@ mod tests {
         );
         let restored = fs.allocator().reserve(None, current_res / 2).unwrap();
         restored.move_to(fs.object_manager().metadata_reservation(), current_res / 2);
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("close failed");
+    }
+
+    // Regression test verifying that compacted journal extents are reclaimed after a remount
+    // even when no post-compaction transaction ran `Journal::pre_commit` before unmounting.
+    // Without restoring `Inner::zero_offset` on mount, repeated compaction-remount cycles leak
+    // compacted extents and eventually exhaust `metadata_reservation`.
+    #[fuchsia::test]
+    async fn test_zero_offset_preserved_across_remount() {
+        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
+        let mut fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        {
+            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+            let store = root_volume
+                .new_volume("test", NewChildStoreOptions::default())
+                .await
+                .expect("new_volume failed");
+            let store_id = store.store_object_id();
+            let dir_id = store.root_directory_object_id();
+            let mut transaction = store
+                .new_transaction(lock_keys![LockKey::object(store_id, dir_id)], Options::default())
+                .await
+                .expect("new_transaction failed");
+            for i in 0..16 {
+                transaction.add(
+                    store_id,
+                    Mutation::replace_or_insert_object(
+                        ObjectKey::extended_attribute(dir_id, format!("attr_{i}").into_bytes()),
+                        ObjectValue::inline_extended_attribute(vec![0u8; 1024]),
+                    ),
+                );
+            }
+            transaction.commit().await.expect("commit failed");
+        }
+        fs.journal().force_compact().await.expect("force_compact failed");
+        fs.close().await.expect("close failed");
+
+        for cycle in 0..8u8 {
+            let device = fs.take_device().await;
+            device.reopen(false);
+            fs = FxFilesystem::open(device).await.expect("open failed");
+
+            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+            let store =
+                root_volume.volume("test", StoreOptions::default()).await.expect("volume failed");
+            let store_id = store.store_object_id();
+            let dir_id = store.root_directory_object_id();
+
+            // Reserve all remaining free disk space so journal chunk allocations must come
+            // strictly from `metadata_reservation` (`M_total`).
+            let user_reservation = fs.allocator().reserve_with(None, |limit| limit);
+
+            for _ in 0..15 {
+                let mut transaction = store
+                    .new_transaction(
+                        lock_keys![LockKey::object(store_id, dir_id)],
+                        Options { reservation: ReservationOptions::Borrowed, ..Default::default() },
+                    )
+                    .await
+                    .expect("new_transaction failed");
+                for i in 0..16 {
+                    transaction.add(
+                        store_id,
+                        Mutation::replace_or_insert_object(
+                            ObjectKey::extended_attribute(dir_id, format!("attr_{i}").into_bytes()),
+                            ObjectValue::inline_extended_attribute(vec![
+                                cycle.wrapping_add(1);
+                                1024
+                            ]),
+                        ),
+                    );
+                }
+                transaction.commit().await.expect("borrowed commit failed");
+            }
+
+            fs.journal().force_compact().await.expect("force_compact failed");
+            std::mem::drop(user_reservation);
+            fsck(fs.clone()).await.expect("fsck failed");
+            // Close immediately without committing another transaction, leaving `zero_offset`
+            // unconsumed until the next mount.
+            fs.close().await.expect("close failed");
+        }
+
+        let device = fs.take_device().await;
+        device.reopen(false);
+        fs = FxFilesystem::open(device).await.expect("open failed");
+        {
+            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+            let store =
+                root_volume.volume("test", StoreOptions::default()).await.expect("volume failed");
+            let store_id = store.store_object_id();
+            let dir_id = store.root_directory_object_id();
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store_id, dir_id)],
+                    Options { reservation: ReservationOptions::Borrowed, ..Default::default() },
+                )
+                .await
+                .expect("new_transaction failed");
+            transaction.add(
+                store_id,
+                Mutation::replace_or_insert_object(
+                    ObjectKey::extended_attribute(dir_id, b"attr_0".to_vec()),
+                    ObjectValue::inline_extended_attribute(vec![0xff; 1024]),
+                ),
+            );
+            transaction.commit().await.expect("post-reopen commit failed");
+        }
+        let journal_handle = ObjectStore::open_object(
+            &fs.object_manager().root_parent_store(),
+            fs.super_block_header().journal_object_id,
+            super::journal_handle_options(),
+            None,
+        )
+        .await
+        .expect("open journal failed");
+        let allocated_size =
+            journal_handle.get_properties().await.expect("get_properties failed").allocated_size;
+        assert!(
+            allocated_size <= 4 * super::CHUNK_SIZE,
+            "expected compacted journal extents to be zeroed after remount, got allocated_size={}",
+            allocated_size,
+        );
         fsck(fs.clone()).await.expect("fsck failed");
         fs.close().await.expect("close failed");
     }
@@ -4824,6 +5113,534 @@ mod tests {
         fs.journal().force_compact().await.expect("force_compact failed");
         assert_eq!(fs.object_manager().borrowed_metadata_space(), 0);
 
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test(threads = 4)]
+    async fn test_commit_races_with_sync_and_write_super_block() {
+        use super::JournalOptions;
+        use crate::hooks::Hooks;
+        use crate::object_store::SetExtendedAttributeMode;
+        use fuchsia_sync::Mutex;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Keep all 4 executor worker threads awake throughout both phases so blocking a worker on a
+        // synchronous test hook or `writer_mutex` never stalls the executor.
+        let _executor_tasks = crate::testing::force_executor_threads_to_run(4).await;
+
+        let reclaim_size = 32_768;
+        let device = DeviceHolder::new(FakeDevice::new(65536, 4096));
+        let (mut hooks, fs_hooks) = Hooks::new();
+        let fs = FxFilesystemBuilder::new()
+            .hooks(fs_hooks)
+            .journal_options(JournalOptions { reclaim_size, ..Default::default() })
+            .format(device)
+            .await
+            .expect("format failed");
+
+        let (file_0, file_1) = {
+            let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
+            let store = root_vol
+                .new_volume("test", NewChildStoreOptions::default())
+                .await
+                .expect("new_volume failed");
+            let root_dir = Directory::open(&store, store.root_directory_object_id())
+                .await
+                .expect("Directory::open failed");
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store.store_object_id(), root_dir.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            let f0 = Arc::new(
+                root_dir
+                    .create_child_file(&mut transaction, "f0")
+                    .await
+                    .expect("create_child_file failed"),
+            );
+            let f1 = Arc::new(
+                root_dir
+                    .create_child_file(&mut transaction, "f1")
+                    .await
+                    .expect("create_child_file failed"),
+            );
+            transaction.commit().await.expect("commit failed");
+            (f0, f1)
+        };
+
+        // Compact initial format/volume/file setup so `journal_bytes` starts near zero (`<<
+        // reclaim_size`), pause automatic compactions, and run one warm-up commit to clear
+        // post-compaction `zero_offset` state before arming the Phase 1 hook.
+        fs.journal().force_compact().await.expect("force_compact failed");
+        fs.journal().pause_compactions().await;
+        file_1
+            .set_extended_attribute(b"init".to_vec(), vec![0u8; 8], SetExtendedAttributeMode::Set)
+            .await
+            .expect("set_extended_attribute failed");
+
+        // Phase 1: deterministically pause a committing transaction right before
+        // `did_commit_transaction` and run `Journal::sync` + `Journal::write_super_block` without
+        // wall-clock sleeps. Without `writer_mutex` covering `did_commit_transaction`, `sync` pads
+        // `inner.writer` to the next block boundary and `write_super_block` advances
+        // `ObjectManager::last_end_offset` to that padded offset before `did_commit_transaction`
+        // subtracts `last_end_offset` from `checkpoint_after.file_offset`.
+        let (reached_tx, reached_rx) = futures::channel::oneshot::channel::<()>();
+        let reached_tx = Mutex::new(Some(reached_tx));
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let resume_tx = Arc::new(Mutex::new(Some(resume_tx)));
+        let resume_rx = Mutex::new(resume_rx);
+        hooks.set_before_did_commit(move || {
+            let first = reached_tx.lock().take();
+            if let Some(tx) = first {
+                let _ = tx.send(());
+                resume_rx.lock().recv().expect("failed to wait for resume");
+            }
+        });
+
+        let fs_interleave = fs.clone();
+        let interleaver_task = fasync::Task::spawn(async move {
+            reached_rx.await.expect("commit never reached before_did_commit");
+            let resume_from_sync = resume_tx.clone();
+            fs_interleave
+                .journal()
+                .sync(SyncOptions {
+                    flush_device: false,
+                    precondition: Some(Box::new(|| {
+                        if fs_interleave.journal().writer_mutex.try_lock().is_none() {
+                            // `writer_mutex` is held by the paused commit (fixed behavior): unblock
+                            // the commit right before `sync` blocks on `writer_mutex`.
+                            if let Some(tx) = resume_from_sync.lock().take() {
+                                tx.send(()).expect("failed to resume commit");
+                            }
+                        }
+                        true
+                    })),
+                })
+                .await
+                .expect("sync failed");
+            fs_interleave.journal().write_super_block().await.expect("write_super_block failed");
+            if let Some(tx) = resume_tx.lock().take() {
+                tx.send(()).expect("failed to resume commit");
+            }
+        });
+
+        file_0
+            .set_extended_attribute(b"attr".to_vec(), vec![0u8; 64], SetExtendedAttributeMode::Set)
+            .await
+            .expect("set_extended_attribute failed");
+        interleaver_task.await;
+        drop(hooks);
+        assert_eq!(fs.object_manager().last_end_offset() % super::BLOCK_SIZE, 0);
+
+        // Phase 2: resume automatic `reclaim_size` compactions and exercise unhooked multi-threaded
+        // contention across exposed `set_extended_attribute`, `fs.sync`, and background compaction.
+        // Writing > `2 * reclaim_size` bytes across the two tasks guarantees `check_journal_space`
+        // requires at least one automatic background compaction to complete before they finish.
+        fs.journal().resume_compactions();
+        let generation_before = fs.journal().super_block_header().generation;
+        let done = Arc::new(AtomicBool::new(false));
+
+        let fs_sync = fs.clone();
+        let done_sync = done.clone();
+        let sync_loop = fasync::Task::spawn(async move {
+            while !done_sync.load(Ordering::Acquire) {
+                fs_sync
+                    .sync(SyncOptions { flush_device: true, ..Default::default() })
+                    .await
+                    .expect("sync failed");
+                fasync::yield_now().await;
+            }
+        });
+
+        let mut writer_tasks = Vec::new();
+        for file in [file_0, file_1] {
+            writer_tasks.push(fasync::Task::spawn(async move {
+                let attr_name = vec![b'x'; 200];
+                for i in 0u8..80 {
+                    file.set_extended_attribute(
+                        attr_name.clone(),
+                        vec![i; 256],
+                        SetExtendedAttributeMode::Set,
+                    )
+                    .await
+                    .expect("set_extended_attribute failed");
+                    fasync::yield_now().await;
+                }
+            }));
+        }
+        for task in writer_tasks {
+            task.await;
+        }
+        done.store(true, Ordering::Release);
+        sync_loop.await;
+
+        assert!(
+            fs.journal().super_block_header().generation > generation_before,
+            "reclaim_size should trigger background compaction during Phase 2"
+        );
+
+        fs.journal().force_compact().await.expect("force_compact failed");
+        let expected_reservation = fs.object_manager().metadata_reservation().amount();
+        let expected_borrowed = fs.object_manager().borrowed_metadata_space();
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("close failed");
+
+        // Verify persisted super-block reservation state matches live state across replay.
+        let device = fs.take_device().await;
+        device.reopen(false);
+        let fs = FxFilesystemBuilder::new()
+            .journal_options(JournalOptions { reclaim_size, ..Default::default() })
+            .open(device)
+            .await
+            .expect("open failed");
+        assert_eq!(fs.object_manager().metadata_reservation().amount(), expected_reservation);
+        assert_eq!(fs.object_manager().borrowed_metadata_space(), expected_borrowed);
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_journal_reserved_space_validation() {
+        assert_eq!(super::reserved_space(super::DEFAULT_RECLAIM_SIZE), 1_564_672);
+        assert_eq!(super::reserved_space(u64::MAX), u64::MAX);
+
+        for bad_reclaim_size in [0, super::MIN_RECLAIM_SIZE - 1] {
+            let device = DeviceHolder::new(FakeDevice::new(8192, 512));
+            let err = FxFilesystemBuilder::new()
+                .journal_options(super::JournalOptions {
+                    reclaim_size: bad_reclaim_size,
+                    ..Default::default()
+                })
+                .format(device)
+                .await
+                .err()
+                .expect("format with small reclaim_size should fail");
+            assert!(FxfsError::InvalidArgs.matches(&err), "unexpected error: {err:?}");
+        }
+
+        // Physical device block sizes exceeding `journal::BLOCK_SIZE` (4 KiB) must be rejected.
+        let oversize_block_device =
+            DeviceHolder::new(FakeDevice::new(1024, (super::BLOCK_SIZE.get() * 2) as u32));
+        let err = FxFilesystemBuilder::new()
+            .format(oversize_block_device)
+            .await
+            .err()
+            .expect("format with >4KiB device block size should fail");
+        assert!(FxfsError::NotSupported.matches(&err), "unexpected error: {err:?}");
+
+        // `MIN_RECLAIM_SIZE` succeeds, both superblocks have their lookahead chunk preallocated
+        // outside `metadata_reservation`, and initial `create_child_dir("volumes")` borrows at
+        // most one `CHUNK_SIZE` lookahead plus one journal block of sub-block padding.
+        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
+        let fs = FxFilesystemBuilder::new()
+            .journal_options(super::JournalOptions {
+                reclaim_size: super::MIN_RECLAIM_SIZE,
+                ..Default::default()
+            })
+            .format(device)
+            .await
+            .expect("format at MIN_RECLAIM_SIZE failed");
+        assert!(
+            fs.object_manager().borrowed_metadata_space()
+                <= super::CHUNK_SIZE
+                    + crate::object_store::object_manager::reserved_space_from_journal_usage(
+                        super::BLOCK_SIZE.get(),
+                    ),
+            "unexpectedly large borrowed_metadata_space: {}",
+            fs.object_manager().borrowed_metadata_space(),
+        );
+        for instance in [SuperBlockInstance::A, SuperBlockInstance::B] {
+            let sb = ObjectStore::open_object(
+                &fs.root_store(),
+                instance.object_id(),
+                HandleOptions::default(),
+                None,
+            )
+            .await
+            .expect("open superblock failed");
+            assert_eq!(sb.get_size(), super::MIN_SUPER_BLOCK_SIZE + super::SUPER_BLOCK_CHUNK_SIZE);
+        }
+        // Exercise multiple journal transactions and a remount at `MIN_RECLAIM_SIZE`.
+        for _ in 0..30 {
+            let mut transaction = fs
+                .root_store()
+                .new_transaction(lock_keys![], Options::default())
+                .await
+                .expect("new_transaction failed");
+            ObjectStore::create_object(
+                &fs.root_store(),
+                &mut transaction,
+                HandleOptions::default(),
+                None,
+            )
+            .await
+            .expect("create_object failed");
+            transaction.commit().await.expect("commit failed");
+        }
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("close failed");
+        let device = fs.take_device().await;
+        device.reopen(false);
+        let fs = FxFilesystemBuilder::new()
+            .journal_options(super::JournalOptions {
+                reclaim_size: super::MIN_RECLAIM_SIZE,
+                ..Default::default()
+            })
+            .open(device)
+            .await
+            .expect("open at MIN_RECLAIM_SIZE failed");
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_fragmented_journal_super_block_reservation() {
+        let block_size = super::BLOCK_SIZE.get();
+        let device = DeviceHolder::new(FakeDevice::new(4096, block_size as u32));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+        let store = root_volume
+            .new_volume("test", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+        let store_id = store.store_object_id();
+        let root_dir =
+            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
+
+        // Pre-create 4 child files and populate the extended attributes using regular reservations
+        // so later `Borrowed` overwrites are space-neutral and reference valid objects for `fsck`.
+        let mut inflight_ids = Vec::new();
+        {
+            let mut txn = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store_id, root_dir.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            for slot in 0..super::MAX_IN_FLIGHT_TRANSACTIONS {
+                let file = root_dir
+                    .create_child_file(&mut txn, &format!("inflight_{slot}"))
+                    .await
+                    .expect("create inflight file failed");
+                inflight_ids.push(file.object_id());
+            }
+            for i in 0..16 {
+                txn.add(
+                    store_id,
+                    Mutation::replace_or_insert_object(
+                        ObjectKey::extended_attribute(
+                            root_dir.object_id(),
+                            format!("frag_attr_{i:02}").into_bytes(),
+                        ),
+                        ObjectValue::inline_extended_attribute(vec![0u8; 1024]),
+                    ),
+                );
+            }
+            txn.commit().await.expect("commit failed");
+        }
+        for &obj_id in &inflight_ids {
+            let mut txn = store
+                .new_transaction(lock_keys![LockKey::object(store_id, obj_id)], Options::default())
+                .await
+                .expect("new_transaction failed");
+            for i in 0..16 {
+                txn.add(
+                    store_id,
+                    Mutation::replace_or_insert_object(
+                        ObjectKey::extended_attribute(
+                            obj_id,
+                            format!("frag_inflight_{i:02}").into_bytes(),
+                        ),
+                        ObjectValue::inline_extended_attribute(vec![0u8; 1024]),
+                    ),
+                );
+            }
+            txn.commit().await.expect("commit failed");
+        }
+
+        // Allocate `frag_file` and punch 1024 alternating 4 KiB holes so fragmented 4 KiB blocks
+        // exist across `[frag_file]` before consuming contiguous tail space with `plug_file`.
+        let frag_file = {
+            let mut txn = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store_id, root_dir.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            let file =
+                root_dir.create_child_file(&mut txn, "frag_file").await.expect("create failed");
+            txn.commit().await.expect("commit failed");
+            file
+        };
+        let frag_blocks = 2048u64;
+        let prealloc_chunk = 256 * block_size;
+        for chunk_start in (0..frag_blocks * block_size).step_by(prealloc_chunk as usize) {
+            let mut txn = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store_id, frag_file.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            let mut range = chunk_start..chunk_start + prealloc_chunk;
+            frag_file.preallocate_range(&mut txn, &mut range).await.expect("preallocate failed");
+            txn.commit().await.expect("commit failed");
+        }
+        let hole_count = 1024u64;
+        for batch_start in (0..hole_count).step_by(64) {
+            let mut txn = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store_id, frag_file.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            for i in batch_start..std::cmp::min(batch_start + 64, hole_count) {
+                let offset = i * 2 * block_size;
+                frag_file.zero(&mut txn, offset..offset + block_size).await.expect("zero failed");
+            }
+            txn.commit().await.expect("commit failed");
+        }
+        drop(frag_file);
+        fs.sync(SyncOptions { flush_device: true, ..Default::default() })
+            .await
+            .expect("sync failed");
+
+        // Allocate `plug_file` in 64 KiB chunks so `BestFit` consumes all contiguous free regions
+        // larger than 4 KiB first, leaving single-block 4 KiB holes for metadata allocations.
+        let free_user_bytes = fs.allocator().reserve_with(None, |limit| limit).amount();
+        let plug_bytes =
+            block_size * (free_user_bytes.saturating_sub(64 * block_size) / block_size);
+        let plug_file = {
+            let mut txn = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store_id, root_dir.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            let file =
+                root_dir.create_child_file(&mut txn, "plug_file").await.expect("create failed");
+            txn.commit().await.expect("commit failed");
+            file
+        };
+        let plug_chunk = 16 * block_size;
+        let mut allocated = 0u64;
+        while allocated < plug_bytes {
+            let next_end = std::cmp::min(allocated + plug_chunk, plug_bytes);
+            let mut txn = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store_id, plug_file.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            let mut range = allocated..next_end;
+            plug_file.preallocate_range(&mut txn, &mut range).await.expect("preallocate failed");
+            txn.commit().await.expect("commit failed");
+            allocated = next_end;
+        }
+        drop(plug_file);
+
+        fs.journal().force_compact().await.expect("force_compact failed");
+        fs.sync(SyncOptions { flush_device: true, ..Default::default() })
+            .await
+            .expect("sync failed");
+        fs.journal().force_compact().await.expect("force_compact failed");
+        assert!(
+            fs.object_manager().borrowed_metadata_space()
+                <= super::reserved_space(super::DEFAULT_RECLAIM_SIZE)
+        );
+
+        fs.journal().pause_compactions().await;
+        let reservation = fs.allocator().reserve_with(None, |limit| limit);
+
+        // Run three compaction windows with fragmented 4 KiB journal allocations and 4 concurrent
+        // in-flight `Borrowed` transactions per window so both superblocks grow beyond one block.
+        for window in 0..3u64 {
+            for step in 0..30u64 {
+                let mut txn = store
+                    .new_transaction(
+                        lock_keys![LockKey::object(store_id, root_dir.object_id())],
+                        Options { reservation: ReservationOptions::Borrowed, ..Default::default() },
+                    )
+                    .await
+                    .expect("new_transaction failed");
+                for i in 0..16 {
+                    txn.add(
+                        store_id,
+                        Mutation::replace_or_insert_object(
+                            ObjectKey::extended_attribute(
+                                root_dir.object_id(),
+                                format!("frag_attr_{i:02}").into_bytes(),
+                            ),
+                            ObjectValue::inline_extended_attribute(vec![
+                                (window * 31 + step) as u8;
+                                1024
+                            ]),
+                        ),
+                    );
+                }
+                txn.commit().await.expect("commit failed");
+            }
+
+            let mut in_flight = Vec::new();
+            for &obj_id in &inflight_ids {
+                let mut txn = store
+                    .new_transaction(
+                        lock_keys![LockKey::object(store_id, obj_id)],
+                        Options { reservation: ReservationOptions::Borrowed, ..Default::default() },
+                    )
+                    .await
+                    .expect("new_transaction failed");
+                for i in 0..16 {
+                    txn.add(
+                        store_id,
+                        Mutation::replace_or_insert_object(
+                            ObjectKey::extended_attribute(
+                                obj_id,
+                                format!("frag_inflight_{i:02}").into_bytes(),
+                            ),
+                            ObjectValue::inline_extended_attribute(vec![
+                                (window * 31 + 30) as u8;
+                                1024
+                            ]),
+                        ),
+                    );
+                }
+                in_flight.push(txn);
+            }
+            for txn in in_flight {
+                txn.commit().await.expect("in-flight commit failed");
+            }
+
+            fs.journal().force_compact().await.expect("force_compact failed");
+        }
+
+        for instance in [SuperBlockInstance::A, SuperBlockInstance::B] {
+            let sb = ObjectStore::open_object(
+                &fs.root_store(),
+                instance.object_id(),
+                HandleOptions::default(),
+                None,
+            )
+            .await
+            .expect("open superblock failed");
+            assert!(
+                sb.get_size() > super::MIN_SUPER_BLOCK_SIZE + super::SUPER_BLOCK_CHUNK_SIZE,
+                "expected superblock {:?} to exceed 1 data block under fragmentation, got size {}",
+                instance,
+                sb.get_size()
+            );
+        }
+
+        drop(reservation);
+        fs.journal().resume_compactions();
         fsck(fs.clone()).await.expect("fsck failed");
         fs.close().await.expect("close failed");
     }

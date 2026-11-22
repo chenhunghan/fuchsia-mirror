@@ -8,16 +8,21 @@ if (is_host) {
   group("tests") {
     testonly = true
     deps = [
-      "cli:cli_test",
+      "cli:tests",
       "daemon:tests",
       "daemon_manager:tests",
       "shared:tests",
-      "tests:cli_integration_test",
+      "tests",
       "//src/lib/debug/dap:tests",
     ]
   }
 
   group("install") {
     deps = [ "daemon:install" ]
+  }
+} else {
+  group("tests") {
+    testonly = true
+    deps = [ ":tests($host_toolchain)" ]
   }
 }

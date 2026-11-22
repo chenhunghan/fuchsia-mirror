@@ -11,6 +11,7 @@
 
 #include <array>
 #include <mutex>
+#include <string_view>
 
 #include "sdk/lib/fdio/cleanpath.h"
 #include "sdk/lib/fdio/fdio_slot.h"
@@ -22,6 +23,10 @@ struct fdio_state_t {
   fbl::RefPtr<fdio> fd_to_io(int fd) __TA_EXCLUDES(lock);
   fbl::RefPtr<fdio> unbind_from_fd_locked(int fd) __TA_REQUIRES(lock);
   fbl::RefPtr<fdio> unbind_from_fd(int fd) __TA_EXCLUDES(lock);
+
+  std::string_view current_cwd_path() const __TA_REQUIRES(cwd_lock) {
+    return cwd_path.empty() ? "/" : std::string_view{cwd_path};
+  }
 
   // TODO(tamird): make these private and make this a class.
   std::mutex lock;

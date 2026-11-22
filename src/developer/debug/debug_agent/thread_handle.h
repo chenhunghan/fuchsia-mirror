@@ -17,14 +17,21 @@
 #include "src/developer/debug/shared/register_info.h"
 #include "src/lib/fxl/memory/ref_counted.h"
 
+// TODO(https://fxbug.dev/581892793): Switch to #ifdef and #elifdef once reclient's C++ include
+// scanner supports C++23 preprocessor directives.
+// NOLINTBEGIN(readability-use-concise-preprocessor-directives)
 #if defined(__Fuchsia__)
 #include <lib/zx/thread.h>
 #elif defined(__linux__)
 #include "src/developer/debug/debug_agent/linux_task.h"
 #endif
+// NOLINTEND(readability-use-concise-preprocessor-directives)
 
 namespace debug_agent {
 
+// TODO(https://fxbug.dev/581892793): Switch to #ifdef and #elifdef once reclient's C++ include
+// scanner supports C++23 preprocessor directives.
+// NOLINTBEGIN(readability-use-concise-preprocessor-directives)
 #if defined(__Fuchsia__)
 using NativeThreadHandle = zx::thread;
 #elif defined(__linux__)
@@ -32,6 +39,7 @@ using NativeThreadHandle = fxl::RefPtr<LinuxTask>;
 #else
 #error Unknown platform
 #endif
+// NOLINTEND(readability-use-concise-preprocessor-directives)
 
 // An abstract wrapper around an OS thread primitive. This abstraction is to allow mocking.
 class ThreadHandle {
@@ -82,6 +90,11 @@ class ThreadHandle {
   // suspended. Returns true if we could find a valid suspension condition (either suspended or on
   // an exception). False if timeout or error.
   virtual bool WaitForSuspension(TickTimePoint deadline) const = 0;
+
+  // Waits strictly for the OS suspended signal (or thread termination) up to |deadline|, without
+  // polling GetState().is_blocked_on_exception(). Returns true only if the thread reached the
+  // suspended state without terminating.
+  virtual bool WaitForSuspensionSignal(TickTimePoint deadline) const = 0;
 
   // Registers -------------------------------------------------------------------------------------
 

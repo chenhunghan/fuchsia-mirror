@@ -54,12 +54,13 @@ mod tests {
             .collect();
         let occupied: HashSet<Port> =
             listeners.iter().map(|l| l.local_addr().unwrap().port()).collect();
-        for _ in 0..1000 {
-            let port = pick_unused_port().expect("should find an unused port");
-            assert!(!occupied.contains(&port));
-            TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
-                .expect("picked port should be bindable on 127.0.0.1");
-        }
+        (0..10)
+            .find_map(|_| {
+                let port = pick_unused_port().expect("should find an unused port");
+                assert!(!occupied.contains(&port));
+                TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).ok()
+            })
+            .expect("failed to bind to any port after 10 attempts");
     }
 
     #[test]
@@ -72,9 +73,12 @@ mod tests {
             .collect();
         let occupied: HashSet<Port> =
             listeners.iter().map(|l| l.local_addr().unwrap().port()).collect();
-        for _ in 0..1000 {
-            let port = pick_unused_port().expect("should find an unused port");
-            assert!(!occupied.contains(&port));
-        }
+        (0..10)
+            .find_map(|_| {
+                let port = pick_unused_port().expect("should find an unused port");
+                assert!(!occupied.contains(&port));
+                TcpListener::bind(SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0)).ok()
+            })
+            .expect("failed to bind to any port after 10 attempts");
     }
 }

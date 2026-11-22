@@ -23,9 +23,12 @@
 namespace forensics::feedback {
 namespace {
 
-using testing::BuildLogMessage;
+using ::testing::IsEmpty;
+using ::testing::TestParamInfo;
 using ::testing::UnorderedElementsAre;
 using ::testing::UnorderedElementsAreArray;
+using ::testing::ValuesIn;
+using ::testing::WithParamInterface;
 
 MATCHER_P2(MatchesCobaltEvent, expected_type, expected_metric_id, "") {
   return arg.type == expected_type && arg.metric_id == expected_metric_id;
@@ -102,6 +105,104 @@ TEST_F(NamespaceInitTest, MoveFile) {
   EXPECT_FALSE(files::IsFile(from));
   EXPECT_TRUE(files::IsFile(to));
   EXPECT_EQ(ReadFile(to), "reboot_reason");
+}
+
+TEST_F(NamespaceInitTest, MoveFileWithFallbackOnlyCurrentExists) {
+  const std::string from = MakeFilepath(RootdDir(), "from.txt");
+  const std::string legacy_from = MakeFilepath(RootdDir(), "legacy_from.txt");
+  const std::string to = MakeFilepath(RootdDir(), "to.txt");
+
+  WriteFile(from, "current_content");
+  MoveFileWithFallback(from, legacy_from, to);
+
+  EXPECT_FALSE(files::IsFile(from));
+  EXPECT_FALSE(files::IsFile(legacy_from));
+  ASSERT_TRUE(files::IsFile(to));
+  EXPECT_EQ(ReadFile(to), "current_content");
+}
+
+TEST_F(NamespaceInitTest, MoveFileWithFallbackOnlyLegacyExists) {
+  const std::string from = MakeFilepath(RootdDir(), "from.txt");
+  const std::string legacy_from = MakeFilepath(RootdDir(), "legacy_from.txt");
+  const std::string to = MakeFilepath(RootdDir(), "to.txt");
+
+  WriteFile(legacy_from, "legacy_content");
+  MoveFileWithFallback(from, legacy_from, to);
+
+  EXPECT_FALSE(files::IsFile(from));
+  EXPECT_FALSE(files::IsFile(legacy_from));
+  ASSERT_TRUE(files::IsFile(to));
+  EXPECT_EQ(ReadFile(to), "legacy_content");
+}
+
+TEST_F(NamespaceInitTest, MoveFileWithFallbackBothExistPrefersCurrentAndDeletesLegacy) {
+  const std::string from = MakeFilepath(RootdDir(), "from.txt");
+  const std::string legacy_from = MakeFilepath(RootdDir(), "legacy_from.txt");
+  const std::string to = MakeFilepath(RootdDir(), "to.txt");
+
+  WriteFile(from, "current_content");
+  WriteFile(legacy_from, "legacy_content");
+  MoveFileWithFallback(from, legacy_from, to);
+
+  EXPECT_FALSE(files::IsFile(from));
+  EXPECT_FALSE(files::IsFile(legacy_from));
+  ASSERT_TRUE(files::IsFile(to));
+  EXPECT_EQ(ReadFile(to), "current_content");
+}
+
+TEST_F(NamespaceInitTest, MoveFileWithFallbackNeitherExists) {
+  const std::string from = MakeFilepath(RootdDir(), "from.txt");
+  const std::string legacy_from = MakeFilepath(RootdDir(), "legacy_from.txt");
+  const std::string to = MakeFilepath(RootdDir(), "to.txt");
+
+  MoveFileWithFallback(from, legacy_from, to);
+
+  EXPECT_FALSE(files::IsFile(from));
+  EXPECT_FALSE(files::IsFile(legacy_from));
+  EXPECT_FALSE(files::IsFile(to));
+}
+
+TEST_F(NamespaceInitTest, MoveFileWithFallbackWriteFailsOnlyCurrentExists) {
+  const std::string from = MakeFilepath(RootdDir(), "from.txt");
+  const std::string legacy_from = MakeFilepath(RootdDir(), "legacy_from.txt");
+  const std::string to = "/bad_path/to.txt";
+
+  WriteFile(from, "current_content");
+  MoveFileWithFallback(from, legacy_from, to);
+
+  ASSERT_TRUE(files::IsFile(from));
+  EXPECT_EQ(ReadFile(from), "current_content");
+  EXPECT_FALSE(files::IsFile(legacy_from));
+  EXPECT_FALSE(files::IsFile(to));
+}
+
+TEST_F(NamespaceInitTest, MoveFileWithFallbackWriteFailsOnlyLegacyExists) {
+  const std::string from = MakeFilepath(RootdDir(), "from.txt");
+  const std::string legacy_from = MakeFilepath(RootdDir(), "legacy_from.txt");
+  const std::string to = "/bad_path/to.txt";
+
+  WriteFile(legacy_from, "legacy_content");
+  MoveFileWithFallback(from, legacy_from, to);
+
+  EXPECT_FALSE(files::IsFile(from));
+  ASSERT_TRUE(files::IsFile(legacy_from));
+  EXPECT_EQ(ReadFile(legacy_from), "legacy_content");
+  EXPECT_FALSE(files::IsFile(to));
+}
+
+TEST_F(NamespaceInitTest, MoveFileWithFallbackWriteFailsBothExist) {
+  const std::string from = MakeFilepath(RootdDir(), "from.txt");
+  const std::string legacy_from = MakeFilepath(RootdDir(), "legacy_from.txt");
+  const std::string to = "/bad_path/to.txt";
+
+  WriteFile(from, "current_content");
+  WriteFile(legacy_from, "legacy_content");
+  MoveFileWithFallback(from, legacy_from, to);
+
+  ASSERT_TRUE(files::IsFile(from));
+  EXPECT_EQ(ReadFile(from), "current_content");
+  EXPECT_FALSE(files::IsFile(legacy_from));
+  EXPECT_FALSE(files::IsFile(to));
 }
 
 TEST_F(NamespaceInitTest, MoveAndRecordBootId) {
@@ -199,8 +300,9 @@ TEST_F(NamespaceInitTest, CreatePreviousLogsFile) {
   }
 
   std::string log_file = MakeFilepath(RootdDir(), "log.system.previous_boot.txt");
-  CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
-                         /*last_boot_uptime=*/std::nullopt, logs_dir, log_file);
+  EXPECT_EQ(CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
+                                   logs_dir, log_file),
+            kLogMessageBaseTimestamp);
 
   RunLoopUntilIdle();
 
@@ -233,8 +335,9 @@ TEST_F(NamespaceInitTest, CreatePreviousLogsFileLogsMetricsAtCapacity) {
   WriteFile(MakeFilepath(logs_dir, 1), encoder.Encode(unencoded));
 
   const std::string log_file = MakeFilepath(RootdDir(), "log.system.previous_boot.txt");
-  CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
-                         /*last_boot_uptime=*/zx::sec(124) + zx::msec(55), logs_dir, log_file);
+  EXPECT_EQ(CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
+                                   logs_dir, log_file),
+            zx::time_boot(zx::sec(124).get()));
 
   RunLoopUntilIdle();
 
@@ -251,10 +354,7 @@ TEST_F(NamespaceInitTest, CreatePreviousLogsFileLogsMetricsAtCapacity) {
                         {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, 2),
           cobalt::Event(cobalt::EventType::kInteger,
                         cobalt_registry::kPreviousBootLogDurationAtCapacityMetricId,
-                        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, 2),
-          cobalt::Event(cobalt::EventType::kInteger,
-                        cobalt_registry::kPreviousBootLogLastTimestampDeltaMetricId,
-                        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, 55)));
+                        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, 2)));
 }
 
 TEST_F(NamespaceInitTest, CreatePreviousLogsFileLogsMetricsNotAtCapacity) {
@@ -272,22 +372,36 @@ TEST_F(NamespaceInitTest, CreatePreviousLogsFileLogsMetricsNotAtCapacity) {
   WriteFile(MakeFilepath(logs_dir, 0), encoder.Encode(unencoded));
 
   const std::string log_file = MakeFilepath(RootdDir(), "log.system.previous_boot.txt");
-  CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
-                         /*last_boot_uptime=*/zx::sec(124) + zx::msec(55), logs_dir, log_file);
+  EXPECT_EQ(CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
+                                   logs_dir, log_file),
+            zx::time_boot(zx::sec(124).get()));
 
   RunLoopUntilIdle();
 
-  EXPECT_THAT(
-      ReceivedCobaltEvents(),
-      UnorderedElementsAre(
-          MatchesCobaltEvent(cobalt::EventType::kInteger,
-                             cobalt_registry::kPreviousBootLogCompressionRatioMigratedMetricId),
-          cobalt::Event(cobalt::EventType::kInteger,
-                        cobalt_registry::kPreviousBootLogLastTimestampDeltaMetricId,
-                        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, 55)));
+  EXPECT_THAT(ReceivedCobaltEvents(),
+              UnorderedElementsAre(MatchesCobaltEvent(
+                  cobalt::EventType::kInteger,
+                  cobalt_registry::kPreviousBootLogCompressionRatioMigratedMetricId)));
 }
 
-TEST_F(NamespaceInitTest, CreatePreviousLogsFileLogsNegativeDelta) {
+TEST_F(NamespaceInitTest, CreatePreviousLogsFileNoLogs) {
+  timekeeper::TestClock clock;
+  cobalt::Logger cobalt(dispatcher(), services(), &clock);
+  SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
+
+  const std::string logs_dir = MakeFilepath(RootdDir(), "missing");
+  const std::string log_file = MakeFilepath(RootdDir(), "log.system.previous_boot.txt");
+  EXPECT_EQ(CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
+                                   logs_dir, log_file),
+            std::nullopt);
+
+  RunLoopUntilIdle();
+
+  EXPECT_FALSE(files::IsFile(log_file));
+  EXPECT_THAT(ReceivedCobaltEvents(), IsEmpty());
+}
+
+TEST_F(NamespaceInitTest, CreatePreviousLogsFileWriteFails) {
   timekeeper::TestClock clock;
   cobalt::Logger cobalt(dispatcher(), services(), &clock);
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
@@ -298,23 +412,83 @@ TEST_F(NamespaceInitTest, CreatePreviousLogsFileLogsNegativeDelta) {
   feedback_data::system_log_recorder::ProductionEncoder encoder;
   const std::string unencoded =
       "[00002.000][07559][07687][] INFO: line 0\n"
-      "[00120.000][07559][07687][] INFO: line 1\n";
+      "[00124.000][07559][07687][] INFO: line 1\n";
   WriteFile(MakeFilepath(logs_dir, 0), encoder.Encode(unencoded));
 
-  const std::string log_file = MakeFilepath(RootdDir(), "log.system.previous_boot.txt");
-  CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
-                         /*last_boot_uptime=*/zx::sec(100), logs_dir, log_file);
+  const std::string log_file = "/bad_path/log.system.previous_boot.txt";
+  EXPECT_EQ(CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
+                                   logs_dir, log_file),
+            zx::time_boot(zx::sec(124).get()));
 
   RunLoopUntilIdle();
 
-  EXPECT_THAT(
-      ReceivedCobaltEvents(),
-      UnorderedElementsAre(
-          MatchesCobaltEvent(cobalt::EventType::kInteger,
-                             cobalt_registry::kPreviousBootLogCompressionRatioMigratedMetricId),
-          cobalt::Event(cobalt::EventType::kInteger,
-                        cobalt_registry::kPreviousBootLogLastTimestampDeltaMetricId,
-                        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, -20000)));
+  EXPECT_TRUE(files::IsDirectory(logs_dir));
+  EXPECT_FALSE(files::IsFile(log_file));
+  EXPECT_THAT(ReceivedCobaltEvents(), IsEmpty());
+}
+
+struct LastTimestampDeltaTestParam {
+  std::string test_name;
+  std::optional<zx::time_boot> last_log_timestamp;
+  std::optional<zx::duration> last_boot_uptime;
+  std::optional<int64_t> expected_delta_ms;
+};
+
+class LastTimestampDeltaTest : public NamespaceInitTest,
+                               public WithParamInterface<LastTimestampDeltaTestParam> {};
+
+INSTANTIATE_TEST_SUITE_P(WithVariousTimes, LastTimestampDeltaTest,
+                         ValuesIn(std::vector<LastTimestampDeltaTestParam>({
+                             {
+                                 .test_name = "PositiveDelta",
+                                 .last_log_timestamp = zx::time_boot(zx::sec(124).get()),
+                                 .last_boot_uptime = zx::sec(124) + zx::msec(55),
+                                 .expected_delta_ms = 55,
+                             },
+                             {
+                                 .test_name = "NegativeDelta",
+                                 .last_log_timestamp = zx::time_boot(zx::sec(120).get()),
+                                 .last_boot_uptime = zx::sec(100),
+                                 .expected_delta_ms = -20000,
+                             },
+                             {
+                                 .test_name = "NoLastLogTimestamp",
+                                 .last_log_timestamp = std::nullopt,
+                                 .last_boot_uptime = zx::sec(100),
+                                 .expected_delta_ms = std::nullopt,
+                             },
+                             {
+                                 .test_name = "NoLastBootUptime",
+                                 .last_log_timestamp = zx::time_boot(zx::sec(120).get()),
+                                 .last_boot_uptime = std::nullopt,
+                                 .expected_delta_ms = std::nullopt,
+                             },
+                         })),
+                         [](const TestParamInfo<LastTimestampDeltaTestParam>& info) {
+                           return info.param.test_name;
+                         });
+
+TEST_P(LastTimestampDeltaTest, LogsDelta) {
+  const LastTimestampDeltaTestParam& param = GetParam();
+
+  timekeeper::TestClock clock;
+  cobalt::Logger cobalt(dispatcher(), services(), &clock);
+  SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
+
+  LogPreviousBootLogLastTimestampDelta(&cobalt, param.last_log_timestamp, param.last_boot_uptime);
+
+  RunLoopUntilIdle();
+
+  if (param.expected_delta_ms.has_value()) {
+    EXPECT_THAT(ReceivedCobaltEvents(),
+                UnorderedElementsAre(
+                    cobalt::Event(cobalt::EventType::kInteger,
+                                  cobalt_registry::kPreviousBootLogLastTimestampDeltaMetricId,
+                                  {cobalt_registry::FeedbackMetricDimensionProvider::Feedback},
+                                  *param.expected_delta_ms)));
+  } else {
+    EXPECT_THAT(ReceivedCobaltEvents(), IsEmpty());
+  }
 }
 
 }  // namespace

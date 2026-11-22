@@ -12,6 +12,14 @@
         test_type: "syscall_gtest",
         environ: [ "MUTABLE_STORAGE=/data" ],
     },
+    children: [
+        {
+            // Syscall tests do not inspect rendered pixels, so use Scenic's
+            // null renderer to avoid Vulkan initialization and teardown.
+            name: "ui-config",
+            url: "#meta/null_renderer_config.cm",
+        },
+    ],
     use: [
         {
             storage: "custom_artifacts",
@@ -20,6 +28,11 @@
         },
     ],
     offer: [
+        {
+            config: "fuchsia.ui.test.Renderer",
+            from: "#ui-config",
+            to: "#ui",
+        },
         {
             protocol: [ "fuchsia.session.power.Handoff" ],
             from: "void",

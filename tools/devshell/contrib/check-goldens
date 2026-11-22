@@ -5,7 +5,7 @@
 
 #### CATEGORY=Source tree
 #### PREBUILTS=${PREBUILT_PYTHON3}
-### Checks all golden file comparisons in the GN build graph.
+### Checks all golden file comparisons in the GN and Bazel build graphs.
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 source "$SCRIPT_DIR/../lib/vars.sh" || exit $?

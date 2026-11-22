@@ -128,7 +128,7 @@ template("_fuchsia_driver") {
     assert_no_deps += [ "//src/devices/bin/driver_runtime" ]
 
     metadata = {
-      # Used by the check_included_drivers template.
+      # Used by the assert_driver_components template.
       fuchsia_driver_labels =
           [ get_label_info(":$_target_name", "label_no_toolchain") ]
 

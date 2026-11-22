@@ -1,0 +1,86 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "format",
+    srcs = [
+        "async_output_buffer.cc",
+        "format.cc",
+        "format_name.cc",
+        "output_buffer.cc",
+        "string_util.cc",
+    ],
+    hdrs = [
+        "async_output_buffer.h",
+        "format.h",
+        "format_name.h",
+        "output_buffer.h",
+        "string_util.h",
+    ],
+    # Host-only in Bazel (depends on host-only //src/developer/debug/zxdb/expr
+    # and //src/developer/debug/zxdb/symbols); keep unguarded in BUILD.gn.
+    # @bazel2gn:skip
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/developer/debug/zxdb/client:__pkg__",
+        "//src/developer/debug/zxdb/console:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/fit",
+        "//sdk/lib/syslog/cpp",
+        "//src/developer/debug/shared",
+        "//src/developer/debug/zxdb/common",
+        "//src/developer/debug/zxdb/expr",
+        "//src/developer/debug/zxdb/symbols",
+        "//src/lib/fxl",
+    ],
+)
+
+fx_cc_library(
+    name = "test_support",
+    testonly = True,
+    srcs = ["async_output_buffer_test_util.cc"],
+    hdrs = ["async_output_buffer_test_util.h"],
+    # Host-only in Bazel (depends on host-only :format); keep unguarded in BUILD.gn.
+    # @bazel2gn:skip
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/developer/debug/zxdb/console:__pkg__",
+    ],
+    deps = [
+        ":format",
+        "//src/developer/debug/shared",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "tests",
+    testonly = True,
+    srcs = [
+        "async_output_buffer_unittest.cc",
+        "format_name_unittest.cc",
+        "format_unittest.cc",
+        "output_buffer_unittest.cc",
+        "string_util_unittest.cc",
+    ],
+    implementation_deps = [
+        ":format",
+        ":test_support",
+        "//src/developer/debug/shared",
+        "//src/developer/debug/zxdb/common:test_support",
+        "//src/developer/debug/zxdb/expr:test_support",
+        "//src/developer/debug/zxdb/symbols:test_support",
+        "@com_google_googletest//:gtest",
+    ],
+    # Host-only in Bazel (depends on host-only :format); keep unguarded in BUILD.gn.
+    # @bazel2gn:skip
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    alwayslink = True,
+)

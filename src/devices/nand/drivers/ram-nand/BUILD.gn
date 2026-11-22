@@ -31,7 +31,6 @@ fuchsia_driver_component("ram-nand") {
     ":ram-nand-bind",
     ":ram-nand-driver",
   ]
-  info = "meta/ram-nand-info.json"
 }
 
 source_set("common") {

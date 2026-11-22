@@ -20,6 +20,7 @@ rustc_library(
         "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust",
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_rust",
+        "//sdk/fidl/fuchsia.wlan.internal:fuchsia.wlan.internal_rust",
         "//sdk/fidl/fuchsia.wlan.sme:fuchsia.wlan.sme_rust",
         "//sdk/lib/device-watcher/rust",
         "//sdk/rust/zx",

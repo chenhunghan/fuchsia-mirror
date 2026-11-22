@@ -2,13 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_library.gni")
-
-fuchsia_unittest_package("fdomain-container-tests") {
-  deps = [ ":container_test" ]
-}
-
 group("tests") {
   public_deps = [ ":fdomain-container-tests" ]
   testonly = true
@@ -48,7 +41,6 @@ rustc_library("container") {
   ]
   crate_name = "fdomain_container"
   edition = "2024"
-  test_deps = [ "//src/lib/fuchsia" ]
   visibility = [
     ":*",
     "//src/developer/remote-control:*",
@@ -57,7 +49,6 @@ rustc_library("container") {
     "//src/lib/fdomain/example_next:*",
     "//src/lib/fdomain/local:*",
   ]
-  with_unit_tests = true
   deps = []
   deps += [
     "//sdk/fidl/fuchsia.fdomain:fuchsia.fdomain_rust",
@@ -75,4 +66,40 @@ rustc_library("container") {
       "//src/lib/fuchsia-async",
     ]
   }
+}
+if (is_fuchsia) {
+  rustc_test("container_test") {
+    sources = [
+      "src/handles.rs",
+      "src/lib.rs",
+      "src/test.rs",
+      "src/wire.rs",
+    ]
+    edition = "2024"
+    deps = []
+    deps += [
+      "//sdk/fidl/fuchsia.fdomain:fuchsia.fdomain_rust",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+      "//src/lib/fidl/rust/fidl",
+      "//src/lib/fidl/rust/fidl_message",
+      "//src/lib/replace-with",
+      "//third_party/rust_crates:futures",
+      "//third_party/rust_crates:pin-project",
+      "//third_party/rust_crates:rand",
+    ]
+    if (is_fuchsia) {
+      deps += [
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-async",
+      ]
+    }
+    deps += [ "//src/lib/fuchsia" ]
+    output_name = "fdomain_container_lib_test"
+  }
+}
+
+fuchsia_unittest_package("fdomain-container-tests") {
+  package_name = "fdomain-container-tests-gn"
+  component_name = "fdomain-container-tests"
+  deps = [ ":container_test" ]
 }

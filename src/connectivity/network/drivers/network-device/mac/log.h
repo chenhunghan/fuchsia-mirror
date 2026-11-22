@@ -7,7 +7,7 @@
 
 #ifdef NETDEV_DRIVER
 
-#include <sdk/lib/driver/logging/cpp/logger.h>
+#include <lib/driver/logging/cpp/logger.h>
 #define LOG_ERROR(msg) FDF_LOG(ERROR, msg)
 #define LOG_WARN(msg) FDF_LOG(WARNING, msg)
 #define LOG_INFO(msg) FDF_LOG(INFO, msg)
@@ -20,7 +20,7 @@
 
 #else  // !NETDEV_DRIVER
 
-#include <sdk/lib/syslog/cpp/macros.h>  // nogncheck
+#include <lib/syslog/cpp/macros.h>  // nogncheck
 
 #include "src/connectivity/network/drivers/network-device/log/log.h"  // nogncheck
 

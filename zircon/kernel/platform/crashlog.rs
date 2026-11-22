@@ -169,10 +169,3 @@ impl PlatformCrashlog {
         Ok(())
     }
 }
-
-// TODO(https://fxbug.dev/507423574): Remove once all platform callers are ported to Rust.
-/// FFI wrapper around [`PlatformCrashlog::has_non_trivial_impl`] for C++ callers.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_crashlog_has_non_trivial_impl() -> bool {
-    PlatformCrashlog::has_non_trivial_impl()
-}

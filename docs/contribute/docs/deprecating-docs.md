@@ -68,7 +68,7 @@ To mark a document as deprecated in a `_toc.yaml` file:
 
 1. Submit the changes (document and TOC deprecation) to the Fuchsia repository.
 
-## Redirect the pages to the deprecation notice
+## Redirect the pages to the deprecation notice {#redirect-the-pages-to-the-deprecation-notice}
 
 After the deprecation timeline has passed, delete the pages and redirect them.
 

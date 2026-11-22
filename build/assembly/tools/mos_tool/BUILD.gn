@@ -2,30 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/host.gni")
-import("//build/rust/rustc_binary.gni")
+assert(is_host, "bazel_host_tool() can only be called in a host toolchain.")
 
-assert(is_host, "This tool is only applicable on the host toolchain")
+import("//build/bazel/bazel_host_tool.gni")
 
-rustc_binary("mos_tool") {
-  edition = "2024"
-  with_unit_tests = true
-  sources = [ "src/main.rs" ]
+bazel_host_tool("mos_tool") {
+  bazel_target = ":mos_tool"
+  bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/mos-tool"
   output_name = "mos-tool"
-  deps = [
-    "//src/developer/ffx/lib/pbms:lib",
-    "//src/lib/assembly/artifact_cache",
-    "//src/lib/assembly/util",
-    "//src/lib/fuchsia",
-    "//src/lib/gcs",
-    "//src/lib/structured_ui",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:argh",
-    "//third_party/rust_crates:serde_json",
-  ]
+  install_host_tool = true
 }
 
-install_host_tools("host") {
+group("host") {
   deps = [ ":mos_tool" ]
-  outputs = [ "mos-tool" ]
 }

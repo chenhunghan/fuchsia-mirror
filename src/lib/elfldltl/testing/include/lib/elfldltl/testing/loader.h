@@ -10,6 +10,7 @@
 #include <lib/elfldltl/load.h>
 #include <lib/elfldltl/mmap-loader.h>
 #include <lib/elfldltl/phdr.h>
+#include <lib/fit/function.h>
 
 #include <optional>
 #include <string_view>
@@ -169,9 +170,10 @@ class LoadTests : public ::testing::Test {
 
   static constexpr LoadInfo::Region kNoRelro{};
 
-  template <typename... LoaderArgs>
+  template <typename... MakeLoaderArgs, typename... LoadArgs>
   void Load(const TestLib& test_lib, std::optional<LoadResult>& result,
-            LoaderArgs&&... loader_args) {
+            std::tuple<MakeLoaderArgs...> make_loader_args, std::tuple<LoadArgs...> load_args,
+            fit::function<void(LoadResult&)> before_load = nullptr) {
     result = std::nullopt;
 
     // Bail out if the test_lib argument expression had a failure.
@@ -188,27 +190,43 @@ class LoadTests : public ::testing::Test {
     auto& [ehdr, phdrs_result] = *headers;
 
     ASSERT_FALSE(phdrs_result.empty());
-    result = LoadResult{
-        .loader = Traits::MakeLoader(std::forward<LoaderArgs>(loader_args)...),
-        .phdrs = std::move(phdrs_result),
-        .phoff = ehdr.phoff,
-        .entry = ehdr.entry,
+
+    // This can be passed to std::apply with an empty argument list, unlike the
+    // Traits::MakeLoader function pointer, because a defaulted argument isn't
+    // part of the function pointer type signature.
+    auto make = [&]<typename... Args>(Args&&... args) {
+      result = LoadResult{
+          .loader = Traits::MakeLoader(std::forward<Args>(args)...),
+          .phdrs = std::move(phdrs_result),
+          .phoff = ehdr.phoff,
+          .entry = ehdr.entry,
+      };
     };
+    ASSERT_NO_FATAL_FAILURE(std::apply(make, std::move(make_loader_args)));
 
     std::span<const Phdr> phdrs = result->phdrs;
-    ASSERT_TRUE(elfldltl::DecodePhdrs(diag, phdrs,
-                                      result->info.GetPhdrObserver(result->loader.page_size()),
-                                      PhdrStackObserver<Elf>{result->stack_size}));
+    ASSERT_TRUE(elfldltl::DecodePhdrs(  //
+        diag, phdrs, result->info.GetPhdrObserver(result->loader.page_size()),
+        PhdrStackObserver<Elf>{result->stack_size}));
 
     ASSERT_TRUE(Traits::Normalize(diag, result->info, file, result->loader));
 
-    ASSERT_TRUE(result->loader.Load(diag, result->info, Traits::LoadFileArgument(test_lib)));
+    if (before_load) {
+      ASSERT_NO_FATAL_FAILURE(before_load(*result));
+    }
+    auto do_load = [&result, &diag, &test_lib]<typename... Args>(Args&&... args) {
+      return result->loader.Load(diag, result->info, Traits::LoadFileArgument(test_lib),
+                                 std::forward<Args>(args)...);
+    };
+    ASSERT_TRUE(std::apply(do_load, std::move(load_args)));
   }
 
-  template <typename... LoaderArgs>
-  void Load(std::string_view name, std::optional<LoadResult>& result, LoaderArgs&&... loader_args) {
-    ASSERT_NO_FATAL_FAILURE(
-        Load(Traits::TestLibProvider(name), result, std::forward<LoaderArgs>(loader_args)...));
+  template <typename... MakeLoaderArgs, typename... LoadArgs>
+  void Load(std::string_view name, std::optional<LoadResult>& result,
+            std::tuple<MakeLoaderArgs...> make_loader_args, std::tuple<LoadArgs...> load_args,
+            fit::function<void(LoadResult&)> before_load = nullptr) {
+    ASSERT_NO_FATAL_FAILURE(Load(Traits::TestLibProvider(name), result, std::move(make_loader_args),
+                                 std::move(load_args), std::move(before_load)));
   }
 };
 

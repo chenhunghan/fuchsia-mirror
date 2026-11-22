@@ -260,13 +260,7 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_show_part() {
-        let mut builder = ffx_config::test_env();
-        let temp_dir = builder.isolate_root().join("instances");
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let env = builder
-            .user_config(ffx_config::keys::EMU_INSTANCE_ROOT_DIR, temp_dir.to_string_lossy())
-            .build()
-            .unwrap();
+        let env = ffx_config::test_env().build().unwrap();
         let tool = EmuShowTool {
             cmd: ShowCommand { device: true, ..Default::default() },
             context: env.context.clone(),
@@ -274,7 +268,9 @@ mod tests {
 
         let mut data = EmulatorInstanceData::new_with_state("one_instance", EngineState::Running);
         data.get_emulator_configuration_mut().device.cpu.count = 2;
-        let emu_instances = EmulatorInstances::new(temp_dir);
+        let emu_instances = EmulatorInstances::from(
+            env.context.get::<Vec<PathBuf>, _>(ffx_config::keys::EMU_INSTANCE_ROOT_DIR).unwrap(),
+        );
         let instance_dir = emu_instances
             .get_instance_dir("one_instance", true)
             .expect("test instance dir created");

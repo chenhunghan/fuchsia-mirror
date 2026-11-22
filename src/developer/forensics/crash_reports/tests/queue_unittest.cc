@@ -5,6 +5,7 @@
 #include "src/developer/forensics/crash_reports/queue.h"
 
 #include <fidl/fuchsia.feedback/cpp/fidl.h>
+#include <fidl/fuchsia.mem/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
 
@@ -32,7 +33,6 @@
 #include "src/developer/forensics/utils/vmo.h"
 #include "src/lib/files/directory.h"
 #include "src/lib/files/path.h"
-#include "src/lib/fsl/vmo/strings.h"
 #include "src/lib/fxl/strings/string_printf.h"
 #include "src/lib/timekeeper/test_clock.h"
 
@@ -66,14 +66,12 @@ constexpr char kMinidumpValue[] = "minidump";
 constexpr zx::duration kPeriodicUploadDuration = zx::min(15);
 constexpr zx::duration kUploadResponseDelay = zx::sec(5);
 
-fuchsia::mem::Buffer BuildAttachment(const std::string& value) {
-  fuchsia::mem::Buffer attachment;
-  FX_CHECK(fsl::VmoFromString(value, &attachment));
-  return attachment;
+fuchsia_mem::Buffer BuildAttachment(const std::string& value) {
+  return BufferFromString(value).value();
 }
 
-std::map<std::string, fuchsia::mem::Buffer> MakeAttachments() {
-  std::map<std::string, fuchsia::mem::Buffer> attachments;
+std::map<std::string, fuchsia_mem::Buffer> MakeAttachments() {
+  std::map<std::string, fuchsia_mem::Buffer> attachments;
   attachments[kAttachmentKey] = BuildAttachment(kAttachmentValue);
   return attachments;
 }

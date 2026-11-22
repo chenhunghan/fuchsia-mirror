@@ -94,6 +94,7 @@ if (!is_kernel) {
   import("//build/components.gni")
   import("//build/cpp/cpp_fuzzer.gni")
   import("//build/test.gni")
+  import("//sdk/lib/c/experimental.gni")
 
   test("trivial-allocator-unittests") {
     sources = [
@@ -120,9 +121,9 @@ if (!is_kernel) {
   # test for panic-delete.
   test("stub-delete-unittests") {
     deps = [
-      ":trivial-allocator",
-      "//src/lib/fxl/test:gtest_main",
-    ]
+             ":trivial-allocator",
+             "//src/lib/fxl/test:gtest_main",
+           ] + experimental_libc_deps
 
     if ((is_fuchsia || current_os == "linux") &&
         toolchain_variant.tags + [ "replaces-allocator" ] -
@@ -133,6 +134,7 @@ if (!is_kernel) {
   }
 
   fuchsia_unittest_package("stub-delete-tests") {
+    forward_variables_from(experimental_libc_package_args, "*")
     deps = [ ":stub-delete-unittests" ]
   }
 

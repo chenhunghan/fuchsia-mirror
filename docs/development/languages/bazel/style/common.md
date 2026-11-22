@@ -130,7 +130,8 @@ as:
 * `@rules_fuchsia//fuchsia`
 
 The only such paths that are permitted begin with `@fuchsia_rules_common/`,
-though only the Build team should use these directly.
+though only the Build team should use these directly (see
+[`//build/bazel_sdk/fuchsia_rules_common/README.md`][fuchsia-rules-common-readme]).
 
 Platform code should also avoid `bazel_sdk/` paths except in the case of
 specific build rules that share implementation with the Fuchsia Bazel SDK.
@@ -219,9 +220,9 @@ are applied consistently.
 
 Specifically, there are wrappers for the following languages:
 
-* C/C++: Use `fx_cc_...()` from `//build/bazel/rules/cc/...` (or
-  `cc_*_library_zx()` from `//build/bazel/rules:zx_library.bzl` for Zircon
-  libraries) rather than `cc_...` from `@rules_cc//`.
+* C/C++: Use `fx_cc_...()` from `//build/bazel/rules/cc/...` (specifically
+  `fx_cc_*_library_zx()` from `//build/bazel/rules/cc:fx_cc_*_library_zx.bzl`
+  for Zircon libraries) rather than `cc_...` from `@rules_cc//`.
 
 * Rust: Use `rustc_...()` from `//build/bazel/rules/rust/...` rather than
   `rust_...` from `@rules_rust//`.
@@ -251,6 +252,7 @@ to avoid the escaping.
 [bazel-official-build-style-visibility]: https://bazel.build/build/style-guide#visibility
 [bazel-package-group]: https://bazel.build/reference/be/functions#package_group
 [do-not-use-fuchsia-bazel-sdk-paths]: #do-not-use-fuchsia-bazel-sdk-paths
+[fuchsia-rules-common-readme]: /build/bazel_sdk/fuchsia_rules_common/README.md
 [fxbug-560343570]: https://fxbug.dev/560343570
 [load-visibility]: bzl_files.md#load-visibility
 [prohibited-label-patterns]: #prohibited-label-patterns

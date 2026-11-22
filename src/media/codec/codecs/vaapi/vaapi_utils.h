@@ -5,7 +5,7 @@
 #ifndef SRC_MEDIA_CODEC_CODECS_VAAPI_VAAPI_UTILS_H_
 #define SRC_MEDIA_CODEC_CODECS_VAAPI_VAAPI_UTILS_H_
 
-#include <fuchsia/mediacodec/cpp/fidl.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
 #include <lib/fit/function.h>
 #include <lib/syslog/cpp/macros.h>
 
@@ -243,9 +243,9 @@ std::optional<ProfileDescription> GetProfileDescription(
     const VAProfile& profile, VAEntrypoint required_entrypoint,
     std::vector<VAConfigAttrib>& required_attribs);
 
-std::vector<fuchsia::mediacodec::DetailedCodecDescription> GetCodecDescriptions();
+std::vector<fuchsia_mediacodec::DetailedCodecDescription> GetCodecDescriptions();
 
-std::vector<fuchsia::mediacodec::CodecDescription> GetDeprecatedCodecList();
+std::vector<fuchsia_mediacodec::CodecDescription> GetDeprecatedCodecList();
 
 // Copy the memory between arrays with checking the array size.
 template <typename T, size_t N>

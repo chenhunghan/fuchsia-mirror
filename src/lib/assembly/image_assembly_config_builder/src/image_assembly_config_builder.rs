@@ -49,7 +49,7 @@ use fidl_fuchsia_component_decl_common::Component;
 use fuchsia_archive::Utf8Reader;
 use fuchsia_pkg::PackageManifest;
 use fuchsia_url::fuchsia_pkg::AbsoluteComponentUrl;
-use image_assembly_config::{BoardDriverArguments, ImageAssemblyConfig, KernelConfig};
+use image_assembly_config::{DriverBoardInfo, ImageAssemblyConfig, KernelConfig, PlatformId};
 use itertools::Itertools;
 use product_input_bundle::ProductInputBundle;
 use rayon::iter::{ParallelBridge, ParallelIterator};
@@ -113,8 +113,12 @@ pub struct ImageAssemblyConfigBuilder {
     /// The memory buckets to merge and make available to memory monitor.
     memory_buckets: MemoryBuckets,
 
-    /// Data passed to the board's Board Driver, if provided.
-    board_driver_arguments: Option<BoardDriverArguments>,
+    /// Platform identity passed via a `ZBI_TYPE_PLATFORM_ID` ZBI item, if provided.
+    platform_id: Option<PlatformId>,
+
+    /// Board information passed to the board driver via a `ZBI_TYPE_DRV_BOARD_INFO` ZBI item, if
+    /// provided.
+    driver_board_info: Option<DriverBoardInfo>,
 
     /// Configuration capabilities to add to a configuration component/package.
     configuration_capabilities: Option<assembly_config_capabilities::CapabilityNamedMap>,
@@ -134,6 +138,9 @@ pub struct ImageAssemblyConfigBuilder {
 
     /// Optional ImagesConfig to add to the constructed ImageAssembly config
     images_config: Option<ImagesConfig>,
+
+    /// Delivery blob type to generate when publishing packages for this system.
+    delivery_blob_type: Option<u32>,
 
     /// Optional version information for all input artifacts.
     /// TODO(https://fxbug.dev/416239346): Make this a required field.
@@ -172,13 +179,15 @@ impl ImageAssemblyConfigBuilder {
             qemu_kernel: None,
             packages_to_compile: BTreeMap::default(),
             memory_buckets: MemoryBuckets::default(),
-            board_driver_arguments: None,
+            platform_id: None,
+            driver_board_info: None,
             configuration_capabilities: None,
             zbi_extra_items: None,
             devicetree: None,
             devicetree_overlay: None,
             developer_only_options: None,
             images_config: None,
+            delivery_blob_type: None,
             system_release_info,
         }
     }
@@ -459,31 +468,23 @@ impl ImageAssemblyConfigBuilder {
         Ok(())
     }
 
-    /// Set the (optional) arguments for the Board Driver.
-    pub fn set_board_driver_arguments(&mut self, board_config: &BoardConfig) -> Result<()> {
-        if self.board_driver_arguments.is_some() {
-            bail!("Board driver arguments have already been set");
+    /// Set the (optional) platform ID from the board's `hardware_info`.
+    pub fn set_platform_id(&mut self, board_config: &BoardConfig) -> Result<()> {
+        if self.platform_id.is_some() {
+            bail!("Platform ID has already been set");
         }
-        self.board_driver_arguments = match &board_config.hardware_info {
-            HardwareInfo {
-                name,
-                vendor_id: Some(vendor_id),
-                product_id: Some(product_id),
-                revision: Some(revision),
-            } => Some(BoardDriverArguments {
-                vendor_id: *vendor_id,
-                product_id: *product_id,
-                revision: *revision,
-                name: name.as_ref().unwrap_or(&board_config.name).clone(),
-            }),
-            HardwareInfo { name: _, vendor_id: None, product_id: None, revision: None } => None,
-            _ => {
-                bail!(
-                    "If any of 'vendor_id', 'product_id', or 'revision' are set, all must be provided: {:?}",
-                    board_config.hardware_info
-                );
-            }
-        };
+        self.platform_id =
+            validate_hardware_info(board_config)?.map(|(platform_id, _)| platform_id);
+        Ok(())
+    }
+
+    /// Set the (optional) driver board info from the board's `hardware_info`.
+    pub fn set_driver_board_info(&mut self, board_config: &BoardConfig) -> Result<()> {
+        if self.driver_board_info.is_some() {
+            bail!("Driver board info has already been set");
+        }
+        self.driver_board_info =
+            validate_hardware_info(board_config)?.map(|(_, driver_board_info)| driver_board_info);
         Ok(())
     }
 
@@ -739,7 +740,7 @@ impl ImageAssemblyConfigBuilder {
                 driver_details.package.clone()
             });
 
-        self.add_package_from_path(&driver_package_path, origin, &set)?;
+        let set = self.add_package_from_path(&driver_package_path, origin, &set)?;
 
         let driver_package_type = match set {
             PackageSet::Base => DriverPackageType::Base,
@@ -904,6 +905,10 @@ impl ImageAssemblyConfigBuilder {
         self.memory_buckets.add_buckets(buckets)
     }
 
+    pub fn set_delivery_blob_type(&mut self, delivery_blob_type: u32) {
+        self.delivery_blob_type = Some(delivery_blob_type);
+    }
+
     /// Construct an ImageAssembly ImageAssemblyConfig from the collected items in the
     /// builder, and report any validation issues.
     ///
@@ -976,13 +981,15 @@ impl ImageAssemblyConfigBuilder {
             shell_commands,
             packages_to_compile,
             memory_buckets: _,
-            board_driver_arguments,
+            platform_id,
+            driver_board_info,
             configuration_capabilities,
             zbi_extra_items,
             devicetree,
             devicetree_overlay,
             developer_only_options: _,
             images_config,
+            delivery_blob_type,
             system_release_info,
         } = self;
 
@@ -1226,13 +1233,15 @@ impl ImageAssemblyConfigBuilder {
             images_config: images_config.unwrap_or_default(),
             board_name,
             partitions_config,
-            board_driver_arguments,
+            platform_id,
+            driver_board_info,
             zbi_extra_items,
             devicetree,
             devicetree_overlay,
             system_release_info,
             image_mode,
             build_type: self.build_type,
+            delivery_blob_type,
         };
 
         if mode.is_test_kernel() {
@@ -1273,6 +1282,33 @@ impl ImageAssemblyConfigBuilder {
             );
         }
         Ok((image_assembly_config, Validator))
+    }
+}
+
+fn validate_hardware_info(
+    board_config: &BoardConfig,
+) -> Result<Option<(PlatformId, DriverBoardInfo)>> {
+    match &board_config.hardware_info {
+        HardwareInfo {
+            name,
+            vendor_id: Some(vendor_id),
+            product_id: Some(product_id),
+            revision: Some(revision),
+        } => Ok(Some((
+            PlatformId {
+                vendor_id: *vendor_id,
+                product_id: *product_id,
+                name: name.as_ref().unwrap_or(&board_config.name).clone(),
+            },
+            DriverBoardInfo { revision: *revision },
+        ))),
+        HardwareInfo { name: _, vendor_id: None, product_id: None, revision: None } => Ok(None),
+        _ => {
+            bail!(
+                "If any of 'vendor_id', 'product_id', or 'revision' are set, all must be provided: {:?}",
+                board_config.hardware_info
+            );
+        }
     }
 }
 
@@ -2938,13 +2974,15 @@ mod tests {
             images_config: Default::default(),
             board_name: "test_board".into(),
             partitions_config: None,
-            board_driver_arguments: Default::default(),
+            platform_id: Default::default(),
+            driver_board_info: Default::default(),
             zbi_extra_items: None,
             devicetree: None,
             devicetree_overlay: None,
             system_release_info: Default::default(),
             image_mode: FilesystemImageMode::default(),
             build_type: BuildType::Eng,
+            delivery_blob_type: None,
         };
 
         let result = validate_cache_package_environments(&product_failing);
@@ -2991,15 +3029,151 @@ mod tests {
             images_config: Default::default(),
             board_name: "test_board".into(),
             partitions_config: None,
-            board_driver_arguments: Default::default(),
+            platform_id: Default::default(),
+            driver_board_info: Default::default(),
             zbi_extra_items: None,
             devicetree: None,
             devicetree_overlay: None,
             system_release_info: Default::default(),
             image_mode: FilesystemImageMode::default(),
             build_type: BuildType::Eng,
+            delivery_blob_type: None,
         };
 
         assert!(validate_cache_package_environments(&product_passing).is_ok());
+    }
+
+    #[test]
+    fn test_aib_bootfs_or_base_driver() {
+        for (feature_set_level, image_mode, expect_in_base) in [
+            (FeatureSetLevel::Standard, FilesystemImageMode::Partition, true),
+            (FeatureSetLevel::Bootstrap, FilesystemImageMode::NoImage, false),
+        ] {
+            let vars = TempdirPathsForTest::new();
+            let tools = FakeToolProvider::default();
+            let mut aib = make_test_assembly_bundle(&vars.outdir, &vars.bundle_path, false);
+            let driver = make_test_driver("bootfs_or_base_driver", &vars.outdir).unwrap();
+            aib.drivers.push(PackagedDriverDetails {
+                package: "bootfs_or_base_driver".into(),
+                set: PackageSet::BootfsOrBase,
+                components: driver.components,
+            });
+
+            let mut builder = ImageAssemblyConfigBuilder::new(
+                BuildType::UserDebug,
+                feature_set_level,
+                "my_board".into(),
+                None::<Utf8PathBuf>,
+                image_mode,
+                AssemblyMode::default(),
+                SystemReleaseInfo::new_for_testing(),
+            );
+            builder.add_parsed_bundle(&vars.outdir, aib).unwrap();
+            let (result, _) =
+                builder.build_and_validate(&vars.outdir, &tools, ValidationMode::On).unwrap();
+
+            let expected_manifest = vars.outdir.join("bootfs_or_base_driver");
+            if expect_in_base {
+                assert!(result.base.contains(&expected_manifest));
+                assert!(!result.bootfs_packages.contains(&expected_manifest));
+            } else {
+                assert!(result.bootfs_packages.contains(&expected_manifest));
+                assert!(!result.base.contains(&expected_manifest));
+            }
+        }
+    }
+
+    #[test]
+    fn test_set_platform_id_and_driver_board_info() {
+        let vars = TempdirPathsForTest::new();
+        let tools = FakeToolProvider::default();
+
+        let mut builder = get_minimum_config_builder(&vars.outdir, vec![]);
+        let board_config = BoardConfig {
+            name: "board-name".into(),
+            hardware_info: HardwareInfo {
+                name: Some("hw-info-name".into()),
+                vendor_id: Some(0x11),
+                product_id: Some(0x22),
+                revision: Some(0x33),
+            },
+            ..Default::default()
+        };
+
+        builder.set_platform_id(&board_config).unwrap();
+        builder.set_driver_board_info(&board_config).unwrap();
+
+        // Setting either twice should fail.
+        assert!(builder.set_platform_id(&board_config).is_err());
+        assert!(builder.set_driver_board_info(&board_config).is_err());
+
+        let (config, _) =
+            builder.build_and_validate(&vars.outdir, &tools, ValidationMode::On).unwrap();
+        assert_eq!(
+            config.platform_id,
+            Some(PlatformId { vendor_id: 0x11, product_id: 0x22, name: "hw-info-name".into() })
+        );
+        assert_eq!(config.driver_board_info, Some(DriverBoardInfo { revision: 0x33 }));
+    }
+
+    #[test]
+    fn test_set_platform_id_defaults_name_to_board_name() {
+        let vars = TempdirPathsForTest::new();
+        let tools = FakeToolProvider::default();
+
+        let mut builder = get_minimum_config_builder(&vars.outdir, vec![]);
+        let board_config = BoardConfig {
+            name: "fallback-board-name".into(),
+            hardware_info: HardwareInfo {
+                name: None,
+                vendor_id: Some(1),
+                product_id: Some(2),
+                revision: Some(3),
+            },
+            ..Default::default()
+        };
+
+        builder.set_platform_id(&board_config).unwrap();
+        let (config, _) =
+            builder.build_and_validate(&vars.outdir, &tools, ValidationMode::On).unwrap();
+        assert_eq!(
+            config.platform_id,
+            Some(PlatformId { vendor_id: 1, product_id: 2, name: "fallback-board-name".into() })
+        );
+        assert_eq!(config.driver_board_info, None);
+    }
+
+    #[test]
+    fn test_set_platform_id_and_driver_board_info_validate_partial_hardware_info() {
+        let vars = TempdirPathsForTest::new();
+        let mut builder = get_minimum_config_builder(&vars.outdir, vec![]);
+
+        let empty_board = BoardConfig {
+            name: "empty-board".into(),
+            hardware_info: HardwareInfo {
+                name: Some("only-name".into()),
+                vendor_id: None,
+                product_id: None,
+                revision: None,
+            },
+            ..Default::default()
+        };
+        builder.set_platform_id(&empty_board).unwrap();
+        builder.set_driver_board_info(&empty_board).unwrap();
+        assert_eq!(builder.platform_id, None);
+        assert_eq!(builder.driver_board_info, None);
+
+        let partial_board = BoardConfig {
+            name: "partial-board".into(),
+            hardware_info: HardwareInfo {
+                name: None,
+                vendor_id: Some(1),
+                product_id: Some(2),
+                revision: None,
+            },
+            ..Default::default()
+        };
+        assert!(builder.set_platform_id(&partial_board).is_err());
+        assert!(builder.set_driver_board_info(&partial_board).is_err());
     }
 }

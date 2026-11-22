@@ -595,6 +595,10 @@ TYPED_TEST(ElfldltlDwarfTests, EncodedPtr) {
               Optional(AllOf(Field(&EncodedPtr::ptr, -0xaabb),
                              Field(&EncodedPtr::encoding, EncodedPtr::kSleb128),
                              Field(&EncodedPtr::encoded_size, uint8_t{3}))));
+
+  constexpr std::byte kTruncatedLeb[] = {std::byte{0x80}};
+  EXPECT_EQ(EncodedPtr::Read<Elf>(EncodedPtr::kUleb128, kTruncatedLeb), std::nullopt);
+  EXPECT_EQ(EncodedPtr::Read<Elf>(EncodedPtr::kSleb128, kTruncatedLeb), std::nullopt);
 }
 
 TYPED_TEST(ElfldltlDwarfTests, EncodedPtrFromMemory) {
@@ -656,6 +660,17 @@ TYPED_TEST(ElfldltlDwarfTests, EncodedPtrFromMemory) {
   EXPECT_EQ(EncodedPtr::FromMemory<Elf>(EncodedPtr::kPtr | EncodedPtr::kIndirect, memory,
                                         kBadIndirectEncodedAt, kSize<Addr>),
             std::nullopt);
+
+  // Test dynamic-sized LEB128 reads from a small buffer (< kDynamicSize bytes).
+  constexpr uint8_t kSmallLeb[] = {0x80 | (0x1234u & 0x7f), (0x1234u >> 7) & 0x7f};
+  std::byte small_buf[sizeof(kSmallLeb)];
+  memcpy(small_buf, kSmallLeb, sizeof(kSmallLeb));
+  elfldltl::DirectMemory small_memory{small_buf, 0x2000};
+  EXPECT_THAT(EncodedPtr::FromMemory<Elf>(EncodedPtr::kUleb128, small_memory, 0x2000),
+              Optional(uint64_t{0x1234}));
+  EXPECT_THAT(
+      EncodedPtr::FromMemory<Elf>(EncodedPtr::kUleb128 | EncodedPtr::kPcrel, small_memory, 0x2000),
+      Optional(uint64_t{0x3234}));
 }
 
 TYPED_TEST(ElfldltlDwarfTests, EhFrameHdr) {
@@ -725,6 +740,24 @@ TYPED_TEST(ElfldltlDwarfTests, EhFrameHdr) {
   EXPECT_EQ(eh_frame_hdr.eh_frame_ptr(), kEhFrameVaddr);
 
   EXPECT_EQ(eh_frame_hdr.size(), 3u);
+  EXPECT_EQ(eh_frame_hdr.size_bytes(), sizeof(kData));
+
+  const EhFrameHdr& const_hdr = eh_frame_hdr;
+  EXPECT_EQ(const_hdr[0], kEntries[0]);
+  EXPECT_EQ(const_hdr[1], kEntries[1]);
+  EXPECT_EQ(const_hdr[2], kEntries[2]);
+  EXPECT_EQ(const_hdr.begin()[2], kEntries[2]);
+  EXPECT_EQ(*(const_hdr.end() - 1), kEntries[2]);
+  EXPECT_EQ(*(const_hdr.end() - 2), kEntries[1]);
+  EXPECT_EQ(*(const_hdr.end() - 3), kEntries[0]);
+
+  EXPECT_EQ(const_hdr.find(0x0fff), const_hdr.end());
+  EXPECT_EQ(const_hdr.find(0x1000), const_hdr.begin());
+  EXPECT_EQ(const_hdr.find(0x1004), const_hdr.begin());
+  EXPECT_EQ(const_hdr.find(0x1005), const_hdr.begin() + 1);
+  EXPECT_EQ(const_hdr.find(0x1010), const_hdr.begin() + 1);
+  EXPECT_EQ(const_hdr.find(0x1011), const_hdr.begin() + 2);
+  EXPECT_EQ(const_hdr.find(0x2000), const_hdr.begin() + 2);
 
   EXPECT_THAT(eh_frame_hdr, ElementsAreArray(kEntries));
 }
@@ -801,6 +834,101 @@ TYPED_TEST(ElfldltlDwarfTests, CfiEntry) {
   EXPECT_EQ(fde_info->address_range, 5u);
   EXPECT_EQ(fde_info->lsda, 0x534c55u);
   EXPECT_EQ(fde_info->instructions.size_bytes(), 3u);
+}
+
+TYPED_TEST(ElfldltlDwarfTests, CfiEntryPersonalityAndPcrelLsda) {
+  using Elf = typename TestFixture::Elf;
+  using Word = typename Elf::Word;
+  using EncodedPtr = elfldltl::dwarf::EncodedPtr;
+
+  constexpr uint64_t kCieVaddr = 0x500;
+  constexpr uint64_t kPersonalityVaddr = 0x2000;
+  constexpr uint64_t kLsdaVaddr = 0x3000;
+
+  struct [[gnu::packed]] PlrCie {
+    [[gnu::packed]] Word cie_id = elfldltl::dwarf::kEhFrameCieId;
+    uint8_t version = 4;
+    char augmentation[5] = "zPLR";
+    uint8_t address_size = 4;
+    uint8_t segment_selector_size = 0;
+    uint8_t code_alignment_factor = 1;
+    uint8_t data_alignment_factor = -8 & 0x7f;
+    uint8_t return_address_register = 16;
+    uint8_t augmentation_size = 1 + sizeof(Word) + 1 + 1;
+    uint8_t personality_encoding = EncodedPtr::kSdata4 | EncodedPtr::kPcrel;
+    // Offset of personality field from start of CIEData:
+    // 4 (initial_length) + 4 (cie_id) + 1 (ver) + 5 ("zPLR\0") + 2 (addr/seg) +
+    // 3 (factors+rar) + 1 (aug_size) + 1 (personality_encoding) = 21.
+    [[gnu::packed]] typename Word::Signed personality =
+        static_cast<int32_t>(kPersonalityVaddr - (kCieVaddr + 21));
+    uint8_t lsda_encoding = EncodedPtr::kSdata4 | EncodedPtr::kPcrel;
+    uint8_t fde_encoding = EncodedPtr::kSdata4 | EncodedPtr::kPcrel;
+    uint8_t instructions[2] = {0x0c, 0x07};
+  };
+  using CieData = TestData<InitialLength32<Elf>, PlrCie>;
+  constexpr uint64_t kPlrFdeVaddr = kCieVaddr + sizeof(CieData);
+
+  struct [[gnu::packed]] PlrFde {
+    [[gnu::packed]] Word cie_pointer = sizeof(CieData) + sizeof(Word);
+    [[gnu::packed]] typename Word::Signed initial_location =
+        static_cast<int32_t>(0x1500 - (kPlrFdeVaddr + 8));
+    [[gnu::packed]] Word address_range = 0x20;
+    uint8_t augmentation_size = sizeof(Word);
+    // Offset of lsda field from start of FdeData:
+    // 4 (initial_length) + 4 (cie_pointer) + 4 (initial_location) + 4 (range) +
+    // 1 (augmentation_size) = 17.
+    [[gnu::packed]] typename Word::Signed lsda =
+        static_cast<int32_t>(kLsdaVaddr - (kPlrFdeVaddr + 17));
+    uint8_t instructions[1] = {0};
+  };
+  using FdeData = TestData<InitialLength32<Elf>, PlrFde>;
+
+  struct [[gnu::packed]] Frame {
+    CieData cie;
+    FdeData fde;
+  } constexpr kFrame{};
+
+  auto diag = elfldltl::testing::ExpectOkDiagnostics();
+  std::span kData = AsBytes(kFrame);
+  elfldltl::DirectMemory memory{
+      {const_cast<std::byte*>(kData.data()), kData.size_bytes()},
+      kCieVaddr,
+  };
+
+  const elfldltl::dwarf::SectionData const_sec{kData.subspan(4),
+                                               elfldltl::dwarf::SectionData::Format::kDwarf32};
+  EXPECT_EQ(const_sec.read_offset<Elf>(0), uint64_t{0});
+
+  auto fde = elfldltl::dwarf::CfiEntry::ReadEhFrameFromMemory<Elf>(diag, memory, kPlrFdeVaddr);
+  ASSERT_TRUE(fde);
+  auto cie = fde->template ReadEhFrameCieFromMemory<Elf>(diag, memory);
+  ASSERT_TRUE(cie);
+
+  auto cie_info = cie->template DecodeCie<Elf>(diag, kCieVaddr);
+  ASSERT_TRUE(cie_info);
+  EXPECT_EQ(cie_info->personality, kPersonalityVaddr);
+  EXPECT_EQ(cie_info->lsda_encoding, uint8_t{EncodedPtr::kSdata4 | EncodedPtr::kPcrel});
+  EXPECT_EQ(cie_info->fde_encoding, uint8_t{EncodedPtr::kSdata4 | EncodedPtr::kPcrel});
+  EXPECT_EQ(cie_info->initial_instructions.size_bytes(), 2u);
+
+  auto fde_info = fde->template DecodeFde<Elf>(diag, kPlrFdeVaddr, *cie_info);
+  ASSERT_TRUE(fde_info);
+  EXPECT_EQ(fde_info->initial_location, 0x1500u);
+  EXPECT_EQ(fde_info->address_range, 0x20u);
+  EXPECT_EQ(fde_info->lsda, kLsdaVaddr);
+  EXPECT_EQ(fde_info->instructions.size_bytes(), 1u);
+
+  // Also test truncated non-'z' FDE augmentation data bounds check.
+  elfldltl::dwarf::CfiCie unsized_cie = *cie_info;
+  unsized_cie.fde_augmentation_sized = false;
+  unsized_cie.fde_augmentation_data_size = 64;
+  elfldltl::testing::ExpectedSingleError trunc_err{
+      "DWARF CFI has invalid encoding ",
+      unsigned{unsized_cie.lsda_encoding},
+      " or truncated FDE",
+      elfldltl::FileAddress{kPlrFdeVaddr},
+  };
+  EXPECT_EQ(fde->template DecodeFde<Elf>(trunc_err, kPlrFdeVaddr, unsized_cie), std::nullopt);
 }
 
 }  // namespace

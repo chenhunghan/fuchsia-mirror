@@ -1,0 +1,16 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    [
+        "repository_rules.bzl",
+        "third-party-cobalt.BUILD.bazel",
+    ],
+    visibility = [
+        "//:__pkg__",
+        "//build/bazel:__pkg__",
+    ],
+)

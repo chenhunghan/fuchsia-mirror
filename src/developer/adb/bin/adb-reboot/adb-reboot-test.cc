@@ -4,8 +4,8 @@
 
 #include "adb-reboot.h"
 
+#include <fidl/fuchsia.hardware.adb/cpp/fidl.h>
 #include <fidl/fuchsia.storage.block/cpp/wire.h>
-#include <fuchsia/hardware/adb/cpp/fidl.h>
 #include <fuchsia/hardware/power/statecontrol/cpp/fidl.h>
 #include <fuchsia/hardware/power/statecontrol/cpp/fidl_test_base.h>
 #include <lib/async-loop/cpp/loop.h>
@@ -152,17 +152,15 @@ class AdbRebootTest : public gtest::RealLoopFixture {
                                .name = "misc", .rights = fuchsia::io::R_STAR_DIR, .path = "/misc"}},
                            .source = ChildRef{"block_device"},
                            .targets = {ChildRef{"adb-reboot"}}});
-    builder.AddRoute(Route{.capabilities = {Protocol{fuchsia::hardware::adb::Provider::Name_}},
-                           .source = ChildRef{"adb-reboot"},
-                           .targets = {ParentRef()}});
+    builder.AddRoute(Route{
+        .capabilities = {Protocol{fidl::DiscoverableProtocolName<fuchsia_hardware_adb::Provider>}},
+        .source = ChildRef{"adb-reboot"},
+        .targets = {ParentRef()}});
     realm_ = builder.Build(dispatcher());
 
-    ASSERT_EQ(realm_->component().Connect<fuchsia::hardware::adb::Provider>(
-                  reboot_.NewRequest(dispatcher())),
-              ZX_OK);
-
-    reboot_.set_error_handler(
-        [](zx_status_t status) { FX_LOGS(INFO) << "adb reboot could not connect " << status; });
+    auto client_end = realm_->component().Connect<fuchsia_hardware_adb::Provider>();
+    ASSERT_TRUE(client_end.is_ok());
+    reboot_.Bind(std::move(*client_end), dispatcher());
   }
 
   void TearDown() override {
@@ -173,7 +171,7 @@ class AdbRebootTest : public gtest::RealLoopFixture {
 
  protected:
   std::optional<component_testing::RealmRoot> realm_;
-  fidl::InterfacePtr<fuchsia::hardware::adb::Provider> reboot_;
+  fidl::Client<fuchsia_hardware_adb::Provider> reboot_;
   LocalPowerStateControl* local_power_state_control_ptr_ = nullptr;
   FakeBlockDeviceComponent* fake_block_device_ptr_ = nullptr;
 };
@@ -184,10 +182,15 @@ TEST_F(AdbRebootTest, Reboot) {
   zx::socket server, client;
   ASSERT_EQ(zx::socket::create(ZX_SOCKET_STREAM, &server, &client), ZX_OK);
 
-  reboot_->ConnectToService(std::move(client), "",
-                            [&](auto result) { ASSERT_FALSE(result.is_err()); });
-  // Wait for reboot to complete.
-  RunLoopUntil([&]() { return local_power_state_control_ptr_->reboot_complete.load(); });
+  bool callback_complete = false;
+  reboot_->ConnectToService({std::move(client), ""}).ThenExactlyOnce([&](auto& result) {
+    EXPECT_TRUE(result.is_ok());
+    callback_complete = true;
+  });
+  // Wait for reboot and reply callback to complete.
+  RunLoopUntil([&]() {
+    return local_power_state_control_ptr_->reboot_complete.load() && callback_complete;
+  });
 }
 
 TEST_F(AdbRebootTest, RebootBootloader) {
@@ -196,10 +199,15 @@ TEST_F(AdbRebootTest, RebootBootloader) {
   zx::socket server, client;
   ASSERT_EQ(zx::socket::create(ZX_SOCKET_STREAM, &server, &client), ZX_OK);
 
-  reboot_->ConnectToService(std::move(client), "bootloader",
-                            [&](auto result) { ASSERT_FALSE(result.is_err()); });
-  // Wait for reboot to complete.
-  RunLoopUntil([&]() { return local_power_state_control_ptr_->reboot_complete.load(); });
+  bool callback_complete = false;
+  reboot_->ConnectToService({std::move(client), "bootloader"}).ThenExactlyOnce([&](auto& result) {
+    EXPECT_TRUE(result.is_ok());
+    callback_complete = true;
+  });
+  // Wait for reboot and reply callback to complete.
+  RunLoopUntil([&]() {
+    return local_power_state_control_ptr_->reboot_complete.load() && callback_complete;
+  });
 }
 
 TEST_F(AdbRebootTest, RebootRecovery) {
@@ -208,10 +216,15 @@ TEST_F(AdbRebootTest, RebootRecovery) {
   zx::socket server, client;
   ASSERT_EQ(zx::socket::create(ZX_SOCKET_STREAM, &server, &client), ZX_OK);
 
-  reboot_->ConnectToService(std::move(client), "recovery",
-                            [&](auto result) { ASSERT_FALSE(result.is_err()); });
-  // Wait for reboot to complete.
-  RunLoopUntil([&]() { return local_power_state_control_ptr_->reboot_complete.load(); });
+  bool callback_complete = false;
+  reboot_->ConnectToService({std::move(client), "recovery"}).ThenExactlyOnce([&](auto& result) {
+    EXPECT_TRUE(result.is_ok());
+    callback_complete = true;
+  });
+  // Wait for reboot and reply callback to complete.
+  RunLoopUntil([&]() {
+    return local_power_state_control_ptr_->reboot_complete.load() && callback_complete;
+  });
 }
 
 TEST_F(AdbRebootTest, RebootFastboot) {
@@ -220,10 +233,15 @@ TEST_F(AdbRebootTest, RebootFastboot) {
   zx::socket server, client;
   ASSERT_EQ(zx::socket::create(ZX_SOCKET_STREAM, &server, &client), ZX_OK);
 
-  reboot_->ConnectToService(std::move(client), "fastboot",
-                            [&](auto result) { ASSERT_FALSE(result.is_err()); });
-  // Wait for reboot to complete.
-  RunLoopUntil([&]() { return local_power_state_control_ptr_->reboot_complete.load(); });
+  bool callback_complete = false;
+  reboot_->ConnectToService({std::move(client), "fastboot"}).ThenExactlyOnce([&](auto& result) {
+    EXPECT_TRUE(result.is_ok());
+    callback_complete = true;
+  });
+  // Wait for reboot and reply callback to complete.
+  RunLoopUntil([&]() {
+    return local_power_state_control_ptr_->reboot_complete.load() && callback_complete;
+  });
 
   bootloader_message message;
   fake_block_device_ptr_->ReadVmo(&message, 0, sizeof(message));

@@ -40,7 +40,7 @@ The future work is classified roughly by area.
    fundamental type-unsafety of the formatting API and confuse it into
    revealing information it is not meant to reveal.
 
-## Locale fallback
+## Locale fallback {:#locale-fallback}
 
 The following desirable properties are not built into the fallback mechanism
 today but would be very nice to have.

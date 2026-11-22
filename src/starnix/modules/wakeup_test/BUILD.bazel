@@ -2,7 +2,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -17,9 +29,11 @@ rustc_library(
     ],
     crate_name = "starnix_modules_wakeup_test",
     edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
     visibility = ["//src/starnix/modules:__subpackages__"],
     deps = [
         "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+        "//sdk/fidl/fuchsia.math:fuchsia.math_rust",
         "//sdk/fidl/fuchsia.ui.test.input:fuchsia.ui.test.input_rust",
         "//sdk/rust/zx",
         "//src/lib/fidl/rust/fidl",
@@ -29,9 +43,69 @@ rustc_library(
         "//src/starnix/kernel/core",
         "//src/starnix/lib/linux_uapi",
         "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_sync",
         "//src/starnix/lib/starnix_syscalls",
         "//src/starnix/lib/starnix_uapi",
         "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:zerocopy",
     ],
+)
+
+rustc_test(
+    name = "wakeup_test_test",
+    crate = ":wakeup_test",
+    # Matches program.binary in meta/starnix_wakeup_test_tests.cml for the generated GN test.
+    crate_name = "starnix_modules_wakeup_test_lib_test",
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    # TODO(https://fxbug.dev/42059075): Re-enable starnix in these environments.
+    tags = [
+        "exclude_toolchain_tags=asan",
+        "exclude_toolchain_tags=hwasan",
+    ],
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_packaged_binary(
+    name = "wakeup_test_test_packaged_bin",
+    testonly = True,
+    binary = ":wakeup_test_test",
+    binary_name = "starnix_modules_wakeup_test_lib_test",
+)
+
+fx_component_manifest(
+    name = "starnix-wakeup-test-tests-manifest",
+    testonly = True,
+    component_name = "starnix-wakeup-test-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/starnix:unit_test.shard.cml",
+    ],
+    manifest = "meta/starnix_wakeup_test_tests.cml",
+)
+
+fx_test_component(
+    name = "starnix-wakeup-test-tests-component",
+    compiled_manifest = ":starnix-wakeup-test-tests-manifest",
+    test_type = "starnix",
+    deps = [
+        ":wakeup_test_test_packaged_bin",
+        # In GN, //src/starnix/kernel/vdso is a resource() propagated through
+        # //src/starnix/kernel/core's deps.
+        "//src/starnix/kernel/vdso",
+    ],
+)
+
+fx_package(
+    name = "starnix-wakeup-test-tests-package",
+    package_name = "starnix-wakeup-test-tests",
+    test_components = [":starnix-wakeup-test-tests-component"],
+)
+
+fx_test(
+    name = "starnix-wakeup-test-tests",
+    # Tests exercise failure cases, so ERROR logs are expected.
+    max_log_severity = "ERROR",
+    package = ":starnix-wakeup-test-tests-package",
 )

@@ -7,6 +7,7 @@
 
 // A modified version of gvisor's syscall matchers from test/util/test_util.h.
 
+#include <errno.h>
 #include <lib/fit/result.h>
 #include <string.h>
 
@@ -42,10 +43,10 @@ class SyscallSuccessMatcher {
    public:
     explicit Impl(::testing::Matcher<T> matcher) : matcher_(::std::move(matcher)) {}
 
-    bool MatchAndExplain(T const& rv,
-                         ::testing::MatchResultListener* const listener) const override {
-      if (rv == static_cast<decltype(rv)>(-1) && errno != 0) {
-        *listener << "with errno " << strerror(errno);
+    bool MatchAndExplain(T rv, ::testing::MatchResultListener* const listener) const override {
+      if (rv == static_cast<std::remove_cvref_t<T>>(-1)) {
+        int actual_errno = errno;
+        *listener << "with errno " << strerror(actual_errno) << " (" << actual_errno << ")";
         return false;
       }
       bool match = matcher_.MatchAndExplain(rv, listener);
@@ -80,8 +81,7 @@ class AnySuccessValueMatcher {
   template <typename T>
   class Impl : public ::testing::MatcherInterface<T> {
    public:
-    bool MatchAndExplain(T const& rv,
-                         ::testing::MatchResultListener* const listener) const override {
+    bool MatchAndExplain(T rv, ::testing::MatchResultListener* const listener) const override {
       return true;
     }
 
@@ -102,7 +102,7 @@ class SyscallFailureMatcher {
       return false;
     }
     int actual_errno = errno;
-    *listener << "with errno " << strerror(actual_errno);
+    *listener << "with errno " << strerror(actual_errno) << " (" << actual_errno << ")";
     bool match = errno_matcher_.MatchAndExplain(actual_errno, listener);
     return match;
   }
@@ -130,10 +130,12 @@ class SpecificErrnoMatcher : public ::testing::MatcherInterface<int> {
     return actual_errno == expected_;
   }
 
-  void DescribeTo(::std::ostream* const os) const override { *os << strerror(expected_); }
+  void DescribeTo(::std::ostream* const os) const override {
+    *os << strerror(expected_) << " (" << expected_ << ")";
+  }
 
   void DescribeNegationTo(::std::ostream* const os) const override {
-    *os << "not " << strerror(expected_);
+    *os << "not " << strerror(expected_) << " (" << expected_ << ")";
   }
 
  private:
@@ -293,6 +295,41 @@ inline ::testing::PolymorphicMatcher<internal::SyscallResultFailureMatcher> Sysc
 inline ::testing::PolymorphicMatcher<internal::SyscallResultFailureMatcher> SyscallResultIsErrno(
     int const expected) {
   return SyscallResultIsErrno(internal::SpecificErrno(expected));
+}
+
+namespace internal {
+
+class SyscallExpectedResultMatcher {
+ public:
+  explicit SyscallExpectedResultMatcher(fit::result<int> expected) : expected_(expected) {}
+
+  template <typename T>
+  operator ::testing::Matcher<T>() const {
+    if (expected_.is_ok()) {
+      return ::testing::SafeMatcherCast<T>(SyscallSucceeds());
+    }
+    return ::testing::SafeMatcherCast<T>(SyscallFailsWithErrno(expected_.error_value()));
+  }
+
+ private:
+  fit::result<int> expected_;
+};
+
+}  // namespace internal
+
+// Matches a raw syscall return value (`!= -1` on success, or `-1` with `errno`) against `expected`.
+inline internal::SyscallExpectedResultMatcher SyscallMatchesResult(fit::result<int> expected) {
+  return internal::SyscallExpectedResultMatcher(expected);
+}
+
+// Matches a successful raw syscall return value when `expect_success` is true, or `-1` with
+// `errno == expected_errno` otherwise.
+inline internal::SyscallExpectedResultMatcher SyscallSucceedsOrFailsWithErrno(bool expect_success,
+                                                                              int expected_errno) {
+  if (expect_success) {
+    return SyscallMatchesResult(fit::ok());
+  }
+  return SyscallMatchesResult(fit::error(expected_errno));
 }
 
 #endif  // SRC_STARNIX_TESTS_SYSCALLS_CPP_SYSCALL_MATCHERS_H_

@@ -42,7 +42,7 @@ records (overwrite on).
 Any number of writers append records at once, and one reader at a time takes
 finished pages. A controller creates the buffer with a capacity and an
 overflow policy, and enables and disables it. Its calls are rare and take a
-lock that writers and the reader never touch. Disabling discards the contents
+lock that writers and the reader never touch. Disabling drops the contents
 and frees the memory; enabling starts again from empty.
 
 A writer reserves space for a record of a given size, writes the record into
@@ -114,7 +114,7 @@ record takes its absolute time from the page header.
 ### Overflow policy
 
 When every page holds unread data, a buffer created with overwrite on lets a
-writer that needs space discard the oldest finished page, and counts it as a
+writer that needs space drop the oldest finished page, and counts it as a
 lost page. With overwrite off, that writer fails with Full and the old data
 stays. Capacity is fixed between enable and disable.
 
@@ -132,8 +132,8 @@ state in its own metadata memory, outside the page data:
 |                  | owner bit held by the thread consuming the head. |
 | claim word       | Offset of the next free byte, a closed bit, and  |
 | (per page)       | the low bits of the last claimed record's time.  |
-| writer state     | An open bit and the number of active writers on  |
-| (per page)       | the page.                                        |
+| writer state     | An open bit, a closing bit, and the number of    |
+| (per page)       | active writers on the page.                      |
 | ring word        | An enabled bit and the number of reservations    |
 |                  | and reads in progress. A reservation is in       |
 |                  | progress until it is committed.                  |
@@ -144,10 +144,11 @@ state in its own metadata memory, outside the page data:
 
 The pages from the head up to the tail hold data, and the pages after the tail
 and before the head are reset and free. The buffer is full when the page after
-the tail is the head, and nothing is finished when the head is the tail.
+the tail is the head, and empty when the head is the tail and no space has been
+claimed on it.
 
 Resetting a page sets its claim word to the start of the record area, open,
-with no time, and then sets its writer state to open with no active writers.
+with no time, and then sets its writer state to open=1, closing=0, and active writers=0.
 
 ## Guarantees
 
@@ -165,10 +166,10 @@ Integrity:
 Delivery and loss:
 
 5. Pages reach the reader in the order they were finished, each at most once.
-6. Every committed record is delivered, discarded on a counted lost page, still
-   in the buffer, or discarded by disable. A record that was never placed is
+6. Every committed record is delivered, dropped on a counted lost page, still
+   in the buffer, or dropped by disable. A record that was never placed is
    counted or reported to its writer.
-7. With overwrite off, no unread page is discarded. With overwrite on, a writer
+7. With overwrite off, no unread page is dropped. With overwrite on, a writer
    never fails with Full.
 8. A delivered page that follows lost data has its lost-records bit set.
 
@@ -221,20 +222,25 @@ decrement, and every record write happens before the reader's copy.
 
 ### Closing a page
 
-The page's size has to be fixed when it closes, while other writers may be
-claiming space on it at that moment. The writer whose record doesn't fit closes
-the page before it leaves it. It sets the closed bit in the claim word with an
-atomic OR, which also returns the final offset. Claims before the OR are inside
-that offset, and claims after it see the closed bit and fail.
+The page's size has to be fixed when it closes, while writers may be claiming
+space on it at that moment. A writer whose record doesn't fit closes the page
+before it leaves it, and the reader closes the tail page when the head has
+caught up to an idle, non-empty tail.
 
-Only one writer writes a page's `commit` field: the one whose OR found the
-closed bit clear. The OR is a single atomic step, so when several writers close
-the page at once, exactly one sees the bit clear. The others see it set and do
-nothing more. The closing writer writes `commit` and then clears the open bit
-in the writer state with release ordering. That stops new writers from joining
-and makes `commit` visible to the reader along with the records. Writers that
-claimed space before the close may still be writing, which is why the reader
-also waits for the active-writer count to reach zero.
+Only one thread closes a page and writes its `commit` field. A thread that
+closes the page first sets the closing bit in the writer state with an atomic
+OR. The OR is a single atomic step, so when several threads close the page at
+once, exactly one finds the bit clear. The others find it set and do nothing
+more.
+
+The winner then sets the closed bit in the claim word with another atomic OR,
+which also returns the final offset. Claims before that OR are inside the
+offset, and claims after it see the closed bit and fail. The winner writes
+`commit` and then clears the open bit in the writer state with release ordering.
+That stops new writers from joining and makes `commit` visible to the reader
+along with the records. Writers that claimed space before the close may still be
+writing, which is why the reader also waits for the active-writer count to reach
+zero.
 
 ### Reading a page and reusing it
 
@@ -244,7 +250,23 @@ setting the owner bit in the head word with a CAS, then checks that the page is
 complete and isn't the tail. It copies the page into the caller's buffer,
 resets the page, and stores the head word with the next index, the next
 generation, and the owner bit clear, with release ordering. While the reader
-owns the head, no writer can discard that page or move the tail onto it.
+owns the head, no writer can drop that page or move the tail onto it.
+
+When the head and tail are on the same page, the reader closes the page only
+if it is idle and non-empty. If no space has been claimed on the page or
+writers are active on it, and the tail word is unchanged since the head was
+read, so the two were equal at the same moment, the reader leaves the page open
+and reports Nothing ready. Otherwise, if the page is still open, the reader
+joins it and checks that the tail word has not moved and that space has been
+claimed. If both hold, it closes the page and leaves it. If no space has been
+claimed, it leaves the page open and reports Nothing ready. Once the page is
+closed, whether by the reader or by a writer that was paused before it moved
+the tail, the reader moves the tail onto the next page instead of waiting for
+that writer. If the next page is the head and an overwriting writer owns it,
+the reader leaves the tail to that writer and reports Nothing ready. Whenever
+the tail word has moved, the reader starts over. The reader leaves the page
+before it takes the head, because the head page is complete only when no
+writers are active on it, and the reader counts as one while it has joined.
 
 A reused page must not be touched by writers from its earlier use, and writers
 in its new use must not see the old closed state. The first holds because the
@@ -258,7 +280,7 @@ head word, which was stored after that page's reset.
 
 A reader or writer that reads shared state, is paused, and resumes after the
 ring has wrapped can find a page that looks the same but now belongs to a newer
-use. If it acts on what it remembers, it can write into, close, or discard that
+use. If it acts on what it remembers, it can write into, close, or drop that
 page.
 
 The head and tail words carry generations, and every update to them is a CAS
@@ -277,9 +299,9 @@ page is closed, moves the tail and starts over.
 ### Moving the head
 
 The reader moves the head when it takes a page. With overwrite on, a writer
-that needs space also moves it, by discarding the oldest page. Only the holder
+that needs space also moves it, by dropping the oldest page. Only the holder
 of the owner bit may move the head, so a page is never both delivered and
-discarded.
+dropped.
 
 A writer decides the buffer is full only if the tail word is unchanged after it
 reads the head word. Every tail move changes the generation, so the tail did
@@ -357,18 +379,19 @@ several threads may want to take is one of two kinds.
 Some steps any thread can finish for the others. Moving the tail onto a free
 page is one: every writer that finds the tail page closed CASes the tail word
 from the value it read. One CAS wins, and the rest fail, see the new tail, and
-continue on it. No writer depends on the one that closed the page to move the
-tail.
+continue on it. The reader does the same when the head has caught up to a
+closed tail page. Neither writers nor the reader depend on the thread that
+closed the page to move the tail.
 
 Other steps belong to the one thread that won the right to take them: closing a
-page (won by the atomic OR) and consuming the head (won by the owner bit).
-Nobody waits for the winner to finish. Writers that find the page closed move
-the tail and claim space on the next page, writers that find the head owned
+page (won by the OR on the closing bit) and consuming the head (won by the owner
+bit). Nobody waits for the winner to finish. Writers that find the page closed
+move the tail and claim space on the next page, writers that find the head owned
 drop their records, and the reader reports Nothing ready.
 
 A paused writer still delays delivery of its page and the pages after it (see
 Context), and while a paused reader owns the head, overwriting writers drop
-their records instead of discarding that page.
+their records instead of dropping that page.
 
 ## Design tradeoffs
 
@@ -379,12 +402,18 @@ when its delta needs a time-extend record, and the delta depends on the
 previous record's time. A CAS only fails when another writer succeeded, so
 writers still make progress.
 
-The newest page becomes readable only once a write overflows it, because only
-a writer whose record doesn't fit closes a page. Writers and the reader never
-contend over the newest page, but its records wait until the next page starts,
-and disable discards them. Letting the reader close the newest page would make
-records readable sooner, at the price of a race on the closed bit and partly
-empty pages.
+The reader closes the tail page only when the head has caught up to it and the
+reader finds no writer active on it. While closed pages wait ahead of the tail,
+or while it sees writers active on the tail page, the reader leaves the tail
+alone. Once writers go quiet, a read delivers the trailing records on a partly
+filled page instead of leaving them unread until a later write fills the page
+or disable drops them.
+
+The closer is picked by a separate closing bit in the writer state, not by the
+OR on the claim word's closed bit. Every closer, writer or reader, has joined
+the page, so the claim word's OR alone could pick the winner: a losing OR finds
+the bit already set and changes nothing. The closing bit costs one more atomic
+operation per closed page.
 
 The reader copies the head page while it stays in the ring. Linux instead swaps
 a spare page into the ring for the head, so writers can never reach the page

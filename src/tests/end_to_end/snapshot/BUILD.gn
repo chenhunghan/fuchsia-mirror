@@ -19,7 +19,6 @@ python_mobly_test("snapshot_test") {
   environments = [
     emu_env,
     vim3_env,
-    nuc7_env,
     nuc11_env,
   ]
 }

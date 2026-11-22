@@ -7,8 +7,8 @@ import logging
 import fidl_fuchsia_wlan_common as fidl_common
 import fidl_fuchsia_wlan_device_service as fidl_device_svc
 import fuchsia_wlan_base_test
-import honeydew.affordances.connectivity.wlan.core as wlan_core
 from honeydew.affordances.connectivity.netstack.types import PortClass
+from honeydew.affordances.connectivity.wlan.core import wlan_core
 from legacy_access_point.access_point import AccessPoint, setup_ap
 from legacy_access_point.ap_lib.hostapd_constants import (
     AP_DEFAULT_CHANNEL_2G,

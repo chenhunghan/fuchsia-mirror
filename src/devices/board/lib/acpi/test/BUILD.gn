@@ -13,7 +13,6 @@ source_set("mock-acpi") {
     "mock-pci.cc",
   ]
   deps = [
-    "//sdk/banjo/fuchsia.hardware.pciroot:fuchsia.hardware.pciroot_banjo_cpp",
     "//sdk/fidl/fuchsia.hardware.i2c.businfo:fuchsia.hardware.i2c.businfo_cpp",
     "//sdk/fidl/fuchsia.hardware.spi.businfo:fuchsia.hardware.spi.businfo_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",

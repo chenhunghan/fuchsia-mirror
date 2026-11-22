@@ -84,10 +84,6 @@ writing and using simple codec drivers implementing the codec protocol.
 The codec protocol is defined in FIDL at
 [codec.fidl](/sdk/fidl/fuchsia.hardware.audio/codec.fidl).
 
-Note that because the FDF does not currently provide a way to directly get a FIDL
-channel for communication, we define a way to get a channel through
-Banjo at [fuchsia.hardware.audio](/sdk/banjo/fuchsia.hardware.audio/audio.fidl).
-
 Many codec protocol operations are "fire-and-forget", i.e. they do not expect a
 reply. Codec protocol operations with a reply are not considered completed until
 the reply of the function is received, and not considered completed successfully

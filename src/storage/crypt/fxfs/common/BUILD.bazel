@@ -10,6 +10,12 @@ load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_compo
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":fxfs_crypt_common_lib_tests"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
 rustc_library(
     name = "lib",
     srcs = ["src/lib.rs"],
@@ -38,6 +44,7 @@ rustc_test(
     crate = ":lib",
     crate_name = "fxfs_crypt_common_lib_test",
     edition = "2024",
+    tags = ["manual"],
     deps = ["//src/lib/fuchsia"],
 )
 

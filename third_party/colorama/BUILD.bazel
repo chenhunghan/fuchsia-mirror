@@ -16,17 +16,15 @@ license(
 )
 
 # TODO: Verify whether colorama should use target_compatible_with (was not gated by if (is_host) in GN).
-# @bazel2gn:raw_attribute:enable_mypy = false
-# @bazel2gn:raw_attribute:source_root = "colorama/colorama"
 py_library(
     name = "colorama",
     srcs = [
-        "colorama/colorama/__init__.py",  # @bazel2gn:path_overwrite:__init__.py
-        "colorama/colorama/ansi.py",  # @bazel2gn:path_overwrite:ansi.py
-        "colorama/colorama/ansitowin32.py",  # @bazel2gn:path_overwrite:ansitowin32.py
-        "colorama/colorama/initialise.py",  # @bazel2gn:path_overwrite:initialise.py
-        "colorama/colorama/win32.py",  # @bazel2gn:path_overwrite:win32.py
-        "colorama/colorama/winterm.py",  # @bazel2gn:path_overwrite:winterm.py
+        "colorama/colorama/__init__.py",
+        "colorama/colorama/ansi.py",
+        "colorama/colorama/ansitowin32.py",
+        "colorama/colorama/initialise.py",
+        "colorama/colorama/win32.py",
+        "colorama/colorama/winterm.py",
     ],
     imports = ["colorama"],
     target_compatible_with = HOST_OS_CONSTRAINTS,

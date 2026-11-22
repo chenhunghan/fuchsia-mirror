@@ -134,9 +134,17 @@ template("generate_fuchsia_bazel_sdk") {
 #       the directory created by that target. Default is its
 #       $target_out_dir/$target_name otherwise.
 #
+#    use_oot_bazel: (optional)
+#       If true, run the test suite using the pinned out-of-tree Bazel prebuilt
+#       (//prebuilt/third_party/bazel_oot/${host_os}-${host_cpu}/bazel) and
+#       vendor directory (//third_party/bazel_vendor/bazel_sdk_oot). Defaults to
+#       false, which uses the in-tree Bazel prebuilt and
+#       //third_party/bazel_vendor/bazel_sdk_in_tree.
+#
 #    bazel_vendor_dir: (optional)
 #       Path to the Bazel vendor directory to use. Defaults to
-#       //third_party/bazel_vendor/fuchsia_in_tree
+#       //third_party/bazel_vendor/bazel_sdk_in_tree (or
+#       //third_party/bazel_vendor/bazel_sdk_oot when use_oot_bazel is true).
 #
 #    bazel_registry_dir: (optional)
 #       Path to the Bazel registry directory to use. Defaults to
@@ -215,11 +223,15 @@ template("run_fuchsia_bazel_sdk_tests") {
 
   _main_target_name = target_name
 
+  _use_oot_bazel = defined(invoker.use_oot_bazel) && invoker.use_oot_bazel
+
   if (defined(invoker.bazel_vendor_dir)) {
     _bazel_vendor_dir = invoker.bazel_vendor_dir
-  } else {
+  } else if (_use_oot_bazel) {
     # LINT.IfChange(bazel_vendor_dir)
-    _bazel_vendor_dir = "//third_party/bazel_vendor/fuchsia_in_tree"
+    _bazel_vendor_dir = "//third_party/bazel_vendor/bazel_sdk_oot"
+  } else {
+    _bazel_vendor_dir = "//third_party/bazel_vendor/bazel_sdk_in_tree"
     # LINT.ThenChange(//build/bazel/enable_vendor_mode.bazelrc:bazel_vendor_dir)
   }
   if (defined(invoker.bazel_registry_dir)) {
@@ -234,7 +246,12 @@ template("run_fuchsia_bazel_sdk_tests") {
     visibility = invoker.visibility + [ ":*" ]
   }
 
-  _bazel_bin = "//prebuilt/third_party/bazel/${host_os}-${host_cpu}/bazel"
+  if (_use_oot_bazel) {
+    _bazel_prebuilt_dir = "bazel_oot"
+  } else {
+    _bazel_prebuilt_dir = "bazel"
+  }
+  _bazel_bin = "//prebuilt/third_party/${_bazel_prebuilt_dir}/${host_os}-${host_cpu}/bazel"
   _prerequisite_deps = [
     _rules_fuchsia_target,
     prebuilt_content_hash_labels.clang,

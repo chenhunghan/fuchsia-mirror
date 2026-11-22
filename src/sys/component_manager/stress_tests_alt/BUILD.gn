@@ -4,39 +4,13 @@
 
 import("//build/components.gni")
 
-fuchsia_component("no_binary") {
-  testonly = true
-  manifest = "meta/no_binary.cml"
-}
-
-fuchsia_component("unreliable_echo_client") {
-  testonly = true
-  deps = [ ":unreliable_echo_client_bin" ]
-  manifest = "meta/unreliable_echo_client.cml"
-}
-
-fuchsia_component("unreliable_echo_server") {
-  testonly = true
-  deps = [ ":unreliable_echo_server_bin" ]
-  manifest = "meta/unreliable_echo_server.cml"
-}
-
-fuchsia_component("actor") {
-  testonly = true
-  manifest = "meta/actor.cml"
-  deps = [ ":actor-bin" ]
-}
-
-fuchsia_component("test") {
-  testonly = true
+fuchsia_test_component("test") {
   manifest = "meta/test.cml"
 }
 
-fuchsia_component("test_short") {
-  testonly = true
-  manifest = "meta/test_short.cml"
-}
-
+# Retained in GN because //bundles:stress-tests has no Bazel bridge and bazel2gn
+# does not translate `fx_test_environment_variant` (`tags = [ "stress-tests"
+# ]`).
 fuchsia_test_package("component-manager-stress-tests-alt") {
   deps = [
     ":actor",
@@ -54,31 +28,10 @@ fuchsia_test_package("component-manager-stress-tests-alt") {
     }
     environments = [
       {
-        dimensions = qemu_env.dimensions
+        dimensions = emu_env.dimensions
         tags = [ "stress-tests" ]
       },
     ]
-  }
-}
-
-# This test package is designed to run a small number of operations on CQ bots.
-# This ensures that these tests cannot break due to CL changes.
-fuchsia_test_package("component-manager-stress-tests-short") {
-  deps = [
-    ":actor",
-    ":no_binary",
-    ":unreliable_echo_client",
-    ":unreliable_echo_server",
-
-    # https://fxbug.dev/42052321: Dep included for affected tests presubmit
-    "//src/sys/component_manager:component-manager-realm-builder-cmp",
-  ]
-  test_components = [ ":test_short" ]
-  test_specs = {
-    log_settings = {
-      max_severity = "ERROR"
-    }
-    environments = [ qemu_env ]
   }
 }
 
@@ -131,6 +84,18 @@ rustc_binary("unreliable_echo_server_bin") {
   ]
 }
 
+fuchsia_component_manifest("unreliable_echo_server_manifest") {
+  testonly = true
+  component_name = "unreliable_echo_server"
+  manifest = "meta/unreliable_echo_server.cml"
+}
+
+fuchsia_component("unreliable_echo_server") {
+  testonly = true
+  cm_label = ":unreliable_echo_server_manifest"
+  deps = [ ":unreliable_echo_server_bin" ]
+}
+
 rustc_binary("unreliable_echo_client_bin") {
   testonly = true
   sources = [ "unreliable_echo_client.rs" ]
@@ -144,6 +109,18 @@ rustc_binary("unreliable_echo_client_bin") {
     "//src/lib/fuchsia-component",
     "//third_party/rust_crates:rand",
   ]
+}
+
+fuchsia_component_manifest("unreliable_echo_client_manifest") {
+  testonly = true
+  component_name = "unreliable_echo_client"
+  manifest = "meta/unreliable_echo_client.cml"
+}
+
+fuchsia_component("unreliable_echo_client") {
+  testonly = true
+  cm_label = ":unreliable_echo_client_manifest"
+  deps = [ ":unreliable_echo_client_bin" ]
 }
 
 rustc_binary("actor-bin") {
@@ -169,4 +146,55 @@ rustc_binary("actor-bin") {
     "//third_party/rust_crates:log",
     "//third_party/rust_crates:rand",
   ]
+}
+
+fuchsia_component_manifest("actor_manifest") {
+  testonly = true
+  component_name = "actor"
+  manifest = "meta/actor.cml"
+}
+
+fuchsia_component("actor") {
+  testonly = true
+  cm_label = ":actor_manifest"
+  deps = [ ":actor-bin" ]
+}
+
+fuchsia_component_manifest("no_binary_manifest") {
+  testonly = true
+  component_name = "no_binary"
+  manifest = "meta/no_binary.cml"
+}
+
+fuchsia_component("no_binary") {
+  testonly = true
+  cm_label = ":no_binary_manifest"
+}
+
+fuchsia_component_manifest("test_short_manifest") {
+  testonly = true
+  component_name = "test_short"
+  manifest = "meta/test_short.cml"
+}
+
+fuchsia_test_component("test_short") {
+  cm_label = ":test_short_manifest"
+}
+
+fuchsia_test_package("component-manager-stress-tests-short") {
+  package_name = "component-manager-stress-tests-short-gn"
+  test_components = [ ":test_short" ]
+  deps = [
+    ":actor",
+    ":no_binary",
+    ":unreliable_echo_client",
+    ":unreliable_echo_server",
+    "//src/sys/component_manager:component-manager-realm-builder-cmp",
+  ]
+  test_specs = {
+    environments = [ emu_env ]
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
 }

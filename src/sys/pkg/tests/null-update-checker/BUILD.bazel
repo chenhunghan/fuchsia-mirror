@@ -2,14 +2,27 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# The test component and package (`:component` and `:package`) stay in BUILD.gn
-# because they use RealmBuilder (`sys/component/realm_builder.shard.cml`) and
-# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`
-# is not in Bazel.
+test_suite(
+    name = "tests",
+    tests = [":null-update-checker-integration-tests"],
+    visibility = ["//src/sys/pkg:__pkg__"],
+)
+
 rustc_test(
     name = "bin",
     srcs = ["src/lib.rs"],
@@ -18,6 +31,9 @@ rustc_test(
     crate_name = "null_update_checker_integration_test",
     edition = "2024",
     lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    # Device-packaged integration test depending on Fuchsia-only components and crates.
+    target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
         "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
         "//sdk/fidl/fuchsia.update.channel:fuchsia.update.channel_rust",
@@ -25,13 +41,51 @@ rustc_test(
         "//sdk/rust/zx",
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia",
-        # GN depends on the `//src/lib/fuchsia-component-test` group, which bundles
-        # `:fuchsia-component-test-lib` with `realm_builder_server_component`; Bazel
-        # depends on `:fuchsia-component-test-lib` directly.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/sys/lib/cm_rust",
         "//src/sys/lib/component-events",
         "//third_party/rust_crates/vendor:assert_matches",
         "//third_party/rust_crates/vendor:test-case",
     ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "null_update_checker_integration_test",
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    testonly = True,
+    component_name = "component",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/null-update-checker-integration-tests.cml",
+)
+
+fx_test_component(
+    name = "component",
+    compiled_manifest = ":component_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "null-update-checker-integration-tests",
+    testonly = True,
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/pkg/bin/null-update-checker:component",
+    ],
+    test_components = [":component"],
+)
+
+fx_test(
+    name = "null-update-checker-integration-tests",
+    package = ":package",
 )

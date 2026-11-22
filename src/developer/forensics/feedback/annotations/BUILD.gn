@@ -9,7 +9,6 @@ source_set("annotations") {
   public = [
     "annotation_manager.h",
     "constants.h",
-    "decode.h",
     "encode.h",
     "metrics.h",
     "provider.h",
@@ -21,8 +20,6 @@ source_set("annotations") {
     "annotation_manager.cc",
     "annotation_manager.h",
     "constants.h",
-    "decode.cc",
-    "decode.h",
     "encode.cc",
     "encode.h",
     "metrics.cc",
@@ -34,7 +31,7 @@ source_set("annotations") {
   ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//sdk/lib/async",
     "//src/developer/forensics/feedback/reboot_log",
     "//src/developer/forensics/utils:errors",

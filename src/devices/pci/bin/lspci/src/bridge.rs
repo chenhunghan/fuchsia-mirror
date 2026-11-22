@@ -16,7 +16,7 @@ pub struct Bridge<'a> {
 
 impl<'a> Bridge<'a> {
     pub fn new(device: &'a Device<'_>) -> Self {
-        let cfg = Type01Config::new(&device.device.config);
+        let cfg = Type01Config::new(&device.device.config).expect("Device::new checked header");
         Bridge { device, cfg }
     }
 
@@ -97,12 +97,13 @@ impl<'a> fmt::Display for Bridge<'a> {
         self.device.print_common_header(f)?;
         if self.device.args.verbose {
             writeln!(
-            f,
-            "\tBus: primary = 0x{:02x}, secondary = 0x{:02x}, subordinate = 0x{:02x}, sec-latency = {}",
-            self.cfg.primary_bus_number,
-            self.cfg.secondary_bus_number,
-            self.cfg.subordinate_bus_number,
-            self.cfg.secondary_latency_timer)?;
+                f,
+                "\tBus: primary = 0x{:02x}, secondary = 0x{:02x}, subordinate = 0x{:02x}, sec-latency = {}",
+                self.cfg.primary_bus_number,
+                self.cfg.secondary_bus_number,
+                self.cfg.subordinate_bus_number,
+                self.cfg.secondary_latency_timer
+            )?;
 
             write!(f, "\tI/O behind bridge: ")?;
             if let Some((base, limit)) = self.decode_bridge_io() {

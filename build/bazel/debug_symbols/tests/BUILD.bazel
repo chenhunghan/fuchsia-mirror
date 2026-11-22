@@ -2,47 +2,42 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Definitions used to test debug symbol collection.
+"""Definitions used to test debug symbol collection and path remapping.
 
-NOTE: For now, only manual verification is supported. See TODOs below.
+Automated CQ coverage (`//build/bazel/rules/tests:quick_tests`):
+- `:verify_fuchsia_debug_binaries` and `:verify_host_debug_binaries` (via
+  `:verify_host_and_oot_debug_binaries_from_fuchsia`) validate DWARF
+  `.debug_info`, `.debug_line`, and `.rodata` path invariants for focused
+  representative in-tree C++ and assembly targets (including DWARF v4 and
+  ThinLTO variants).
+- `:verify_oot_debug_binaries` validates Linux out-of-tree
+  (`use_default_build_flags = False`) C++ executables (`:a_cc_binary`) and
+  shared libraries (`:a_cc_shared_library`) across all three `dbg`, `fastbuild`,
+  and `opt` compilation modes.
 
-To verify that debug symbol collection works properly for all supported binary
-types, build the //build/bazel/debug_symbols/tests:debug_symbols target, which will
-generate a file under bazel-bin/build/bazel/debug_symbols/tests/debug_symbols.json
-which should include an entry for each target below compiled for each one of
-the "dbg", "fastbuild" and "opt" compilation modes.
-
-For example, for Linux:
-
-```
-fx bazel build --config=host \
-  --output_groups=+debug_symbol_files \
-  //build/bazel/debug_symbols/tests:debug_symbols
-
-python3 build/bazel/debug_symbols/tests/check_debug_binaries.py \
-  --manifest bazel-bin/build/bazel/debug_symbols/tests/debug_symbols.json
-```
-
-For Fuchsia, there is no comparable command until --config=fuchsia
-works (see https://fxrev.dev/1269985).
-
-TODO(digit): Ensure `fx bazel run //build/bazel/debug_symbols/tests:check_debug_binaries
-             works properly (it inherits Bazel options like --config=gcertauth !?).
-
-TODO(digit): Find a way to generate a single manifest and generate debug binaries
-             for both host and Fuchsia build configurations at the same time.
-             For now, trying to use a transition function to change --platforms
-             fails with a Rust toolchain resolution error !?
-
-TODO(digit): Make this a proper build-time test instead.
+Manual full-matrix target:
+- `:debug_symbols` (`:binaries`) retains the full 3-mode Fuchsia, host, C++, and
+  Rust matrix for manual checks outside `quick_tests`.
 """
 
+load("@fuchsia_build_config//:defs.bzl", "build_config")
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_shared_library")
+load("@rules_fuchsia//common/platforms:utils.bzl", "to_bazel_cpu_name")
 load("@rules_fuchsia//fuchsia:defs.bzl", "fuchsia_cc_binary", "fuchsia_cc_test", "fuchsia_wrap_rust_binary")
 load("@rules_python//python:defs.bzl", "py_binary")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_dylib_library", "rust_test")
-load(":defs.bzl", "debug_symbols_manifest", "multi_compilation_mode_filegroup")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    ":defs.bzl",
+    "debug_symbols_manifest",
+    "host_target_filegroup",
+    "multi_compilation_mode_filegroup",
+    "oot_mode_filegroup",
+    "verify_debug_symbols_manifest",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -54,16 +49,15 @@ debug_symbols_manifest(
 )
 
 # A script used to check the content of a debug symbols manifest
-# and to verify that all debug binaries it points to are indeed
-# unstripped (to verify that toolchains are configured properly).
+# and to verify that all debug binaries it points to are unstripped
+# and satisfy source path remapping invariants.
 py_binary(
     name = "check_debug_binaries",
     srcs = ["check_debug_binaries.py"],
     deps = ["//build/python/modules/elf"],
 )
 
-# A single target that will build multiple dependencies in all
-# "dbg", "fastbuild" and "opt" compilation modes at the same time.
+# Full 3-mode target matrix retained for manual verification outside quick_tests.
 multi_compilation_mode_filegroup(
     name = "binaries",
     testonly = True,
@@ -84,18 +78,255 @@ multi_compilation_mode_filegroup(
             ":a_rust_binary",
             ":a_rust_binary_with_dylib",
             ":a_rust_test",
+            ":an_fx_cc_binary",
         ],
     }),
+)
+
+# Focused representative binary set for quick_tests (Decision 3A),
+# including per-target DWARF v4 (-O0) and DWARF v5 ThinLTO overrides.
+filegroup(
+    name = "quick_in_tree_binaries",
+    testonly = True,
+    srcs = [
+        ":a_cc_shared_library",
+        ":an_fx_cc_binary",
+        ":an_fx_cc_binary_dwarf4",
+        ":an_fx_cc_binary_thinlto",
+    ],
+)
+
+debug_symbols_manifest(
+    name = "quick_debug_symbols",
+    testonly = True,
+    dep = ":quick_in_tree_binaries",
+    output = "quick_debug_symbols.json",
+)
+
+# Minimal Linux host platform used only by `_oot_mode_transition` in `defs.bzl`.
+# Real out-of-tree `@rules_fuchsia` workspaces use Bazel's built-in host
+# platform (`@platforms//os:linux` + CPU constraint) directly with no custom
+# platform definition to sync via `LINT.IfChange`, whereas in-tree
+# `//build/bazel/platforms:linux_*` targets attach in-tree platform flags that
+# would override the out-of-tree transition settings.
+platform(
+    name = "oot_host_platform",
+    constraint_values = [
+        "@platforms//os:linux",
+        build_config.host_platform_cpu_constraint,
+    ],
+    flags = [
+        "--cpu=" + to_bazel_cpu_name(build_config.host_arch),
+    ],
+)
+
+oot_mode_filegroup(
+    name = "oot_binaries",
+    testonly = True,
+    srcs = [
+        ":a_cc_binary",
+        ":a_cc_shared_library",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+debug_symbols_manifest(
+    name = "oot_debug_symbols",
+    testonly = True,
+    dep = ":oot_binaries",
+    output = "oot_debug_symbols.json",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+_QUICK_IN_TREE_EXPECTED_TARGETS = [
+    "a_cc_shared_library",
+    "an_fx_cc_binary",
+    "an_fx_cc_binary_dwarf4",
+    "an_fx_cc_binary_thinlto",
+]
+
+verify_debug_symbols_manifest(
+    name = "verify_fuchsia_debug_binaries",
+    testonly = True,
+    dep = ":quick_debug_symbols",
+    expected_targets = _QUICK_IN_TREE_EXPECTED_TARGETS,
+    mode = "in_tree",
+    stamp = "verify_fuchsia_debug_binaries.stamp",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+verify_debug_symbols_manifest(
+    name = "verify_host_debug_binaries",
+    testonly = True,
+    dep = ":quick_debug_symbols",
+    expected_targets = _QUICK_IN_TREE_EXPECTED_TARGETS,
+    mode = "in_tree",
+    stamp = "verify_host_debug_binaries.stamp",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+verify_debug_symbols_manifest(
+    name = "verify_oot_debug_binaries",
+    testonly = True,
+    dep = ":oot_debug_symbols",
+    expected_configs = [
+        "dbg",
+        "fastbuild",
+        "opt",
+    ],
+    expected_targets = [
+        "a_cc_binary",
+        "a_cc_shared_library",
+    ],
+    mode = "oot",
+    stamp = "verify_oot_debug_binaries.stamp",
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+host_target_filegroup(
+    name = "verify_host_and_oot_debug_binaries_from_fuchsia",
+    testonly = True,
+    srcs = [
+        ":verify_host_debug_binaries",
+        ":verify_oot_debug_binaries",
+    ] if build_config.host_os == "linux" else [],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+genrule(
+    name = "gen_header",
+    outs = ["generated_header.h"],
+    cmd = "echo 'static __attribute__((noinline)) int generated_header_value(int x) { return x + 13; }' > $@",
+)
+
+cc_library(
+    name = "gen_header_lib",
+    hdrs = [":gen_header"],
+)
+
+cc_library(
+    name = "a_asm",
+    srcs = [
+        "a_asm.S",
+        "a_raw_asm.s",
+    ],
+    # Raw `.s` assembly invokes Clang's integrated assembler without C
+    # preprocessing, so C flags in default_build_flags are unused.
+    copts = ["-Wno-unused-command-line-argument"],
 )
 
 cc_binary(
     name = "a_cc_binary",
     srcs = ["a_main.cc"],
+    deps = [
+        ":a_asm",
+        ":a_cc_library",
+        ":gen_header_lib",
+    ],
 )
 
 cc_test(
     name = "a_cc_test",
     srcs = ["a_main.cc"],
+    deps = [
+        ":a_asm",
+        ":a_cc_library",
+        ":gen_header_lib",
+    ],
+)
+
+fx_cc_binary(
+    name = "an_fx_cc_binary",
+    testonly = True,
+    srcs = ["a_main.cc"],
+    deps = [
+        ":a_asm",
+        ":a_cc_library",
+        ":gen_header_lib",
+    ],
+)
+
+build_flags(
+    name = "dwarf4_unoptimized_flags",
+    testonly = True,
+    cflags = [
+        "-gdwarf-4",
+        "-O0",
+    ],
+    ldflags = ["-gdwarf-4"],
+    subflags = ["//build/config/lto:no-lto"],
+)
+
+build_flags(
+    name = "dwarf5_thinlto_flags",
+    testonly = True,
+    cflags = ["-gdwarf-5"],
+    ldflags = ["-gdwarf-5"],
+    subflags = ["//build/config/lto:thinlto-if-compatible"],
+)
+
+fx_cc_library(
+    name = "a_asm_dwarf4",
+    testonly = True,
+    srcs = [
+        "a_asm.S",
+        "a_raw_asm.s",
+    ],
+    build_flags = [":dwarf4_unoptimized_flags"],
+    copts = ["-Wno-unused-command-line-argument"],
+)
+
+fx_cc_library(
+    name = "a_cc_library_dwarf4",
+    testonly = True,
+    srcs = ["a_library.cc"],
+    hdrs = ["a_library.h"],
+    build_flags = [":dwarf4_unoptimized_flags"],
+)
+
+fx_cc_binary(
+    name = "an_fx_cc_binary_dwarf4",
+    testonly = True,
+    srcs = ["a_main.cc"],
+    build_flags = [":dwarf4_unoptimized_flags"],
+    deps = [
+        ":a_asm_dwarf4",
+        ":a_cc_library_dwarf4",
+        ":gen_header_lib",
+    ],
+)
+
+fx_cc_library(
+    name = "a_asm_thinlto",
+    testonly = True,
+    srcs = [
+        "a_asm.S",
+        "a_raw_asm.s",
+    ],
+    build_flags = [":dwarf5_thinlto_flags"],
+    copts = ["-Wno-unused-command-line-argument"],
+)
+
+fx_cc_library(
+    name = "a_cc_library_thinlto",
+    testonly = True,
+    srcs = ["a_library.cc"],
+    hdrs = ["a_library.h"],
+    build_flags = [":dwarf5_thinlto_flags"],
+)
+
+fx_cc_binary(
+    name = "an_fx_cc_binary_thinlto",
+    testonly = True,
+    srcs = ["a_main.cc"],
+    build_flags = [":dwarf5_thinlto_flags"],
+    deps = [
+        ":a_asm_thinlto",
+        ":a_cc_library_thinlto",
+        ":gen_header_lib",
+    ],
 )
 
 cc_library(
@@ -157,11 +388,21 @@ rust_binary(
 fuchsia_cc_binary(
     name = "a_fuchsia_cc_binary",
     srcs = ["a_main.cc"],
+    deps = [
+        ":a_asm",
+        ":a_cc_library",
+        ":gen_header_lib",
+    ],
 )
 
 fuchsia_cc_test(
     name = "a_fuchsia_cc_test",
     srcs = ["a_main.cc"],
+    deps = [
+        ":a_asm",
+        ":a_cc_library",
+        ":gen_header_lib",
+    ],
 )
 
 fuchsia_wrap_rust_binary(

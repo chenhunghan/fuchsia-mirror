@@ -1,0 +1,15 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.test",
+    testonly = True,
+    srcs = ["fuchsia.hardware.test.fidl"],
+    visibility = ["//src/lib/ddktl/tests/metadata-server-test:__subpackages__"],
+    deps = ["//zircon/vdso/zx"],
+)

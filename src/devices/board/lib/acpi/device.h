@@ -117,7 +117,6 @@ class Device : public DeviceType,
         metadata_{std::move(args.metadata_)},
         bus_type_{args.bus_type_},
         bus_id_{args.bus_id_},
-        pci_bdfs_{std::move(args.bdfs_)},
         sta_enabled_{args.sta_enabled_},
         outgoing_{component::OutgoingDirectory(dispatcher_)} {}
 
@@ -152,8 +151,6 @@ class Device : public DeviceType,
                                   InstallAddressSpaceHandlerCompleter::Sync& completer) override;
   void SetWakeDevice(SetWakeDeviceRequestView request,
                      SetWakeDeviceCompleter::Sync& completer) override;
-
-  std::vector<pci_bdf_t>& pci_bdfs() { return pci_bdfs_; }
 
   ACPI_STATUS RemoveNotifyHandler();
 
@@ -233,12 +230,8 @@ class Device : public DeviceType,
   BusType bus_type_ = BusType::kUnknown;
   uint32_t bus_id_ = UINT32_MAX;
 
-  // TODO(https://fxbug.dev/42108122): remove once kernel PCI is no longer used.
-  std::vector<pci_bdf_t> pci_bdfs_;
-
   // True when discovery already determined the device is enabled.
   const bool sta_enabled_ = false;
-
   // ACPI events.
   std::optional<fidl::WireSharedClient<fuchsia_hardware_acpi::NotifyHandler>> notify_handler_;
   std::atomic_size_t pending_notify_count_ = 0;

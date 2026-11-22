@@ -7,7 +7,7 @@ The set of Scenic APIs which [UI Clients](/docs/concepts/ui/ui-client.md) use
 to create, destroy, and modify Views are together called the
 [View System](/docs/contribute/governance/rfcs/0147_view_system.md).
 
-## View
+## View {#view}
 
 A [View](/docs/glossary#view) is the fundamental unit of UI organization on Fuchsia.
 
@@ -20,7 +20,7 @@ a View's coordinate system and receive input events according to the same.
 It is not possible for a UI client to present graphical content to the display without
 embedding it in a View first.
 
-## Viewport
+## Viewport {#viewport}
 
 UI clients can embed other Views within their own View by asking Scenic to create an object
 called a Viewport; this Viewport is intrinsically linked to a given View which it "hosts".

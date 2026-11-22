@@ -147,10 +147,10 @@ template("gidl_hlcpp_conformance") {
   }
 }
 
-template("gidl_llcpp_conformance") {
+template("gidl_cpp_wire_conformance") {
   _gidl_cc_source_set(target_name) {
     type = "conformance"
-    language = "llcpp"
+    language = "cpp_wire"
     bindings_suffix = "_cpp"
     forward_variables_from(invoker, "*")
 
@@ -178,10 +178,10 @@ template("gidl_hlcpp_benchmarks") {
   }
 }
 
-template("gidl_llcpp_benchmarks") {
+template("gidl_cpp_wire_benchmarks") {
   _gidl_cc_source_set(target_name) {
     type = "benchmark"
-    language = "llcpp"
+    language = "cpp_wire"
     bindings_suffix = "_cpp"
     forward_variables_from(invoker, "*")
 
@@ -216,10 +216,10 @@ template("gidl_driver_cpp_benchmarks") {
   }
 }
 
-template("gidl_driver_llcpp_benchmarks") {
+template("gidl_driver_cpp_wire_benchmarks") {
   _gidl_cc_source_set(target_name) {
     type = "benchmark"
-    language = "driver_llcpp"
+    language = "driver_cpp_wire"
 
     # In GN, the `_cpp` target includes driver headers, whereas Bazel uses
     # `_cpp_driver_headers`.

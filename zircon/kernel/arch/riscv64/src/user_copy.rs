@@ -140,7 +140,12 @@ pub unsafe fn arch_copy_from_user_capture_faults(
     dst: *mut core::ffi::c_void,
     src: *const core::ffi::c_void,
     len: usize,
+    context: crate::arch_rs::CopyContext,
 ) -> Result<(), UserCopyCaptureFaultsError> {
+    debug_assert!(
+        crate::arch_rs::ops::num_spinlocks_held() == 0
+            || context == crate::arch_rs::CopyContext::BlockingNotAllowed
+    );
     user_copy_capture_faults(dst, src, len, src as usize)
 }
 
@@ -154,7 +159,12 @@ pub unsafe fn arch_copy_to_user_capture_faults(
     dst: *mut core::ffi::c_void,
     src: *const core::ffi::c_void,
     len: usize,
+    context: crate::arch_rs::CopyContext,
 ) -> Result<(), UserCopyCaptureFaultsError> {
+    debug_assert!(
+        crate::arch_rs::ops::num_spinlocks_held() == 0
+            || context == crate::arch_rs::CopyContext::BlockingNotAllowed
+    );
     user_copy_capture_faults(dst, src, len, dst as usize)
 }
 
@@ -169,7 +179,14 @@ pub unsafe extern "C" fn rust_arch_copy_from_user_capture_faults(
     len: usize,
 ) -> Riscv64UserCopyRet {
     // SAFETY: Foreign function caller guarantees valid pointers.
-    match unsafe { arch_copy_from_user_capture_faults(dst.cast(), src.cast(), len) } {
+    match unsafe {
+        arch_copy_from_user_capture_faults(
+            dst.cast(),
+            src.cast(),
+            len,
+            crate::arch_rs::CopyContext::BlockingNotAllowed,
+        )
+    } {
         Ok(()) => {
             Riscv64UserCopyRet { status: Status::result_into_raw(Ok(())), pf_flags: 0, pf_va: 0 }
         }
@@ -193,7 +210,14 @@ pub unsafe extern "C" fn rust_arch_copy_to_user_capture_faults(
     len: usize,
 ) -> Riscv64UserCopyRet {
     // SAFETY: Foreign function caller guarantees valid pointers.
-    match unsafe { arch_copy_to_user_capture_faults(dst.cast(), src.cast(), len) } {
+    match unsafe {
+        arch_copy_to_user_capture_faults(
+            dst.cast(),
+            src.cast(),
+            len,
+            crate::arch_rs::CopyContext::BlockingNotAllowed,
+        )
+    } {
         Ok(()) => {
             Riscv64UserCopyRet { status: Status::result_into_raw(Ok(())), pf_flags: 0, pf_va: 0 }
         }

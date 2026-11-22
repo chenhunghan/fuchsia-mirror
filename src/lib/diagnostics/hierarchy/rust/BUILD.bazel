@@ -11,6 +11,7 @@ rustc_library(
     srcs = [
         "src/lib.rs",
         "src/macros.rs",
+        "src/matcher.rs",
         "src/serialization/deserialize.rs",
         "src/serialization/mod.rs",
         "src/serialization/serialize.rs",

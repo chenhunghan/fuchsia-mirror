@@ -2,72 +2,215 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 {
-    config: {
-        my_flag: { type: "bool" },
-        my_uint8: { type: "uint8" },
-        my_uint16: { type: "uint16" },
-        my_uint32: { type: "uint32" },
-        my_uint64: { type: "uint64" },
-        my_int8: { type: "int8" },
-        my_int16: { type: "int16" },
-        my_int32: { type: "int32" },
-        my_int64: { type: "int64" },
-        my_string: {
+    // Use `transitional` rather than `optional` availability because unoffered
+    // `optional` config capabilities fail startup unless explicitly offered
+    // `from: "void"`: `client_integration/cpp_elf` includes this shard directly
+    // as a top-level test root under `test_manager` (with no custom parent
+    // manifest), `client_integration/cpp_driver` runs inside
+    // `driver_test_realm`, and `client_integration/rust` avoids listing 20
+    // boilerplate `from: "void"` offers.
+    use: [
+        {
+            config: "fuchsia.config.MyFlag",
+            key: "my_flag",
+            type: "bool",
+            availability: "transitional",
+            default: true,
+        },
+        {
+            config: "fuchsia.config.MyUint8",
+            key: "my_uint8",
+            type: "uint8",
+            availability: "transitional",
+            default: 255,
+        },
+        {
+            config: "fuchsia.config.MyUint16",
+            key: "my_uint16",
+            type: "uint16",
+            availability: "transitional",
+            default: 65535,
+        },
+        {
+            config: "fuchsia.config.MyUint32",
+            key: "my_uint32",
+            type: "uint32",
+            availability: "transitional",
+            default: 4000000000,
+        },
+        {
+            config: "fuchsia.config.MyUint64",
+            key: "my_uint64",
+            type: "uint64",
+            availability: "transitional",
+            default: 8000000000,
+        },
+        {
+            config: "fuchsia.config.MyInt8",
+            key: "my_int8",
+            type: "int8",
+            availability: "transitional",
+            default: -127,
+        },
+        {
+            config: "fuchsia.config.MyInt16",
+            key: "my_int16",
+            type: "int16",
+            availability: "transitional",
+            default: -32766,
+        },
+        {
+            config: "fuchsia.config.MyInt32",
+            key: "my_int32",
+            type: "int32",
+            availability: "transitional",
+            default: -2000000000,
+        },
+        {
+            config: "fuchsia.config.MyInt64",
+            key: "my_int64",
+            type: "int64",
+            availability: "transitional",
+            default: -4000000000,
+        },
+        {
+            config: "fuchsia.config.MyString",
+            key: "my_string",
             type: "string",
             max_size: 100,
+            availability: "transitional",
+            default: "hello, world!",
         },
-        my_vector_of_flag: {
+        {
+            config: "fuchsia.config.MyVectorOfFlag",
+            key: "my_vector_of_flag",
             type: "vector",
             element: { type: "bool" },
             max_count: 100,
+            availability: "transitional",
+            default: [
+                true,
+                false,
+            ],
         },
-        my_vector_of_uint8: {
+        {
+            config: "fuchsia.config.MyVectorOfUint8",
+            key: "my_vector_of_uint8",
             type: "vector",
             element: { type: "uint8" },
             max_count: 100,
+            availability: "transitional",
+            default: [
+                1,
+                2,
+                3,
+            ],
         },
-        my_vector_of_uint16: {
+        {
+            config: "fuchsia.config.MyVectorOfUint16",
+            key: "my_vector_of_uint16",
             type: "vector",
             element: { type: "uint16" },
             max_count: 100,
+            availability: "transitional",
+            default: [
+                2,
+                3,
+                4,
+            ],
         },
-        my_vector_of_uint32: {
+        {
+            config: "fuchsia.config.MyVectorOfUint32",
+            key: "my_vector_of_uint32",
             type: "vector",
             element: { type: "uint32" },
             max_count: 100,
+            availability: "transitional",
+            default: [
+                3,
+                4,
+                5,
+            ],
         },
-        my_vector_of_uint64: {
+        {
+            config: "fuchsia.config.MyVectorOfUint64",
+            key: "my_vector_of_uint64",
             type: "vector",
             element: { type: "uint64" },
             max_count: 100,
+            availability: "transitional",
+            default: [
+                4,
+                5,
+                6,
+            ],
         },
-        my_vector_of_int8: {
+        {
+            config: "fuchsia.config.MyVectorOfInt8",
+            key: "my_vector_of_int8",
             type: "vector",
             element: { type: "int8" },
             max_count: 100,
+            availability: "transitional",
+            default: [
+                -1,
+                -2,
+                3,
+            ],
         },
-        my_vector_of_int16: {
+        {
+            config: "fuchsia.config.MyVectorOfInt16",
+            key: "my_vector_of_int16",
             type: "vector",
             element: { type: "int16" },
             max_count: 100,
+            availability: "transitional",
+            default: [
+                -2,
+                -3,
+                4,
+            ],
         },
-        my_vector_of_int32: {
+        {
+            config: "fuchsia.config.MyVectorOfInt32",
+            key: "my_vector_of_int32",
             type: "vector",
             element: { type: "int32" },
             max_count: 100,
+            availability: "transitional",
+            default: [
+                -3,
+                -4,
+                5,
+            ],
         },
-        my_vector_of_int64: {
+        {
+            config: "fuchsia.config.MyVectorOfInt64",
+            key: "my_vector_of_int64",
             type: "vector",
             element: { type: "int64" },
             max_count: 100,
+            availability: "transitional",
+            default: [
+                -4,
+                -5,
+                6,
+            ],
         },
-        my_vector_of_string: {
+        {
+            config: "fuchsia.config.MyVectorOfString",
+            key: "my_vector_of_string",
             type: "vector",
             element: {
                 type: "string",
                 max_size: 100,
             },
             max_count: 100,
+            availability: "transitional",
+            default: [
+                "hello, world!",
+                "hello, again!",
+            ],
         },
-    },
+    ],
 }

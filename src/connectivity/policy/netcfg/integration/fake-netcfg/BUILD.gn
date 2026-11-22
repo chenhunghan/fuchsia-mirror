@@ -31,4 +31,11 @@ fuchsia_component("component") {
   component_name = "fake_netcfg"
   manifest = "meta/fake_netcfg.cml"
   deps = [ ":fake_netcfg_svc" ]
+  visibility = [ ":*" ]
+}
+
+fuchsia_package("package") {
+  testonly = true
+  package_name = "fake-netcfg"
+  deps = [ ":component" ]
 }

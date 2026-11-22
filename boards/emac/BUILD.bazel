@@ -45,6 +45,7 @@ fuchsia_board_input_bundle(
 
 fuchsia_board_configuration(
     name = "emac",
+    arch = "arm64",
     board_input_bundles = [
         ":board_driver",
         ":main_bundle",
@@ -76,7 +77,7 @@ fuchsia_board_configuration(
     platform = {
         "connectivity": {
             "network": {
-                "netsvc_interface": "/dwmac-ff3f0000/dwmac/Designware-MAC/network-device",
+                "netsvc_interface": "/ethernet-phy-ff634000",
             },
         },
         "development_support": {

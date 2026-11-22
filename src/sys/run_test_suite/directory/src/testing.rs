@@ -139,7 +139,7 @@ pub fn assert_suite_result(
     expected_suite: &ExpectedSuite,
 ) {
     let context = EntityContext::Suite(expected_suite);
-    let &SuiteResult { common, cases, tags } = &actual_suite;
+    let &SuiteResult { common, cases, tags, .. } = &actual_suite;
     assert_eq!(common.deref().outcome, expected_suite.outcome, "Outcome for {}", context);
     assert_eq!(common.deref().name, expected_suite.name, "Name for {}", context);
     assert_match_option!(
@@ -604,7 +604,7 @@ impl ExpectedTestCase {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{ArtifactType, CommonResult, OutputDirectoryBuilder, SchemaVersion, RUN_NAME};
+    use crate::{ArtifactType, CommonResult, OutputDirectoryBuilder, RUN_NAME, SchemaVersion};
     use std::borrow::Cow;
     use std::io::Write;
 
@@ -868,6 +868,7 @@ mod test {
                 }),
                 cases: vec![],
                 tags: Cow::Owned(vec![]),
+                runner: None,
             },
         );
 
@@ -900,6 +901,7 @@ mod test {
                 }),
                 cases: vec![],
                 tags: Cow::Owned(vec![]),
+                runner: None,
             },
         );
 
@@ -932,6 +934,7 @@ mod test {
                 }),
                 cases: vec![],
                 tags: Cow::Owned(vec![]),
+                runner: None,
             },
         );
 
@@ -970,6 +973,7 @@ mod test {
                 }),
                 cases: vec![],
                 tags: Cow::Owned(vec![]),
+                runner: None,
             },
         );
 
@@ -1010,6 +1014,7 @@ mod test {
                     }),
                 }],
                 tags: Cow::Owned(vec![]),
+                runner: None,
             },
         );
 
@@ -1047,6 +1052,7 @@ mod test {
                     TestTag { key: "os".to_string(), value: "fuchsia".to_string() },
                     TestTag { key: "cpu".to_string(), value: "arm64".to_string() },
                 ]),
+                runner: None,
             },
         );
 
@@ -1080,6 +1086,7 @@ mod test {
                 }),
                 cases: vec![],
                 tags: Cow::Owned(vec![]),
+                runner: None,
             },
         );
 
@@ -1109,6 +1116,7 @@ mod test {
                 }),
                 cases: vec![],
                 tags: Cow::Owned(vec![]),
+                runner: None,
             },
         );
 
@@ -1138,6 +1146,7 @@ mod test {
                 }),
                 cases: vec![],
                 tags: Cow::Owned(vec![]),
+                runner: None,
             },
         );
 
@@ -1167,6 +1176,7 @@ mod test {
                 }),
                 cases: vec![],
                 tags: Cow::Owned(vec![]),
+                runner: None,
             },
         );
 
@@ -1208,6 +1218,7 @@ mod test {
                     }),
                 }],
                 tags: Cow::Owned(vec![]),
+                runner: None,
             },
         );
 

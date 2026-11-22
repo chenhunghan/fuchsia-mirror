@@ -39,7 +39,7 @@
         "ExampleBits"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
         "line": 7,
         "column": 6,
         "length": 11
@@ -50,7 +50,7 @@
           "name": "on_bits",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 6,
             "column": 1,
             "length": 8
@@ -75,7 +75,7 @@
         {
           "name": "MEMBER",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 9,
             "column": 5,
             "length": 6
@@ -96,7 +96,7 @@
               "name": "on_bits_member",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
                 "line": 8,
                 "column": 5,
                 "length": 15
@@ -112,7 +112,7 @@
     {
       "name": "test.placementofattributes/EXAMPLE_CONST",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
         "line": 13,
         "column": 7,
         "length": 13
@@ -123,7 +123,7 @@
           "name": "on_const",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 12,
             "column": 1,
             "length": 9
@@ -162,7 +162,7 @@
         "ExampleEnum"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
         "line": 16,
         "column": 6,
         "length": 11
@@ -173,7 +173,7 @@
           "name": "on_enum",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 15,
             "column": 1,
             "length": 8
@@ -185,7 +185,7 @@
         {
           "name": "MEMBER",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 18,
             "column": 5,
             "length": 6
@@ -206,7 +206,7 @@
               "name": "on_enum_member",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
                 "line": 17,
                 "column": 5,
                 "length": 15
@@ -223,7 +223,7 @@
     {
       "name": "test.placementofattributes/ExampleProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
         "line": 22,
         "column": 17,
         "length": 15
@@ -234,7 +234,7 @@
           "name": "on_protocol",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 21,
             "column": 1,
             "length": 12
@@ -250,7 +250,7 @@
           "name": "Method",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 24,
             "column": 12,
             "length": 6
@@ -262,7 +262,7 @@
               "name": "on_method",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
                 "line": 23,
                 "column": 5,
                 "length": 10
@@ -300,7 +300,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
         "line": 24,
         "column": 19,
         "length": 51
@@ -324,7 +324,7 @@
           },
           "name": "arg",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 25,
             "column": 9,
             "length": 3
@@ -354,7 +354,7 @@
         "ExampleStruct"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
         "line": 30,
         "column": 6,
         "length": 13
@@ -365,7 +365,7 @@
           "name": "on_struct",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 29,
             "column": 1,
             "length": 10
@@ -389,7 +389,7 @@
           },
           "name": "member",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 32,
             "column": 5,
             "length": 6
@@ -400,7 +400,7 @@
               "name": "on_struct_member",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
                 "line": 31,
                 "column": 5,
                 "length": 17
@@ -434,7 +434,7 @@
         "ExampleTable"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
         "line": 36,
         "column": 6,
         "length": 12
@@ -445,7 +445,7 @@
           "name": "on_table",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 35,
             "column": 1,
             "length": 9
@@ -470,7 +470,7 @@
           },
           "name": "member",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 38,
             "column": 8,
             "length": 6
@@ -481,7 +481,7 @@
               "name": "on_table_member",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
                 "line": 37,
                 "column": 5,
                 "length": 16
@@ -510,7 +510,7 @@
         "ExampleUnion"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
         "line": 45,
         "column": 6,
         "length": 12
@@ -521,7 +521,7 @@
           "name": "on_union",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 44,
             "column": 1,
             "length": 9
@@ -546,7 +546,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 47,
             "column": 8,
             "length": 7
@@ -557,7 +557,7 @@
               "name": "on_union_member",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
                 "line": 46,
                 "column": 5,
                 "length": 16
@@ -584,7 +584,7 @@
     {
       "name": "test.placementofattributes/Alias",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
         "line": 42,
         "column": 7,
         "length": 5
@@ -595,7 +595,7 @@
           "name": "on_alias",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/placement_of_attributes/example.test.fidl",
             "line": 41,
             "column": 1,
             "length": 9

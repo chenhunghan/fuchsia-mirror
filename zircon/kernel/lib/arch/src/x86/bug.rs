@@ -261,6 +261,55 @@ pub fn has_x86_meltdown_bug(cpuid: &impl Cpuid, msr: &impl ReadReg<ArchCapabilit
     }
 }
 
+/// Whether the CPU is susceptible to the L1 Terminal Fault (L1TF) bug:
+/// https://software.intel.com/security-software-guidance/advisory-guidance/l1-terminal-fault.
+///
+/// CVE-2018-3615, CVE-2018-3620, CVE-2018-3646.
+pub fn has_x86_l1tf_bug(cpuid: &impl Cpuid, msr: &impl ReadReg<ArchCapabilitiesMsr>) -> bool {
+    // Advertisement of RDCL_NO also implies non-susceptibility to L1TF:
+    // https://software.intel.com/security-software-guidance/deep-dives/deep-dive-intel-analysis-l1-terminal-fault.
+    if ArchCapabilitiesMsr::is_supported(cpuid) && msr.read().rdcl_no() {
+        return false;
+    }
+
+    let version_info = cpuid.read(VERSION_INFO);
+    let vendor = VendorString::from_cpuid(cpuid).vendor();
+    match version_info.microarchitecture(vendor) {
+        Microarchitecture::Unknown
+        | Microarchitecture::IntelCore2
+        | Microarchitecture::IntelNehalem
+        | Microarchitecture::IntelWestmere
+        | Microarchitecture::IntelSandyBridge
+        | Microarchitecture::IntelIvyBridge
+        | Microarchitecture::IntelHaswell
+        | Microarchitecture::IntelBroadwell
+        | Microarchitecture::IntelSkylake
+        | Microarchitecture::IntelCannonLake => true,
+        Microarchitecture::IntelIceLake
+        | Microarchitecture::IntelTigerLake
+        | Microarchitecture::IntelAlderLake
+        | Microarchitecture::IntelRaptorLake
+        | Microarchitecture::IntelBonnell
+        | Microarchitecture::IntelSaltwell
+        | Microarchitecture::IntelSilvermont
+        | Microarchitecture::IntelAirmont
+        | Microarchitecture::IntelGoldmont
+        | Microarchitecture::IntelGoldmontPlus
+        | Microarchitecture::IntelTremont
+        | Microarchitecture::AmdFamilyBulldozer
+        | Microarchitecture::AmdFamilyJaguar
+        | Microarchitecture::AmdFamilyZen
+        | Microarchitecture::AmdFamilyZen3 => false,
+        // Special cases from the above table.
+        Microarchitecture::IntelSkylakeServer => {
+            if version_info.stepping() >= 0x6 {
+                return false; // Cascade Lake server+
+            }
+            true // Skylake server
+        }
+    }
+}
+
 /// An architecturally prescribed mitigation for Spectre v2.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpectreV2Mitigation {
@@ -504,5 +553,74 @@ pub fn apply_x86_errata_workarounds(
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use regio::testing::FnReadReg;
+    use regio::testing::x86::FakeCpuid;
+
+    use super::*;
+    use crate::x86::cpuid::{
+        ExtendedFeatureFlagsD, MAX_LEAF, VENDOR_STRING_B, VENDOR_STRING_C, VENDOR_STRING_D,
+        VersionInfo,
+    };
+
+    #[test]
+    fn l1tf_bug_detection() {
+        let no_msr = FnReadReg(|| ArchCapabilitiesMsr::from(0));
+        let mut rdcl_no_val = ArchCapabilitiesMsr::from(0);
+        rdcl_no_val.set_rdcl_no(true);
+        let rdcl_no_msr = FnReadReg(move || rdcl_no_val);
+
+        let mut cpuid = FakeCpuid::new();
+        cpuid
+            .set(MAX_LEAF, 7)
+            .set(VENDOR_STRING_B, u32::from_le_bytes(*b"Genu"))
+            .set(VENDOR_STRING_D, u32::from_le_bytes(*b"ineI"))
+            .set(VENDOR_STRING_C, u32::from_le_bytes(*b"ntel"));
+
+        // Skylake Server stepping 4 is vulnerable unless RDCL_NO is advertised.
+        let mut ver = VersionInfo::from(0);
+        ver.set_base_family(6).set_base_model(5).set_extended_model(5).set_stepping(4);
+        cpuid.set(VERSION_INFO, ver);
+        assert!(has_x86_l1tf_bug(&cpuid, &no_msr));
+
+        let mut ext_d = ExtendedFeatureFlagsD::from(0);
+        ext_d.set_ia32_arch_capabilities(true);
+        cpuid.set(EXTENDED_FEATURES_D, ext_d);
+        assert!(has_x86_l1tf_bug(&cpuid, &no_msr));
+        assert!(!has_x86_l1tf_bug(&cpuid, &rdcl_no_msr));
+
+        // Cascade Lake Server (stepping >= 6) is not vulnerable even without RDCL_NO.
+        ver.set_stepping(6);
+        cpuid.set(VERSION_INFO, ver);
+        assert!(!has_x86_l1tf_bug(&cpuid, &no_msr));
+
+        // Intel Atom Airmont (family 6, model 0x4c) is not susceptible to L1TF.
+        cpuid.set(EXTENDED_FEATURES_D, ExtendedFeatureFlagsD::from(0));
+        ver.set_base_model(0xc).set_extended_model(0x4).set_stepping(4);
+        cpuid.set(VERSION_INFO, ver);
+        assert!(!has_x86_l1tf_bug(&cpuid, &no_msr));
+        cpuid.set(EXTENDED_FEATURES_D, ext_d);
+        assert!(!has_x86_l1tf_bug(&cpuid, &rdcl_no_msr));
+
+        // Goldmont Plus (family 6, model 0x7a) is not susceptible to L1TF.
+        ver.set_base_model(0xa).set_extended_model(0x7).set_stepping(1);
+        cpuid.set(VERSION_INFO, ver);
+        assert!(!has_x86_l1tf_bug(&cpuid, &no_msr));
+
+        // AMD Zen (family 0x17 = base 0xf + ext 0x8) is not susceptible to L1TF.
+        let mut amd_cpuid = FakeCpuid::new();
+        let mut amd_ver = VersionInfo::from(0);
+        amd_ver.set_base_family(0xf).set_extended_family(0x8).set_base_model(0x1).set_stepping(1);
+        amd_cpuid
+            .set(MAX_LEAF, 7)
+            .set(VENDOR_STRING_B, u32::from_le_bytes(*b"Auth"))
+            .set(VENDOR_STRING_D, u32::from_le_bytes(*b"enti"))
+            .set(VENDOR_STRING_C, u32::from_le_bytes(*b"cAMD"))
+            .set(VERSION_INFO, amd_ver);
+        assert!(!has_x86_l1tf_bug(&amd_cpuid, &no_msr));
     }
 }

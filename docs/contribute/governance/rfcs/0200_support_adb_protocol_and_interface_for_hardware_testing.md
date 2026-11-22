@@ -137,7 +137,7 @@ responsible for accounting for USB packets and callbacks.
 This component understands the adb protocol and is responsible for parsing and routing the messages
 to appropriate services.
 
-### adb services
+### adb services {:#adb-services}
 
 When an adb client sends a command to the adb server, the server might reach out to the daemon with
 a request to connect to a service on the device such as shell or logger service. The adb daemon
@@ -353,12 +353,9 @@ existing test frameworks based on adb would have to be updated.
 * [adb on Android](https://android.googlesource.com/platform/packages/modules/adb/+/refs/tags/android-13.0.0_r3/) - Android adb implementation
 
 [poc-cl]: https://fuchsia-review.googlesource.com/c/fuchsia/+/710726
-[usbser]:
-    https://docs.microsoft.com/en-us/windows-hardware/drivers/usbcon/usb-driver-installation-based-on-compatible-ids
+[usbser]: https://docs.microsoft.com/en-us/windows-hardware/drivers/usbcon/usb-driver-installation-based-on-compatible-ids
 [overnet]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/connectivity/overnet/README.md
-[adb-protocol]:
-    https://android.googlesource.com/platform/packages/modules/adb/+/refs/tags/android-13.0.0_r3/protocol.txt
+[adb-protocol]: https://android.googlesource.com/platform/packages/modules/adb/+/refs/tags/android-13.0.0_r3/protocol.txt
 [adb-cli]: https://developer.android.com/studio/command-line/adb
-[adb-services]:
-    https://android.googlesource.com/platform/packages/modules/adb/+/refs/tags/android-13.0.0_r3/SERVICES.TXT
+[adb-services]: https://android.googlesource.com/platform/packages/modules/adb/+/refs/tags/android-13.0.0_r3/SERVICES.TXT
 [usb-interface]: https://www.beyondlogic.org/usbnutshell/usb5.shtml#InterfaceDescriptors

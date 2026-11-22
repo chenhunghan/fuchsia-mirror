@@ -122,6 +122,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         construct_base_package(&mut assembled_system, dir, "system_image", &product_config)
             .unwrap();
@@ -169,6 +170,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         construct_base_package(&mut assembled_system, dir, "system_image", &product_config)
             .unwrap();

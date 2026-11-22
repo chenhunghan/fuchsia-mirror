@@ -40,7 +40,7 @@ source_set("igc_core") {
     "//sdk/fidl/fuchsia.driver.compat:fuchsia.driver.compat_cpp",
     "//sdk/fidl/fuchsia.hardware.network.driver:fuchsia.hardware.network.driver_cpp",
     "//sdk/lib/driver/compat/cpp",
-    "//src/devices/pci/lib/device-protocol-pci",
+    "//sdk/lib/driver/pci/cpp",
     "//src/devices/pci/lib/pci",
     "//src/lib/vmo_store",
   ]
@@ -66,7 +66,6 @@ fuchsia_cc_driver("igc-driver") {
 fuchsia_driver_component("igc") {
   component_name = "igc"
   deps = [ ":igc-driver" ]
-  info = "meta/igc-info.json"
   dml_label = ":igc-dml"
 }
 

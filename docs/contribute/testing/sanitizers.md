@@ -58,7 +58,7 @@ attempt to expose bugs in the code at runtime, and they are usually used in
 conjunction. Fuzzers are different from sanitizers in that fuzzers attempt to
 force the execution of production code into paths that may expose a bug.
 
-## Supported configurations
+## Supported configurations {:#supported-configurations}
 
 Sanitizers are currently supported in local builds and in CI/CQ under the
 following configurations:
@@ -86,7 +86,7 @@ applied to Rust code for detecting [Rust memory leaks][rust-leaks]{:.external}.
 
 ## Troubleshooting sanitizer issues
 
-### Build
+### Build {:#build}
 
 #### Fuchsia platform build (in-tree)
 

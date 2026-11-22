@@ -14,7 +14,6 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
 use fbl::RefPtr;
 use ksync::{KMutex, guarded};
-use object_constants_rs as object_constants;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zerocopy::{FromZeros, IntoBytes};
 use zx_status::Status;
@@ -40,12 +39,6 @@ pub struct Exceptionate {
     #[guarded_by(lock)]
     is_shutdown: bool,
 }
-
-zr::static_assert_size_and_align!(
-    Exceptionate,
-    object_constants::kExceptionateStorageSize,
-    object_constants::kExceptionateStorageAlign,
-);
 
 impl Exceptionate {
     /// Returns a pinned initializer for a new `Exceptionate` of the given

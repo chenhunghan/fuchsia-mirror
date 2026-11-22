@@ -398,13 +398,13 @@ deprecated, due to these problems:
     Zircon eventpair objects), which allow clients of weaker protocols to pose
     as another view.
 
-[child-views]: /docs/contribute/governance/rfcs/0147_view_system.md#child_views
+[child-views]: /docs/contribute/governance/rfcs/0147_view_system.md#child-views
 [focus-chain-api]: https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/sdk/fidl/fuchsia.ui.focus/focus_chain.fidl
 [focus-chain]: /docs/development/graphics/scenic/concepts/focus_chain.md
-[focus-policy]: /docs/development/graphics/scenic/concepts/focus_chain.md#transfer_of_view_focus_policy
-[koid-invalid]: /docs/concepts/kernel/concepts.md#kernel_object_ids
+[focus-policy]: /docs/development/graphics/scenic/concepts/focus_chain.md#transfer-of-view-focus-policy
+[koid-invalid]: /docs/concepts/kernel/concepts.md#kernel-object-ids
 [ui-client]: /docs/concepts/ui/ui-client.md
-[view-focus]:  /docs/development/graphics/scenic/concepts/focus_chain.md#view_focus
+[view-focus]:  /docs/development/graphics/scenic/concepts/focus_chain.md#view-focus
 [view-ref-api]: https://fuchsia.dev/reference/fidl/fuchsia.ui.views#ViewRef
 [view-rfc]: /docs/contribute/governance/rfcs/0147_view_system.md
 [view-tree-security]: /docs/contribute/governance/rfcs/0147_view_system.md#view-security

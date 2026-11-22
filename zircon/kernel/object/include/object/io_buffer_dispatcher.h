@@ -36,7 +36,6 @@ zx_status_t rust_io_buffer_dispatcher_get_name(const IoBufferDispatcher* disp,
                                                char (*out_name)[ZX_MAX_NAME_LEN]);
 zx_status_t rust_io_buffer_dispatcher_set_name(IoBufferDispatcher* disp, const char* name,
                                                size_t len);
-size_t rust_io_buffer_dispatcher_region_count(const IoBufferDispatcher* disp);
 }  // extern "C"
 
 class IoBufferDispatcher final : public Dispatcher, public VmObjectChildObserver {
@@ -54,8 +53,6 @@ class IoBufferDispatcher final : public Dispatcher, public VmObjectChildObserver
   [[nodiscard]] zx_status_t set_name(const char* name, size_t len) final {
     return rust_io_buffer_dispatcher_set_name(this, name, len);
   }
-
-  size_t RegionCount() const { return rust_io_buffer_dispatcher_region_count(this); }
 
  protected:
   Lock<CriticalMutex>* get_lock() const final;

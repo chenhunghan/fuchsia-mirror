@@ -5,14 +5,16 @@
 #ifndef SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_IMPL_H_
 #define SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_IMPL_H_
 
+#include <fidl/fuchsia.media.drm/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
 #include <fidl/fuchsia.sysmem2/cpp/fidl.h>
 #include <fuchsia/media/drm/cpp/fidl.h>
 #include <fuchsia/mediacodec/cpp/fidl.h>
-#include <fuchsia/sysmem/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/closure-queue/closure_queue.h>
-#include <lib/fidl/cpp/binding.h>
+#include <lib/fidl/cpp/interface_request.h>
 #include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/media/codec_impl/codec_adapter.h>
@@ -155,10 +157,14 @@ constexpr bool kEnableDynamicBuffers = (CODEC_IMPL_INTERNAL_ENABLE_DYNAMIC_BUFFE
 class ScopedLock;
 // CodecImpl is final; CodecAdapter interface is not final and get sub-classed by CodecImpl client
 // code to implement a specific codec. See also CodecAdapter.
-class CodecImpl final : public fuchsia::media::StreamProcessor,
+class CodecImpl final : public fidl::Server<fuchsia_media::StreamProcessor>,
                         public CodecAdapterEvents,
                         private CodecAdapter {
  public:
+  using NaturalStreamProcessorParams =
+      std::variant<fuchsia_mediacodec::CreateDecoderParams, fuchsia_mediacodec::CreateEncoderParams,
+                   fuchsia_media_drm::DecryptorParams>;
+  // Deprecated HLCPP soft-transition alias; prefer passing natural params directly.
   using StreamProcessorParams =
       std::variant<fuchsia::mediacodec::CreateDecoder_Params,
                    fuchsia::mediacodec::CreateEncoder_Params, fuchsia::media::drm::DecryptorParams>;
@@ -182,14 +188,13 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   // (sequence/thread).
   CodecImpl(fidl::ClientEnd<fuchsia_sysmem2::Allocator> sysmem,
             std::unique_ptr<CodecAdmission> codec_admission,
-            async_dispatcher_t* shared_fidl_dispatcher, StreamProcessorParams params,
-            fidl::InterfaceRequest<fuchsia::media::StreamProcessor> request);
+            async_dispatcher_t* shared_fidl_dispatcher, NaturalStreamProcessorParams params,
+            fidl::ServerEnd<fuchsia_media::StreamProcessor> server_end);
 
-  // Deprecated; use the constructor overload without shared_fidl_thread.
+  // Deprecated HLCPP soft-transition constructor; prefer the natural constructor above.
   CodecImpl(fidl::ClientEnd<fuchsia_sysmem2::Allocator> sysmem,
             std::unique_ptr<CodecAdmission> codec_admission,
-            async_dispatcher_t* shared_fidl_dispatcher, thrd_t shared_fidl_thread,
-            StreamProcessorParams params,
+            async_dispatcher_t* shared_fidl_dispatcher, StreamProcessorParams params,
             fidl::InterfaceRequest<fuchsia::media::StreamProcessor> request);
 
   // If the client code calls SetSharingFidlDomainForCoreCodec or returns true from
@@ -329,41 +334,53 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   //
   // Codec interface
   //
-  void EnableOnStreamFailed() override;
+  void EnableOnStreamFailed(EnableOnStreamFailedCompleter::Sync& completer) override;
   void SetInputBufferPartialSettings(
-      fuchsia::media::StreamBufferPartialSettings input_settings) override;
+      SetInputBufferPartialSettingsRequest& request,
+      SetInputBufferPartialSettingsCompleter::Sync& completer) override;
   void SetOutputBufferPartialSettings(
-      fuchsia::media::StreamBufferPartialSettings output_settings) override;
-  void CompleteOutputBufferPartialSettings(uint64_t buffer_lifetime_ordinal) override;
-  void FlushEndOfStreamAndCloseStream(uint64_t stream_lifetime_ordinal) override;
-  void CloseCurrentStream(uint64_t stream_lifetime_ordinal, bool release_input_buffers,
-                          bool release_output_buffers) override;
-  void Sync(SyncCallback callback) override;
-  void RecycleOutputPacket(fuchsia::media::PacketHeader available_output_packet) override;
-  void QueueInputFormatDetails(uint64_t stream_lifetime_ordinal,
-                               fuchsia::media::FormatDetails format_details) override;
-  void QueueInputPacket(fuchsia::media::Packet packet) override;
-  void QueueInputEndOfStream(uint64_t stream_lifetime_ordinal) override;
+      SetOutputBufferPartialSettingsRequest& request,
+      SetOutputBufferPartialSettingsCompleter::Sync& completer) override;
+  void CompleteOutputBufferPartialSettings(
+      CompleteOutputBufferPartialSettingsRequest& request,
+      CompleteOutputBufferPartialSettingsCompleter::Sync& completer) override;
+  void FlushEndOfStreamAndCloseStream(
+      FlushEndOfStreamAndCloseStreamRequest& request,
+      FlushEndOfStreamAndCloseStreamCompleter::Sync& completer) override;
+  void CloseCurrentStream(CloseCurrentStreamRequest& request,
+                          CloseCurrentStreamCompleter::Sync& completer) override;
+  void Sync(SyncCompleter::Sync& completer) override;
+  void RecycleOutputPacket(RecycleOutputPacketRequest& request,
+                           RecycleOutputPacketCompleter::Sync& completer) override;
+  void QueueInputFormatDetails(QueueInputFormatDetailsRequest& request,
+                               QueueInputFormatDetailsCompleter::Sync& completer) override;
+  void QueueInputPacket(QueueInputPacketRequest& request,
+                        QueueInputPacketCompleter::Sync& completer) override;
+  void QueueInputEndOfStream(QueueInputEndOfStreamRequest& request,
+                             QueueInputEndOfStreamCompleter::Sync& completer) override;
   //
   // These are not sent by correctly-operating clients unless
   // fuchsia.mediacodec/DetailedCodecDescription.supports_dynamic_buffers is set
   // to true. See codec_factory.fidl and stream_processor.fidl.
   //
   void ParticipateInBufferAllocation(
-      fuchsia::media::StreamProcessorParticipateInBufferAllocationRequest request) override;
-  void AddBuffer(fuchsia::media::StreamProcessorAddBufferRequest request) override;
-  void RemoveBuffer(fuchsia::media::StreamProcessorRemoveBufferRequest request,
-                    RemoveBufferCallback callback) override;
-  void EnableOldOutputBuffers() override;
-  void EnableSameOutputBufferConcurrentlyInFlight() override;
-  void EnableForceOutputBuffersFixedImageSize() override;
+      ParticipateInBufferAllocationRequest& request,
+      ParticipateInBufferAllocationCompleter::Sync& completer) override;
+  void AddBuffer(AddBufferRequest& request, AddBufferCompleter::Sync& completer) override;
+  void RemoveBuffer(RemoveBufferRequest& request, RemoveBufferCompleter::Sync& completer) override;
+  void EnableOldOutputBuffers(EnableOldOutputBuffersCompleter::Sync& completer) override;
+  void EnableSameOutputBufferConcurrentlyInFlight(
+      EnableSameOutputBufferConcurrentlyInFlightCompleter::Sync& completer) override;
+  void EnableForceOutputBuffersFixedImageSize(
+      EnableForceOutputBuffersFixedImageSizeCompleter::Sync& completer) override;
   // Currently this will log and close the channel, because currently for a
   // protocol whose clients and servers are both "platform" and "external", the
   // abi_compat tool prevents adding a strict message, forcing all new
   // StreamProcessor messages to be added as "flexible". So currently we have to
   // assume every unrecognized message is logically strict despite not being
   // "strict" in FIDL.
-  void handle_unknown_method(uint64_t ordinal, bool method_has_response) override;
+  void handle_unknown_method(fidl::UnknownMethodMetadata<fuchsia_media::StreamProcessor> metadata,
+                             fidl::UnknownMethodCompleter::Sync& completer) override;
 
   // These are public so that CodecBuffer doesn't have to be a friend of CodecImpl.
 
@@ -407,21 +424,24 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   void WaitForSharedFidlForStreamWaitCountForTesting(uint64_t expected_count) __TA_EXCLUDES(lock_);
 
   static void EnsureInputFormatDetailsNormalizedForTesting(
+      fuchsia_media::FormatDetails* format_details, bool is_decryptor = false);
+  // Temporary HLCPP soft-transition overload; removed once in-tree tests migrate.
+  static void EnsureInputFormatDetailsNormalizedForTesting(
       fuchsia::media::FormatDetails* format_details, bool is_decryptor = false);
-  static void EnsureFormatDetailsBridgedForTesting(fuchsia::media::FormatDetails* format_details);
+  static void EnsureFormatDetailsBridgedForTesting(fuchsia_media::FormatDetails* format_details);
 
  private:
   // Normalizes input FormatDetails: moves legacy `domain.crypto.encrypted` into `encrypted_format`
   // without cloning per-packet buffers and clears `domain.crypto`; for non-decryptors (decoders,
   // secure decoders, and encoders), bridges video/audio bidirectionally while cross-repo encoders
   // complete the soft transition and synthesizes compressed `domain` from `mime_type` when needed.
-  static void EnsureInputFormatDetailsNormalized(fuchsia::media::FormatDetails* format_details,
+  static void EnsureInputFormatDetailsNormalized(fuchsia_media::FormatDetails* format_details,
                                                  bool is_decryptor);
 
   // Populates both new top-level FormatDetails fields (`image_format`, `pcm_format`,
   // `encrypted_format`) and legacy `domain` fields when either representation is provided,
   // treating the top-level fields as authoritative when both are present.
-  static void EnsureFormatDetailsBridged(fuchsia::media::FormatDetails* format_details);
+  static void EnsureFormatDetailsBridged(fuchsia_media::FormatDetails* format_details);
   class AddingBuffer;
 
   using BuffersByIndex = std::unordered_map<uint32_t, std::unique_ptr<CodecBuffer>>;
@@ -637,14 +657,12 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
     // This can be called 0-N times for a given stream, and each call replaces
     // any previously-set details (returning the previous details so the caller
     // can destroy them outside lock_).
-    std::unique_ptr<fuchsia::media::FormatDetails> SetInputFormatDetails(
-        std::unique_ptr<fuchsia::media::FormatDetails> input_format_details);
+    std::shared_ptr<const fuchsia_media::FormatDetails> SetInputFormatDetails(
+        std::shared_ptr<const fuchsia_media::FormatDetails> input_format_details);
     // Can be nullptr if no per-stream details have been set, in which case the
     // caller should look at CodecImpl::initial_input_format_details_
-    // instead.  The returned pointer is only valid up until the next call to to
-    // SetInputFormatDetails() or when the stream is deleted, whichever comes
-    // first.  This is only meant to be called on stream_control_thread_.
-    [[nodiscard]] const fuchsia::media::FormatDetails* input_format_details();
+    // instead.  This is only meant to be called on stream_control_thread_.
+    [[nodiscard]] const std::shared_ptr<const fuchsia_media::FormatDetails>& input_format_details();
     // We send oob_bytes (if any) to the core codec just before sending a
     // packet to the core codec, but only when the stream has OOB data pending.
     // A new stream has OOB data initially pending, and it becomes pending again
@@ -701,7 +719,7 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
     // Starts as nullptr for each new stream with implicit fallback to
     // initial_input_format_details_, but can be overridden on a per-stream
     // basis with QueueInputFormatDetails().
-    std::unique_ptr<fuchsia::media::FormatDetails> input_format_details_;
+    std::shared_ptr<const fuchsia_media::FormatDetails> input_format_details_;
     // This defaults to _true_, so that we send the OOB bytes to the HW for each
     // stream, if we have any oob_bytes to send.
     bool oob_config_pending_ = true;
@@ -730,7 +748,7 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
    public:
     // Used when not dynamic buffers.
     PortSettings(CodecImpl* parent, CodecPort port,
-                 fuchsia::media::StreamBufferPartialSettings partial_settings);
+                 fuchsia_media::StreamBufferPartialSettings partial_settings);
 
     // Used when dynamic buffers. When the first buffer completes GetVmoInfo, we
     // set a CodecImpl-synthesized BufferCollectionInfo that has the
@@ -769,7 +787,7 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
     [[nodiscard]] fuchsia_sysmem2::CoherencyDomain coherency_domain();
 
     // only called when not dynamic buffers
-    [[nodiscard]] const fuchsia::media::StreamBufferPartialSettings& partial_settings();
+    [[nodiscard]] const fuchsia_media::StreamBufferPartialSettings& partial_settings();
 
     // only called when not dynamic buffers
     [[nodiscard]] fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> TakeToken();
@@ -830,7 +848,7 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
     CodecImpl* parent_ = nullptr;
     CodecPort port_ = kInvalidPort;
 
-    std::unique_ptr<fuchsia::media::StreamBufferPartialSettings> partial_settings_;
+    std::unique_ptr<fuchsia_media::StreamBufferPartialSettings> partial_settings_;
 
     uint64_t buffer_constraints_version_ordinal_ = 0;
     uint64_t buffer_lifetime_ordinal_ = 0;
@@ -1038,20 +1056,29 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   // that all relevant FIDL bindings are un-bound.  Calls to this method must
   // only occur on the FIDL thread.
   void EnsureUnbindCompleted();
+  // Unbinds binding_ref_ (if bound) so no more StreamProcessor messages are dispatched to this
+  // CodecImpl, and sets binding_unbind_state_->is_codec_impl_unbinding_or_destroyed so the
+  // on_unbound handler won't call back into this CodecImpl. Only call on the FIDL thread.
+  // Idempotent.
+  //
+  // This doesn't close the channel. The on_unbound handler parks the channel in
+  // binding_unbind_state_->codec_to_close, which isn't closed until after ~CodecAdmission (see
+  // BindingUnbindState).
+  void UnbindServerBinding();
 
   // TODO(https://fxbug.dev/42110593): This isn't fully hooked up yet, so doesn't actually yet
   // indicate whether buffers are secure.  Enforce that
   // port_settings_[X].is_secure() is consistent with these.
-  [[nodiscard]] fuchsia::mediacodec::SecureMemoryMode OutputSecureMemoryMode();
-  [[nodiscard]] fuchsia::mediacodec::SecureMemoryMode InputSecureMemoryMode();
-  [[nodiscard]] fuchsia::mediacodec::SecureMemoryMode PortSecureMemoryMode(CodecPort port);
+  [[nodiscard]] fuchsia_mediacodec::SecureMemoryMode OutputSecureMemoryMode();
+  [[nodiscard]] fuchsia_mediacodec::SecureMemoryMode InputSecureMemoryMode();
+  [[nodiscard]] fuchsia_mediacodec::SecureMemoryMode PortSecureMemoryMode(CodecPort port);
   [[nodiscard]] bool IsPortSecureRequired(CodecPort port);
   [[nodiscard]] bool IsPortSecurePermitted(CodecPort port);
 
   void AddBufferInternal(CodecPort port, uint64_t buffer_constraints_version_ordinal,
                          uint64_t buffer_lifetime_ordinal, uint32_t buffer_index, zx::vmo buffer);
   void RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_ordinal, uint32_t buffer_index,
-                            RemoveBufferCallback callback);
+                            ThreadSafeDeleter<RemoveBufferCompleter::Async> completer_holder);
 
   // This gets deleted outside lock_ by the caller of MaybeDeleteBufferLifetimeOrdinal. The
   // fake_map_range_to_delete is the main motivation for this struct.
@@ -1105,7 +1132,7 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   bool is_supports_dynamic_buffers_ = false;
   bool is_supports_mid_stream_output_constraints_change_ = true;
 
-  const StreamProcessorParams params_;
+  NaturalStreamProcessorParams params_;
 
   // Regardless of which type of codec was created, these track the input
   // FormatDetails.
@@ -1120,9 +1147,9 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   // The oob_bytes field can be null if the codec type or specific format
   // does not require oob_bytes.
   //
-  // This points directly to a field of decoder_params_ (or encoder_params_),
-  // which out-last all usages of this pointer.
-  const fuchsia::media::FormatDetails* initial_input_format_details_ = nullptr;
+  // Moved out of params_.input_details() during construction and shared with
+  // CodecAdapter / CodecInputItem without copying.
+  std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details_;
 
   // Held here temporarily until DeviceFidl is ready to handle errors so we can
   // bind.
@@ -1130,21 +1157,32 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
 
   // Held here temporarily until DeviceFidl is ready to handle errors so we can
   // bind.
-  fidl::InterfaceRequest<fuchsia::media::StreamProcessor> tmp_interface_request_;
+  fidl::ServerEnd<fuchsia_media::StreamProcessor> tmp_server_end_;
+
+  struct BindingUnbindState {
+    // Retrieved unclosed from fidl::BindServer's on_unbound callback;
+    // dropped strictly after ~CodecAdmission in ~CodecImpl's fit::defer so that
+    // a Codec client can try again immediately on noticing channel closure
+    // without potentially bouncing off a still-existing old CodecAdmission.
+    //
+    // This also prevents the possibility that overly-aggressive client retries on channel closure
+    // by the server could build up many CodecImpl instances. By only closing the channel itself as
+    // the last thing after all other cleanup is fully done, we don't trigger the client to create
+    // a new CodecImpl while the old one still exists.
+    zx::channel codec_to_close;
+    // Set true on shared_fidl_dispatcher_ when CodecImpl initiates unbind or
+    // enters EnsureUnbindCompleted() / ~CodecImpl(), ensuring on_unbound never
+    // dereferences a destroyed CodecImpl*.
+    bool is_codec_impl_unbinding_or_destroyed = false;
+  };
 
   // This binding doesn't channel-own this CodecImpl.  The DeviceFidl owns all
   // the CodecImpl(s).  The DeviceFidl will SetErrorHandler() such that its
   // ownership drops if the channel fails.  The CodecImpl takes care of cleaning
   // itself up before calling the DeviceFidl's error handler, so that CodecImpl
   // is ready for destruction by the time DeviceFidl's error handler is called.
-  fidl::Binding<fuchsia::media::StreamProcessor, CodecImpl*> binding_;
-
-  // This is the zx::channel we get indirectly from binding_.Unbind() (we only
-  // need the zx::channel part).  We delay closing the Codec zx::channel until
-  // after removing the concurrency tally in ~CodecAdmission, so that a Codec
-  // client can try again immediately on noticing channel closure without
-  // potentially bouncing off still-existing old CodecAdmission.
-  zx::channel codec_to_close_;
+  std::optional<fidl::ServerBindingRef<fuchsia_media::StreamProcessor>> binding_ref_;
+  std::shared_ptr<BindingUnbindState> binding_unbind_state_;
   bool was_bind_async_called_ = false;
   // This being true means BindAsync() reached the point where we can and must
   // fail via UnbindLocked() instead of just running the owner's error handler
@@ -1175,14 +1213,14 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   // StreamControl thread.
   void AddInputBuffer_StreamControl(CodecBuffer::Info buffer_info, CodecVmoRange vmo_range);
   void SetInputBufferPartialSettings_StreamControl(
-      fuchsia::media::StreamBufferPartialSettings input_partial_settings);
+      fuchsia_media::StreamBufferPartialSettings input_partial_settings);
   void FlushEndOfStreamAndCloseStream_StreamControl(uint64_t stream_lifetime_ordinal);
   void CloseCurrentStream_StreamControl(uint64_t stream_lifetime_ordinal,
                                         bool release_input_buffers, bool release_output_buffers);
-  void Sync_StreamControl(ThreadSafeDeleter<SyncCallback> callback);
+  void Sync_StreamControl(ThreadSafeDeleter<SyncCompleter::Async> completer_holder);
   void QueueInputFormatDetails_StreamControl(uint64_t stream_lifetime_ordinal,
-                                             fuchsia::media::FormatDetails format_details);
-  void QueueInputPacket_StreamControl(fuchsia::media::Packet packet);
+                                             fuchsia_media::FormatDetails format_details);
+  void QueueInputPacket_StreamControl(fuchsia_media::Packet packet);
   void QueueInputEndOfStream_StreamControl(uint64_t stream_lifetime_ordinal);
   // This method returns false if input buffers aren't configured enough so far,
   // or if sysmem-based buffers can't be confirmed to be allocated.  On
@@ -1192,14 +1230,14 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   [[nodiscard]] bool IsStreamActiveLocked();
 
   void SetInputBufferSettingsCommon(
-      ScopedLock& lock, fuchsia::media::StreamBufferPartialSettings* input_partial_settings);
+      ScopedLock& lock, fuchsia_media::StreamBufferPartialSettings* input_partial_settings);
 
   void SetOutputBufferSettingsCommon(
-      ScopedLock& lock, fuchsia::media::StreamBufferPartialSettings* output_partial_settings);
+      ScopedLock& lock, fuchsia_media::StreamBufferPartialSettings* output_partial_settings);
 
   void SetBufferSettingsCommon(ScopedLock& lock, CodecPort port,
-                               fuchsia::media::StreamBufferPartialSettings* partial_settings,
-                               const fuchsia::media::StreamBufferConstraints& constraints);
+                               fuchsia_media::StreamBufferPartialSettings* partial_settings,
+                               const fuchsia_media::StreamBufferConstraints& constraints);
 
   // is_client_gone true unconditionally cleans up all packets, even if the client has sent
   // EnableOldOutputBuffers
@@ -1210,8 +1248,8 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   // involvement of sysmem yet (but soon), so there's not a ton to validate
   // here.
   [[nodiscard]] bool ValidatePartialBufferSettingsVsConstraintsLocked(
-      CodecPort port, const fuchsia::media::StreamBufferPartialSettings& partial_settings,
-      const fuchsia::media::StreamBufferConstraints& constraints) __TA_REQUIRES(lock_);
+      CodecPort port, const fuchsia_media::StreamBufferPartialSettings& partial_settings,
+      const fuchsia_media::StreamBufferConstraints& constraints) __TA_REQUIRES(lock_);
 
   void AddOutputBufferInternal(CodecBuffer::Info buffer_info, CodecVmoRange vmo_range);
 
@@ -1326,7 +1364,7 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   // this points to that stream, owned by stream_queue_.
   Stream* stream_ = nullptr;
 
-  std::unique_ptr<const fuchsia::media::StreamBufferConstraints> input_constraints_;
+  std::unique_ptr<const fuchsia_media::StreamBufferConstraints> input_constraints_;
 
   // This represents the most recent settings received from the client and
   // accepted.
@@ -1351,7 +1389,7 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   // For CodecImpl, the initial StreamOutputConstraints can be the first sent
   // message. If sent that early, the StreamOutputConstraints is likely to
   // change again before any output data is emitted, but it _may not_.
-  std::unique_ptr<const fuchsia::media::StreamOutputConstraints> output_constraints_;
+  std::unique_ptr<const fuchsia_media::StreamOutputConstraints> output_constraints_;
 
   // The core codec indicated that it didn't like an output config that had this
   // buffer_constraints_version_ordinal set.  Normally this would lead to
@@ -1554,7 +1592,7 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   void StartIgnoringClientOldOutputConfig(ScopedLock& lock);
 
   void TryFillDynamicStreamBufferConstraintsFields(
-      CodecPort port, fuchsia::media::StreamBufferConstraints& buffer_constraints)
+      CodecPort port, fuchsia_media::StreamBufferConstraints& buffer_constraints)
       __TA_EXCLUDES(lock_);
 
   void GenerateAndSendNewOutputConstraints(ScopedLock& lock,
@@ -1826,7 +1864,7 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
 
   // Send OnFreeInputPacket() using shared_fidl_thread().  This can be called
   // on any thread other than shared_fidl_thread().
-  void SendFreeInputPacketLocked(fuchsia::media::PacketHeader header) __TA_REQUIRES(lock_);
+  void SendFreeInputPacketLocked(fuchsia_media::PacketHeader header) __TA_REQUIRES(lock_);
 
   [[nodiscard]] bool IsInputConfiguredLocked() __TA_REQUIRES(lock_);
   [[nodiscard]] bool IsOutputConfiguredLocked() __TA_REQUIRES(lock_);
@@ -1885,9 +1923,9 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   [[nodiscard]] bool IsEncoder() const;
   [[nodiscard]] bool IsDecryptor() const;
 
-  [[nodiscard]] const fuchsia::mediacodec::CreateDecoder_Params& decoder_params() const;
-  [[nodiscard]] const fuchsia::mediacodec::CreateEncoder_Params& encoder_params() const;
-  [[nodiscard]] const fuchsia::media::drm::DecryptorParams& decryptor_params() const;
+  [[nodiscard]] const fuchsia_mediacodec::CreateDecoderParams& decoder_params() const;
+  [[nodiscard]] const fuchsia_mediacodec::CreateEncoderParams& encoder_params() const;
+  [[nodiscard]] const fuchsia_media_drm::DecryptorParams& decryptor_params() const;
 
   void LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent event_code) const;
 
@@ -1923,6 +1961,8 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
 
   // The core codec should only call this method at times when there is a
   // current stream, not between streams.
+  void onCoreCodecFailStream(fuchsia_media::StreamError error) override;
+  // Deprecated HLCPP soft-transition override; delegates to natural overload above.
   void onCoreCodecFailStream(fuchsia::media::StreamError error) override;
 
   void onCoreCodecResetStreamAfterCurrentFrame() override;
@@ -1981,11 +2021,12 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
 
   [[nodiscard]] zx::unowned_bti CoreCodecBti() __TA_EXCLUDES(lock_) override;
 
-  void CoreCodecInit(const fuchsia::media::FormatDetails& initial_input_format_details)
+  void CoreCodecInit(
+      std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details)
       __TA_EXCLUDES(lock_) override;
 
   void CoreCodecSetSecureMemoryMode(CodecPort port,
-                                    fuchsia::mediacodec::SecureMemoryMode secure_memory_mode)
+                                    fuchsia_mediacodec::SecureMemoryMode secure_memory_mode)
       __TA_EXCLUDES(lock_) override;
 
   void CoreCodecSetForceNewBuffersOnNewDimensions(bool force) override;
@@ -2004,14 +2045,14 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
       CodecPort port, const fuchsia_sysmem2::BufferCollectionInfo& buffer_collection_info)
       __TA_EXCLUDES(lock_) override;
 
-  [[nodiscard]] fuchsia::media::StreamOutputFormat CoreCodecGetOutputFormat(
+  [[nodiscard]] fuchsia_media::StreamOutputFormat CoreCodecGetOutputFormat2(
       uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal)
       __TA_EXCLUDES(lock_) override;
 
   void CoreCodecStartStream() __TA_EXCLUDES(lock_) override;
 
   void CoreCodecQueueInputFormatDetails(
-      const fuchsia::media::FormatDetails& per_stream_override_format_details)
+      std::shared_ptr<const fuchsia_media::FormatDetails> per_stream_override_format_details)
       __TA_EXCLUDES(lock_) override;
 
   void CoreCodecQueueInputPacket(const CodecPacket* packet) __TA_EXCLUDES(lock_) override;

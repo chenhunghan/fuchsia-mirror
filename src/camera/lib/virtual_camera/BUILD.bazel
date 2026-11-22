@@ -1,0 +1,102 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":virtual_camera_unittest_test"],
+    visibility = ["//src/camera:__pkg__"],
+)
+
+fx_cc_library(
+    name = "virtual_camera",
+    srcs = [
+        "virtual_camera_impl.cc",
+        "virtual_camera_impl.h",
+    ],
+    hdrs = ["virtual_camera.h"],
+    implementation_deps = [
+        # virtual_camera_impl.cc includes these HLCPP conversion headers directly.
+        "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp_hlcpp_conversion",
+        "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_cpp_hlcpp_conversion",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/syslog/cpp",
+        "//src/camera/lib/fake_camera",
+        "//src/camera/lib/fake_stream",
+        "//zircon/third_party/ulib/safemath",
+    ],
+    visibility = ["//src/camera/lib:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.camera3:fuchsia.camera3_hlcpp",
+        "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_hlcpp",
+        "//sdk/lib/fit-promise",
+        "//src/lib/fsl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/sysmem-version",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "virtual_camera_unittest_bin",
+    srcs = ["virtual_camera_unittest.cc"],
+    deps = [
+        ":virtual_camera",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_packaged_binary(
+    name = "virtual_camera_unittest_packaged_bin",
+    testonly = True,
+    binary = ":virtual_camera_unittest_bin",
+    binary_name = "virtual_camera_unittest_bin",
+)
+
+fx_component_manifest(
+    name = "virtual_camera_unittest_manifest",
+    testonly = True,
+    component_name = "virtual_camera_unittest",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/virtual_camera_unittest.cml",
+)
+
+fx_test_component(
+    name = "virtual_camera_unittest_component",
+    compiled_manifest = ":virtual_camera_unittest_manifest",
+    deps = [":virtual_camera_unittest_packaged_bin"],
+)
+
+fx_package(
+    name = "virtual_camera_unittest",
+    test_components = [":virtual_camera_unittest_component"],
+)
+
+fx_test(
+    name = "virtual_camera_unittest_test",
+    package = ":virtual_camera_unittest",
+    test_type = "system",
+)

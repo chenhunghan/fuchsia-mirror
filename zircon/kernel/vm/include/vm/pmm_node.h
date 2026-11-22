@@ -14,7 +14,6 @@
 #include <kernel/lockdep.h>
 #include <kernel/mutex.h>
 #include <ktl/span.h>
-#include <vm/evictor.h>
 #include <vm/page_queues.h>
 #include <vm/pmm_arena.h>
 #include <vm/pmm_checker.h>
@@ -90,14 +89,6 @@ class PmmNode {
   // Note: This method is faster than PageToIndex(), about the cost of some basic math
   //       and bit manipulation.
   vm_page_t* IndexToPage(uint32_t index);
-
-  // Converts the number returned by PageToIndex() back to a paddr_t.
-  // |index| must be a non-zero value previously returned by PageToIndex(). Invalid indexes, such
-  // as 0 or kIndexReserved0, are not checked for.
-  //
-  // Note: This method is faster than IndexToPage()->paddr() as the vm_page_t itself does not have
-  //       to be de-referenced, saving a memory load.
-  paddr_t IndexToPaddr(uint32_t index);
 
   // main allocator routines
   zx::result<vm_page_t*> AllocPage(uint alloc_flags);

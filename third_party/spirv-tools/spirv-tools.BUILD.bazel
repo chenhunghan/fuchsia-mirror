@@ -1,0 +1,227 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Replacement BUILD file for @spirv_tools (via new_local_repository in
+# //build/bazel/toplevel.MODULE.bazel). Unlike the other Vulkan third_party
+# repos (which have no BUILD.bazel in src/), third_party/spirv-tools/src ships
+# an upstream BUILD.bazel creating a subpackage boundary, with
+# default_visibility = ["//visibility:private"] and plain cc_library targets
+# using upstream COMMON_COPTS (-Werror, -DSPIRV_TIMER_ENABLED). Using
+# new_local_repository replaces that upstream BUILD.bazel with this
+# Fuchsia-owned file (fx_cc_library + _FUCHSIA_COPTS) while still loading
+# upstream :build_defs.bzl directly rather than deleting the subpackage via
+# --deleted_packages.
+
+load("@@//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("@rules_python//python:defs.bzl", "py_binary")
+load(
+    ":build_defs.bzl",
+    "CLDEBUGINFO100_GRAMMAR_JSON_FILE",
+    "COMMON_COPTS",
+    "DEBUGINFO_GRAMMAR_JSON_FILE",
+    "ExtInst",
+    "SHDEBUGINFO100_GRAMMAR_JSON_FILE",
+    "TEST_COPTS",
+    "create_grammar_tables_target",
+    "generate_extinst_lang_headers",
+    "incompatible_with",
+)
+
+package(
+    features = [
+        "layering_check",
+    ],
+)
+
+licenses(["notice"])
+
+_FUCHSIA_COPTS = COMMON_COPTS + [
+    "-USPIRV_TIMER_ENABLED",
+    "-Wno-implicit-fallthrough",
+    "-Wno-newline-eof",
+    "-Wno-unreachable-code-break",
+    "-Wno-unreachable-code-return",
+    "-Wno-unused-but-set-variable",
+    "-Wno-deprecated-copy",
+    "-Wno-implicit-int-conversion",
+    "-Wno-unused-result",
+    "-Wno-unused-function",
+    "-Wno-sign-compare",
+    "-Wno-extra-semi",
+    "-Wno-missing-field-initializers",
+]
+
+exports_files(
+    [
+        "CHANGES",
+        "LICENSE",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+py_binary(
+    # The script that generates compressed grammar tables for
+    # instructions and operands.
+    name = "ggt",
+    main = "utils/ggt.py",  # The file found by $(location :ggt)
+    srcs = [
+        "utils/ggt.py",
+        "utils/Table/__init__.py",
+        "utils/Table/Context.py",
+        "utils/Table/IndexRange.py",
+        "utils/Table/Operand.py",
+        "utils/Table/StringList.py",
+    ],
+)
+
+py_binary(
+    name = "generate_language_headers",
+    srcs = ["utils/generate_language_headers.py"],
+)
+
+create_grammar_tables_target(
+    name = "core",  # unused
+    extinsts = [
+        ExtInst("glsl.std.450", target = "spirv_glsl_grammar_unified1"),
+        ExtInst("opencl.std.100", target = "spirv_opencl_grammar_unified1"),
+        ExtInst("opencl.debuginfo.100", prefix = "CLDEBUG100_"),
+        ExtInst("nonsemantic.shader.debuginfo", prefix = "SHDEBUG100_"),
+        ExtInst("tosa.001000.1", target = "spirv_ext_inst_tosa_001000_1", prefix = "TOSA_"),
+        ExtInst("arm.motion-engine.100", target = "spirv_ext_inst_arm_motion_engine_100"),
+    ] + [
+        ExtInst(e)
+        for e in [
+            "spv-amd-shader-explicit-vertex-parameter",
+            "spv-amd-shader-trinary-minmax",
+            "spv-amd-gcn-shader",
+            "spv-amd-shader-ballot",
+            "debuginfo",
+            "nonsemantic.clspvreflection",
+            "nonsemantic.vkspreflection",
+        ]
+    ],
+)
+
+generate_extinst_lang_headers(
+    name = "DebugInfo",
+    grammar = DEBUGINFO_GRAMMAR_JSON_FILE,
+)
+
+generate_extinst_lang_headers(
+    name = "OpenCLDebugInfo100",
+    grammar = CLDEBUGINFO100_GRAMMAR_JSON_FILE,
+)
+
+generate_extinst_lang_headers(
+    name = "NonSemanticShaderDebugInfo100",
+    grammar = SHDEBUGINFO100_GRAMMAR_JSON_FILE,
+)
+
+py_binary(
+    name = "generate_registry_tables",
+    srcs = ["utils/generate_registry_tables.py"],
+)
+
+genrule(
+    name = "generators_inc",
+    srcs = ["@spirv_headers//:spirv_xml_registry"],
+    outs = ["generators.inc"],
+    cmd = "$(location :generate_registry_tables) --xml=$(location @spirv_headers//:spirv_xml_registry) --generator-output=$(location generators.inc)",
+    cmd_bat = "$(location :generate_registry_tables) --xml=$(location @spirv_headers//:spirv_xml_registry) --generator-output=$(location generators.inc)",
+    tools = [":generate_registry_tables"],
+)
+
+py_binary(
+    name = "update_build_version",
+    srcs = ["utils/update_build_version.py"],
+)
+
+genrule(
+    name = "build_version_inc",
+    srcs = ["CHANGES"],
+    outs = ["build-version.inc"],
+    cmd = "SOURCE_DATE_EPOCH=0 $(location :update_build_version) $(location CHANGES) $(location build-version.inc)",
+    cmd_bat = "set SOURCE_DATE_EPOCH=0  && $(location :update_build_version) $(location CHANGES) $(location build-version.inc)",
+    tools = [":update_build_version"],
+)
+
+# Libraries
+
+fx_cc_library(
+    name = "spirv_tools",
+    hdrs = [
+        "include/spirv-tools/libspirv.h",
+        "include/spirv-tools/libspirv.hpp",
+    ],
+    copts = _FUCHSIA_COPTS,
+    includes = ["include"],
+    linkstatic = 1,
+    visibility = ["@//:__subpackages__"],
+    deps = [
+        ":spirv_tools_internal",
+    ],
+)
+
+fx_cc_library(
+    name = "spirv_tools_internal",
+    srcs = glob([
+        "source/*.cpp",
+        "source/util/*.cpp",
+        "source/val/*.cpp",
+    ], exclude = [
+        "source/mimalloc.cpp",
+    ]) + [
+        ":build_version_inc",
+        ":gen_compressed_tables",
+        ":gen_extinst_lang_headers_DebugInfo",
+        ":gen_extinst_lang_headers_NonSemanticShaderDebugInfo100",
+        ":gen_extinst_lang_headers_OpenCLDebugInfo100",
+        ":generators_inc",
+    ],
+    hdrs = [
+        "include/spirv-tools/libspirv.h",
+        "include/spirv-tools/libspirv.hpp",
+        ":gen_extinst_lang_headers_DebugInfo",
+        ":gen_extinst_lang_headers_NonSemanticShaderDebugInfo100",
+        ":gen_extinst_lang_headers_OpenCLDebugInfo100",
+    ] + glob([
+        "source/*.h",
+        "source/util/*.h",
+        "source/val/*.h",
+    ]),
+    copts = _FUCHSIA_COPTS,
+    includes = ["include"],
+    deps = [
+        "@spirv_headers//:spirv_common_headers",
+        "@spirv_headers//:spirv_cpp11_headers",
+    ],
+)
+
+fx_cc_library(
+    name = "spirv_tools_opt",
+    hdrs = [
+        "include/spirv-tools/optimizer.hpp",
+    ],
+    copts = _FUCHSIA_COPTS,
+    linkstatic = 1,
+    visibility = ["@//:__subpackages__"],
+    deps = [
+        ":spirv_tools",
+        ":spirv_tools_opt_internal",
+    ],
+)
+
+fx_cc_library(
+    name = "spirv_tools_opt_internal",
+    srcs = glob(["source/opt/*.cpp"]),
+    hdrs = glob(["source/opt/*.h"]) + [
+        "include/spirv-tools/optimizer.hpp",
+    ],
+    copts = _FUCHSIA_COPTS,
+    deps = [
+        ":spirv_tools_internal",
+        "@spirv_headers//:spirv_common_headers",
+        "@spirv_headers//:spirv_c_headers",
+    ],
+)

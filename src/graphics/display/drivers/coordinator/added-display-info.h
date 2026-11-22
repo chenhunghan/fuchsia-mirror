@@ -6,6 +6,7 @@
 #define SRC_GRAPHICS_DISPLAY_DRIVERS_COORDINATOR_ADDED_DISPLAY_INFO_H_
 
 #include <fidl/fuchsia.hardware.display.engine/cpp/driver/wire.h>
+#include <fidl/fuchsia.hardware.display.types/cpp/fidl.h>
 #include <lib/zx/result.h>
 
 #include <memory>
@@ -46,6 +47,10 @@ struct AddedDisplayInfo {
 
   // Guaranteed to be non-empty in valid instances.
   fbl::Vector<display::Mode> preferred_modes;
+
+  // Parallel to `preferred_modes` (same size in instances created by `Create()`,
+  // or empty in test literals to imply empty `VrrConfig`s).
+  fbl::Vector<fuchsia_hardware_display_types::VrrConfig> preferred_mode_vrr_configs;
 };
 
 }  // namespace display_coordinator

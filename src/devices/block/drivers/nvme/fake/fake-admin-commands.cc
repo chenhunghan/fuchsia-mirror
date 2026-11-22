@@ -24,32 +24,32 @@ using nvme::GenericStatus;
 using nvme::StatusCodeType;
 
 FakeAdminCommands::FakeAdminCommands(FakeController& controller) : controller_(controller) {
-  controller.AddAdminCommand(nvme::AdminCommandOpcode::kIdentify,
-                             fit::bind_member(this, &FakeAdminCommands::Identify));
-  controller.AddAdminCommand(
+  controller.AddDefaultAdminCommand(nvme::AdminCommandOpcode::kIdentify,
+                                    fit::bind_member(this, &FakeAdminCommands::Identify));
+  controller.AddDefaultAdminCommand(
       nvme::AdminCommandOpcode::kCreateIoCompletionQueue,
       fit::bind_member(this, &FakeAdminCommands::ConfigureIoCompletionQueue));
-  controller.AddAdminCommand(
+  controller.AddDefaultAdminCommand(
       nvme::AdminCommandOpcode::kCreateIoSubmissionQueue,
       fit::bind_member(this, &FakeAdminCommands::ConfigureIoSubmissionQueue));
-  controller.AddAdminCommand(nvme::AdminCommandOpcode::kDeleteIoCompletionQueue,
-                             fit::bind_member(this, &FakeAdminCommands::DeleteIoQueue));
-  controller.AddAdminCommand(nvme::AdminCommandOpcode::kDeleteIoSubmissionQueue,
-                             fit::bind_member(this, &FakeAdminCommands::DeleteIoQueue));
-  controller.AddAdminCommand(nvme::AdminCommandOpcode::kSetFeatures,
-                             fit::bind_member(this, &FakeAdminCommands::SetFeatures));
-  controller.AddAdminCommand(nvme::AdminCommandOpcode::kGetFeatures,
-                             fit::bind_member(this, &FakeAdminCommands::GetFeatures));
+  controller.AddDefaultAdminCommand(nvme::AdminCommandOpcode::kDeleteIoCompletionQueue,
+                                    fit::bind_member(this, &FakeAdminCommands::DeleteIoQueue));
+  controller.AddDefaultAdminCommand(nvme::AdminCommandOpcode::kDeleteIoSubmissionQueue,
+                                    fit::bind_member(this, &FakeAdminCommands::DeleteIoQueue));
+  controller.AddDefaultAdminCommand(nvme::AdminCommandOpcode::kSetFeatures,
+                                    fit::bind_member(this, &FakeAdminCommands::SetFeatures));
+  controller.AddDefaultAdminCommand(nvme::AdminCommandOpcode::kGetFeatures,
+                                    fit::bind_member(this, &FakeAdminCommands::GetFeatures));
 }
 
 namespace {
-void MakeIdentifyController(nvme::IdentifyController* out) {
+void MakeIdentifyController(uint8_t max_data_transfer, nvme::IdentifyController* out) {
   out->set_cqes_max_log2(__builtin_ctzl(sizeof(nvme::Completion)));
   out->set_cqes_min_log2(__builtin_ctzl(sizeof(nvme::Completion)));
   out->set_sqes_max_log2(__builtin_ctzl(sizeof(nvme::Submission)));
   out->set_sqes_min_log2(__builtin_ctzl(sizeof(nvme::Submission)));
   out->num_namespaces = 256;
-  out->max_data_transfer = 2;
+  out->max_data_transfer = max_data_transfer;
   out->vwc = 1;
 
   memset(out->serial_number, ' ', sizeof(out->serial_number));
@@ -83,7 +83,8 @@ void FakeAdminCommands::Identify(nvme::Submission& default_submission,
 
   switch (submission.structure()) {
     case IdentifySubmission::IdentifyCns::kIdentifyController: {
-      MakeIdentifyController(static_cast<nvme::IdentifyController*>(buffer));
+      MakeIdentifyController(controller_.max_data_transfer(),
+                             static_cast<nvme::IdentifyController*>(buffer));
       break;
     }
     case IdentifySubmission::IdentifyCns::kActiveNamespaceList: {
@@ -129,9 +130,10 @@ void FakeAdminCommands::ConfigureIoCompletionQueue(nvme::Submission& submission,
                                                    const nvme::TransactionData& data,
                                                    nvme::Completion& completion) {
   ZX_ASSERT(submission.data_pointer[0] == FAKE_BTI_PHYS_ADDR);
-  auto id = submission.GetSubmission<nvme::CreateIoCompletionQueueSubmission>().queue_id();
-  controller_.AddQueuePair(id, &controller_.nvme()->io_queue()->completion(), nullptr);
-  controller_.registers().SetUpCompletionDoorbell(id);
+  auto& cmd = submission.GetSubmission<nvme::CreateIoCompletionQueueSubmission>();
+  controller_.AddQueuePair(cmd.queue_id(), &controller_.nvme()->io_queue()->completion(), nullptr,
+                           static_cast<uint16_t>(cmd.interrupt_vector()), cmd.interrupt_en());
+  controller_.registers().SetUpCompletionDoorbell(cmd.queue_id());
   completion.set_status_code_type(StatusCodeType::kGeneric)
       .set_status_code(GenericStatus::kSuccess);
 }

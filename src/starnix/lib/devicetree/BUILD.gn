@@ -12,7 +12,7 @@ group("tests") {
 
 dtb("dtb") {
   sources = [ "//src/devices/board/drivers/vim3-devicetree/dts/vim3.dts" ]
-  deps = [ "//src/devices/board/drivers/vim3-devicetree:vim3-power-config" ]
+  deps = [ "//src/devices/board/drivers/vim3-devicetree:khadas-vim3-board" ]
   dtcflags = [ "-Wno-unique_unit_address" ]
 }
 

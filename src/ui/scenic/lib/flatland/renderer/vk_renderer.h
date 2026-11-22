@@ -8,7 +8,10 @@
 #include <fidl/fuchsia.images2/cpp/fidl.h>
 #include <fuchsia/images/cpp/fidl.h>
 
+#include <memory>
 #include <memory_resource>
+#include <mutex>
+#include <optional>
 #include <set>
 #include <unordered_map>
 
@@ -37,6 +40,16 @@ class VkRenderer final : public Renderer {
  public:
   explicit VkRenderer(escher::EscherWeakPtr escher);
   ~VkRenderer() override;
+
+  // Main thread only (image_import/DESIGN.md#renderer-contract).
+  fit::result<ImportImageError, std::unique_ptr<GpuCollection>> CreateGpuCollection(
+      GlobalBufferCollectionId collection_id,
+      fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> token) override;
+
+  // Safe from any thread; touches only plain Vulkan handles captured at
+  // construction (image_import/DESIGN.md#renderer-contract).
+  fit::result<ImportImageError, std::unique_ptr<GpuImage>> CreateGpuImage(
+      const ImageMetadata& metadata, GpuCollection& collection, uint64_t per_buffer_bytes) override;
 
   // |BufferCollectionImporter|
   // Only called from the main thread.
@@ -95,7 +108,14 @@ class VkRenderer final : public Renderer {
   // buffers created within |Render()|.
   void set_disable_lazy_pipeline_creation(bool b) { disable_lazy_pipeline_creation_ = b; }
 
+  uint32_t layout_transitions_for_testing() const { return layout_transitions_for_testing_; }
+
  private:
+  struct VkGpuCollection;
+  struct VkGpuImage;
+
+  void WrapGpuImage(VkGpuImage& slot, GlobalImageId id);
+
   // Wrapper struct to contain the sysmem collection handle, the vulkan
   // buffer collection.
   struct CollectionData {
@@ -109,6 +129,7 @@ class VkRenderer final : public Renderer {
   // Creates a vk::BufferCollectionFUCHSIA with the proper constraints set.
   // Returns std::nullopt on failure.
   std::optional<vk::BufferCollectionFUCHSIA> SetConstraintsAndCreateVulkanBufferCollection(
+      GlobalBufferCollectionId collection_id,
       fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> token, BufferCollectionUsage usage,
       std::optional<fuchsia_math::SizeU> size);
 
@@ -148,11 +169,24 @@ class VkRenderer final : public Renderer {
   std::pmr::unordered_map<GlobalBufferCollectionId, CollectionData>& GetBufferCollectionsFor(
       BufferCollectionUsage usage) FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
+  // Destroys `vk_collection` under a traced `vkDestroyBufferCollectionFUCHSIA` slice.
+  void DestroyVulkanBufferCollection(GlobalBufferCollectionId collection_id,
+                                     vk::BufferCollectionFUCHSIA vk_collection) const;
+
   // Return a lazily-initialized |DebugFont|.
   escher::DebugFont* GetDebugFont();
 
-  // Escher is how we access Vulkan.
+  // Escher is how we access Vulkan on the main thread.
   escher::EscherWeakPtr escher_;
+
+  // `vk_device_` and `vk_physical_device_memory_properties_` are captured by
+  // value and `vk_loader_` as a `const` reference into
+  // `escher_->device()->dispatch_loader()` at construction on main so worker
+  // threads never dereference the `escher_` `fxl::WeakPtr`
+  // (image_import/DESIGN.md#renderer-contract).
+  vk::Device vk_device_;
+  const vk::detail::DispatchLoaderDynamic& vk_loader_;
+  const vk::PhysicalDeviceMemoryProperties vk_physical_device_memory_properties_;
 
   // Vulkan rendering component.
   escher::RectangleCompositor compositor_;
@@ -191,6 +225,8 @@ class VkRenderer final : public Renderer {
   bool disable_lazy_pipeline_creation_ = false;
 
   const async_dispatcher_t* const main_dispatcher_;
+
+  uint32_t layout_transitions_for_testing_ = 0;
 };
 
 }  // namespace flatland

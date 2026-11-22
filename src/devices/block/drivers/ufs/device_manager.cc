@@ -8,8 +8,13 @@
 #include <lib/fit/defer.h>
 #include <lib/trace/event.h>
 #include <lib/zx/clock.h>
+#include <zircon/assert.h>
 
+#include <format>
+#include <string>
 #include <utility>
+
+#include <safemath/safe_math.h>
 
 #include "src/devices/block/drivers/ufs/registers.h"
 #include "src/devices/block/drivers/ufs/transfer_request_processor.h"
@@ -18,6 +23,17 @@
 #include "transfer_request_processor.h"
 
 namespace ufs {
+namespace {
+
+std::string FormatMibResult(const zx::result<uint32_t> &result, bool hex = false) {
+  if (result.is_error()) {
+    return result.status_string();
+  }
+  return hex ? std::format("0x{:02x}", result.value()) : std::format("{}", result.value());
+}
+
+}  // namespace
+
 zx::result<std::unique_ptr<DeviceManager>> DeviceManager::Create(
     Ufs &controller, TransferRequestProcessor &transfer_request_processor,
     InspectProperties &properties) {
@@ -216,6 +232,15 @@ zx::result<uint32_t> DeviceManager::DmePeerGet(uint16_t mib_attribute) {
 zx::result<> DeviceManager::DmeSet(uint16_t mib_attribute, uint32_t value) {
   DmeSetUicCommand dme_set_command(controller_, mib_attribute, 0, AttrSetType::kVolatile, value);
   if (auto result = dme_set_command.SendCommand(); result.is_error()) {
+    return result.take_error();
+  }
+  return zx::ok();
+}
+
+zx::result<> DeviceManager::DmePeerSet(uint16_t mib_attribute, uint32_t value) {
+  DmePeerSetUicCommand dme_peer_set_command(controller_, mib_attribute, 0, AttrSetType::kVolatile,
+                                            value);
+  if (auto result = dme_peer_set_command.SendCommand(); result.is_error()) {
     return result.take_error();
   }
   return zx::ok();
@@ -536,12 +561,13 @@ zx::result<WriteBoosterFlushState> DeviceManager::QueryWriteBoosterFlushState() 
   uint8_t buffer_lun = write_booster_buffer_type_ == WriteBoosterBufferType::kLuDedicatedBuffer
                            ? write_booster_dedicated_lu_
                            : 0;
-  // Common idle fast path (1 Query UPIU): per UFS 3.1/4.0 (JESD220E/F section 14.3.2),
-  // bAvailableWBBufferSize reports remaining SLC buffer capacity in 10% increments (0x00..0x0A) in
-  // both preserve-user-space and user-space-reduction modes, and entering UFS_SLEEP_PWR_MODE halts
-  // fWBBufferFlushDuringHibernate in both modes. Hold off runtime Sleep whenever < 40% available
-  // capacity remains and the configured buffer is non-zero (in preserve-user-space mode, high TLC
-  // utilization can shrink dCurrentWBBufferSize to 0, where bAvailableWBBufferSize also reads 0).
+  // Common idle fast path (1 Query UPIU): per UFS 4.0 section 13.4.18.3 and section 14.3,
+  // Table 14.28, bAvailableWriteBoosterBufferSize (IDN 0x1D) reports remaining SLC buffer capacity
+  // in 10% increments (0x00..0x0A) in both preserve-user-space and user-space-reduction modes, and
+  // entering UFS_SLEEP_PWR_MODE halts fWBBufferFlushDuringHibernate in both modes. Hold off
+  // runtime Sleep whenever < 40% available capacity remains and the configured buffer is non-zero
+  // (in preserve-user-space mode, high TLC utilization can shrink dCurrentWBBufferSize to 0, where
+  // bAvailableWBBufferSize also reads 0).
   zx::result<uint32_t> available_buffer_size =
       ReadAttribute(Attributes::bAvailableWBBufferSize, buffer_lun);
   if (available_buffer_size.is_error()) {
@@ -684,6 +710,36 @@ zx::result<> DeviceManager::ConfigureReferenceClock() {
   return zx::ok();
 }
 
+namespace {
+
+// Converts a raw UniPro PA_Granularity (1..6, MIPI UniPro v2.0 section 5.8.3) to microseconds, or
+// std::nullopt if out of range.
+constexpr std::optional<uint32_t> PaGranularityToUs(uint32_t granularity) {
+  switch (granularity) {
+    case 1:
+      return 1;
+    case 2:
+      return 4;
+    case 3:
+      return 8;
+    case 4:
+      return 16;
+    case 5:
+      return 32;
+    case 6:
+      return 100;
+    default:
+      return std::nullopt;
+  }
+}
+
+}  // namespace
+
+bool DeviceManager::NeedsUniproTimingQuirks() const {
+  return controller_.intel_quirk() || controller_.increment_host_pa_tactivate_quirk() ||
+         GetDeviceQuirks().any();
+}
+
 zx::result<> DeviceManager::InitUniproAttributes(inspect::Node &unipro_node) {
   properties_.remote_version = unipro_node.CreateUint("remote_version", 0);
   properties_.local_version = unipro_node.CreateUint("local_version", 0);
@@ -691,12 +747,18 @@ zx::result<> DeviceManager::InitUniproAttributes(inspect::Node &unipro_node) {
   properties_.device_t_activate = unipro_node.CreateUint("device_t_activate", 0);
   properties_.host_granularity = unipro_node.CreateUint("host_granularity", 0);
   properties_.device_granularity = unipro_node.CreateUint("device_granularity", 0);
-  return ConfigureUniproAttributes();
-}
+  properties_.host_hibern8_time = unipro_node.CreateUint("host_hibern8_time", 0);
+  const DeviceQuirks device_quirks = GetDeviceQuirks();
+  properties_.host_pa_tactivate_quirk = unipro_node.CreateBool(
+      "host_pa_tactivate_quirk", controller_.increment_host_pa_tactivate_quirk());
+  properties_.peer_pa_tactivate_quirk = unipro_node.CreateBool(
+      "peer_pa_tactivate_quirk", device_quirks.ensure_peer_pa_tactivate_gt_host);
+  properties_.host_pa_hibern8time_quirk = unipro_node.CreateBool(
+      "host_pa_hibern8time_quirk", device_quirks.increment_host_pa_hibern8time);
 
-zx::result<> DeviceManager::ConfigureUniproAttributes() {
-  // UniPro Version
-  // 7~15 = Above 2.0, 6 = 2.0, 5 = 1.8, 4 = 1.61, 3 = 1.6, 2 = 1.41, 1 = 1.40, 0 = Reserved
+  // Query static UniPro version and granularity attributes once during initial boot; PowerDown
+  // resume reuses the cached granularities in ConfigureUniproAttributes().
+  // UniPro Version: 7~15 = Above 2.0, 6 = 2.0, 5 = 1.8, 4 = 1.61, 3 = 1.6, 2 = 1.41, 1 = 1.40.
   zx::result<uint32_t> remote_version = DmeGet(PA_RemoteVerInfo);
   if (remote_version.is_error()) {
     return remote_version.take_error();
@@ -705,28 +767,6 @@ zx::result<> DeviceManager::ConfigureUniproAttributes() {
   if (local_version.is_error()) {
     return local_version.take_error();
   }
-
-  // UniPro automatically sets timing information such as PA_TActivate through the
-  // PACP_CAP_EXT1_ind command during Link Startup operation.
-  zx::result<uint32_t> host_t_activate = DmeGet(PA_TActivate);
-  if (host_t_activate.is_error()) {
-    return host_t_activate.take_error();
-  }
-
-  if (controller_.intel_quirk()) {
-    // Intel Lake-field UFSHCI has a quirk. We need to add 200us to the PEER's PA_TActivate.
-    DmePeerSetUicCommand dme_peer_set_t_activate(
-        controller_, PA_TActivate, 0, AttrSetType::kVolatile, host_t_activate.value() + 2);
-    if (auto result = dme_peer_set_t_activate.SendCommand(); result.is_error()) {
-      return result.take_error();
-    }
-  }
-
-  zx::result<uint32_t> device_t_activate = DmePeerGet(PA_TActivate);
-  if (device_t_activate.is_error()) {
-    return device_t_activate.take_error();
-  }
-  // PA_Granularity = 100us (1=1us, 2=4us, 3=8us, 4=16us, 5=32us, 6=100us)
   zx::result<uint32_t> host_granularity = DmeGet(PA_Granularity);
   if (host_granularity.is_error()) {
     return host_granularity.take_error();
@@ -735,13 +775,136 @@ zx::result<> DeviceManager::ConfigureUniproAttributes() {
   if (device_granularity.is_error()) {
     return device_granularity.take_error();
   }
-
+  cached_host_granularity_ = host_granularity.value();
+  cached_device_granularity_ = device_granularity.value();
   properties_.remote_version.Set(remote_version.value());
   properties_.local_version.Set(local_version.value());
-  properties_.host_t_activate.Set(host_t_activate.value());
-  properties_.device_t_activate.Set(device_t_activate.value());
   properties_.host_granularity.Set(host_granularity.value());
   properties_.device_granularity.Set(device_granularity.value());
+
+  return ConfigureUniproAttributes();
+}
+
+zx::result<> DeviceManager::ConfigureUniproAttributes() {
+  Ufs::ScopedAutoHibernateDisable ah8_guard(controller_);
+
+  // Initial boot logs applied timing quirks at info level; each PowerDown resume re-applies the
+  // same values, so log those at debug level to keep resume quiet.
+  const bool initial_config = !unipro_timing_configured_;
+
+  // UniPro automatically sets timing information such as PA_TActivate through the
+  // PACP_CAP_EXT1_ind command during Link Startup operation.
+  zx::result<uint32_t> host_t_activate_res = DmeGet(PA_TActivate);
+  if (host_t_activate_res.is_error()) {
+    return host_t_activate_res.take_error();
+  }
+  uint32_t host_t_activate = host_t_activate_res.value();
+
+  if (controller_.increment_host_pa_tactivate_quirk()) {
+    if (!cached_initial_host_t_activate_.has_value()) {
+      cached_initial_host_t_activate_ = host_t_activate;
+    }
+    // Certain UFSHCI host controllers need +1 PA_Granularity unit on local PA_TActivate so the
+    // M-PHY RX has enough wake margin on Hibern8 exit. Apply this before peer PA_TActivate
+    // comparisons so peer margins are computed against the updated local value. An out-of-range
+    // value is rejected by the DME_SET ConfigResultCode, which is propagated below.
+    const uint32_t target_host_t_activate =
+        safemath::ClampAdd(*cached_initial_host_t_activate_, 1u);
+    if (zx::result<> result = DmeSet(PA_TActivate, target_host_t_activate); result.is_error()) {
+      fdf::error("Failed to set PA_TActivate = {} for timing quirk: {}", target_host_t_activate,
+                 result);
+      return result.take_error();
+    }
+    host_t_activate = target_host_t_activate;
+    if (initial_config) {
+      fdf::info("Applied host UniPro timing quirk (host_t_activate={})", host_t_activate);
+    } else {
+      fdf::debug("Applied host UniPro timing quirk (host_t_activate={})", host_t_activate);
+    }
+  }
+
+  if (controller_.intel_quirk()) {
+    // Intel Lake-field UFSHCI has a quirk. We need to add 200us to the PEER's PA_TActivate.
+    if (zx::result<> result = DmePeerSet(PA_TActivate, safemath::ClampAdd(host_t_activate, 2u));
+        result.is_error()) {
+      return result.take_error();
+    }
+  }
+
+  zx::result<uint32_t> device_t_activate_res = DmePeerGet(PA_TActivate);
+  if (device_t_activate_res.is_error()) {
+    return device_t_activate_res.take_error();
+  }
+  uint32_t device_t_activate = device_t_activate_res.value();
+
+  // InitUniproAttributes() caches both granularities before its first call here, and
+  // RestoreDeviceAndLinkConfig() only runs after a successful init.
+  ZX_ASSERT(cached_host_granularity_.has_value() && cached_device_granularity_.has_value());
+  const uint32_t host_granularity = *cached_host_granularity_;
+  const uint32_t device_granularity = *cached_device_granularity_;
+
+  const DeviceQuirks device_quirks = GetDeviceQuirks();
+  if (device_quirks.ensure_peer_pa_tactivate_gt_host) {
+    // Compare in microseconds because host and peer may report different PA_Granularity scales.
+    const std::optional<uint32_t> host_gran_us = PaGranularityToUs(host_granularity);
+    const std::optional<uint32_t> peer_gran_us = PaGranularityToUs(device_granularity);
+    if (host_gran_us.has_value() && peer_gran_us.has_value()) {
+      const uint64_t host_t_activate_us =
+          static_cast<uint64_t>(host_t_activate) * static_cast<uint64_t>(*host_gran_us);
+      const uint64_t peer_t_activate_us =
+          static_cast<uint64_t>(device_t_activate) * static_cast<uint64_t>(*peer_gran_us);
+      if (host_t_activate_us >= peer_t_activate_us) {
+        const uint64_t new_peer = (host_t_activate_us / static_cast<uint64_t>(*peer_gran_us)) + 1;
+        const uint32_t new_peer_t_activate = safemath::saturated_cast<uint32_t>(new_peer);
+        if (zx::result<> result = DmePeerSet(PA_TActivate, new_peer_t_activate);
+            result.is_error()) {
+          fdf::error("Failed to set peer PA_TActivate = {} for timing quirk: {}",
+                     new_peer_t_activate, result);
+          return result.take_error();
+        }
+        device_t_activate = new_peer_t_activate;
+      }
+    } else {
+      // A granularity outside the UniPro 1..6 encoding cannot be converted to microseconds, so
+      // the peer margin cannot be computed; leave the link-startup value in place.
+      fdf::warn("Invalid PA_Granularity (host={}, peer={}); skipping peer PA_TActivate tuning",
+                host_granularity, device_granularity);
+    }
+  }
+
+  std::optional<uint32_t> applied_hibern8_time;
+  if (device_quirks.increment_host_pa_hibern8time) {
+    if (!cached_initial_host_hibern8_time_.has_value()) {
+      zx::result<uint32_t> host_hibern8_time = DmeGet(PA_Hibern8Time);
+      if (host_hibern8_time.is_error()) {
+        fdf::error("Failed to read PA_Hibern8Time for timing quirk: {}", host_hibern8_time);
+        return host_hibern8_time.take_error();
+      }
+      cached_initial_host_hibern8_time_ = host_hibern8_time.value();
+    }
+    const uint32_t new_hibern8_time = safemath::ClampAdd(*cached_initial_host_hibern8_time_, 1u);
+    if (zx::result<> result = DmeSet(PA_Hibern8Time, new_hibern8_time); result.is_error()) {
+      fdf::error("Failed to set PA_Hibern8Time = {} for timing quirk: {}", new_hibern8_time,
+                 result);
+      return result.take_error();
+    }
+    properties_.host_hibern8_time.Set(new_hibern8_time);
+    applied_hibern8_time = new_hibern8_time;
+  }
+
+  if (device_quirks.any()) {
+    if (initial_config) {
+      fdf::info("Applied device UniPro timing quirks (device_t_activate={}, host_hibern8_time={})",
+                device_t_activate, applied_hibern8_time.value_or(0));
+    } else {
+      fdf::debug("Applied device UniPro timing quirks (device_t_activate={}, host_hibern8_time={})",
+                 device_t_activate, applied_hibern8_time.value_or(0));
+    }
+  }
+
+  properties_.host_t_activate.Set(host_t_activate);
+  properties_.device_t_activate.Set(device_t_activate);
+  unipro_timing_configured_ = true;
 
   return zx::ok();
 }
@@ -894,6 +1057,7 @@ zx::result<> DeviceManager::ConfigureUicPowerMode() {
   constexpr uint32_t kRxBitShift = 4;
   constexpr uint32_t kPwrMode = kFastMode << kRxBitShift | kFastMode;
   if (zx::result<> result = DmeSet(PA_PWRMode, kPwrMode); result.is_error()) {
+    LogRejectedPowerMode(tx_lanes, rx_lanes, max_rx_hs_gear, adapt_type, kPwrMode, result);
     return result.take_error();
   }
 
@@ -905,6 +1069,7 @@ zx::result<> DeviceManager::ConfigureUicPowerMode() {
   if (zx_status_t status = controller_.WaitWithTimeout(
           wait_for_completion, zx::usec(kDeviceInitTimeoutUs), timeout_message);
       status != ZX_OK) {
+    controller_.DumpErrorRegisters();
     return zx::error(status);
   }
   // Clear 'Power Mode completion status'
@@ -918,6 +1083,7 @@ zx::result<> DeviceManager::ConfigureUicPowerMode() {
   if (power_mode_status != HostControllerStatusReg::PowerModeStatus::kPowerLocal) {
     fdf::error("Failed to change power mode: power_mode_status = 0x{:x}",
                static_cast<uint32_t>(power_mode_status));
+    controller_.DumpErrorRegisters();
     return zx::error(ZX_ERR_BAD_STATE);
   }
 
@@ -946,7 +1112,50 @@ zx::result<> DeviceManager::ConfigureUicPowerMode() {
   properties_.pa_hs_series.Set(kHsSeries);
   properties_.power_mode.Set(kPwrMode);
 
+  if (!uic_power_mode_logged_) {
+    fdf::info("Configured UIC power mode: HS-G{}, tx_lanes={}, rx_lanes={}", max_rx_hs_gear,
+              tx_lanes, rx_lanes);
+    uic_power_mode_logged_ = true;
+  }
+
   return zx::ok();
+}
+
+void DeviceManager::LogRejectedPowerMode(uint32_t tx_lanes, uint32_t rx_lanes, uint32_t gear,
+                                         uint32_t adapt_type, uint32_t pwr_mode,
+                                         const zx::result<> &status) {
+  // Snapshot error registers before the diagnostic DME reads below so HCS/IS/UEC* reflect the
+  // rejected PA_PWRMode rather than any side effect or timeout from the best-effort reads.
+  controller_.DumpErrorRegisters();
+
+  // Skip remaining MIB reads once a UIC command times out (5 s each) so a stuck UIC path does not
+  // stall bring-up or error recovery behind 7 sequential timeouts.
+  bool timed_out = status.status_value() == ZX_ERR_TIMED_OUT;
+  auto read_mib = [&](auto read_fn, bool hex = false) -> std::string {
+    if (timed_out) {
+      return "skipped";
+    }
+    const zx::result<uint32_t> val = read_fn();
+    if (val.status_value() == ZX_ERR_TIMED_OUT) {
+      timed_out = true;
+    }
+    return FormatMibResult(val, hex);
+  };
+
+  const std::string conn_tx = read_mib([&] { return DmeGet(PA_ConnectedTxDataLanes); });
+  const std::string conn_rx = read_mib([&] { return DmeGet(PA_ConnectedRxDataLanes); });
+  const std::string avail_tx = read_mib([&] { return DmeGet(PA_AvailTxDataLanes); });
+  const std::string avail_rx = read_mib([&] { return DmeGet(PA_AvailRxDataLanes); });
+  const std::string local_max_gear = read_mib([&] { return DmeGet(PA_MaxRxHSGear); });
+  const std::string peer_max_gear = read_mib([&] { return DmePeerGet(PA_MaxRxHSGear); });
+  const std::string current_pwr_mode = read_mib([&] { return DmeGet(PA_PWRMode); }, /*hex=*/true);
+
+  fdf::error(
+      "PA_PWRMode=0x{:02x} rejected ({}): req(tx_lanes={}, rx_lanes={}, gear={}, adapt={}), "
+      "conn(tx={}, rx={}), avail(tx={}, rx={}), max_rx_hs_gear(local={}, peer={}), "
+      "current_pwr_mode={}",
+      pwr_mode, status, tx_lanes, rx_lanes, gear, adapt_type, conn_tx, conn_rx, avail_tx, avail_rx,
+      local_max_gear, peer_max_gear, current_pwr_mode);
 }
 
 zx::result<> DeviceManager::RestoreDeviceAndLinkConfig() {
@@ -965,9 +1174,10 @@ zx::result<> DeviceManager::RestoreDeviceAndLinkConfig() {
   }
 
   if (!controller_.qemu_quirk()) {
-    // ConfigureUniproAttributes() only programs PA_TActivate on Intel hosts; skip it elsewhere
-    // to avoid three informational DME_GET round-trips on every PowerDown resume.
-    if (controller_.intel_quirk()) {
+    // Without timing quirks the UniPro attribute reads are diagnostic only; when a host or device
+    // timing quirk applies, re-apply the volatile PA_TActivate / PA_Hibern8Time overrides lost
+    // across PowerDown reset and link startup.
+    if (NeedsUniproTimingQuirks()) {
       if (zx::result<> result = ConfigureUniproAttributes(); result.is_error()) {
         return result.take_error();
       }
@@ -1056,7 +1266,7 @@ zx::result<> DeviceManager::SuspendPower() {
     fdf::info("A power-on write-protected LU is present; using Sleep instead of PowerDown suspend");
     power_down_blocked_ = true;
   }
-  // TODO(https://fxbug.dev/568465123): PowerDown collapses the host controller power domain, which
+  // TODO(https://fxbug.dev/588007498): PowerDown collapses the host controller power domain, which
   // discards programmed inline encryption keys. Until key restore is wired through the inline
   // encryption provider on resume, stay in Sleep (link hibernate, controller powered) whenever keys
   // are live so that encrypted I/O continues to work after resume.
@@ -1135,7 +1345,7 @@ zx::result<> DeviceManager::SuspendPower() {
   // but admin UPIUs can be submitted until ResumePower() re-opens it. This must happen outside
   // power_lock_ because the I/O worker, which completes the in-flight commands, may be blocked in
   // IsResumed().
-  zx::result<> result = req_processor_.BlockSlotAllocation(kSuspendIoDrainTimeout);
+  zx::result<> result = req_processor_.BlockSlotAllocation(suspend_io_drain_timeout_);
 
   std::lock_guard<std::mutex> lock(power_lock_);
   if (power_down && controller_.HasProgrammedCryptoKeys()) {
@@ -1330,9 +1540,10 @@ zx::result<> DeviceManager::ResumePower() {
         // false.
         reinit_result = controller_.ReinitAfterPowerDown();
         if (reinit_result.is_ok()) {
-          // Per JEDEC UFS 3.1 Section 7.4.2, the device comes out of a power cycle and
-          // fDeviceInit in UFS_ACTIVE_PWR_MODE (scsi::PowerCondition::kActive), and
-          // ClearUnitAttentions() has already verified W-LUN readiness.
+          // When bInitPowerMode == 0x01 (UFS 4.0 section 7.1.6, Table 7.2 and section 14.1.4.2,
+          // Table 14.4; devices with bInitPowerMode == 0x00 enter UFS-Sleep instead), the device
+          // finishes power-on and fDeviceInit in Active mode, and ClearUnitAttentions() has
+          // already verified W-LUN readiness.
           break;
         }
         fdf::error("Re-initialization after PowerDown failed (attempt {}/{}): {}", attempt,
@@ -1729,8 +1940,6 @@ zx::result<> DeviceManager::InitUfsPowerMode(inspect::Node &controller_node,
   current_power_mode_ = target_power_mode;
   current_power_condition_ = GetPowerModeInfo(current_power_mode_).power_condition;
   current_link_state_ = GetPowerModeInfo(current_power_mode_).link_state;
-
-  // TODO(https://fxbug.dev/42075643): Enable auto hibernate
 
   properties_.b_current_power_mode =
       attributes_node.CreateUint("bCurrentPowerMode", static_cast<uint8_t>(current_power_mode_));

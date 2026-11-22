@@ -157,12 +157,12 @@ func (b *cppValueBuilder) visitRecord(value ir.Record, decl mixer.RecordDeclarat
 			unknownData := field.Value.(ir.UnknownData)
 			if decl.IsResourceType() {
 				b.Builder.WriteString(fmt.Sprintf(
-					"%s%sSetUnknownData(static_cast<fidl_xunion_tag_t>(%dlu), %s, %s);\n",
+					"%s%sSetUnknownData(static_cast<fidl_union_tag_t>(%dlu), %s, %s);\n",
 					containerVar, accessor, field.Key.UnknownOrdinal, hlcpp.BuildBytes(unknownData.Bytes),
 					buildHandles(unknownData.Handles, b.handleExtractOp)))
 			} else {
 				b.Builder.WriteString(fmt.Sprintf(
-					"%s%sSetUnknownData(static_cast<fidl_xunion_tag_t>(%dlu), %s);\n",
+					"%s%sSetUnknownData(static_cast<fidl_union_tag_t>(%dlu), %s);\n",
 					containerVar, accessor, field.Key.UnknownOrdinal, hlcpp.BuildBytes(unknownData.Bytes)))
 			}
 			continue

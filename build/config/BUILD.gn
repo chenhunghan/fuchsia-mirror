@@ -21,10 +21,7 @@ import("//build/toolchain/rbe.gni")
 import("//build/toolchain/toolchain_environment.gni")
 import("//build/toolchain/variant.gni")
 
-declare_args() {
-  # Controls whether to promote warnings to errors.
-  deny_warnings = true
-}
+import("//build/config/deny_warnings.gni")
 
 # No frame pointers for host compiles.
 if (current_toolchain == host_toolchain) {
@@ -72,6 +69,7 @@ foreach(cxx_version, fuchsia_sdk_cxx_supported_versions) {
 
 # LINT.ThenChange(BUILD.bazel:cxx_versions)
 
+# LINT.IfChange(color_diagnostics)
 compiler_config("color_diagnostics") {
   # GCC correctly defaults this from the terminal, so leave it alone.
   if (!is_gcc) {
@@ -80,6 +78,9 @@ compiler_config("color_diagnostics") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:color_diagnostics)
+
+# LINT.IfChange(crash_diagnostics)
 compiler_config("crash_diagnostics") {
   if (!is_gcc) {
     c_family_flags = [
@@ -93,12 +94,18 @@ compiler_config("crash_diagnostics") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:crash_diagnostics)
+
+# LINT.IfChange(call-graph-section)
 compiler_config("call-graph-section") {
   if (call_graph_section && !is_gcc && is_elf) {
     c_family_flags = [ "-fexperimental-call-graph-section" ]
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:call-graph-section)
+
+# LINT.IfChange(stack-size-section)
 compiler_config("stack-size-section") {
   if (!is_gcc) {
     c_family_flags = [ "-fstack-size-section" ]
@@ -111,6 +118,9 @@ compiler_config("stack-size-section") {
   rust_linker_llvm_flags = [ "--stack-size-section" ]
 }
 
+# LINT.ThenChange(BUILD.bazel:stack-size-section)
+
+# LINT.IfChange(stack-clash-protection)
 config("stack-clash-protection") {
   # see https://gcc.gnu.org/onlinedocs/gcc/Instrumentation-Options.html#index-fstack-clash-protection
   #
@@ -130,6 +140,9 @@ config("stack-clash-protection") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:stack-clash-protection)
+
+# LINT.IfChange(time-trace)
 config("time-trace") {
   if (!is_gcc && time_trace) {
     cflags = [ "-ftime-trace" ]
@@ -138,12 +151,18 @@ config("time-trace") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:time-trace)
+
+# LINT.IfChange(rust-depinfo)
 config("rust-depinfo") {
   # rustc depfiles should identify all the .rlib / .rmeta / etc. input files,
   # not just the .rs source files.
   rustflags = [ "-Zbinary-dep-depinfo" ]
 }
 
+# LINT.ThenChange(BUILD.bazel:rust-depinfo)
+
+# LINT.IfChange(compiler)
 config("compiler") {
   cflags = []
   cflags_cc = [ "-fvisibility-inlines-hidden" ]
@@ -187,6 +206,8 @@ config("compiler") {
   asmflags = cflags
 }
 
+# LINT.ThenChange(BUILD.bazel:compiler)
+
 # LINT.IfChange(libcxx_include)
 # This is separate from :compiler so it can be removed from configs when also
 # adding :no-libc++-include.
@@ -214,12 +235,16 @@ config("no-libc++-include") {
 
 # LINT.ThenChange(BUILD.bazel:libcxx_include)
 
+# LINT.IfChange(cpu_baseline)
 compiler_config("cpu_baseline") {
   if (current_cpu != "wasm32") {
     compiler_configs = [ "//build/config/$current_cpu" ]
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:cpu_baseline)
+
+# LINT.IfChange(clang_defaults)
 # These flags are enabled by default in Fuchsia's Clang toolchain, but we set
 # them explicitly to support other Clang toolchains and Clang-based tools.
 config("clang_defaults") {
@@ -239,6 +264,12 @@ config("clang_defaults") {
   }
 }
 
+# LINT.ThenChange(
+#   BUILD.bazel:clang_defaults,
+#   //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/cc_features.bzl:clang_defaults,
+# )
+
+# LINT.IfChange(embed_bitcode)
 config("embed_bitcode") {
   if (clang_embed_bitcode) {
     cflags = [
@@ -248,6 +279,9 @@ config("embed_bitcode") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:embed_bitcode)
+
+# LINT.IfChange(fast-math)
 # -ffast-math enables 4 sets of optimizations:
 #     no-math-errno, no-rounding-math, unsafe-math-optimizations, finite-math-only
 # This config sets the first 3. Use one of the subsequent configs to disable/enable the last one.
@@ -283,6 +317,9 @@ config("fast-math-no-inf-nan") {
   ]
 }
 
+# LINT.ThenChange(BUILD.bazel:fast-math)
+
+# LINT.IfChange(ffp_contract)
 config("ffp_contract") {
   # TODO(https://fxbug.dev/42169939): This was the default for -ffp-model=precise until
   # LLVM revision f04e387055e495e3e14570087d68e93593cf2918 when Clang switched
@@ -291,6 +328,9 @@ config("ffp_contract") {
   asmflags = cflags
 }
 
+# LINT.ThenChange(BUILD.bazel:ffp_contract)
+
+# LINT.IfChange(toolchain_version_stamp)
 # We want to force a recompile and relink of the world whenever our toolchain
 # changes since artifacts from an older version of the toolchain may or may not
 # be compatible with newer ones.
@@ -306,7 +346,15 @@ config("toolchain_version_stamp") {
   rustflags = [ "--cfg=__rust_toolchain=\"${rustc_version_string}\"" ]
 }
 
+# LINT.ThenChange(BUILD.bazel:toolchain_version_stamp)
+
 # LINT.IfChange(relative_paths)
+
+# GN compiles natively from $BUILD_DIR (two levels below $FUCHSIA_DIR), so it
+# already emits ../../<path> with DW_AT_comp_dir=".". Bazel's matching
+# BUILD.bazel:relative_paths adds compile-only -fdebug-prefix-map and
+# -fmacro-prefix-map=./= flags to match this ../../<path> contract for C, C++,
+# and assembly.
 compiler_config("relative_paths") {
   if (is_gcc) {
     # Relativize paths without leaking the build output directory in debug info.
@@ -373,9 +421,12 @@ config("debug") {
 
 # LINT.ThenChange(BUILD.bazel:debug)
 
+# LINT.IfChange(release)
 config("release") {
   defines = [ "NDEBUG=1" ]
 }
+
+# LINT.ThenChange(BUILD.bazel:release)
 
 config("exceptions") {
   cflags_cc = [ "-fexceptions" ]
@@ -756,6 +807,7 @@ compiler_config("default_debuginfo") {
 
 # LINT.ThenChange(BUILD.bazel:default_debuginfo)
 
+# LINT.IfChange(default_frame_pointers)
 config("default_frame_pointers") {
   if (enable_frame_pointers) {
     configs = [ ":frame_pointers" ]
@@ -763,6 +815,8 @@ config("default_frame_pointers") {
     configs = [ ":no_frame_pointers" ]
   }
 }
+
+# LINT.ThenChange(BUILD.bazel:default_frame_pointers)
 
 # LINT.IfChange(frame_pointers)
 variant("frame_pointers") {
@@ -908,8 +962,12 @@ config("default_warnings") {
   ]
 }
 
-# LINT.ThenChange(//build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl:default_warnings)
+# LINT.ThenChange(
+#   BUILD.bazel:default_warnings,
+#   //build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl:default_warnings,
+# )
 
+# LINT.IfChange(sdk_extra_warnings)
 # Code that goes into the SDK or otherwise contributes to the SDK surface area
 # in source form will be compiled in many different environments. As such, we
 # should compile it with stricter warnings in fuchsia.git.
@@ -927,6 +985,8 @@ config("sdk_extra_warnings") {
 config("test_exercising_sdk_headers") {
   configs = [ ":sdk_extra_warnings" ]
 }
+
+# LINT.ThenChange(BUILD.bazel:sdk_extra_warnings)
 
 config("Wmissing-declarations") {
   if (is_gcc) {
@@ -972,11 +1032,14 @@ config("Wno-unused-function") {
   ]
 }
 
+# LINT.IfChange(Wno-unused-template)
 # TODO(https://fxbug.dev/534361287): Clean up unused templates in first-party code.
 # This config will stay permanently for third_party.
 config("Wno-unused-template") {
   cflags = [ "-Wno-unused-template" ]
 }
+
+# LINT.ThenChange(BUILD.bazel:Wno-unused-template)
 
 config("Wno-deprecated-declarations") {
   visibility = [ "//third_party/*" ]
@@ -1035,7 +1098,6 @@ config("Wno-vla-cxx-extension") {
     "//src/connectivity/bluetooth/hci/transport/usb:*",
     "//src/connectivity/ethernet/drivers/ethernet/netdevice-migration:*",
     "//src/connectivity/ethernet/drivers/gvnic:*",
-    "//src/connectivity/network/lib/udp_serde:*",
     "//src/connectivity/network/tests/external_network:*",
     "//src/connectivity/network/tests/socket:*",
     "//src/connectivity/wlan/drivers/lib/log/cpp/test:*",
@@ -1075,7 +1137,6 @@ config("Wno-vla-cxx-extension") {
     "//vendor/google/starnix/tests/*",
     "//zircon/system/ulib/runtests-utils:*",
     "//zircon/system/ulib/test-utils:*",
-    "//zircon/system/ulib/zxtest:*",
   ]
 }
 
@@ -1142,10 +1203,6 @@ config("Wno-conversion") {
     "//src/lib/containers/cpp:*",
     "//src/lib/ddk:*",
     "//src/lib/elflib:*",
-    "//src/lib/fidl/llcpp/tests:*",
-    "//src/lib/fidl/llcpp/tests/conformance:*",
-    "//src/lib/fidl/llcpp/tests/integration:*",
-    "//src/lib/fidl/llcpp/tests/wire_types:*",
     "//src/lib/fsl/socket:*",
     "//src/lib/fsl/vmo:*",
     "//src/lib/icu/tools/extractor:*",
@@ -1192,8 +1249,6 @@ config("Wno-conversion") {
     "//third_party/zstd:*",
     "//vendor/*",
     "//zircon/system/ulib/image-format:*",
-    "//zircon/system/ulib/tftp:*",
-    "//zircon/third_party/dev/ethernet/e1000:*",
     "//zircon/third_party/lib/jitterentropy",
     "//zircon/third_party/uapp/fsck-msdosfs:*",
     "//zircon/third_party/uapp/mkfs-msdosfs:*",
@@ -1212,7 +1267,6 @@ config("Wno-implicit-fallthrough") {
     "//src/lib/fxl:third_party",
     "//third_party/lz4",
     "//third_party/rust_crates/compat/brotli",
-    "//zircon/third_party/dev/ethernet/e1000:e1000_third_party",
     "//zircon/third_party/ulib/boringssl",
   ]
 }
@@ -1227,6 +1281,7 @@ config("Wno-unused-but-set-parameter") {
   ]
 }
 
+# LINT.IfChange(Wno-unused-but-set-variable)
 # Config to suppress Wunused-but-set-variable warning in the third party code
 # that doesn't comply with.
 config("Wno-unused-but-set-variable") {
@@ -1240,6 +1295,8 @@ config("Wno-unused-but-set-variable") {
     "//vendor/*",
   ]
 }
+
+# LINT.ThenChange(BUILD.bazel:Wno-unused-but-set-variable)
 
 # Config to suppress Wunused-but-set-global warning in the third party code
 # that doesn't comply with.
@@ -1354,6 +1411,7 @@ config("default_libs") {
 
 # LINT.ThenChange(BUILD.bazel:default_libs)
 
+# LINT.IfChange(werror)
 compiler_config("werror") {
   if (!use_ccache) {
     cflags = [
@@ -1386,6 +1444,8 @@ compiler_config("werror") {
     rustflags = [ "--remote-only=-Dwarnings" ]
   }
 }
+
+# LINT.ThenChange(BUILD.bazel:werror)
 
 # LINT.IfChange(no-template-backtrace-limit)
 config("no-template-backtrace-limit") {
@@ -1452,9 +1512,12 @@ compiler_config("icf") {
 
 # "_ALL_SOURCE" is used by some system headers to expose more features (say in
 # fcntl.h) beyond those strictly defined in standard.
+# LINT.IfChange(all_source)
 config("all_source") {
   defines = [ "_ALL_SOURCE" ]
 }
+
+# LINT.ThenChange(BUILD.bazel:all_source)
 
 # LINT.IfChange(auto_var_init)
 config("auto_var_init") {
@@ -1640,6 +1703,7 @@ config("Wno-unterminated-string-initialization") {
   cflags_c = [ "-Wno-unterminated-string-initialization" ]
 }
 
+# LINT.IfChange(Wno-deprecated-this-capture)
 config("Wno-deprecated-this-capture") {
   visibility = [
     ":*",
@@ -1647,6 +1711,8 @@ config("Wno-deprecated-this-capture") {
   ]
   cflags_cc = [ "-Wno-deprecated-this-capture" ]
 }
+
+# LINT.ThenChange(BUILD.bazel:Wno-deprecated-this-capture)
 
 config("Wno-unused-result") {
   visibility = [ "//third_party/*" ]
@@ -1692,7 +1758,7 @@ config("crel") {
 # These must also omit toolchain-provided instrumentation runtimes that will
 # themselves depend on libc.
 config("standalone") {
-  configs = [ "//build/config/zircon:nolibc" ]
+  configs = [ "//build/config/zircon:nolibc-nostartfiles" ]
 
   ldflags = []
   if (is_gcc) {
@@ -1756,6 +1822,7 @@ compiler_config("bp-compression-sort") {
 # quite all the same features and so its default value is quite low (4.2.1).
 # But it does support many, many features of newer GCC versions.  Also, Clang
 # does not set the predefine at all under -fms-compatibility (UEFI).
+# LINT.IfChange(gnuc_version)
 config("gnuc_version") {
   if (!is_gcc) {
     gnuc_version = "16.1"
@@ -1766,3 +1833,4 @@ config("gnuc_version") {
     cflags = [ "-fgnuc-version=$gnuc_version" ]
   }
 }
+# LINT.ThenChange(BUILD.bazel:gnuc_version)

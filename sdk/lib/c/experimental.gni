@@ -1,0 +1,39 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+declare_args() {
+  # **NOTE: Experimental** Opt supported packages into linking against the new
+  # libc and startup dynamic linker (https://fxbug.dev/492249787).
+  experimental_libc_opt_in = false
+}
+
+# Packages that want to use the new libc can opt in by simply adding
+# `experimental_libc_deps` to their deps like so:
+#
+#   deps += experimental_libc_deps
+#
+# Additionally, we have an experimental builder that exercises tests using the
+# new libc at `core.arm64-experimental_libc`. Users who want their tests
+# exercised on that builder can add their package to the deps of
+# `//sdk/lib/c:experimental-libc-opt-in-tests`.
+experimental_libc_deps = []
+
+# `fuchsia_package` / `fuchsia_test_package` / `fuchsia_unittest_package`
+# targets for opted-in packages add:
+#   forward_variables_from(experimental_libc_package_args, "*")
+#
+experimental_libc_package_args = {
+}
+
+if (experimental_libc_opt_in) {
+  if (is_fuchsia && !is_kernel) {
+    experimental_libc_deps = [ "//sdk/lib/c:new-libc-bundle" ]
+  }
+  experimental_libc_package_args = {
+    # TODO(https://fxbug.dev/492249787): new-libc-bundle packages :new-libc as
+    # lib/libc.so and renames the sysroot libc.so to unused/libc.so, which
+    # trips verify_manifest_elf_binaries.py.
+    disable_elf_binaries_checks = true
+  }
+}

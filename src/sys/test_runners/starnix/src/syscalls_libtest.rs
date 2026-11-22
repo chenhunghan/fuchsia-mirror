@@ -5,37 +5,84 @@
 use crate::debian_guest::DebianGuest;
 use crate::helpers::{self, clone_start_info};
 use anyhow::{Context, Error, anyhow, bail};
-use cm_types::NamespacePath;
 use fidl_fuchsia_component_runner as frunner;
 use fidl_fuchsia_test as ftest;
 use fuchsia_async as fasync;
-use futures::AsyncReadExt;
+use futures::{AsyncReadExt, TryFutureExt};
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::path::Path;
 
-const CML_TARGET_KERNEL_FIELD: &str = "test_target_kernel";
+fn build_libtest_cases(all_tests: Vec<String>, disabled_tests: Vec<String>) -> Vec<ftest::Case> {
+    let disabled_set: HashSet<String> = disabled_tests.into_iter().collect();
+    all_tests
+        .into_iter()
+        .map(|name| {
+            let enabled = !disabled_set.contains(&name);
+            ftest::Case { name: Some(name), enabled: Some(enabled), ..Default::default() }
+        })
+        .collect()
+}
 
-/// Enumerates libtest test cases by dry-running the binary with `--list` and `--list --ignored`.
-pub async fn get_cases_list_for_libtests(
+/// Enumerates libtest test cases on a Debian guest by dry-running the binary with `--list` and
+/// `--list --ignored`.
+pub(crate) async fn get_cases_list_for_libtests_on_guest(
+    start_info: &mut frunner::ComponentStartInfo,
+    debian_guest: &DebianGuest,
+) -> Result<Vec<ftest::Case>, Error> {
+    let guest_binary = helpers::prepare_guest_syscall_test(start_info, debian_guest).await?;
+    let all_tests = run_guest_list_command(debian_guest, &guest_binary, false).await?;
+    let disabled_tests = run_guest_list_command(debian_guest, &guest_binary, true).await?;
+    Ok(build_libtest_cases(all_tests, disabled_tests))
+}
+
+/// Enumerates libtest test cases in Starnix by dry-running the binary with `--list` and
+/// `--list --ignored`.
+pub(crate) async fn get_cases_list_for_libtests_on_starnix(
     mut start_info: frunner::ComponentStartInfo,
     component_runner: &frunner::ComponentRunnerProxy,
 ) -> Result<Vec<ftest::Case>, Error> {
-    let all_tests = run_list_command(&mut start_info, component_runner, false).await?;
-    let disabled_tests = run_list_command(&mut start_info, component_runner, true)
-        .await?
-        .into_iter()
-        .collect::<HashSet<_>>();
-
-    Ok(all_tests
-        .into_iter()
-        .map(|name| {
-            let enabled = !disabled_tests.contains(&name);
-            ftest::Case { name: Some(name), enabled: Some(enabled), ..Default::default() }
-        })
-        .collect())
+    let all_tests = run_starnix_list_command(&mut start_info, component_runner, false).await?;
+    let disabled_tests = run_starnix_list_command(&mut start_info, component_runner, true).await?;
+    Ok(build_libtest_cases(all_tests, disabled_tests))
 }
 
-async fn run_list_command(
+async fn run_guest_list_command(
+    debian_guest: &DebianGuest,
+    guest_binary: &Path,
+    ignored_only: bool,
+) -> Result<Vec<String>, Error> {
+    let command = if ignored_only {
+        format!("{} --list --ignored", guest_binary.display())
+    } else {
+        format!("{} --list", guest_binary.display())
+    };
+
+    let (guest_stdout, host_stdout) = zx::Socket::create_stream();
+    let mut async_stdout = fasync::Socket::from_socket(host_stdout);
+    let mut output_bytes = Vec::new();
+
+    // Keep the non-zero exit check inside the join so a failed command aborts reading stdout
+    // instead of hanging if the guest never closes its stdout socket.
+    let ((), _) = futures::try_join!(
+        async {
+            let return_code =
+                debian_guest.execute(&command, &[], None, Some(guest_stdout), None).await?;
+            if return_code != 0 {
+                bail!(
+                    "Failed to list tests on guest (command: '{}', exit code {})",
+                    command,
+                    return_code
+                );
+            }
+            Ok(())
+        },
+        async_stdout.read_to_end(&mut output_bytes).map_err(Error::from),
+    )?;
+
+    Ok(parse_libtest_list_output(&output_bytes))
+}
+
+async fn run_starnix_list_command(
     start_info: &mut frunner::ComponentStartInfo,
     component_runner: &frunner::ComponentRunnerProxy,
     ignored_only: bool,
@@ -50,7 +97,7 @@ async fn run_list_command(
     cloned_info.numbered_handles = Some(numbered_handles);
     helpers::replace_program_args(args, cloned_info.program.as_mut().context("No program")?);
 
-    let stdout_sink = std_handles.out.unwrap();
+    let stdout_sink = std_handles.out.context("Missing stdout handle")?;
     let mut async_stdout = fasync::Socket::from_socket(stdout_sink);
 
     let controller = helpers::start_test_component(cloned_info, component_runner)?;
@@ -66,7 +113,11 @@ async fn run_list_command(
         bail!("Failed to list tests: {:?}", status.status);
     }
 
-    let output_str = String::from_utf8_lossy(&output_bytes);
+    Ok(parse_libtest_list_output(&output_bytes))
+}
+
+fn parse_libtest_list_output(output_bytes: &[u8]) -> Vec<String> {
+    let output_str = String::from_utf8_lossy(output_bytes);
     let mut test_names = Vec::new();
     for line in output_str.lines() {
         let trimmed = line.trim();
@@ -74,73 +125,19 @@ async fn run_list_command(
             test_names.push(test_name.to_string());
         }
     }
-    Ok(test_names)
-}
-
-/// Executes libtest syscall tests on either the Machina Debian guest or Starnix kernel.
-pub async fn run_syscall_libtests(
-    tests: Vec<ftest::Invocation>,
-    mut test_start_info: frunner::ComponentStartInfo,
-    run_listener_proxy: &ftest::RunListenerProxy,
-    component_runner: &frunner::ComponentRunnerProxy,
-    debian_guest: Arc<DebianGuest>,
-    options: ftest::RunOptions,
-) -> Result<(), Error> {
-    let program_data = test_start_info.program.as_mut().context("Missing program")?;
-    let test_target_kernel =
-        helpers::take_opt_str_value_from_dict(program_data, CML_TARGET_KERNEL_FIELD)?;
-
-    match test_target_kernel.as_deref() {
-        Some("linux") => {
-            log::info!("Executing libtest syscall tests on Machina Debian guest.");
-            run_libtests_on_debian_guest(
-                tests,
-                test_start_info,
-                run_listener_proxy,
-                debian_guest,
-                options,
-            )
-            .await
-        }
-        None => {
-            log::info!("Executing libtest syscall tests on Starnix kernel.");
-            run_libtests_on_starnix(
-                tests,
-                test_start_info,
-                run_listener_proxy,
-                component_runner,
-                options,
-            )
-            .await
-        }
-        Some(unexpected_target) => {
-            bail!("Unexpected {} specified: {}", CML_TARGET_KERNEL_FIELD, unexpected_target)
-        }
-    }
+    test_names
 }
 
 /// Executes individual libtest tests inside Machina with isolated per-test stdout/stderr sockets.
-async fn run_libtests_on_debian_guest(
+pub(crate) async fn run_libtests_on_debian_guest(
     tests: Vec<ftest::Invocation>,
     mut test_start_info: frunner::ComponentStartInfo,
     run_listener_proxy: &ftest::RunListenerProxy,
-    debian_guest: Arc<DebianGuest>,
+    debian_guest: &DebianGuest,
     options: ftest::RunOptions,
 ) -> Result<(), Error> {
-    let mut test_component_ns = namespace::Namespace::try_from(test_start_info.ns.take().unwrap())?;
-    test_start_info.ns = Some(test_component_ns.clone().try_into()?);
-    let test_pkg_dir = test_component_ns
-        .remove(&NamespacePath::new("/pkg")?)
-        .ok_or_else(|| anyhow!("Could not find /pkg in namespace!"))?
-        .into_proxy();
-
-    let data_mount = helpers::get_syscall_data_mount(&test_pkg_dir).await?;
-    debian_guest.configure_data_mount(data_mount);
-
-    let guest_binary = helpers::get_guest_syscall_test_binary_path(&test_start_info)?;
-    let test_binary_file =
-        helpers::open_guest_syscall_test_binary(&test_pkg_dir, &test_start_info).await?;
-    debian_guest.push_data_to_guest(test_binary_file, &guest_binary).await?;
+    let guest_binary =
+        helpers::prepare_guest_syscall_test(&mut test_start_info, debian_guest).await?;
 
     for test in tests {
         let test_name = test.name.clone().ok_or_else(|| anyhow!("Invocation missing test name"))?;
@@ -193,7 +190,7 @@ async fn run_libtests_on_debian_guest(
 }
 
 /// Executes individual libtest tests on Starnix kernel.
-async fn run_libtests_on_starnix(
+pub(crate) async fn run_libtests_on_starnix(
     tests: Vec<ftest::Invocation>,
     mut test_start_info: frunner::ComponentStartInfo,
     run_listener_proxy: &ftest::RunListenerProxy,
@@ -231,8 +228,10 @@ async fn run_libtests_on_starnix(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::debian_guest::test_helpers::{MockDebianGuest, send_command_exit};
     use fidl::endpoints::create_proxy_and_stream;
     use fidl_fuchsia_data as fdata;
+    use fidl_fuchsia_virtualization_guest_interaction::InteractiveGuestRequest;
     use fuchsia_async as fasync;
     use futures::{AsyncWriteExt, TryStreamExt};
 
@@ -302,12 +301,139 @@ mod tests {
             ..Default::default()
         };
 
-        let cases = get_cases_list_for_libtests(start_info, &runner).await.unwrap();
+        let cases = get_cases_list_for_libtests_on_starnix(start_info, &runner).await.unwrap();
         assert_eq!(cases.len(), 2);
         assert_eq!(cases[0].name.as_deref(), Some("foo::test_a"));
         assert_eq!(cases[0].enabled, Some(true));
         assert_eq!(cases[1].name.as_deref(), Some("foo::test_b"));
         assert_eq!(cases[1].enabled, Some(false));
+    }
+
+    #[fuchsia::test]
+    async fn test_get_cases_list_for_libtests_on_guest_on_started_error() {
+        const BINARY_PATH: &str = "data/tests/linux_rust_test_bin";
+        let pkg = helpers::TestPackageDir::with_guest_binary(BINARY_PATH);
+        let mut start_info = pkg.start_info(
+            "fuchsia-pkg://fuchsia.com/pkg#meta/linux_rust_test.cm",
+            BINARY_PATH,
+            &[],
+        );
+
+        // Keep stdout open so listing must abort reading stdout rather than hanging.
+        let mut held_stdout = None;
+        let mock = MockDebianGuest::with_request_handler(move |request| match request {
+            InteractiveGuestRequest::PutFile { responder, .. } => {
+                responder.send(zx::sys::ZX_OK).expect("send PutFile response");
+            }
+            InteractiveGuestRequest::ExecuteCommand {
+                command, stdout, command_listener, ..
+            } => {
+                assert!(command.ends_with(" --list"), "Unexpected guest command: {}", command);
+                assert!(held_stdout.replace(stdout.expect("stdout socket")).is_none());
+                let (_stream, control_handle) = command_listener.into_stream_and_control_handle();
+                control_handle
+                    .send_on_started(zx::Status::INTERNAL.into_raw())
+                    .expect("send OnStarted error");
+            }
+            other => panic!("Unexpected InteractiveGuest request: {:?}", other),
+        });
+
+        let err = get_cases_list_for_libtests_on_guest(&mut start_info, &mock.guest)
+            .await
+            .expect_err("expected error on OnStarted failure");
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("failed to start"), "unexpected error: {err_msg}");
+        assert!(err_msg.contains("INTERNAL"), "unexpected error: {err_msg}");
+
+        assert_eq!(mock.put_file_count(), 1);
+        mock.finish().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_get_cases_list_for_libtests_on_guest_list_nonzero_exit() {
+        const BINARY_PATH: &str = "data/tests/linux_rust_test_bin";
+        let pkg = helpers::TestPackageDir::with_guest_binary(BINARY_PATH);
+        let mut start_info = pkg.start_info(
+            "fuchsia-pkg://fuchsia.com/pkg#meta/linux_rust_test.cm",
+            BINARY_PATH,
+            &[],
+        );
+
+        // Keep stdout open so listing must abort reading stdout rather than hanging.
+        let mut held_stdout = None;
+        let mock = MockDebianGuest::with_request_handler(move |request| match request {
+            InteractiveGuestRequest::PutFile { responder, .. } => {
+                responder.send(zx::sys::ZX_OK).expect("send PutFile response");
+            }
+            InteractiveGuestRequest::ExecuteCommand {
+                command, stdout, command_listener, ..
+            } => {
+                assert!(command.ends_with(" --list"), "Unexpected guest command: {}", command);
+                assert!(held_stdout.replace(stdout.expect("stdout socket")).is_none());
+                send_command_exit(command_listener, 1);
+            }
+            other => panic!("Unexpected InteractiveGuest request: {:?}", other),
+        });
+
+        let err = get_cases_list_for_libtests_on_guest(&mut start_info, &mock.guest)
+            .await
+            .expect_err("expected error on non-zero --list exit code");
+        let err_msg = err.to_string();
+        assert!(err_msg.contains(" --list'"), "unexpected error: {err_msg}");
+        assert!(err_msg.contains("exit code 1"), "unexpected error: {err_msg}");
+
+        assert_eq!(mock.put_file_count(), 1);
+        mock.finish().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_get_cases_list_for_libtests_on_guest_ignored_list_nonzero_exit() {
+        const BINARY_PATH: &str = "data/tests/linux_rust_test_bin";
+        let pkg = helpers::TestPackageDir::with_guest_binary(BINARY_PATH);
+        let mut start_info = pkg.start_info(
+            "fuchsia-pkg://fuchsia.com/pkg#meta/linux_rust_test.cm",
+            BINARY_PATH,
+            &[],
+        );
+
+        // Keep the failed `--list --ignored` stdout open so listing must abort reading stdout
+        // rather than hanging.
+        let mut held_stdout = None;
+        let mock = MockDebianGuest::with_request_handler(move |request| match request {
+            InteractiveGuestRequest::PutFile { responder, .. } => {
+                responder.send(zx::sys::ZX_OK).expect("send PutFile response");
+            }
+            InteractiveGuestRequest::ExecuteCommand {
+                command, stdout, command_listener, ..
+            } => {
+                if command.ends_with(" --list") {
+                    let output = b"foo::test_a: test\n";
+                    let stdout_socket = stdout.expect("stdout socket");
+                    assert_eq!(
+                        stdout_socket.write(output).expect("write list output"),
+                        output.len()
+                    );
+                    drop(stdout_socket);
+                    send_command_exit(command_listener, 0);
+                } else if command.ends_with(" --list --ignored") {
+                    assert!(held_stdout.replace(stdout.expect("stdout socket")).is_none());
+                    send_command_exit(command_listener, 2);
+                } else {
+                    panic!("Unexpected guest command: {}", command);
+                }
+            }
+            other => panic!("Unexpected InteractiveGuest request: {:?}", other),
+        });
+
+        let err = get_cases_list_for_libtests_on_guest(&mut start_info, &mock.guest)
+            .await
+            .expect_err("expected error on non-zero --list --ignored exit code");
+        let err_msg = err.to_string();
+        assert!(err_msg.contains(" --list --ignored'"), "unexpected error: {err_msg}");
+        assert!(err_msg.contains("exit code 2"), "unexpected error: {err_msg}");
+
+        assert_eq!(mock.put_file_count(), 1);
+        mock.finish().await;
     }
 
     #[fuchsia::test]
@@ -354,7 +480,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(get_cases_list_for_libtests(start_info, &proxy).await.is_err());
+        assert!(get_cases_list_for_libtests_on_starnix(start_info, &proxy).await.is_err());
     }
 
     #[fuchsia::test]

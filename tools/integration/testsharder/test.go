@@ -72,11 +72,13 @@ type Test struct {
 func (t *Test) applyModifier(m TestModifier, s *Shard) {
 	// Only apply MaxAttempts if the test is not already set to be multiplied.
 	if m.MaxAttempts > 0 && t.RunAlgorithm != StopOnFailure {
-		if s.IsBootTest {
+		if s.IsBootTest || s.IsPerf {
 			// Boot tests look through serial logs from the target
 			// for tests that automatically run on boot up, so it
 			// doesn't make sense to retry. If it succeeds on a retry,
 			// that just means the test took longer than expected.
+			// Tests in perf shards are run only once so that failures
+			// can be retried by re-running the whole shard instead.
 			t.Runs = 1
 		} else {
 			t.Runs = m.MaxAttempts

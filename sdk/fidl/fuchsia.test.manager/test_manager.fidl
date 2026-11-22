@@ -297,7 +297,13 @@ type EventDetails = flexible resource union {
 
 /// Details for `suite_started` events.
 @available(added=20)
-type SuiteStartedEventDetails = table {};
+type SuiteStartedEventDetails = table {
+    /// The runner name declared in the test root's manifest, e.g.
+    /// `gtest_runner`. May not match a standard runner name. Absent if the
+    /// root declares no runner. Clients must handle unknown or absent values.
+    @available(added=HEAD)
+    1: runner fuchsia.component.name;
+};
 
 /// Details for `test_case_found` events.
 @available(added=20)

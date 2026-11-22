@@ -1192,7 +1192,7 @@ down the road, e.g. should a library define a general purpose `ErrorStatus`
 enum, it could be replaced later by another 'better' general purpose
 `ErrorStatusV2`.
 
-[envelopes]: /docs/contribute/governance/rfcs/0047_tables.md#envelopes
+[envelopes]: /docs/contribute/governance/rfcs/0047_tables.md#envelopes
 [rfc-0028]: /docs/contribute/governance/rfcs/0028_handle_rights.md
 [rfc-0038]: /docs/contribute/governance/rfcs/0038_separating_layout_from_constraints.md
 [rfc-0039]: /docs/contribute/governance/rfcs/0039_types_come_second.md

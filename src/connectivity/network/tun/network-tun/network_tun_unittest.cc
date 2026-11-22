@@ -13,6 +13,7 @@
 #include <lib/fidl/cpp/wire/internal/transport_channel.h>
 #include <lib/fzl/vmo-mapper.h>
 #include <lib/stdcompat/span.h>
+#include <lib/syslog/cpp/log_settings.h>
 #include <lib/zx/time.h>
 #include <zircon/status.h>
 
@@ -21,7 +22,6 @@
 #include <fbl/auto_lock.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <sdk/lib/syslog/cpp/log_settings.h>
 
 #include "src/connectivity/lib/network-device/buffer_descriptor/buffer_descriptor.h"
 #include "src/lib/fsl/handles/object_info.h"

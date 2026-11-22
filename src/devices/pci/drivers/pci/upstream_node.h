@@ -59,6 +59,8 @@ class UpstreamNode {
 
   // Configure / late-initialization any devices downstream of this node.
   virtual void ConfigureDownstreamDevices();
+  // Publish all devices directly connected to this node and recurse into bridges.
+  void PublishDownstream();
   // Disable all devices directly connected to this bridge.
   virtual void DisableDownstream();
   // Unplug all devices directly connected to this bridge.

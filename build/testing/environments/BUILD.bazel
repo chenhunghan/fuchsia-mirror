@@ -350,12 +350,6 @@ fx_test_environment(
 )
 
 fx_test_environment(
-    name = "nuc7_env",
-    dimensions = {"device_type": device_types.nuc7},
-    visibility = ["//visibility:public"],
-)
-
-fx_test_environment(
     name = "nuc11_env",
     dimensions = {"device_type": device_types.nuc11},
     visibility = ["//visibility:public"],

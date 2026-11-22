@@ -1,0 +1,120 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":process_explorer_integration_tests",
+        ":process_explorer_unit_tests",
+    ],
+    visibility = ["//src/developer:__pkg__"],
+)
+
+fx_cc_binary(
+    name = "mock_process",
+    srcs = ["mock_process.cc"],
+)
+
+fx_packaged_binary(
+    name = "mock_process_packaged",
+    binary = ":mock_process",
+    binary_name = "mock_process",
+)
+
+fx_cc_test_binary(
+    name = "integration_test",
+    srcs = ["process_explorer_integration_test.cc"],
+    gn_output_name = "process_explorer_integration_test",
+    deps = [
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+        "//sdk/fidl/fuchsia.process.explorer:fuchsia.process.explorer_cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/sys/component/cpp/testing:cpp_library",
+        "//src/developer/process_explorer:lib",
+        "//src/lib/fsl",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//zircon/system/ulib/fbl",
+    ],
+)
+
+fx_packaged_binary(
+    name = "integration_test_packaged",
+    testonly = True,
+    binary = ":integration_test",
+    binary_name = "process_explorer_integration_test",
+)
+
+fx_component_manifest(
+    name = "process_explorer_integration_test_manifest",
+    testonly = True,
+    component_name = "process_explorer_integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/process_explorer_integration_test.cml",
+)
+
+fx_test_component(
+    name = "process_explorer_integration_test",
+    compiled_manifest = ":process_explorer_integration_test_manifest",
+    deps = [
+        ":integration_test_packaged",
+        ":mock_process_packaged",
+    ],
+)
+
+# Run with `fx test process_explorer_integration_tests`.
+fx_package(
+    name = "process_explorer_integration_tests_package",
+    package_name = "process_explorer_integration_tests",
+    testonly = True,
+    components = [
+        "//src/developer/process_explorer:process_explorer_component",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":process_explorer_integration_test"],
+)
+
+fx_test(
+    name = "process_explorer_integration_tests",
+    package = ":process_explorer_integration_tests_package",
+)
+
+fx_cc_test_binary(
+    name = "process_explorer_unittest",
+    srcs = ["utils_unittest.cc"],
+    deps = [
+        "//src/developer/process_explorer:lib",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+# Run with `fx test process_explorer_unit_tests`.
+fx_unittest_package(
+    name = "process_explorer_unit_tests",
+    unit_tests = [":process_explorer_unittest"],
+)

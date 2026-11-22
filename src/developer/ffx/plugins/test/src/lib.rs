@@ -57,6 +57,8 @@ const SYSLOG_FILE_NAME: &str = "syslog.txt";
 const SYSLOG_SINCE_MARGIN: TimeDelta = TimeDelta::seconds(5);
 
 #[derive(FfxTool)]
+// Always requires a target; `rcs` is deferred only to map connection errors to `SETUP_FAILED_CODE`.
+#[target(Required)]
 pub struct TestTool {
     #[command]
     cmd: TestCommand,

@@ -11,8 +11,8 @@ use crate::user_copy::UserOutPtr;
 use crate::vm::page_source::PageSource;
 use crate::vm::vm_object::VmObject;
 use core::pin::Pin;
-use fbl::{Canary, DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode, RefPtr};
-use ksync::{KMutex, guarded, kcell_init};
+use fbl::{Canary, DoublyLinkedList, DoublyLinkedListContainable, RefPtr};
+use ksync::{KMutex, LockToken, guarded, kcell_init};
 use object_constants_rs as object_constants;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
@@ -24,11 +24,8 @@ use zx_types::{
     zx_vaddr_t, zx_vmo_dirty_range_t,
 };
 
-use super::pager_dispatcher_ffi::{
-    cpp_pager_dispatcher_create, cpp_pager_proxy_create, cpp_pager_proxy_create_page_source,
-    cpp_pager_proxy_free, cpp_pager_proxy_get_dll_node, cpp_pager_proxy_get_ref_counted,
-    cpp_pager_proxy_on_dispatcher_close, cpp_pager_proxy_set_page_source_unchecked,
-};
+use super::pager_dispatcher_ffi::cpp_pager_dispatcher_create;
+use super::pager_proxy::{PagerProxy, PagerProxyStateMtxClass};
 use super::port_dispatcher::PortDispatcher;
 use super::{KernelHandle, Name};
 
@@ -44,81 +41,6 @@ zr::static_assert_size_and_align!(
 
 define_kcounter!(DISPATCHER_PAGER_CREATE_COUNT, "dispatcher.pager.create", Sum);
 define_kcounter!(DISPATCHER_PAGER_DESTROY_COUNT, "dispatcher.pager.destroy", Sum);
-
-fbl::impl_opaque_ref_counted_facade!(
-    /// Page provider implementation that talks to a userspace pager service.
-    #[repr(align(8))]
-    pub(crate) struct PagerProxy,
-    cpp_pager_proxy_free,
-    cpp_pager_proxy_get_ref_counted,
-);
-
-impl DoublyLinkedListContainable<PagerProxy> for PagerProxy {
-    fn get_node(&self) -> &DoublyLinkedListNode<PagerProxy> {
-        // SAFETY: `cpp_pager_proxy_get_dll_node` returns a valid pointer to the embedded
-        // `DoublyLinkedListNodeState<fbl::RefPtr<PagerProxy>>` inside `self`, which has the
-        // identical two-pointer layout and null/non-null invariants as `DoublyLinkedListNode`.
-        unsafe { &*cpp_pager_proxy_get_dll_node(self) }
-    }
-}
-
-impl PagerProxy {
-    /// Option bit indicating that clean-to-dirty transitions should be trapped.
-    const TRAP_DIRTY: u32 = object_constants::kPagerProxyTrapDirty;
-
-    /// Creates a new `PagerProxy`.
-    fn create(
-        dispatcher: &PagerDispatcher,
-        port: RefPtr<PortDispatcher>,
-        key: u64,
-        options: u32,
-    ) -> Result<RefPtr<Self>, Status> {
-        let port_raw = RefPtr::into_raw(port).cast_mut();
-        let mut out_proxy: *mut PagerProxy = core::ptr::null_mut();
-        // SAFETY: `dispatcher` is a valid reference, `port_raw` is an owned raw pointer from
-        // `RefPtr::into_raw`, and `out_proxy` is a valid out reference.
-        let status =
-            unsafe { cpp_pager_proxy_create(dispatcher, port_raw, key, options, &mut out_proxy) };
-        Status::ok(status)?;
-        // SAFETY: `cpp_pager_proxy_create` succeeded and wrote a non-null owned `PagerProxy`
-        // pointer to `out_proxy`.
-        Ok(unsafe { RefPtr::from_raw(out_proxy) })
-    }
-
-    /// Creates a new `PageSource` backed by `proxy`.
-    fn create_page_source(proxy: &Self) -> Result<RefPtr<PageSource>, Status> {
-        let mut out_src: *mut PageSource = core::ptr::null_mut();
-        // SAFETY: `proxy` and `out_src` are valid references.
-        let status = unsafe { cpp_pager_proxy_create_page_source(proxy, &mut out_src) };
-        Status::ok(status)?;
-        // SAFETY: `cpp_pager_proxy_create_page_source` succeeded and wrote a non-null owned
-        // `PageSource` pointer to `out_src`.
-        Ok(unsafe { RefPtr::from_raw(out_src) })
-    }
-
-    /// Called by the pager dispatcher to set the `PageSource` reference. This is guaranteed to
-    /// happen exactly once just after construction.
-    ///
-    /// # Safety
-    ///
-    /// Must be called at most once per `PagerProxy` instance, immediately after construction, and
-    /// the caller must ensure `on_dispatcher_close` is later invoked to break the `RefPtr` cycle
-    /// between `PagerProxy` and `PageSource`.
-    unsafe fn set_page_source_unchecked(&self, src: RefPtr<PageSource>) {
-        let src_raw = RefPtr::into_raw(src).cast_mut();
-        // SAFETY: `self` is a valid `PagerProxy` reference, `src_raw` is an owned raw pointer from
-        // `RefPtr::into_raw`, and caller upholds the single-initialization and cycle-breaking
-        // invariants.
-        unsafe { cpp_pager_proxy_set_page_source_unchecked(self, src_raw) }
-    }
-
-    /// Called by the pager dispatcher when it is about to go away. Handles cleaning up port's
-    /// reference to any in flight packets.
-    fn on_dispatcher_close(&self) {
-        // SAFETY: `self` is a valid `PagerProxy` reference.
-        unsafe { cpp_pager_proxy_on_dispatcher_close(self) }
-    }
-}
 
 /// Internal state storage for `PagerDispatcher`.
 #[guarded]
@@ -145,7 +67,7 @@ pub struct PagerDispatcherState {
 
 // SAFETY: `PagerDispatcherState` contains `DoublyLinkedList<RefPtr<PagerProxy>>` which holds raw
 // node pointers internally and is therefore `!Send` and `!Sync` by default. All access to `proxies`
-// is synchronized by `lock`.
+// (and to the `PagerProxyState::node` of each linked proxy) is synchronized by `lock`.
 unsafe impl Send for PagerDispatcherState {}
 unsafe impl Sync for PagerDispatcherState {}
 
@@ -219,7 +141,7 @@ impl PagerDispatcher {
         // We are going to setup two objects that both need to point to each other. As such one of
         // the pointers must be bound 'late' and not in the constructor.
         let proxy = PagerProxy::create(self, port, key, proxy_options)?;
-        let src = PagerProxy::create_page_source(&proxy)?;
+        let src = PageSource::create(PagerProxy::as_page_provider(proxy.clone()))?;
         // Now that PageSource has been created and has a reference to proxy we must setup expected
         // backlink in proxy. As such there must never be an early return added between here and
         // set_page_source_unchecked.
@@ -229,7 +151,7 @@ impl PagerDispatcher {
         // SAFETY: Called once immediately after construction, and `proxy` is pushed onto `proxies`
         // below so `on_zero_handles` is guaranteed to call `on_dispatcher_close` to break the
         // cycle.
-        unsafe { proxy.set_page_source_unchecked(src.clone()) };
+        unsafe { proxy.state().set_page_source_unchecked(src.clone()) };
 
         guard.as_mut().fields_mut().proxies.push_front(proxy);
         Ok(src)
@@ -237,7 +159,16 @@ impl PagerDispatcher {
 
     /// Drop and return this object's reference to `proxy`. Must be called under
     /// `proxy`'s lock to prevent races with dispatcher teardown.
-    pub(crate) fn release_proxy(&self, proxy: &PagerProxy) -> Option<RefPtr<PagerProxy>> {
+    ///
+    /// # Safety
+    ///
+    /// `proxy` must have been created by `self` (through `create_source`), so that if it is
+    /// linked in any list, that list is this dispatcher's `proxies`.
+    pub unsafe fn release_proxy(
+        &self,
+        proxy: &PagerProxy,
+        _proxy_token: &LockToken<'_, PagerProxyStateMtxClass>,
+    ) -> Option<RefPtr<PagerProxy>> {
         ksync::lock!(let mut guard = self.state().lock_lock());
         let in_container = proxy.get_node().in_container();
         let triggered_zero_handles = *guard.fields().triggered_zero_handles;
@@ -253,7 +184,8 @@ impl PagerDispatcher {
             if in_container { "" } else { "not " }
         );
         if in_container {
-            // SAFETY: `proxy` is in `proxies`.
+            // SAFETY: The caller guarantees `proxy` was created by this dispatcher, so the list
+            // `in_container` reports it is in is `proxies`.
             unsafe { guard.as_mut().fields_mut().proxies.erase(proxy) }
         } else {
             None
@@ -273,7 +205,7 @@ impl PagerDispatcher {
             // and to preserve the lock order that PagerProxy locks are acquired before the
             // list lock.
             guard.as_mut().call_unlocked(|| {
-                proxy.on_dispatcher_close();
+                proxy.state().on_dispatcher_close();
             });
         }
     }
@@ -450,7 +382,9 @@ impl PagerDispatcher {
                 Ok(()) => break,
                 Err(Status::SHOULD_WAIT) => {
                     debug_assert!(info.captured_fault_info);
-                    if thread::soft_fault(info.pf_va, info.pf_flags).is_err() {
+                    // SAFETY: Called in user thread context with no locks held
+                    // (`lockdep::assert_no_locks_held()` checked on entry).
+                    if unsafe { thread::soft_fault(info.pf_va, info.pf_flags) }.is_err() {
                         return Err(Status::INVALID_ARGS);
                     }
                     // Reset |captured_fault_info| so that a future page fault can set it again.
@@ -511,7 +445,9 @@ impl PagerDispatcher {
             let Some(fault_info) = copy_err.fault_info else {
                 return Err(copy_err.status);
             };
-            if thread::soft_fault(fault_info.pf_va, fault_info.pf_flags).is_err() {
+            // SAFETY: Called in user thread context with no locks held
+            // (`lockdep::assert_no_locks_held()` checked on entry).
+            if unsafe { thread::soft_fault(fault_info.pf_va, fault_info.pf_flags) }.is_err() {
                 return Err(Status::INVALID_ARGS);
             }
         }

@@ -12,7 +12,7 @@ const (
 	TimeoutReachingTargetMsg = "Timeout attempting to reach target"
 	// LINT.ThenChange(
 	//     //src/developer/ffx/lib/target/src/lib.rs:timeout_reaching_target,
-	//     //src/testing/end_to_end/honeydew/honeydew/transports/ffx/ffx.py:timeout_reaching_target,
+	//     //src/testing/end_to_end/honeydew/honeydew/transports/ffx/ffx_impl.py:timeout_reaching_target,
 	//     //tools/testing/tefmocheck/check-configs.yaml:timeout_reaching_target
 	// )
 	UnableToResolveAddressMsg = "unable to resolve address for target"

@@ -6,7 +6,6 @@
 //! in the blackhole module.
 
 use lock_order::relation::LockBefore;
-use lock_order::wrap::LockedWrapperApi;
 use net_types::ip::Ip;
 use netstack3_base::DeviceIdContext;
 use netstack3_device::blackhole::{
@@ -15,6 +14,7 @@ use netstack3_device::blackhole::{
 use netstack3_device::{DeviceCollectionContext, DeviceConfigurationContext};
 use netstack3_ip::nud::NudUserConfig;
 
+use crate::context::prelude::*;
 use crate::{BindingsTypes, CoreCtx};
 
 impl<BT: BindingsTypes, L> DeviceIdContext<BlackholeDevice> for CoreCtx<'_, BT, L> {

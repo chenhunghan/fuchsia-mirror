@@ -82,7 +82,6 @@ fx_test_component(
 
 fx_package(
     name = "fake_camera_unittest",
-    package_name = "fake_camera_unittest",
     test_components = [":fake_camera_unittest_component"],
 )
 

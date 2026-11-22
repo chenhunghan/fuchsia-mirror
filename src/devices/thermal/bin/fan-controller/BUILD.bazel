@@ -2,9 +2,94 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component", "fx_component_manifest")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fan-controller-test"],
+    visibility = ["//src/devices:__pkg__"],
+)
 
 exports_files(
     ["meta/fan-controller.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_library(
+    name = "common",
+    srcs = ["fan-controller.cc"],
+    hdrs = ["fan-controller.h"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.fan:fuchsia.hardware.fan_cpp",
+        "//sdk/fidl/fuchsia.thermal:fuchsia.thermal_cpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "fan-controller-bin",
+    srcs = ["main.cc"],
+    deps = [":common"],
+)
+
+fx_packaged_binary(
+    name = "fan-controller-bin_packaged",
+    binary = ":fan-controller-bin",
+    binary_name = "fan-controller-bin",
+)
+
+fx_component_manifest(
+    name = "fan-controller_manifest",
+    component_name = "fan-controller",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/fan-controller.cml",
+)
+
+fx_component(
+    name = "fan-controller_component",
+    compiled_manifest = ":fan-controller_manifest",
+    deps = [":fan-controller-bin_packaged"],
+)
+
+fx_package(
+    name = "fan-controller",
+    components = [":fan-controller_component"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_test_binary(
+    name = "fan-controller-test-bin",
+    srcs = ["fan-controller-test.cc"],
+    local_defines = ["FAN_CONTROLLER_TEST"],
+    deps = [
+        ":common",
+        "//sdk/lib/async_patterns/testing/cpp",
+        "//sdk/lib/driver/testing/cpp",
+        "//src/storage/lib/vfs/cpp",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fan-controller-test",
+    max_log_severity = "ERROR",
+    unit_tests = [":fan-controller-test-bin"],
 )

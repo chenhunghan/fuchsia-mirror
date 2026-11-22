@@ -1,0 +1,13 @@
+{
+    "allowed_licenses": {
+        "BSL-1.0": [
+            {
+                "bug": "b/585200385",
+                "description": "gfxstream includes Boost Software License 1.0 headers/utilities.",
+                "paths": [
+                    "third_party/gfxstream"
+                ]
+            }
+        ]
+    }
+}

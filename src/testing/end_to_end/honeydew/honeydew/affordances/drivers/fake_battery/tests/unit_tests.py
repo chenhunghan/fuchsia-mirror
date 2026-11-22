@@ -7,15 +7,14 @@ import unittest
 from unittest import mock
 
 from honeydew import errors
-from honeydew.affordances.drivers.battery_manager.utils.types import (
-    HealthStatus,
-    PowerSourceType,
-)
-from honeydew.affordances.drivers.fake_battery import (
-    FakeBatteryUsingFfx,
+from honeydew.affordances.drivers.battery_manager.utils import (
+    types as battery_types,
 )
 from honeydew.affordances.drivers.fake_battery import (
     errors as fake_battery_errors,
+)
+from honeydew.affordances.drivers.fake_battery import (
+    fake_battery,
 )
 from honeydew.transports.ffx import errors as ffx_errors
 from honeydew.transports.ffx import ffx as ffx_transport
@@ -29,14 +28,14 @@ _CAPABILITY_OUTPUT = (
 
 
 class FakeBatteryTests(unittest.TestCase):
-    """Unit tests for FakeBatteryUsingFfx affordance."""
+    """Unit tests for FakeBattery affordance."""
 
     def setUp(self) -> None:
         super().setUp()
         self.ffx_obj = mock.MagicMock(spec=ffx_transport.FFX, autospec=True)
         self.ffx_obj.run.return_value = _CAPABILITY_OUTPUT
 
-        self.fake_battery = FakeBatteryUsingFfx(
+        self.fake_battery = fake_battery.FakeBattery(
             device_name="fuchsia-test-device",
             ffx=self.ffx_obj,
         )
@@ -45,7 +44,7 @@ class FakeBatteryTests(unittest.TestCase):
         """Test verify_supported raises NotSupportedError when capability missing."""
         self.ffx_obj.run.return_value = ""
         with self.assertRaises(errors.NotSupportedError):
-            FakeBatteryUsingFfx(
+            fake_battery.FakeBattery(
                 device_name="fuchsia-test-device",
                 ffx=self.ffx_obj,
             )
@@ -56,7 +55,7 @@ class FakeBatteryTests(unittest.TestCase):
             "Target not found"
         )
         with self.assertRaises(errors.NotSupportedError):
-            FakeBatteryUsingFfx(
+            fake_battery.FakeBattery(
                 device_name="fuchsia-test-device",
                 ffx=self.ffx_obj,
             )
@@ -66,7 +65,7 @@ class FakeBatteryTests(unittest.TestCase):
         self.ffx_obj.run.return_value = (
             "Found capability test.hardwarepowercontrol.Service"
         )
-        fb = FakeBatteryUsingFfx(
+        fb = fake_battery.FakeBattery(
             device_name="fuchsia-test-device",
             ffx=self.ffx_obj,
         )
@@ -147,8 +146,8 @@ class FakeBatteryTests(unittest.TestCase):
         )
 
         self.fake_battery.set(
-            source=PowerSourceType.USB,
-            health=HealthStatus.HOT,
+            source=battery_types.PowerSourceType.USB,
+            health=battery_types.HealthStatus.HOT,
         )
 
         expected_cmd = "fake-battery-cli set --source usb --health hot"
@@ -207,7 +206,7 @@ class FakeBatteryTests(unittest.TestCase):
         """Test set_charging convenience helper."""
         self.ffx_obj.run.return_value = "Success"
         self.fake_battery.set_charging(
-            source=PowerSourceType.USB,
+            source=battery_types.PowerSourceType.USB,
             voltage_mv=5000,
             current_ua=1500000,
         )
@@ -247,7 +246,7 @@ class FakeBatteryTests(unittest.TestCase):
     def test_set_health(self) -> None:
         """Test set_health convenience helper."""
         self.ffx_obj.run.return_value = "Success"
-        self.fake_battery.set_health(HealthStatus.OVER_VOLTAGE)
+        self.fake_battery.set_health(battery_types.HealthStatus.OVER_VOLTAGE)
         self.ffx_obj.run.assert_called_with(
             [
                 "component",

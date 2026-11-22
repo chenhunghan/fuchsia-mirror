@@ -6,7 +6,7 @@
 
 #include <lib/boot-shim/devicetree-boot-shim.h>
 
-#include <phys/boot-shim/devicetree.h>
+#include <phys/linuxboot-runtime/devicetree.h>
 
 #include <ktl/enforce.h>
 
@@ -23,7 +23,7 @@ constexpr const char* kShimName = "linux-arm64-boot-shim";
 
 }  // namespace
 
-void PhysMain(void* flat_devicetree_blob, arch::EarlyTicks ticks) {
+void CppPhysMain(void* flat_devicetree_blob, arch::EarlyTicks ticks) {
   BootShimHelper<Shim, kOptions> shim_helper(kShimName, flat_devicetree_blob);
   // Items will be initialized, and the matching process will begin.
   ZX_ASSERT(shim_helper.InitItems());

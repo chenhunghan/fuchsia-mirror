@@ -1,0 +1,95 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":amlogic_decoder_integration_tests"],
+    visibility = ["//src/media:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "amlogic_decoder_integration_tests_bin",
+    testonly = True,
+    srcs = ["test_runner.cc"],
+    # Uses Zircon and fuchsia.driver.development FIDL headers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fdio-caller",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "amlogic_decoder_integration_tests_bin_packaged",
+    testonly = True,
+    binary = ":amlogic_decoder_integration_tests_bin",
+    binary_name = "amlogic_decoder_integration_tests",
+)
+
+fx_component_manifest(
+    name = "amlogic_decoder_integration_tests_manifest",
+    testonly = True,
+    component_name = "amlogic_decoder_integration_tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/testing:elf_test_runner",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/amlogic_decoder_integration_tests.cml",
+)
+
+fx_test_component(
+    name = "amlogic_decoder_integration_tests_component",
+    compiled_manifest = ":amlogic_decoder_integration_tests_manifest",
+    test_type = "device",
+    deps = [":amlogic_decoder_integration_tests_bin_packaged"],
+)
+
+fx_package(
+    name = "amlogic_decoder_integration_tests_package",
+    package_name = "amlogic_decoder_integration_tests",
+    testonly = True,
+    test_components = [":amlogic_decoder_integration_tests_component"],
+)
+
+# The amlogic decoder only runs on arm64 boards, so only run this test in
+# arm64 builds. Marking the test incompatible on other CPUs instead breaks
+# tests.json generation for //src/media:target_tests.
+fx_test(
+    name = "amlogic_decoder_integration_tests",
+    build_only = select({
+        "@platforms//cpu:arm64": False,
+        "//conditions:default": True,
+    }),
+    environments = select({
+        "@platforms//cpu:arm64": [
+            "//build/testing/environments:astro_env",
+            "//build/testing/environments:sherlock_env",
+            "//build/testing/environments:vim3_env",
+        ],
+        # build_only tests take the default environments placeholder.
+        "//conditions:default": ["//build/bazel/rules/testing:default_environments"],
+    }),
+    package = ":amlogic_decoder_integration_tests_package",
+)

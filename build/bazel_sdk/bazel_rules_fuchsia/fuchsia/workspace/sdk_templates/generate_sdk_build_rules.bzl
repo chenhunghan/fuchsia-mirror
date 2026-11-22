@@ -496,7 +496,25 @@ def _generate_sysroot_build_rules(
 
             # dist_lib_subpath can be 'libfoo.so' or '<variant>/libfoo.so'
             variant, _, _ = dist_lib_subpath.rpartition("/")
-            variant_config = _FUCHSIA_CLANG_VARIANT_MAP[variant]
+            variant_config = _FUCHSIA_CLANG_VARIANT_MAP.get(variant)
+            if not variant_config:
+                # Temporarily skip the 4 sysroot variants added in
+                # //sdk/lib/c/sysroot_entries.gni whose @fuchsia_clang
+                # config_setting targets are wired in a follow-up commit; this
+                # special case will be removed by that commit.
+                if variant in (
+                    "coverage-cts",
+                    "heapdump",
+                    "profile-use",
+                    "profile-use-rust",
+                ):
+                    continue
+                runtime.fail(
+                    "Unmapped sysroot variant '%s' for %s; add it to _FUCHSIA_CLANG_VARIANT_MAP" % (
+                        variant,
+                        dist_lib,
+                    ),
+                )
             variant_target = "dist." + _get_variant_suffix(variant)
             select_variant_targets[variant_config] = ":" + variant_target
 

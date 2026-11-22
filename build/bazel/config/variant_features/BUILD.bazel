@@ -1,0 +1,134 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:feature_flag.bzl", "feature_flag")
+
+package(default_applicable_licenses = ["//:license"])
+
+# NOTE: "thinlto" is intentionally spelled without an underscore to avoid
+# colliding with upstream Bazel / @rules_cc / @rules_rust / @rules_go's
+# built-in "thin_lto" feature, which triggers hardcoded LTO indexing and
+# backend actions that Fuchsia does not use.
+#
+# LINT.IfChange(supported_variant_features)
+feature_flag(
+    name = "asan",
+    feature_name = "asan",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "cfi",
+    feature_name = "cfi",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "coverage",
+    feature_name = "coverage",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "coverage-cts",
+    feature_name = "coverage-cts",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "coverage-rust",
+    feature_name = "coverage-rust",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "fuzzer",
+    feature_name = "fuzzer",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "heapdump",
+    feature_name = "heapdump",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "hwasan",
+    feature_name = "hwasan",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "instrumented",
+    feature_name = "instrumented",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "lsan",
+    feature_name = "lsan",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "lto",
+    feature_name = "lto",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "msan",
+    feature_name = "msan",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "profile",
+    feature_name = "profile",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "profile-rust",
+    feature_name = "profile-rust",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "profile-use",
+    feature_name = "profile-use",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "profile-use-rust",
+    feature_name = "profile-use-rust",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "sancov",
+    feature_name = "sancov",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "thinlto",
+    feature_name = "thinlto",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "tsan",
+    feature_name = "tsan",
+    visibility = ["//:__subpackages__"],
+)
+
+feature_flag(
+    name = "ubsan",
+    feature_name = "ubsan",
+    visibility = ["//:__subpackages__"],
+)
+# LINT.ThenChange(//build/bazel_sdk/fuchsia_rules_common/build_flags/feature_flag.bzl:supported_variant_features)

@@ -67,6 +67,8 @@ TEST_F(ElementBuilderTests, ElementBuilderElementRunnerFilledOut) {
                         desc.element_control_server.handle()->get());
   check_channels_peered(element_runner.server.handle()->get(),
                         desc.element_runner_client->handle()->get());
+  ASSERT_FALSE(desc.initial_lease_token_broker.has_value());
+  ASSERT_FALSE(desc.initial_lease_token_client.has_value());
 }
 
 TEST_F(ElementBuilderTests, ElementBuilderMin) {
@@ -89,6 +91,62 @@ TEST_F(ElementBuilderTests, ElementBuilderMin) {
                         desc.element_control_server.handle()->get());
   check_channels_peered(desc.element_runner_server->handle()->get(),
                         desc.element_runner_client->handle()->get());
+  ASSERT_FALSE(desc.initial_lease_token_broker.has_value());
+  ASSERT_FALSE(desc.initial_lease_token_client.has_value());
+}
+
+TEST_F(ElementBuilderTests, InitialLevelZeroDoesNotCreateLeaseTokens) {
+  fdf_power::PowerElementConfiguration config;
+  config.initial_level = 0;
+  fdf_power::TokenMap tokens;
+
+  fdf_power::ElementDesc desc = fdf_power::ElementDescBuilder(config, std::move(tokens)).Build();
+
+  ASSERT_TRUE(desc.element_config.initial_level.has_value());
+  ASSERT_EQ(*desc.element_config.initial_level, 0u);
+  ASSERT_FALSE(desc.initial_lease_token_broker.has_value());
+  ASSERT_FALSE(desc.initial_lease_token_client.has_value());
+}
+
+TEST_F(ElementBuilderTests, SetInitialLease) {
+  fdf_power::PowerElementConfiguration config;
+  config.initial_level = 5;
+  fdf_power::TokenMap tokens;
+
+  fuchsia_power_broker::LeaseToken lease_token, lease_token_broker;
+  ASSERT_EQ(fuchsia_power_broker::LeaseToken::create(0, &lease_token, &lease_token_broker), ZX_OK);
+
+  fdf_power::ElementDesc desc = fdf_power::ElementDescBuilder(config, std::move(tokens))
+                                    .SetInitialLeaseToken(std::move(lease_token_broker))
+                                    .Build();
+
+  ASSERT_TRUE(desc.initial_lease_token_broker.has_value());
+  ASSERT_TRUE(desc.initial_lease_token_broker->is_valid());
+  // initial_lease_token_client should not be set if SetInitialLeaseToken was used
+  ASSERT_FALSE(desc.initial_lease_token_client.has_value());
+  ASSERT_TRUE(desc.element_config.initial_level.has_value());
+  ASSERT_EQ(*desc.element_config.initial_level, 5);
+
+  check_channels_peered(lease_token.get(), desc.initial_lease_token_broker->get());
+}
+
+TEST_F(ElementBuilderTests, InitialLevelFromConfig) {
+  fdf_power::PowerElementConfiguration config;
+  config.initial_level = 3;
+  fdf_power::TokenMap tokens;
+
+  fdf_power::ElementDesc desc = fdf_power::ElementDescBuilder(config, std::move(tokens)).Build();
+
+  ASSERT_TRUE(desc.initial_lease_token_broker.has_value());
+  ASSERT_TRUE(desc.initial_lease_token_broker->is_valid());
+  ASSERT_TRUE(desc.element_config.initial_level.has_value());
+  ASSERT_EQ(*desc.element_config.initial_level, 3);
+
+  ASSERT_TRUE(desc.initial_lease_token_client.has_value());
+  ASSERT_TRUE(desc.initial_lease_token_client->is_valid());
+
+  check_channels_peered(desc.initial_lease_token_client->get(),
+                        desc.initial_lease_token_broker->get());
 }
 
 }  // namespace power_lib_test

@@ -11,7 +11,7 @@ pub enum TufOrTimeout {
     // LINT.IfChange(tuf_error)
     #[error("rust tuf error")]
     Tuf(#[source] tuf::Error),
-    // LINT.ThenChange(/tools/testing/tefmocheck/string_in_log_check.go:tuf_error)
+    // LINT.ThenChange(/tools/testing/tefmocheck/check-configs.yaml:tuf_error)
     #[error("tuf operation timed out")]
     Timeout,
 }

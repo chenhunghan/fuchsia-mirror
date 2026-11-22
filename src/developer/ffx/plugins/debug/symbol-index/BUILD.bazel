@@ -2,9 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
-load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
 load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
 
 package(default_applicable_licenses = ["//:license"])
@@ -33,23 +31,12 @@ ffx_plugin(
     ],
 )
 
-host_test_data_files(
-    name = "test_data",
-    testonly = True,
-    srcs = [
-        "//src/developer/ffx/lib/symbol-index:test_data/another.json",
-        "//src/developer/ffx/lib/symbol-index:test_data/main.json",
-    ],
-    dest_dir = "test_data",
-    target_compatible_with = HOST_OS_CONSTRAINTS,
-)
-
 # bazel2gn cannot translate test_data; exported via //src/developer/ffx:tests.
 # @bazel2gn:skip
 host_rustc_test(
     name = "ffx_debug_symbol_index_test",
     crate = ":ffx_debug_symbol_index",
-    test_data = [":test_data"],
+    test_data = ["//src/developer/ffx/lib/symbol-index:test_data"],
     visibility = ["//src/developer/ffx:__pkg__"],
     deps = [
         "//src/lib/fuchsia",

@@ -12,7 +12,7 @@ Virtual addresses map directly to physical addresses. Fuchsia uses
 [VMARs](/docs/reference/kernel_objects/vm_address_region.md)
 (Virtual Memory Address Regions) to represent address spaces.
 
-## VMARs, Mappings, and VMOs
+## VMARs, mappings, and VMOs {:#vmars-mappings-and-vmos}
 
 In Fuchsia, every process has a root VMAR, and can partition into a hierarchy of
 VMARs and mappings. Mappings point to an underlying
@@ -82,7 +82,7 @@ spaces, including:
 
 It does this by managing relationships amongst VMARs, VM Mappings, VMOs, and
 hardware page tables. See also the
-[VMM source code](https://cs.opensource.google/fuchsia/fuchsia/+/main:zircon/kernel/vm/vmm.cc?q=vmm&ss=fuchsia%2Ffuchsia).
+[VMM source code](https://cs.opensource.google/fuchsia/fuchsia/+/main:zircon/kernel/vm/vmm.rs?q=vmm&ss=fuchsia%2Ffuchsia).
 
 When a process starts off, its entire address space is represented as one VMAR.
 As different portions of the address space are mapped, the VMAR hierarchy tree
@@ -97,7 +97,8 @@ A node represents either a VMAR or a VM Mapping:
     address range.
 
 Learn more about
-[visualizing memory usage from the root VMAR.](/docs/development/kernel/memory/memory.md#visualize_memory_usage)
+[visualizing memory usage from the root
+VMAR.](/docs/development/kernel/memory/memory.md#visualize-memory-usage)
 
 The VMM uses
 [Address space layout randomization](https://en.wikipedia.org/wiki/Address_space_layout_randomization)

@@ -62,13 +62,11 @@ foreach(test_type, test_types) {
         if (test_type == "long") {
           environments = [
             {
-              dimensions = qemu_env.dimensions
+              dimensions = emu_env.dimensions
               tags = [ "stress-tests" ]
             },
             {
-              dimensions = {
-                device_type = "Vim3"
-              }
+              dimensions = vim3_env.dimensions
               tags = [ "stress-tests" ]
             },
           ]
@@ -76,7 +74,6 @@ foreach(test_type, test_types) {
           environments = [
             emu_env,
             vim3_env,
-            nuc7_env,
             nuc11_env,
           ]
         }

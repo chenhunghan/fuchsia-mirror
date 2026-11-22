@@ -35,11 +35,13 @@ if (is_host) {
       "__init__.py",
       "dataclasses_json_lite.py",
     ]
+    imports = [ ".." ]
     visibility = [
       ":*",
       "//scripts/ffx_complete:*",
       "//src/memory/tools/debug_json:*",
       "//src/memory/tools/images_json:*",
     ]
+    enable_mypy = false
   }
 }

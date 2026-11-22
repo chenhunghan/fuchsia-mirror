@@ -540,12 +540,8 @@ template("generate_touch-test-suite") {
         max_severity = "ERROR"
       }
       environments = [
-        {
-          dimensions = {
-            # Ensure the device has Vulkan.
-            device_type = "AEMU"
-          }
-        },
+        # Ensure the device has Vulkan.
+        aemu_env,
       ]
     }
   }
@@ -571,12 +567,8 @@ template("generate_mouse-test-suite") {
         max_severity = "ERROR"
       }
       environments = [
-        {
-          dimensions = {
-            # Ensure the device has Vulkan.
-            device_type = "AEMU"
-          }
-        },
+        # Ensure the device has Vulkan.
+        aemu_env,
       ]
     }
   }
@@ -603,12 +595,8 @@ template("generate_key-test-suite") {
         max_severity = "ERROR"
       }
       environments = [
-        {
-          dimensions = {
-            # Ensure the device has Vulkan.
-            device_type = "AEMU"
-          }
-        },
+        # Ensure the device has Vulkan.
+        aemu_env,
       ]
     }
   }
@@ -634,12 +622,8 @@ template("generate_focus-test-suite") {
         max_severity = "ERROR"
       }
       environments = [
-        {
-          dimensions = {
-            # Ensure the device has Vulkan.
-            device_type = "AEMU"
-          }
-        },
+        # Ensure the device has Vulkan.
+        aemu_env,
       ]
     }
   }
@@ -665,12 +649,8 @@ template("generate_media-button-test-suite") {
         max_severity = "ERROR"
       }
       environments = [
-        {
-          dimensions = {
-            # Ensure the device has Vulkan.
-            device_type = "AEMU"
-          }
-        },
+        # Ensure the device has Vulkan.
+        aemu_env,
       ]
     }
   }

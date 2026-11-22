@@ -513,7 +513,7 @@ All the **documentation pages** mentioned in this section:
 [load-firmware]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/ddk/include/lib/ddk/driver.h;l=416
 [logging-h]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/compat/cpp/logging.h
 [synchronized-dispatchers]: /docs/concepts/drivers/driver-dispatcher-and-threads.md#synchronized-and-unsynchronized
-[gc-intel-wifi]:https://fuchsia-review.git.corp.google.com/c/fuchsia/+/692243
+[gc-intel-wifi]: https://fuchsia-review.git.corp.google.com/c/fuchsia/+/692243
 [pcie-iwlwifi-driver-cc]: https://fuchsia-review.git.corp.google.com/c/fuchsia/+/692243/47/src/connectivity/wlan/drivers/third_party/intel/iwlwifi/platform/pcie-iwlwifi-driver.cc
 [driver-base]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/component/cpp/driver_base.h?q=sdk%2Flib%2Fdriver%2Fcomponent%2Fcpp%2Fdriver_base.h&ss=fuchsia%2Ffuchsia
 [driver-base-99]: https://source.corp.google.com/h/turquoise-internal/turquoise/+/main:sdk/lib/driver/component/cpp/driver_base.h;l=99
@@ -534,7 +534,7 @@ All the **documentation pages** mentioned in this section:
 [logger-h]: https://source.corp.google.com/h/turquoise-internal/turquoise/+/main:sdk/lib/driver/logging/cpp/logger.h;l=15
 [load-firmware]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/ddk/include/lib/ddk/driver.h;l=408
 [gc-pcie-iwlwifi-driver]: https://fuchsia-review.git.corp.google.com/c/fuchsia/+/692243/47/src/connectivity/wlan/drivers/third_party/intel/iwlwifi/platform/pcie-iwlwifi-driver.cc#60
-[parent-driver-the-server]: /docs/development/drivers/tutorials/fidl-tutorial.md#parent_driver_the_server
+[parent-driver-the-server]: /docs/development/drivers/tutorials/fidl-tutorial.md#parent-driver-the-server
 [raii]: https://en.wikipedia.org/wiki/Resource_acquisition_is_initialization
 [driver-testing-runtime]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/testing/cpp/driver_runtime.h
 [driver-fidl-test-cc]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/component/cpp/tests/driver_fidl_test.cc

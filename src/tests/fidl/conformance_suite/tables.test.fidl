@@ -126,3 +126,43 @@ type ValueTableThenResourceTable = resource struct {
     first SimpleTable;
     second TableFieldInlinedHandle;
 };
+
+type ResourceTableWithHandlesAndVectors = resource table {
+    1: first_handle handle:EVENT;
+    3: middle vector<handle:EVENT>;
+    5: last_handle handle:CHANNEL;
+};
+
+type StructOfResourceTableWithHandlesAndVectors = resource struct {
+    before handle:EVENT;
+    table ResourceTableWithHandlesAndVectors;
+    after handle:CHANNEL;
+};
+
+type TableWithNestedFlexibleResourceUnion = resource table {
+    1: before vector<handle:EVENT>;
+    2: xu SampleResourceUnion;
+    3: after vector<handle:EVENT>;
+};
+
+type StructOfTableWithNestedFlexibleResourceUnion = resource struct {
+    value TableWithNestedFlexibleResourceUnion;
+};
+
+type StructOfTableAndTrigger = resource struct {
+    before handle:EVENT;
+    table TableFieldUnknownResource;
+    valid bool;
+    after handle:CHANNEL;
+};
+
+type EmptyValueTableThenHandle = resource struct {
+    t EmptyTable;
+    after handle:CHANNEL;
+};
+
+type EmptyResourceTableThenHandle = resource struct {
+    t EmptyResourceTable;
+    s string;
+    after handle:CHANNEL;
+};

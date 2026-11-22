@@ -60,7 +60,7 @@ static_library("debug_adapter") {
     "type_conversions.h",
   ]
 
-  deps = []
+  deps = [ "//zircon/third_party/ulib/safemath" ]
   public_deps = [
     "//src/developer/debug/zxdb/client",
     "//src/developer/debug/zxdb/console",
@@ -106,4 +106,5 @@ source_set("tests") {
     "//third_party/googletest:gmock",
     "//third_party/googletest:gtest",
   ]
+  public_deps = [ "//src/developer/debug/zxdb/console:test_support" ]
 }

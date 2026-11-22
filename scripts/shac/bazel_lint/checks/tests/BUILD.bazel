@@ -18,10 +18,12 @@ filegroup(
         "fuchsia_wrappers_test.star",
         "host_constraints_test.star",
         "load_visibility_test.star",
+        "migration_bazel2gn_overwrites_test.star",
         "package_default_visibility_test.star",
         "repository_paths_test.star",
         "root_package_labels_test.star",
         "target_visibility_test.star",
+        "test_suite_target_compatible_with_test.star",
         "vendor_paths_test.star",
         "visibility_for_public_by_default_types_test.star",
         # LINT.ThenChange(//scripts/shac/bazel_lint/checks/__init__.py:all_checks)

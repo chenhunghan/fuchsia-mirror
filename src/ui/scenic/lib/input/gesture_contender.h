@@ -47,6 +47,10 @@ class GestureContender {
   // be delivered to the client along with the initial UpdateStream() event.
   virtual void EndContest(StreamId stream_id, bool awarded_win) = 0;
 
+  // Controls whether outbound FIDL delivery is deferred until the end of an injection batch.
+  // When transitioning from true to false, pending events accumulated during the batch are flushed.
+  virtual void SetBatchMode(bool in_batch) {}
+
   virtual zx_koid_t channel_koid() const { return ZX_KOID_INVALID; }
 
   const zx_koid_t view_ref_koid_;

@@ -13,7 +13,40 @@
         default_dispatcher_opts: [ "allow_sync_calls" ],
     },
     capabilities: [
-        { service: "fuchsia.hardware.ethernet.board.Service" },
+        {
+            service: "fuchsia.hardware.ethernet.board.Service",
+            metadata: {
+                id: "fuchsia.hardware.ethernet.board.Metadata",
+                schema: {
+                    $schema: "http://json-schema.org/draft-07/schema#",
+                    title: "EthBoardMetadata",
+                    type: "object",
+                    properties: {
+                        // At most one consumer: the device can only carry one `fuchsia.ID`.
+                        consumers: {
+                            type: "array",
+                            items: { $ref: "#/definitions/EthBoardConsumer" },
+                        },
+                    },
+                    definitions: {
+                        EthBoardConsumer: {
+                            type: "object",
+                            properties: {
+                                id: {
+                                    type: "integer",
+                                    fuchsia_type: "uint32",
+                                },
+                                name: { type: "string" },
+                            },
+                            required: [
+                                "id",
+                                "name",
+                            ],
+                        },
+                    },
+                },
+            },
+        },
     ],
     use: [
         {

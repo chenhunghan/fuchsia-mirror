@@ -2,32 +2,44 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use rustyline::completion::Completer;
-use rustyline::error::ReadlineError;
-use rustyline::highlight::Highlighter;
-use rustyline::hint::Hinter;
-use rustyline::validate::Validator;
-use rustyline::{Context, Helper};
-use std::borrow::Cow::{self, Borrowed, Owned};
+use bstr::{BStr, BString, ByteSlice};
+use line_editor::{Color, Editor, Hint};
 use std::sync::Arc;
 
 use crate::repl::{BUILTIN_COMMANDS, EXIT_COMMAND, HELP_COMMAND, QUIT_COMMAND};
 use crate::source::CommandSource;
 
-/// Escape sequence that starts drawing hints in dark gray.
-const HINT_COLOR: &str = "\x1b[90m";
-/// Escape sequence that resets the text color.
-const RESET_COLOR: &str = "\x1b[0m";
+/// ANSI SGR color code for drawing inline hints in dark gray (bright black).
+const HINT_COLOR_CODE: u8 = 90;
 
-/// The rustyline [`Helper`] shared by every REPL. Provides command and
-/// argument completion, argument hints, and hint highlighting.
+/// The [`line_editor`] helper shared by every REPL. Provides command and
+/// argument completion, and inline argument hints.
 pub(crate) struct ReplHelper<S> {
     source: Arc<S>,
+}
+
+impl<S> Clone for ReplHelper<S> {
+    fn clone(&self) -> Self {
+        Self { source: Arc::clone(&self.source) }
+    }
 }
 
 impl<S: CommandSource> ReplHelper<S> {
     pub(crate) fn new(source: Arc<S>) -> Self {
         Self { source }
+    }
+
+    /// Registers this helper's completion and hint handlers on `editor`.
+    pub(crate) fn install(self, editor: &mut Editor) {
+        let completer = self.clone();
+        editor.set_completion_handler(move |line: &BStr| {
+            let line = line.to_str_lossy();
+            completer.complete(&line).into_iter().map(BString::from).collect()
+        });
+        editor.set_hint_handler(move |line: &BStr| {
+            let line = line.to_str_lossy();
+            self.hint(&line).map(|hint| Hint::new(hint).with_color(Color::Custom(HINT_COLOR_CODE)))
+        });
     }
 
     /// Returns the names of all commands, including the built-in commands.
@@ -54,23 +66,15 @@ impl<S: CommandSource> ReplHelper<S> {
             .map(|candidate| format!("{command} {candidate}"))
             .collect()
     }
-}
 
-impl<S: CommandSource> Completer for ReplHelper<S> {
-    type Candidate = String;
-
-    fn complete(
-        &self,
-        line: &str,
-        _pos: usize,
-        _ctx: &Context<'_>,
-    ) -> Result<(usize, Vec<String>), ReadlineError> {
+    /// Returns completion candidates for `line`.
+    pub(crate) fn complete(&self, line: &str) -> Vec<String> {
         let components: Vec<&str> = line.split_whitespace().collect();
         let ends_with_space = line.ends_with(char::is_whitespace);
 
         // Complete the first argument once a command followed by whitespace, or a command and a
         // partial argument, has been entered. Otherwise complete the command name.
-        let candidates = match components.as_slice() {
+        match components.as_slice() {
             [] => self.command_names(),
             [typed] if !ends_with_space => {
                 self.command_names().into_iter().filter(|name| name.starts_with(typed)).collect()
@@ -78,16 +82,11 @@ impl<S: CommandSource> Completer for ReplHelper<S> {
             [command] => self.argument_candidates(command, ""),
             [command, partial] if !ends_with_space => self.argument_candidates(command, partial),
             _ => Vec::new(),
-        };
-        Ok((0, candidates))
+        }
     }
-}
-
-impl<S: CommandSource> Hinter for ReplHelper<S> {
-    type Hint = String;
 
     /// Hints the flags and arguments of a fully typed command.
-    fn hint(&self, line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
+    pub(crate) fn hint(&self, line: &str) -> Option<String> {
         let trimmed = line.trim();
         let hint = match trimmed {
             HELP_COMMAND => "<[command]> ".to_string(),
@@ -102,24 +101,9 @@ impl<S: CommandSource> Hinter for ReplHelper<S> {
     }
 }
 
-impl<S: CommandSource> Highlighter for ReplHelper<S> {
-    /// Draws hints in a different color to distinguish them from user input.
-    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        if hint.trim().is_empty() {
-            Borrowed(hint)
-        } else {
-            Owned(format!("{HINT_COLOR}{hint}{RESET_COLOR}"))
-        }
-    }
-}
-
-impl<S: CommandSource> Validator for ReplHelper<S> {}
-
-impl<S: CommandSource> Helper for ReplHelper<S> {}
-
 #[cfg(test)]
 mod tests {
-    use rustyline::history::DefaultHistory;
+    use line_editor::{ColumnWidth, Config, OperatingMode, TerminalMode};
 
     use super::*;
     use crate::commands::CommandSet;
@@ -144,18 +128,11 @@ mod tests {
     }
 
     fn complete<S: CommandSource>(helper: &ReplHelper<S>, line: &str) -> Vec<String> {
-        let history = DefaultHistory::new();
-        let context = Context::new(&history);
-        let (start, candidates) =
-            Completer::complete(helper, line, line.len(), &context).expect("completion succeeds");
-        assert_eq!(start, 0);
-        candidates
+        helper.complete(line)
     }
 
     fn hint<S: CommandSource>(helper: &ReplHelper<S>, line: &str) -> Option<String> {
-        let history = DefaultHistory::new();
-        let context = Context::new(&history);
-        Hinter::hint(helper, line, line.len(), &context)
+        helper.hint(line)
     }
 
     #[fuchsia::test]
@@ -250,9 +227,32 @@ mod tests {
     }
 
     #[fuchsia::test]
-    fn highlights_non_empty_hints() {
-        let helper = ReplHelper::new(Arc::new(Commands::<TestCommand>::new()));
-        assert_eq!(helper.highlight_hint(" <peer-id> "), "\x1b[90m <peer-id> \x1b[0m");
-        assert_eq!(helper.highlight_hint("  "), "  ");
+    fn install_wires_completion_and_hints_into_editor() {
+        let config = Config::default()
+            .with_terminal_mode(TerminalMode::Tty)
+            .with_term_name(Some("xterm-256color"))
+            .with_column_width(ColumnWidth::Fixed(80));
+        let mut editor = Editor::with_config(config);
+        ReplHelper::new(Arc::new(peer_source())).install(&mut editor);
+
+        // Type "con", Tab (completes to "connect"), space, "04",
+        // Tab (completes to "connect 0456"), Enter.
+        let input = b"con\t 04\t\n";
+        let mut output = Vec::new();
+        let line = editor
+            .readline_from(
+                &input[..],
+                &mut output,
+                OperatingMode::Interactive,
+                "\x1b[34mbt>\x1b[0m ",
+            )
+            .expect("readline succeeds");
+        assert_eq!(line, BString::from("connect 0456"));
+        let rendered = String::from_utf8_lossy(&output);
+        // Verify that the dark-gray hint for `connect` (`<peer-id> `) was
+        // rendered to output, and that cursor positioning accounts for the 4
+        // visible columns of "\x1b[34mbt>\x1b[0m ".
+        assert!(rendered.contains("\x1b[0;90;49m <peer-id> \x1b[0m"));
+        assert!(rendered.contains("\r\x1b[11C"));
     }
 }

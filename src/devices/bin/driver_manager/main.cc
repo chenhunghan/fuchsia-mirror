@@ -124,9 +124,9 @@ int main(int argc, char** argv) {
                   statecontrol_admin_result.status_string());
   }
 
-  auto capability_store_result = component::Connect<fuchsia_component_sandbox::CapabilityStore>();
-  if (capability_store_result.is_error()) {
-    return capability_store_result.error_value();
+  auto capabilities_result = component::Connect<fuchsia_component_runtime::Capabilities>();
+  if (capabilities_result.is_error()) {
+    return capabilities_result.error_value();
   }
 
   auto driver_index_result = component::Connect<fuchsia_driver_index::DriverIndex>();
@@ -153,8 +153,7 @@ int main(int argc, char** argv) {
   std::shared_ptr<driver_manager::DriverRunner> driver_runner =
       std::make_shared<driver_manager::DriverRunner>(
           std::move(realm_result.value()), std::move(introspector_result.value()),
-          std::move(capability_store_result.value()), std::move(driver_index_result.value()),
-          inspector,
+          std::move(capabilities_result.value()), std::move(driver_index_result.value()), inspector,
           [loader_service]() -> zx::result<fidl::ClientEnd<fuchsia_ldsvc::Loader>> {
             zx::result client = loader_service->Connect();
             if (client.is_error()) {

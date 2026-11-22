@@ -8,9 +8,17 @@
 
 #![cfg_attr(feature = "userspace", no_std)]
 
+#[cfg(test)]
+extern crate std;
+
+#[cfg(feature = "userspace")]
+#[macro_use(assert, debug_assert)]
+extern crate zr;
+
 #[cfg_attr(not(feature = "userspace"), expect(clippy::module_inception))]
 mod cmpctmalloc;
-#[cfg(feature = "userspace")]
-mod cmpctmalloc_ffi;
+#[cfg(test)]
+#[path = "tests/cmpctmalloc_test.rs"]
+mod tests;
 
 pub use cmpctmalloc::*;

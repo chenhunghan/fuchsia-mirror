@@ -141,8 +141,11 @@
                 "console", // Default device path, overriden by boot arguments.
                 "fuchsia.kernel.RootJob",
                 "fuchsia.process.Launcher",
-                "fuchsia.process.Resolver",
             ],
+        },
+        {
+            protocol: [ "fuchsia.process.Resolver" ],
+            availability: "optional",
         },
         {
             // Used by programs started in the console.

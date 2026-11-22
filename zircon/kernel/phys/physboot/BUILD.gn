@@ -12,9 +12,9 @@ import("//build/zbi/kernel_cmdline.gni")
 import("//build/zbi/zbi.gni")
 import("//build/zircon/zircon_cpu.gni")
 import("//zircon/kernel/kernel_package.gni")
-import("//zircon/kernel/phys/kernel_elf_binary.gni")
-import("//zircon/kernel/phys/kernel_elf_interp.gni")
-import("//zircon/kernel/phys/zbi_executable.gni")
+import("//zircon/kernel/phys/elf/kernel_elf_binary.gni")
+import("//zircon/kernel/phys/elf/kernel_elf_interp.gni")
+import("//zircon/kernel/phys/zbi-runtime/zbi_executable.gni")
 
 zbi_executable("physboot") {
   sources = [
@@ -26,19 +26,16 @@ zbi_executable("physboot") {
     "//zircon/kernel/phys",
   ]
   deps = [
-    "..:address-space",
-    "..:address-space-map",
-    "..:allocation",
-    "..:elf-image",
-    "..:stdio",
-    "..:symbolize",
+    "../address-space",
+    "../allocation",
     "../boot-zbi",
+    "../elf",
     "../handoff",
     "../handoff-prep",
     "../kernel-package",
-    "../log",
+    "../memory:headers",
+    "../output",
     "../runtime",
-    "../uart",
     "//sdk/lib/fit",
     "//src/lib/elfldltl",
     "//src/lib/zbitl",
@@ -89,7 +86,7 @@ kernel_elf_binary("physboot-hello-world-test") {
 
   deps = [
     ":physboot.kernel",
-    "..:address-space",
+    "../address-space:headers",
     "../handoff",
     "//zircon/kernel/lib/boot-options",
     "//zircon/kernel/lib/code-patching:self-test",

@@ -3,15 +3,30 @@
 # found in the LICENSE file.
 
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
-exports_files(
-    [
+# GN has no copy of symbol_index_lib_test (@bazel2gn:skip below).
+# @bazel2gn:skip
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":symbol_index_lib_test"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+host_test_data_files(
+    name = "test_data",
+    testonly = True,
+    srcs = [
         "test_data/another.json",
         "test_data/main.json",
     ],
+    dest_dir = "test_data",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//src/developer/ffx/plugins/debug/symbol-index:__pkg__"],
 )
 
@@ -37,4 +52,14 @@ rustc_library(
         "//third_party/rust_crates/vendor:serde_json",
         "//third_party/rust_crates/vendor:thiserror",
     ],
+)
+
+# bazel2gn cannot translate `test_data`, so this test is wired into
+# //src/developer/ffx:tests in Bazel.
+# @bazel2gn:skip
+host_rustc_test(
+    name = "symbol_index_lib_test",
+    crate = ":lib",
+    test_data = [":test_data"],
+    deps = ["//third_party/rust_crates/vendor:tempfile"],
 )

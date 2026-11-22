@@ -7,12 +7,14 @@ use anyhow::Context;
 use cm_rust::{ComponentDecl, FidlIntoNative};
 use directed_graph::DirectedGraph;
 use flex_client::ProxyHasDomain;
+use flex_fuchsia_component_decl as fcdecl;
+use flex_fuchsia_io as fio;
+use flex_fuchsia_sys2 as fsys;
 use fuchsia_async::TimeoutExt;
 use futures::TryFutureExt;
 use moniker::{Moniker, MonikerError};
 use std::convert::Infallible;
 use thiserror::Error;
-use {flex_fuchsia_component_decl as fcdecl, flex_fuchsia_io as fio, flex_fuchsia_sys2 as fsys};
 
 #[cfg(feature = "fdomain")]
 use fuchsia_fs_fdomain as fuchsia_fs;
@@ -160,6 +162,15 @@ pub enum GetDeclarationError {
 
     #[error("component manifest could not be validated")]
     InvalidManifest(#[from] cm_fidl_validator::error::ErrorList),
+
+    #[error("component manager failed to resolve manifest for {0}")]
+    ResolveFailed(String),
+
+    #[error("component manager failed to open package for {0}")]
+    PackageOpenFailed(String),
+
+    #[error("component manager failed to read package for {0}")]
+    PackageReadFailed(String),
 
     #[error("component manager responded with an unknown error code")]
     UnknownError,
@@ -377,6 +388,18 @@ pub async fn get_resolved_declaration(
             Err(GetDeclarationError::BadMoniker(moniker.clone()))
         }
         Err(fsys::GetDeclarationError::EncodeFailed) => Err(GetDeclarationError::EncodeFailed),
+        Err(fsys::GetDeclarationError::BadUrl) => {
+            Err(GetDeclarationError::BadUrl(format!("for instance {moniker}")))
+        }
+        Err(fsys::GetDeclarationError::ResolveFailed) => {
+            Err(GetDeclarationError::ResolveFailed(moniker_str))
+        }
+        Err(fsys::GetDeclarationError::PackageOpenFailed) => {
+            Err(GetDeclarationError::PackageOpenFailed(moniker_str))
+        }
+        Err(fsys::GetDeclarationError::PackageReadFailed) => {
+            Err(GetDeclarationError::PackageReadFailed(moniker_str))
+        }
         Err(_) => Err(GetDeclarationError::UnknownError),
     }?;
 
@@ -426,6 +449,15 @@ pub async fn resolve_declaration(
                 GetDeclarationError::BadChildLocation(child_location.to_owned())
             }
             fsys::GetDeclarationError::BadUrl => GetDeclarationError::BadUrl(url.to_owned()),
+            fsys::GetDeclarationError::ResolveFailed => {
+                GetDeclarationError::ResolveFailed(url.to_owned())
+            }
+            fsys::GetDeclarationError::PackageOpenFailed => {
+                GetDeclarationError::PackageOpenFailed(url.to_owned())
+            }
+            fsys::GetDeclarationError::PackageReadFailed => {
+                GetDeclarationError::PackageReadFailed(url.to_owned())
+            }
             _ => GetDeclarationError::UnknownError,
         })?;
 
@@ -729,5 +761,101 @@ mod tests {
 
         let execution_info = resolved.execution_info.unwrap();
         assert_eq!(execution_info.start_reason, "Debugging Workflow".to_string());
+    }
+
+    #[fuchsia::test]
+    async fn test_get_resolved_declaration_errors() {
+        use assert_matches::assert_matches;
+        use futures::StreamExt;
+
+        let (query, mut stream) =
+            fidl::endpoints::create_proxy_and_stream::<fsys::RealmQueryMarker>();
+        let _server = fuchsia_async::Task::spawn(async move {
+            while let Some(Ok(request)) = stream.next().await {
+                match request {
+                    fsys::RealmQueryRequest::GetResolvedDeclaration { moniker, responder } => {
+                        let err = match moniker.as_str() {
+                            "resolve_failed" | "/resolve_failed" => {
+                                fsys::GetDeclarationError::ResolveFailed
+                            }
+                            "pkg_open_failed" | "/pkg_open_failed" => {
+                                fsys::GetDeclarationError::PackageOpenFailed
+                            }
+                            "pkg_read_failed" | "/pkg_read_failed" => {
+                                fsys::GetDeclarationError::PackageReadFailed
+                            }
+                            "bad_url" | "/bad_url" => fsys::GetDeclarationError::BadUrl,
+                            _ => fsys::GetDeclarationError::InstanceNotFound,
+                        };
+                        responder.send(Err(err)).unwrap();
+                    }
+                    fsys::RealmQueryRequest::ResolveDeclaration {
+                        parent,
+                        child_location: _,
+                        url: _,
+                        responder,
+                    } => {
+                        let err = match parent.as_str() {
+                            "resolve_failed" | "/resolve_failed" => {
+                                fsys::GetDeclarationError::ResolveFailed
+                            }
+                            "pkg_open_failed" | "/pkg_open_failed" => {
+                                fsys::GetDeclarationError::PackageOpenFailed
+                            }
+                            "pkg_read_failed" | "/pkg_read_failed" => {
+                                fsys::GetDeclarationError::PackageReadFailed
+                            }
+                            _ => fsys::GetDeclarationError::InstanceNotFound,
+                        };
+                        responder.send(Err(err)).unwrap();
+                    }
+                    _ => panic!("Unexpected RealmQuery request"),
+                }
+            }
+        });
+
+        let moniker = Moniker::parse_str("/resolve_failed").unwrap();
+        assert_matches!(
+            get_resolved_declaration(&moniker, &query).await,
+            Err(GetDeclarationError::ResolveFailed(m)) if m == moniker.to_string()
+        );
+
+        let moniker = Moniker::parse_str("/pkg_open_failed").unwrap();
+        assert_matches!(
+            get_resolved_declaration(&moniker, &query).await,
+            Err(GetDeclarationError::PackageOpenFailed(m)) if m == moniker.to_string()
+        );
+
+        let moniker = Moniker::parse_str("/pkg_read_failed").unwrap();
+        assert_matches!(
+            get_resolved_declaration(&moniker, &query).await,
+            Err(GetDeclarationError::PackageReadFailed(m)) if m == moniker.to_string()
+        );
+
+        let moniker = Moniker::parse_str("/bad_url").unwrap();
+        assert_matches!(
+            get_resolved_declaration(&moniker, &query).await,
+            Err(GetDeclarationError::BadUrl(m)) if m == format!("for instance {moniker}")
+        );
+
+        let child_location = fsys::ChildLocation::Collection("coll".to_string());
+        let child_url = "fuchsia-pkg://fuchsia.com/foo#meta/foo.cm";
+        let parent = Moniker::parse_str("/resolve_failed").unwrap();
+        assert_matches!(
+            resolve_declaration(&query, &parent, &child_location, child_url).await,
+            Err(GetDeclarationError::ResolveFailed(u)) if u == child_url
+        );
+
+        let parent = Moniker::parse_str("/pkg_open_failed").unwrap();
+        assert_matches!(
+            resolve_declaration(&query, &parent, &child_location, child_url).await,
+            Err(GetDeclarationError::PackageOpenFailed(u)) if u == child_url
+        );
+
+        let parent = Moniker::parse_str("/pkg_read_failed").unwrap();
+        assert_matches!(
+            resolve_declaration(&query, &parent, &child_location, child_url).await,
+            Err(GetDeclarationError::PackageReadFailed(u)) if u == child_url
+        );
     }
 }

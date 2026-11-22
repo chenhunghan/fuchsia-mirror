@@ -583,10 +583,12 @@ func buildConfigs(absOutputDir string, absFFXPath string, sshInfo SSHInfo, extra
 		"log.dir":                      filepath.Join(absOutputDir, "ffx_logs"),
 		"ffx.subtool-search-paths":     filepath.Dir(absFFXPath),
 		"test.experimental_json_input": true,
-		"emu.instance_dir":             filepath.Join(absOutputDir, "emu/instances"),
 		"ssh.priv":                     sshInfo.SshPriv,
 		"ssh.pub":                      sshInfo.SshPub,
-		"shared_data":                  filepath.Join(absOutputDir, "shared"),
+		// Keep ffx's shared state, including emulator instances under
+		// $SHARED_DATA/emu/instances, isolated inside absOutputDir. Callers can
+		// still override emu.instance_dir via extraConfigSettings.
+		"shared_data": filepath.Join(absOutputDir, "shared"),
 	}
 	for _, settings := range extraConfigSettings {
 		if settings.Level == "global" {
@@ -781,6 +783,9 @@ func (f *FFXInstance) TargetList(ctx context.Context, configs map[string]any, ar
 	return entries, nil
 }
 
+// SetTarget sets the target that later ffx commands run against. It is not
+// synchronized, so it must not be called while another goroutine runs commands
+// through f.
 func (f *FFXInstance) SetTarget(target string) {
 	f.target = target
 }
@@ -1223,7 +1228,7 @@ func (f *FFXInstance) TargetWait(ctx context.Context, args ...string) error {
 // EmuStart returns an invoker to start the emulator with the specified
 // commands.
 func (f *FFXInstance) EmuStart(args ...string) *ffxInvoker {
-	return f.invoker(append([]string{"emu", "start"}, args...))
+	return f.invoker(append([]string{"emu", "start"}, args...)).setCaptureOutput()
 }
 
 func (f *FFXInstance) EmuStop(ctx context.Context, args ...string) error {

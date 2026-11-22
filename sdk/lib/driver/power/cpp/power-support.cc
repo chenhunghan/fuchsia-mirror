@@ -29,6 +29,9 @@
 #include <zircon/rights.h>
 #include <zircon/syscalls.h>
 
+#include <algorithm>
+#include <utility>
+
 #include "lib/driver/power/cpp/element-description-builder.h"
 
 #if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
@@ -492,10 +495,20 @@ fit::result<Error> AddElement(
     std::optional<fidl::ServerEnd<fuchsia_power_broker::ElementControl>> element_control,
     std::optional<fidl::UnownedClientEnd<fuchsia_power_broker::ElementControl>>
         element_control_client,
-    std::optional<fidl::ClientEnd<fuchsia_power_broker::ElementRunner>> element_runner) {
+    std::optional<fidl::ClientEnd<fuchsia_power_broker::ElementRunner>> element_runner,
+    std::optional<fuchsia_power_broker::LeaseToken> initial_lease_token,
+    std::optional<uint8_t> initial_current_level) {
+  const uint8_t effective_initial_level =
+      initial_current_level.value_or(config.initial_level.value_or(0));
+  if (initial_lease_token.has_value() &&
+      (!initial_lease_token->is_valid() || effective_initial_level == 0)) {
+    return fit::error(Error::INVALID_ARGS);
+  }
+
   // Get the power levels we should have
   std::vector<fuchsia_power_broker::PowerLevel> levels = PowerLevelsFromConfig(config);
-  if (levels.size() == 0) {
+  if (levels.empty() ||
+      std::find(levels.begin(), levels.end(), effective_initial_level) == levels.end()) {
     return fit::error(Error::INVALID_ARGS);
   }
 
@@ -547,10 +560,11 @@ fit::result<Error> AddElement(
 
   fuchsia_power_broker::ElementSchema schema{{
       .element_name = std::string(config.element.name.data(), config.element.name.size()),
-      .initial_current_level = static_cast<uint8_t>(0),
+      .initial_current_level = effective_initial_level,
       .valid_levels = std::move(levels),
       .dependencies = std::move(level_deps),
       .element_runner = std::move(element_runner),
+      .initial_lease_token = std::move(initial_lease_token),
   }};
   if (lessor.has_value()) {
     schema.lessor_channel() = std::move(lessor.value());
@@ -569,6 +583,15 @@ fit::result<Error> AddElement(
     // TODO(https://fxbug.dev/328266458) not sure if invalid args is right for
     // all other conditions
     return fit::error(Error::INVALID_ARGS);
+  }
+  if (add_result->is_error()) {
+    switch (add_result->error_value()) {
+      case fuchsia_power_broker::AddElementError::kNotAuthorized:
+        return fit::error(Error::NOT_AUTHORIZED);
+      case fuchsia_power_broker::AddElementError::kInvalid:
+      default:
+        return fit::error(Error::INVALID_ARGS);
+    }
   }
 
   if (element_control_client.has_value()) {
@@ -596,7 +619,9 @@ fit::result<Error> AddElement(fidl::ClientEnd<fuchsia_power_broker::Topology>& p
   return AddElement(power_broker, description.element_config, std::move(description.tokens),
                     description.assertive_token.borrow(), std::move(description.lessor_server),
                     std::move(description.element_control_server), element_control_client,
-                    std::move(description.element_runner_client));
+                    std::move(description.element_runner_client),
+                    std::exchange(description.initial_lease_token_broker, std::nullopt),
+                    description.element_config.initial_level);
 }
 
 fit::result<Error, std::vector<ElementDesc>> ApplyPowerConfiguration(

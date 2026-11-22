@@ -8,6 +8,7 @@
 
 #include <ktl/utility.h>
 #include <phys/runtime/main.h>
+#include <phys/zbi-runtime/main.h>
 
 #include "test-main.h"
 

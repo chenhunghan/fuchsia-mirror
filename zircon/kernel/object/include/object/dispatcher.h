@@ -55,16 +55,6 @@ void cpp_dispatcher_cancel(Dispatcher* disp, const void* handle);
 bool cpp_dispatcher_cancel_by_key(Dispatcher* disp, const void* handle, const void* port,
                                   uint64_t key);
 zx_signals_t cpp_dispatcher_poll_signals(const Dispatcher* disp);
-
-typedef void (*cpp_callback_signal_observer_on_match_fn)(const void* ctx, zx_signals_t signals);
-typedef void (*cpp_callback_signal_observer_on_cancel_fn)(const void* ctx, zx_signals_t signals);
-typedef bool (*cpp_callback_signal_observer_matches_key_fn)(const void* ctx, const void* port,
-                                                            uint64_t key);
-SignalObserver* cpp_callback_signal_observer_init(
-    void* storage, const void* ctx, cpp_callback_signal_observer_on_match_fn on_match,
-    cpp_callback_signal_observer_on_cancel_fn on_cancel,
-    cpp_callback_signal_observer_matches_key_fn matches_key);
-void cpp_callback_signal_observer_destroy(SignalObserver* observer);
 }
 
 template <typename T>
@@ -117,18 +107,17 @@ struct CanaryTag;
     static constexpr zx_obj_type_t ID = E; \
   };
 
-#define DECLARE_SOLO_DISPTAG(T, E, M)                \
-  DECLARE_DISPTAG(T, E)                              \
+#define DECLARE_SOLO_DISPTAG(T, M)                   \
+  class T;                                           \
   template <>                                        \
   struct CanaryTag<T> {                              \
     static constexpr uint32_t magic = fbl::magic(M); \
   };
 
-DECLARE_SOLO_DISPTAG(ProcessDispatcher, ZX_OBJ_TYPE_PROCESS, "PROC")
+DECLARE_SOLO_DISPTAG(ProcessDispatcher, "PROC")
 DECLARE_DISPTAG(VmObjectDispatcher, ZX_OBJ_TYPE_VMO)
 DECLARE_DISPTAG(ChannelDispatcher, ZX_OBJ_TYPE_CHANNEL)
 DECLARE_DISPTAG(SocketDispatcher, ZX_OBJ_TYPE_SOCKET)
-DECLARE_SOLO_DISPTAG(JobDispatcher, ZX_OBJ_TYPE_JOB, "JOBD")
 DECLARE_DISPTAG(IoBufferDispatcher, ZX_OBJ_TYPE_IOB)
 
 #undef DECLARE_SOLO_DISPTAG
@@ -340,7 +329,8 @@ class Dispatcher : private fbl::RefCountedUpgradeable<Dispatcher>,
   // Notify the observers waiting on one or more |signals|.
   //
   // unlike UpdateState and UpdateStateLocked, this method does not modify the stored signal state.
-  void NotifyObserversLocked(zx_signals_t signals, OwnedWaitQueue* queue_to_own) TA_REQ(get_lock());
+  // |queue_to_own| is an opaque pointer to a Rust OwnedWaitQueue, or nullptr.
+  void NotifyObserversLocked(zx_signals_t signals, void* queue_to_own) TA_REQ(get_lock());
 
   // Returns the stored signal state.
   zx_signals_t GetSignalsStateLocked() const TA_REQ(get_lock()) {

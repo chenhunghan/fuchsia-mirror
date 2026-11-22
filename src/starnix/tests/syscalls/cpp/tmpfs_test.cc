@@ -210,4 +210,43 @@ TEST(TmpfsTest, NoswapDoesNotRequireCapIpcLock) {
   ASSERT_TRUE(helper.WaitForChildren());
 }
 
+TEST(TmpfsTest, SizeMountOptionValidation) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "need CAP_SYS_ADMIN to mount tmpfs";
+  }
+
+  test_helper::ScopedTempDir temp_dir;
+
+  const char* kValidOptions[] = {
+      "size=0",      "size=65536",  "size=0x1000",
+      "size=01000",  "size=0xe",    "size=0x10e",
+      "size=0x10ee", "size=0x10g",  "size=64k",
+      "size=64K",    "size=16m",    "size=16M",
+      "size=9g",     "size=9G",     "size=1t",
+      "size=1T",     "size=1p",     "size=1P",
+      "size=1e",     "size=1E",     "size=50%",
+      "size=G",      "size=%",      "size=k%",
+      "size=10k%",   "size=0x10g%", "size=18446744073709551616",
+      "size=16E",
+  };
+
+  for (const char* option : kValidOptions) {
+    auto mount_result =
+        test_helper::ScopedMount::Mount("none", temp_dir.path(), "tmpfs", 0, option);
+    ASSERT_THAT(mount_result, SyscallResultIsOk()) << "mount(tmpfs, " << option << ") failed";
+  }
+
+  const char* kInvalidOptions[] = {
+      "size",     "size=",     "size=invalid", "size=08",   "size=0x",    "size=0X",   "size=0xk",
+      "size=0x%", "size=0xg",  "size=0x10ge",  "size=+100", "size=-1",    "size= 100", "size=100 ",
+      "size=9z",  "size=50%%", "size=10%k",    "size=10kk", "size=100k1", "size=k1",   "size=%1",
+  };
+
+  for (const char* option : kInvalidOptions) {
+    EXPECT_THAT(test_helper::ScopedMount::Mount("none", temp_dir.path(), "tmpfs", 0, option),
+                SyscallResultIsErrno(EINVAL))
+        << "mount(tmpfs, " << option << ") unexpectedly succeeded";
+  }
+}
+
 }  // namespace

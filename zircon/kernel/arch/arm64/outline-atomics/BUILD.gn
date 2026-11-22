@@ -1,0 +1,97 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/config/compiler_config.gni")
+import("//build/toolchain/toolchain_environment.gni")
+import("//zircon/kernel/lib/code-patching/code-patching.gni")
+
+# Only kernel code is expected to be patched.
+assert(toolchain_environment == "kernel")
+
+# This enables FEAT_LSE instructions, which the baseline kernel target lacks.
+compiler_config("lse") {
+  visibility = [ ":*" ]
+
+  c_family_flags = [ "-march=armv8-a+lse" ]
+  rust_target_features = [ "+lse" ]
+}
+
+# This enables FEAT_LSE instructions with the Cortex-A55 workaround of
+# preceding each with `prfm pstl1keep` to force a near atomic in L1.
+compiler_config("lse-a55") {
+  visibility = [ ":*" ]
+
+  compiler_configs = [ ":lse" ]
+  defines = [ "OUTLINE_ATOMIC_LSE_A55=1" ]
+}
+
+sizes = [
+  1,
+  2,
+  4,
+  8,
+  16,
+]
+ops = [
+  "cas",
+  "swp",
+  "ldadd",
+  "ldclr",
+  "ldeor",
+  "ldset",
+]
+orders = [
+  "relax",
+  "acq",
+  "rel",
+  "acq_rel",
+]
+
+outline_atomics = []
+foreach(size, sizes) {
+  foreach(op, ops) {
+    foreach(order, orders) {
+      if (size < 16 || op == "cas") {
+        name = "__aarch64_$op${size}_$order"
+        outline_atomics += [ ":$name" ]
+
+        code_patching_hermetic_multiversion(name) {
+          visibility = [ ":*" ]
+
+          case_id_header = "arch/code-patches/case-id.h"
+          case_id = "ARM64_OUTLINE_ATOMIC_CASE_ID(OUTLINE_ATOMIC)"
+
+          # This selects the one function that outline-atomic.S defines.
+          defines = [ "OUTLINE_ATOMIC=$op,$size,$order" ]
+          sources = [ "outline-atomic.S" ]
+          deps = [ "//zircon/kernel/lib/arch:headers" ]
+
+          versions = [
+            {
+              subdir = "llsc"
+            },
+            {
+              subdir = "lse"
+              add_configs = [ ":lse" ]
+            },
+            {
+              subdir = "lse-a55"
+              add_configs = [ ":lse-a55" ]
+            },
+          ]
+        }
+      }
+    }
+  }
+}
+
+# This provides all the functions that the compiler calls for
+# -moutline-atomics.  Each is a code-patching stub that physboot patches
+# with its "lse/...", "lse-a55/...", or "llsc/..." alternative.  See
+# outline-atomic.S for details.
+group("outline-atomics") {
+  deps = outline_atomics
+}

@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import weakref
 from collections.abc import Sequence
 
 import fidl_fuchsia_wlan_wlanix as fidl_wlanix
@@ -249,6 +250,22 @@ class StaIface:
         """Removes this STA interface from its parent WifiChip."""
         await self._chip.remove_sta_iface(self.name)
 
+    async def _reconnect(self) -> None:
+        """Rebinds active FIDL proxies for this STA interface after device resume."""
+        proxy, server = self._fc_transport.channel_create()
+        (
+            await self._chip.proxy.get_sta_iface(
+                iface_name=self.name, iface=server.take()
+            )
+        ).unwrap()
+        self.wifi_sta_iface = fidl_wlanix.WifiStaIfaceClient(proxy)
+        if self._supplicant_sta_iface is not None:
+            self._supplicant_sta_iface = (
+                self._chip.wlanix.add_supplicant_sta_iface(self.name)
+            )
+        if self._nl80211 is not None:
+            self._nl80211.proxy = self._chip.wlanix.get_nl80211().proxy
+
 
 class WifiChip:
     """Represents a WifiChip managed by wlanix."""
@@ -264,6 +281,7 @@ class WifiChip:
         self.proxy = proxy
         self.wlanix = wlanix
         self._fc_transport = fuchsia_controller
+        self._ifaces: weakref.WeakSet[StaIface] = weakref.WeakSet()
 
     async def get_sta_iface_names(self) -> list[str]:
         """Returns the list of active STA interface names on this chip."""
@@ -293,7 +311,7 @@ class WifiChip:
                 iface_name
             )
 
-        return StaIface(
+        iface = StaIface(
             name=iface_name,
             chip=self,
             wifi_sta_iface=wifi_sta_iface,
@@ -301,10 +319,15 @@ class WifiChip:
             nl80211=None,
             fuchsia_controller=self._fc_transport,
         )
+        self._ifaces.add(iface)
+        return iface
 
     async def remove_sta_iface(self, iface_name: str) -> None:
         """Removes the specified STA interface and verifies it is no longer present."""
         (await self.proxy.remove_sta_iface(iface_name=iface_name)).unwrap()
+        for iface in tuple(self._ifaces):
+            if iface.name == iface_name:
+                self._ifaces.discard(iface)
         iface_names = await self.get_sta_iface_names()
         assert_false(
             iface_name in iface_names,
@@ -354,6 +377,24 @@ class WifiChip:
                     "Timed out waiting for OnSubsystemRestart event"
                 ) from e
 
+    async def _reconnect(self) -> None:
+        """Rebinds the WifiChip proxy and live StaIface proxies after device resume."""
+        proxy, server = self._fc_transport.channel_create()
+        (
+            await self.wlanix.get_wifi().get_chip(
+                chip_id=self.id, chip=server.take()
+            )
+        ).unwrap()
+        self.proxy = fidl_wlanix.WifiChipClient(proxy)
+        if not (live_ifaces := tuple(self._ifaces)):
+            return
+        active_names = frozenset(await self.get_sta_iface_names())
+        for iface in live_ifaces:
+            if iface.name in active_names:
+                await iface._reconnect()
+            else:
+                self._ifaces.discard(iface)
+
 
 class Wlanix:
     """Top-level helper for interacting with fuchsia.wlan.wlanix on a FuchsiaDevice."""
@@ -361,7 +402,21 @@ class Wlanix:
     def __init__(self, dut: fuchsia_device.FuchsiaDevice) -> None:
         self._dut = dut
         self._fc_transport = dut.fuchsia_controller
-        self.proxy = fidl_wlanix.WlanixClient(
+        self._chips: weakref.WeakSet[WifiChip] = weakref.WeakSet()
+        self.proxy = self._connect_proxy()
+
+        weak_self = weakref.ref(self)
+
+        async def _on_device_resume() -> None:
+            if (wlanix := weak_self()) is not None:
+                wlanix.proxy = wlanix._connect_proxy()
+                for chip in tuple(wlanix._chips):
+                    await chip._reconnect()
+
+        dut.register_on_device_resume_fn(_on_device_resume)
+
+    def _connect_proxy(self) -> fidl_wlanix.WlanixClient:
+        return fidl_wlanix.WlanixClient(
             self._fc_transport.connect_device_proxy(
                 FidlEndpoint("core/wlanix", "fuchsia.wlan.wlanix.Wlanix")
             )
@@ -434,9 +489,11 @@ class Wlanix:
         (
             await wifi_proxy.get_chip(chip_id=chip_id, chip=server.take())
         ).unwrap()
-        return WifiChip(
+        chip = WifiChip(
             chip_id=chip_id,
             proxy=fidl_wlanix.WifiChipClient(proxy),
             wlanix=self,
             fuchsia_controller=self._fc_transport,
         )
+        self._chips.add(chip)
+        return chip

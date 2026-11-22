@@ -2,9 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fuchsia-rcu-collections-tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 rustc_library(
     name = "fuchsia-rcu-collections",
@@ -27,10 +35,20 @@ rustc_library(
         "//src/starnix/lib/starnix_rcu:__pkg__",
         "//src/starnix/lib/starnix_sync:__pkg__",
     ],
-    with_unit_tests = True,
     deps = [
         "//src/lib/fuchsia-rcu",
         "//third_party/rust_crates/vendor:memoffset",
         "//third_party/rust_crates/vendor:rapidhash",
     ],
+)
+
+rustc_test(
+    name = "fuchsia-rcu-collections_test",
+    crate = ":fuchsia-rcu-collections",
+    tags = ["manual"],
+)
+
+fx_unittest_package(
+    name = "fuchsia-rcu-collections-tests",
+    unit_tests = [":fuchsia-rcu-collections_test"],
 )

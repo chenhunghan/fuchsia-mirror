@@ -1,0 +1,76 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+_SHADERC_COPTS = [
+    "-Wno-deprecated-copy",
+    "-Wno-extra-semi",
+]
+
+fx_cc_library(
+    name = "shaderc_util_sources",
+    srcs = [
+        "src/libshaderc_util/src/compiler.cc",
+        "src/libshaderc_util/src/file_finder.cc",
+        "src/libshaderc_util/src/io_shaderc.cc",
+        "src/libshaderc_util/src/message.cc",
+        "src/libshaderc_util/src/resources.cc",
+        "src/libshaderc_util/src/shader_stage.cc",
+        "src/libshaderc_util/src/spirv_tools_wrapper.cc",
+        "src/libshaderc_util/src/version_profile.cc",
+    ],
+    hdrs = [
+        "src/libshaderc_util/include/libshaderc_util/compiler.h",
+        "src/libshaderc_util/include/libshaderc_util/counting_includer.h",
+        "src/libshaderc_util/include/libshaderc_util/exceptions.h",
+        "src/libshaderc_util/include/libshaderc_util/file_finder.h",
+        "src/libshaderc_util/include/libshaderc_util/format.h",
+        "src/libshaderc_util/include/libshaderc_util/io_shaderc.h",
+        "src/libshaderc_util/include/libshaderc_util/message.h",
+        "src/libshaderc_util/include/libshaderc_util/mutex.h",
+        "src/libshaderc_util/include/libshaderc_util/resources.h",
+        "src/libshaderc_util/include/libshaderc_util/resources.inc",
+        "src/libshaderc_util/include/libshaderc_util/shader_stage.h",
+        "src/libshaderc_util/include/libshaderc_util/spirv_tools_wrapper.h",
+        "src/libshaderc_util/include/libshaderc_util/string_piece.h",
+        "src/libshaderc_util/include/libshaderc_util/universal_unistd.h",
+        "src/libshaderc_util/include/libshaderc_util/version_profile.h",
+    ],
+    copts = _SHADERC_COPTS,
+    defines = ["ENABLE_HLSL=1"],
+    includes = ["src/libshaderc_util/include"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//third_party/glslang:glslang_sources",
+        "@spirv_tools//:spirv_tools",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "libshaderc",
+    srcs = [
+        "src/libshaderc/src/shaderc.cc",
+        "src/libshaderc/src/shaderc_private.h",
+    ],
+    hdrs = [
+        "src/libshaderc/include/shaderc/env.h",
+        "src/libshaderc/include/shaderc/shaderc.h",
+        "src/libshaderc/include/shaderc/shaderc.hpp",
+        "src/libshaderc/include/shaderc/status.h",
+        "src/libshaderc/include/shaderc/visibility.h",
+    ],
+    defines = ["SHADERC_IMPLEMENTATION"],
+    includes = ["src/libshaderc/include"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":shaderc_util_sources",
+        "//third_party/glslang:glslang_sources",
+        "@spirv_headers//:spirv_cpp_headers",
+        "@spirv_tools//:spirv_tools",
+    ],
+)

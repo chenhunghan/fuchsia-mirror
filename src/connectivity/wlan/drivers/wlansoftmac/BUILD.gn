@@ -51,7 +51,7 @@ source_set("source_set") {
     "//src/connectivity/wlan/drivers/lib/fidl-bridge/cpp:dfv2",
     "//src/connectivity/wlan/drivers/lib/log/cpp:dfv2",
     "//src/connectivity/wlan/drivers/lib/macaddr",
-    "//src/connectivity/wlan/drivers/wlansoftmac/rust_driver/c-binding:wlansoftmac-c",
+    "//src/connectivity/wlan/drivers/wlansoftmac/rust_driver/c-binding:wlansoftmac-c_headers",
     "//src/connectivity/wlan/lib/common/cpp:common",
     "//src/devices/lib/dev-operation",
     "//zircon/system/ulib/fbl",
@@ -74,7 +74,6 @@ fuchsia_driver_component("wlansoftmac_driver") {
   dml_label = ":wlansoftmac-dml"
   component_name = "wlansoftmac"
   deps = [ ":wlansoftmac_driver-driver" ]
-  info = "meta/wlansoftmac.json"
 }
 
 fuchsia_driver_package("wlansoftmac") {

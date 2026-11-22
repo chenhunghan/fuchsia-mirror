@@ -72,7 +72,7 @@ if (status != ZX_OK) {
 takes two arguments:
 
 ```cpp
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/pci/cpp/pci.h>
 
 zx_status_t Pci::ConfigureInterruptMode(uint32_t requested_irq_count,
                                         fpci::InterruptMode* out_mode);
@@ -87,7 +87,7 @@ to create a handle to the selected interrupt. Note that
 **Pci::MapInterrupt()** has the following prototype:
 
 ```cpp
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/pci/cpp/pci.h>
 
 zx_status_t Pci::MapInterrupt(uint32_t which_irq, zx::interrupt* out_interrupt);
 ```

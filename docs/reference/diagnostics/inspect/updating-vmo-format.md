@@ -13,7 +13,7 @@ to alter the VMO format:
 1. [Update the C++ reader.](#update-cpp-reader)
 1. [Update the Rust writer.](#update-rust-writer)
 1. [Update the C++ writer.](#update-cpp-writer)
-1. [(Potentially) Update the validator.](#update-validator-tests)
+1. (Potentially) Update the validator.
 1. Update the documentation.
 1. (Not a change)(Optional) Send a feature announcement.
 

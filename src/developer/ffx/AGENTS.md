@@ -69,10 +69,10 @@ pub struct ExampleTool {
 ```
 
 ### Target Connection Declarations & Holders (`//src/developer/ffx/lib/target/holders`)
-* **Tools that do NOT talk to a target device**: Always annotate the `FfxTool` struct with `#[target(None)]`. This is required so `ffx --strict` does not demand a `--target` argument when running the command.
+* **Strict-mode target requirements**: `#[derive(FfxTool)]` infers whether a tool needs `--target` in `ffx --strict` from its `TryFromEnv` / `TryFromEnvWith` fields (`None`, `Optional` for `Deferred<...>`, or `Required` for target holders/connectors). Tools that do not inject target holders automatically infer `TargetNeed::None` and do not need `#[target(None)]`. Use `#[target(None | Optional | Required)]` only to override inference (for example, when a tool resolves a target manually from `EnvironmentContext`).
 * **Immediate Target Injection**: Use `#[with(moniker("..."))]` or `#[with(toolbox())]` on a FIDL proxy field (or inject `RemoteControlProxyHolder`, `NodenameHolder`, `SshAddrHolder`, `HostAddrHolder`) when every invocation of the tool needs the target.
 * **Conditional / Lazy Target Injection (`fho::Deferred<T>`)**: When a tool has subcommands or code paths that may not require a target connection, wrap the proxy or holder in `fho::Deferred<T>` (or `#[with(fho::deferred(moniker("...")))]`) and `.await?` it only on the branch that needs it.
-* **Resilient Multi-Shot Reconnection (`Connector<T>`)**: For workflows that reboot or flash the target device and must reconnect across disconnects, use `Connector<RemoteControlProxyHolder>` or `DirectConnector` (`try_connect()`).
+* **Resilient Multi-Shot Reconnection (`Connector<T>`)**: For workflows that reboot or flash the target device and must reconnect across disconnects, use `Connector<RemoteControlProxyHolder>` or `TargetConnector` (`try_connect()`).
 * **Native `async fn` in `FfxMain` and `TryFromEnv`**: `FfxMain::main` and `TryFromEnv::try_from_env` use native `async fn`. Do not annotate them with `#[async_trait]` or `#[async_trait(?Send)]`.
 
 ---

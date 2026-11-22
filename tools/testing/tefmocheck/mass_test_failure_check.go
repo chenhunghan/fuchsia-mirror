@@ -18,7 +18,7 @@ type MassTestFailureCheck struct {
 func (c MassTestFailureCheck) Check(to *TestingOutputs) bool {
 	failedTests := make(map[string]bool)
 	for _, test := range to.TestSummary.Tests {
-		if _, ok := failedTests[test.Name]; !ok && runtests.IsFailure(test.Status) {
+		if _, ok := failedTests[test.Name]; !ok && runtests.IsFailure(test.Status) && test.Status != runtests.TestExonerated {
 			failedTests[test.Name] = true
 			if len(failedTests) > c.MaxFailed {
 				return true
@@ -41,4 +41,8 @@ It's unlikely that any one test is to blame. Rather the device or OS probably ha
 
 func (c MassTestFailureCheck) FailureReason() string {
 	return fmt.Sprintf("More than %d tests failed.", c.MaxFailed)
+}
+
+func (c MassTestFailureCheck) Category() runtests.FailureCategory {
+	return runtests.CategorySystemOrTest
 }

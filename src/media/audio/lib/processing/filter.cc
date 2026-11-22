@@ -134,7 +134,8 @@ SincFilter::CacheT* CreateSincFilterCoefficientTableCache() {
     FX_LOGS(INFO) << "CreateSincFilterTable took " << (end_time - start_time).to_nsecs()
                   << " ns with Inputs { side_length=" << inputs.side_length
                   << ", num_frac_bits=" << inputs.num_frac_bits
-                  << ", rate_conversion_ratio=" << inputs.rate_conversion_ratio << " }";
+                  << ", rate_conversion_ratio=" << inputs.rate_conversion_ratio
+                  << ", high_pass=" << inputs.high_pass << " }";
     return t.release();
   });
 
@@ -144,7 +145,12 @@ SincFilter::CacheT* CreateSincFilterCoefficientTableCache() {
 
   // First load any coefficient tables that were built into this executable.
   for (auto& t : kPrebuiltSincFilterCoefficientTables) {
-    auto inputs = SincFilterCoefficientTable::MakeInputs(t.source_rate, t.dest_rate);
+    FX_CHECK(!(t.high_pass && t.low_pass));
+    FX_CHECK(!t.high_pass || t.source_rate == t.dest_rate);
+    auto inputs = t.high_pass ? SincFilterCoefficientTable::MakeHighPassInputs(t.source_rate)
+                  : t.low_pass
+                      ? SincFilterCoefficientTable::MakeLowPassInputs(t.source_rate, t.dest_rate)
+                      : SincFilterCoefficientTable::MakeInputs(t.source_rate, t.dest_rate);
     SincFilter::persistent_cache_->push_back(cache->Add(
         inputs, new CoefficientTable(inputs.side_length, inputs.num_frac_bits, t.table)));
   }
@@ -168,6 +174,10 @@ SincFilter::CacheT* CreateSincFilterCoefficientTableCache() {
       cache->Get(SincFilterCoefficientTable::MakeInputs(44100, 48000)));
   SincFilter::persistent_cache_->push_back(
       cache->Get(SincFilterCoefficientTable::MakeInputs(16000, 48000)));
+  SincFilter::persistent_cache_->push_back(
+      cache->Get(SincFilterCoefficientTable::MakeHighPassInputs(96000, kUltrasoundMinFrequencyHz)));
+  SincFilter::persistent_cache_->push_back(cache->Get(
+      SincFilterCoefficientTable::MakeLowPassInputs(96000, 96000, kAudioMaxFrequencyHz)));
 
   return cache;
 }

@@ -250,12 +250,16 @@ pub unsafe fn init(ranges: &[memalloc::Range]) -> Result<(), Status> {
 }
 
 /// Ends the PMM's role within the context of phys handoff: it frees all physical
-/// memory temporarily used for the hand-off from physboot.
+/// memory temporarily used for the hand-off from physboot. Since this memory
+/// includes that backing the hand-off struct itself (accessible via
+/// `gPhysHandoff`), this call is intended to be the last thing done in the process
+/// of ending the hand-off.
 ///
 /// # Safety
 ///
-/// Must be called at most once after hand-off from physboot completes, and not
-/// concurrently with [`init`].
+/// Must be called at most once after hand-off from physboot completes, after
+/// temporary hand-off memory has been unmapped and no pointers or references into
+/// temporary hand-off memory remain live, and not concurrently with [`init`].
 pub unsafe fn end_handoff() {
     // SAFETY: The caller guarantees the hand-off preconditions of `PmmNode::end_handoff`.
     unsafe { node().end_handoff() };
@@ -316,17 +320,6 @@ pub unsafe fn pmm_checker_init_from_cmdline() {
     }
 }
 
-/// C++ entry point for [`pmm_checker_init_from_cmdline`].
-///
-/// # Safety
-///
-/// Must only be called during early boot, before the kernel console can access the PMM checker.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_checker_init_from_cmdline() {
-    // SAFETY: The caller guarantees the early-boot requirements of `pmm_checker_init_from_cmdline`.
-    unsafe { pmm_checker_init_from_cmdline() };
-}
-
 fn pmm_boot_memory(_level: init::LkInitLevel) {
     // Track the amount of free memory available in the PMM after kernel init, but before
     // userspace starts.
@@ -363,35 +356,6 @@ pub fn get_page_compression() -> Option<&'static crate::vm::compression::VmCompr
 #[unsafe(no_mangle)]
 extern "C" fn rust_pmm_node() -> *mut PmmNode {
     PMM_NODE.as_ptr()
-}
-
-/// C++ entry point for [`init`]; see `pmm_init()`.
-///
-/// # Safety
-///
-/// `ranges` must point to `count` valid ranges, and the requirements of [`init`] must be met.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_init(ranges: *const memalloc::Range, count: usize) -> zx_status_t {
-    // SAFETY: The caller guarantees that `ranges` points to `count` valid ranges; the Rust
-    // `memalloc::Range` is layout-compatible with the C++ version.
-    let ranges = unsafe { zr::slice_from_raw_parts(ranges, count) };
-    // SAFETY: The caller guarantees the requirements of `init`.
-    match unsafe { init(ranges) } {
-        Ok(()) => zx_types::ZX_OK,
-        Err(status) => status.into_raw(),
-    }
-}
-
-/// C++ entry point for [`end_handoff`].
-///
-/// # Safety
-///
-/// Must be called at most once after hand-off from physboot completes, and not
-/// concurrently with [`init`].
-#[unsafe(no_mangle)]
-unsafe extern "C" fn pmm_end_handoff() {
-    // SAFETY: The caller guarantees the hand-off preconditions of `end_handoff`.
-    unsafe { end_handoff() };
 }
 
 #[unsafe(no_mangle)]
@@ -507,30 +471,31 @@ mod console {
     use core::pin::Pin;
     use core::sync::atomic::{AtomicBool, Ordering};
     use kprint::kprintln;
-    use ksync::KOnceCell;
+    use lazy_init::{LazyInit, NoCheck};
     use zx_status::Status;
 
-    crate::ksync_kernel::declare_singleton_mutex!(DumpFreeMemLock);
-
     /// Repeating timer used by `k pmm free` to periodically dump the free memory count.
-    static DUMP_FREE_MEM_TIMER: KOnceCell<Timer, DumpFreeMemLock> = KOnceCell::new();
+    static DUMP_FREE_MEM_TIMER: LazyInit<Timer, NoCheck> = LazyInit::uninit();
 
-    /// Returns a pinned reference to the lazily-initialized `DUMP_FREE_MEM_TIMER`.
-    fn dump_free_mem_timer() -> Pin<&'static Timer> {
-        ksync::lock!(let mut guard = DumpFreeMemLock::get().lock());
-        // SAFETY: `guard.token()` / `guard.token_mut()` belongs to the `DumpFreeMemLock` singleton
-        // guarding `DUMP_FREE_MEM_TIMER`, which is pinned in static memory and never mutated or
-        // dropped after initialization. Checking `get` before `get_or_pin_init` ensures we never
-        // form `&mut Timer` once a shared `&'static Timer` reference has been handed out.
+    fn dump_free_mem_timer_init(_level: init::LkInitLevel) {
+        // SAFETY: lk init hooks run once during single-threaded early boot before any console
+        // command can access `DUMP_FREE_MEM_TIMER`.
         unsafe {
-            let timer: *const Timer = match DUMP_FREE_MEM_TIMER.get(guard.token()) {
-                Some(timer) => timer,
-                None => DUMP_FREE_MEM_TIMER
-                    .get_or_pin_init(Timer::init(ZX_CLOCK_MONOTONIC), guard.token_mut())
-                    .unwrap(),
-            };
-            Pin::new_unchecked(&*timer)
+            let Ok(()) =
+                Pin::static_ref(&DUMP_FREE_MEM_TIMER).init_pin(Timer::init(ZX_CLOCK_MONOTONIC));
         }
+    }
+    init::lk_init_hook!(
+        dump_free_mem_timer,
+        dump_free_mem_timer_init,
+        init::LK_INIT_LEVEL_EARLIEST
+    );
+
+    /// Returns a pinned reference to `DUMP_FREE_MEM_TIMER`.
+    fn dump_free_mem_timer() -> Pin<&'static Timer> {
+        // SAFETY: `DUMP_FREE_MEM_TIMER` is initialized at `LK_INIT_LEVEL_EARLIEST` in
+        // `dump_free_mem_timer_init` and is pinned in static memory.
+        unsafe { Pin::new_unchecked(DUMP_FREE_MEM_TIMER.get_unchecked()) }
     }
 
     /// Timer callback that dumps the PMM free count and rearms itself after 1 second.

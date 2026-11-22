@@ -8,7 +8,6 @@ use fdomain_client::fidl::Proxy;
 use fdomain_fuchsia_starnix_container as fstarcontainer;
 use fdomain_fuchsia_starnix_container::ControllerProxy;
 use ffx_config::EnvironmentContext;
-use ffx_config::keys::EMU_INSTANCE_ROOT_DIR;
 use ffx_emulator_config::ShowDetail;
 use ffx_emulator_engines::EngineBuilder;
 use fho::{Deferred, FfxContext, Result, return_bug, return_user_error};
@@ -25,7 +24,6 @@ use signal_hook::consts::signal::SIGINT;
 use signal_hook::iterator::Signals;
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener as SyncTcpListener};
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -212,10 +210,7 @@ impl std::fmt::Display for ConnectOutput {
 }
 
 async fn get_emu_host_adb_port(context: &EnvironmentContext, name: &str) -> Result<u16> {
-    let instance_dir: PathBuf =
-        context.get(EMU_INSTANCE_ROOT_DIR).bug_context("getting emulator instance dir")?;
-    let emu_instances = emulator_instance::EmulatorInstances::new(instance_dir);
-    let builder = EngineBuilder::new(context, emu_instances);
+    let builder = EngineBuilder::from_env(context)?;
     let mut instance_name = Some(name.to_string());
     let engine = builder
         .get_engine_by_name(&mut instance_name)

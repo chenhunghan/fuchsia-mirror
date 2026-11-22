@@ -42,6 +42,7 @@ fuchsia_component("iperf-component") {
   component_name = "iperf"
   manifest = "meta/iperf.cml"
   deps = [ "//third_party/iperf:bin" ]
+  visibility = [ ":*" ]
 }
 
 fuchsia_test_component("iperf-benchmark-component") {
@@ -58,13 +59,15 @@ fuchsia_test_component("iperf-test-component") {
 common_deps = [
   ":iperf-component",
   "//src/bringup/bin/device-name-provider:component",
-  "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
 ]
 
 fuchsia_test_package("iperf-test") {
   test_components = [ ":iperf-test-component" ]
   deps = common_deps
-  subpackages = [ "//src/connectivity/network/netstack3:package-debug" ]
+  subpackages = [
+    "//src/connectivity/network/netstack3:package-debug",
+    "//src/connectivity/network/testing/netemul/service:package",
+  ]
 }
 
 # This benchmark is intended to be run by host-side logic alongside the
@@ -73,7 +76,10 @@ fuchsia_test_package("iperf-test") {
 fuchsia_test_package("iperf-benchmark") {
   test_components = [ ":iperf-benchmark-component" ]
   deps = common_deps + [ "//src/sys/stash:stash_secure_v2" ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/netstack3:package-for-tests",
+    "//src/connectivity/network/testing/netemul/service:package",
+  ]
 
   # Don't run the benchmark on the target as it is run as a part of the
   # host-driven iPerf benchmarks.

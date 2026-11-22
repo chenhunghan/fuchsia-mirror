@@ -35,7 +35,7 @@ include the necessary build rules from the Fuchsia SDK:
 {% includecode gerrit_repo="fuchsia/sdk-samples/drivers" gerrit_path="src/qemu_edu/fidl/BUILD.bazel" region_tag="imports" adjust_indentation="auto" %}
 ```
 
-## Define a device service
+## Define a device service {:#define-a-device-service}
 
 The driver exposes the capabilities of the `edu` device using a custom FIDL
 service. This service contains one or more protocols that clients can connect

@@ -1,0 +1,61 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+load("//tools/protobuf:rust_proto_library.bzl", "rust_proto_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":pprof_tests"],
+    visibility = ["//src/memory:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/42075035): Create our own copy of the protobuf file and avoid depending on perfetto.
+rust_proto_library(
+    name = "pprof_proto",
+    srcs = [
+        # @fuchsia_perfetto_protos exposes //third_party/perfetto as an external Bazel repo.
+        "@fuchsia_perfetto_protos//:protos/third_party/pprof/profile.proto",  # @bazel2gn:path_overwrite://third_party/perfetto/protos/third_party/pprof/profile.proto
+    ],
+    packages = ["perfetto.third_party.perftools.profiles"],
+)
+
+rustc_library(
+    name = "pprof",
+    srcs = [
+        "src/lib.rs",
+        "src/module_map.rs",
+        "src/string_table.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/developer/ffx/plugins/profile/heapdump:__pkg__",
+        "//src/developer/ffx/plugins/profile/heapdump/common:__pkg__",
+        "//src/memory/tools/dupefinder:__pkg__",
+    ],
+    deps = [
+        ":pprof_proto",
+        "//src/memory/lib/index_table_builder",
+        "//third_party/rust_crates/vendor:hex",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "pprof_test",
+    crate = ":pprof",
+    deps = ["//third_party/rust_crates/vendor:itertools"],
+)
+
+fx_unittest_package(
+    name = "pprof_tests",
+    unit_tests = [":pprof_test"],
+)

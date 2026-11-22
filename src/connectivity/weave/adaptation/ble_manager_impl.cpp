@@ -49,10 +49,13 @@ constexpr WeaveBleUUID kWeaveBleChars[] = {// UUID for |kWeaveBleCharWrite|
 
 BLEManagerImpl BLEManagerImpl::sInstance;
 
-BLEManagerImpl::BLEManagerImpl() : woble_connection_(this), gatt_service_(this) {
+BLEManagerImpl::BLEManagerImpl() : gatt_service_(this) {
   // BleLayer does not initialize this callback, set it NULL to avoid accessing location pointed by
   // garbage value when not set explicitly.
   OnWeaveBleConnectReceived = nullptr;
+  for (auto& con : woble_connections_) {
+    con.instance = this;
+  }
 }
 
 WEAVE_ERROR BLEManagerImpl::_Init() {
@@ -72,6 +75,7 @@ WEAVE_ERROR BLEManagerImpl::_Init() {
   }
 
   memset(device_name_, 0, sizeof(device_name_));
+  ReleaseAllConnections();
 
   flags_ = 0;
   if (ConfigurationMgrImpl().IsWoBLEAdvertisementEnabled()) {
@@ -160,6 +164,97 @@ WEAVE_ERROR BLEManagerImpl::_SetDeviceName(const char* device_name) {
   return WEAVE_NO_ERROR;
 }
 
+uint16_t BLEManagerImpl::_NumConnections() {
+  std::scoped_lock lock(connections_mutex_);
+  uint16_t num_cons = 0;
+  for (const auto& con : woble_connections_) {
+    if (con.allocated) {
+      num_cons++;
+    }
+  }
+  return num_cons;
+}
+
+bool BLEManagerImpl::CloseConnection(BLE_CONNECTION_OBJECT conId) {
+  return ReleaseConnectionState(conId);
+}
+
+void BLEManagerImpl::NotifyWeaveConnectionClosed(BLE_CONNECTION_OBJECT conId) {
+  ReleaseConnectionState(conId);
+}
+
+BLEManagerImpl::WoBLEConState* BLEManagerImpl::GetConnectionState(
+    fuchsia::bluetooth::PeerId peer_id, bool allocate) {
+  std::scoped_lock lock(connections_mutex_);
+  WoBLEConState* free_slot = nullptr;
+  for (auto& con : woble_connections_) {
+    if (con.allocated) {
+      if (con.peer_id.value == peer_id.value) {
+        return &con;
+      }
+    } else if (free_slot == nullptr) {
+      free_slot = &con;
+    }
+  }
+
+  if (allocate && free_slot != nullptr) {
+    free_slot->instance = this;
+    free_slot->pending_ind_buf = nullptr;
+    free_slot->peer_id = peer_id;
+    free_slot->allocated = true;
+    return free_slot;
+  }
+
+  return nullptr;
+}
+
+bool BLEManagerImpl::IsConnectionAllocated(BLE_CONNECTION_OBJECT con_id,
+                                           fuchsia::bluetooth::PeerId* out_peer_id) const {
+  std::scoped_lock lock(connections_mutex_);
+  for (const auto& con : woble_connections_) {
+    if (&con == con_id && con.allocated) {
+      if (out_peer_id != nullptr) {
+        *out_peer_id = con.peer_id;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+bool BLEManagerImpl::ReleaseConnectionState(BLE_CONNECTION_OBJECT con_id) {
+  PacketBuffer* buf_to_free = nullptr;
+  bool released = false;
+  {
+    std::scoped_lock lock(connections_mutex_);
+    for (auto& con : woble_connections_) {
+      if (&con == con_id && con.allocated) {
+        buf_to_free = con.pending_ind_buf;
+        con.pending_ind_buf = nullptr;
+        con.peer_id = {};
+        con.allocated = false;
+        released = true;
+        break;
+      }
+    }
+  }
+  if (buf_to_free != nullptr) {
+    PacketBuffer::Free(buf_to_free);
+  }
+  return released;
+}
+
+void BLEManagerImpl::ReleaseAllConnections() {
+  for (auto& con : woble_connections_) {
+    if (IsConnectionAllocated(&con)) {
+      if (mState == kState_Initialized) {
+        HandleConnectionError(&con, BLE_ERROR_APP_CLOSED_CONNECTION);
+      }
+      ReleaseConnectionState(&con);
+    }
+  }
+}
+
 void BLEManagerImpl::_OnPlatformEvent(const WeaveDeviceEvent* event) {
   BLEManagerImpl* instance;
   WoBLEConState* connection_state;
@@ -175,6 +270,9 @@ void BLEManagerImpl::_OnPlatformEvent(const WeaveDeviceEvent* event) {
                     "Received WoBLE subscribe event without connection state");
       instance = connection_state->instance;
       ZX_ASSERT_MSG(instance != nullptr, "Received WoBLE subscribe event with NULL instance");
+      if (!instance->IsConnectionAllocated(connection_state)) {
+        break;
+      }
       instance->HandleSubscribeReceived(event->WoBLESubscribe.ConId, &WEAVE_BLE_SVC_ID,
                                         &kWeaveBleChars[WeaveBleChar::kWeaveBleCharIndicate]);
 
@@ -191,9 +289,15 @@ void BLEManagerImpl::_OnPlatformEvent(const WeaveDeviceEvent* event) {
                     "Received WoBLE unsubscribe event without connection state");
       instance = connection_state->instance;
       ZX_ASSERT_MSG(instance != nullptr, "Received WoBLE unsubscribe event with NULL instance");
+      if (!instance->IsConnectionAllocated(connection_state)) {
+        break;
+      }
       instance->HandleUnsubscribeReceived(event->WoBLEUnsubscribe.ConId, &WEAVE_BLE_SVC_ID,
                                           &kWeaveBleChars[WeaveBleChar::kWeaveBleCharIndicate]);
-      inspector.NotifySetupStateChange(WeaveInspector::kSetupState_Initialized);
+      instance->ReleaseConnectionState(event->WoBLEUnsubscribe.ConId);
+      if (instance->_NumConnections() == 0) {
+        inspector.NotifySetupStateChange(WeaveInspector::kSetupState_Initialized);
+      }
       break;
     case DeviceEventType::kWoBLEWriteReceived:
       connection_state = static_cast<WoBLEConState*>(event->WoBLEWriteReceived.ConId);
@@ -201,6 +305,10 @@ void BLEManagerImpl::_OnPlatformEvent(const WeaveDeviceEvent* event) {
                     "Received WoBLE write event without connection state");
       instance = connection_state->instance;
       ZX_ASSERT_MSG(instance != nullptr, "Received WoBLE write event with NULL instance");
+      if (!instance->IsConnectionAllocated(connection_state)) {
+        PacketBuffer::Free(event->WoBLEWriteReceived.Data);
+        break;
+      }
       instance->HandleWriteReceived(event->WoBLEWriteReceived.ConId, &WEAVE_BLE_SVC_ID,
                                     &kWeaveBleChars[WeaveBleChar::kWeaveBleCharWrite],
                                     event->WoBLEWriteReceived.Data);
@@ -212,6 +320,9 @@ void BLEManagerImpl::_OnPlatformEvent(const WeaveDeviceEvent* event) {
       instance = connection_state->instance;
       ZX_ASSERT_MSG(instance != nullptr,
                     "Received WoBLE indication confirmation event with NULL instance");
+      if (!instance->IsConnectionAllocated(connection_state)) {
+        break;
+      }
       instance->HandleIndicationConfirmation(event->WoBLEIndicateConfirm.ConId, &WEAVE_BLE_SVC_ID,
                                              &kWeaveBleChars[WeaveBleChar::kWeaveBleCharIndicate]);
       break;
@@ -220,8 +331,12 @@ void BLEManagerImpl::_OnPlatformEvent(const WeaveDeviceEvent* event) {
       ZX_ASSERT(connection_state != nullptr);
       instance = connection_state->instance;
       ZX_ASSERT(instance != nullptr);
+      if (!instance->IsConnectionAllocated(connection_state)) {
+        break;
+      }
       instance->HandleConnectionError(event->WoBLEConnectionError.ConId,
                                       event->WoBLEConnectionError.Reason);
+      instance->ReleaseConnectionState(event->WoBLEConnectionError.ConId);
       break;
     case DeviceEventType::kFabricMembershipChange:
     case DeviceEventType::kServiceProvisioningChange:
@@ -253,8 +368,8 @@ bool BLEManagerImpl::SendIndication(BLE_CONNECTION_OBJECT conId, const WeaveBleU
                                     const WeaveBleUUID* charId, PacketBuffer* data) {
   FX_LOGS(INFO) << "SendIndication request (service id = " << svcId << ", char id = " << charId
                 << ")";
-  auto connection_state = static_cast<WoBLEConState*>(conId);
-  if (!connection_state) {
+  fuchsia::bluetooth::PeerId peer_id;
+  if (!IsConnectionAllocated(conId, &peer_id)) {
     PacketBuffer::Free(data);
     return false;
   }
@@ -264,7 +379,7 @@ bool BLEManagerImpl::SendIndication(BLE_CONNECTION_OBJECT conId, const WeaveBleU
 
   gatt::ValueChangedParameters notification_value;
   notification_value.set_handle(kWeaveBleCharIndicateHandle);
-  std::vector<fuchsia::bluetooth::PeerId> peer_ids = {connection_state->peer_id};
+  std::vector<fuchsia::bluetooth::PeerId> peer_ids = {peer_id};
   notification_value.set_peer_ids(std::move(peer_ids));
   notification_value.set_value(std::move(value));
   zx::eventpair confirm_ours;
@@ -272,19 +387,17 @@ bool BLEManagerImpl::SendIndication(BLE_CONNECTION_OBJECT conId, const WeaveBleU
   zx::eventpair::create(/*options=*/0, &confirm_ours, &confirm_theirs);
   gatt_service_.events().OnIndicateValue(std::move(notification_value), std::move(confirm_theirs));
 
-  // Save a reference to the buffer until we get a indication for the notification.
-  connection_state->pending_ind_buf = data;
-  data = nullptr;
-
   // TODO(https://fxbug.dev/42130443, https://fxbug.dev/42131435): The peer confirmation currently
   // isn't returned to the caller. Proceed as if the confirmation is received, to avoid closing the
   // connection. When the bug is fixed, block until the confirmation is received and handle it.
-  PacketBuffer::Free(connection_state->pending_ind_buf);
+  PacketBuffer::Free(data);
+  data = nullptr;
+
   // If the confirmation was successful...
   // Post an event to the Weave queue to process the indicate confirmation.
   WeaveDeviceEvent event;
   event.Type = DeviceEventType::kWoBLEIndicateConfirm;
-  event.WoBLESubscribe.ConId = conId;
+  event.WoBLEIndicateConfirm.ConId = conId;
   PlatformMgr().PostEvent(&event);
 
   return true;
@@ -300,6 +413,7 @@ void BLEManagerImpl::DriveBLEState() {
       gatt_service_.Close(ZX_ERR_PEER_CLOSED);
       ClearFlag(flags_, kFlag_GATTServicePublished);
     }
+    ReleaseAllConnections();
     return;
   }
 
@@ -341,7 +455,9 @@ void BLEManagerImpl::DriveBLEState() {
     gatt_service_info.set_characteristics(std::move(characteristics));
 
     gatt::Server_PublishService_Result result;
-    gatt_server_->PublishService(std::move(gatt_service_info), gatt_service_.NewBinding(), &result);
+    gatt_server_->PublishService(std::move(gatt_service_info),
+                                 gatt_service_.NewBinding(PlatformMgrImpl().GetDispatcher()),
+                                 &result);
 
     if (result.is_err()) {
       FX_LOGS(ERROR) << "Failed to publish GATT service for Weave. Error: " << result.err()
@@ -383,7 +499,8 @@ void BLEManagerImpl::DriveBLEState() {
     advertising_parameters.set_data(std::move(advertising_data));
     advertising_parameters.set_mode_hint(fuchsia::bluetooth::le::AdvertisingModeHint::SLOW);
 
-    peripheral_->StartAdvertising(std::move(advertising_parameters), adv_handle_.NewRequest(),
+    peripheral_->StartAdvertising(std::move(advertising_parameters),
+                                  adv_handle_.NewRequest(PlatformMgrImpl().GetDispatcher()),
                                   &advertising_result);
 
     if (advertising_result.is_err()) {
@@ -417,13 +534,27 @@ void BLEManagerImpl::CharacteristicConfiguration(fuchsia::bluetooth::PeerId peer
   FX_LOGS(INFO) << "CharacteristicConfiguration on peer " << peer_id.value << " (notify: " << notify
                 << ", indicate: " << indicate << ") characteristic id " << handle.value;
 
+  if (handle.value != kWeaveBleCharIndicateHandle.value) {
+    FX_LOGS(WARNING) << "Ignoring characteristic configuration for unknown handle " << handle.value;
+    callback();
+    return;
+  }
+
+  WoBLEConState* con_state = GetConnectionState(peer_id, /*allocate=*/false);
+  if (con_state == nullptr) {
+    FX_LOGS(WARNING) << "Ignoring characteristic configuration for peer " << peer_id.value
+                     << " without an active WoBLE connection";
+    callback();
+    return;
+  }
+
   // Post an event to the Weave queue to process either a WoBLE Subscribe or Unsubscribe based on
   // whether the client is enabling or disabling indications.
   WeaveDeviceEvent event;
   event.Type = (indicate) ? DeviceEventType::kWoBLESubscribe : DeviceEventType::kWoBLEUnsubscribe;
-  woble_connection_.peer_id = peer_id;
-  event.WoBLESubscribe.ConId = static_cast<void*>(&woble_connection_);
+  event.WoBLESubscribe.ConId = static_cast<void*>(con_state);
   PlatformMgr().PostEvent(&event);
+  callback();
 }
 
 void BLEManagerImpl::ReadValue(fuchsia::bluetooth::PeerId peer_id, gatt::Handle handle,
@@ -468,13 +599,22 @@ void BLEManagerImpl::WriteValue(gatt::LocalServiceWriteValueRequest request,
     return;
   }
 
+  WoBLEConState* con_state = GetConnectionState(request.peer_id(), /*allocate=*/true);
+  if (con_state == nullptr) {
+    FX_LOGS(WARNING) << "Maximum concurrent WoBLE connections reached; rejecting write from peer "
+                     << request.peer_id().value;
+    PacketBuffer::Free(buf);
+    callback(fpromise::error(gatt::Error::INSUFFICIENT_RESOURCES));
+    return;
+  }
+
   std::copy(request.value().begin(), request.value().end(), buf->Start());
   buf->SetDataLength(request.value().size());
 
   // Post an event to the Weave queue to deliver the data into the Weave stack.
   WeaveDeviceEvent event;
   event.Type = DeviceEventType::kWoBLEWriteReceived;
-  event.WoBLEWriteReceived.ConId = static_cast<void*>(&woble_connection_);
+  event.WoBLEWriteReceived.ConId = static_cast<void*>(con_state);
   event.WoBLEWriteReceived.Data = buf;
   PlatformMgr().PostEvent(&event);
   buf = nullptr;

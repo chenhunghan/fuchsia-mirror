@@ -14,7 +14,7 @@ use arm64_mp_bindings::ARM64_MPIDR_MASK;
 use arm64_thread_bindings::MSDCR_EL1_INITIAL_VALUE;
 use boot_options::{Arm64AlternateVbar as BootOptionsAlternateVbar, BootOptions};
 use debug::{dprintf, ltracef};
-use handoff::{ArchPhysHandoff, Arm64AlternateVbar, PhysHandoff};
+use handoff::{Arm64AlternateVbar, PhysHandoff};
 use kprint::kprintln;
 use lazy_init::LazyInit;
 use libarch::arm64::{
@@ -28,8 +28,8 @@ use regio::arm64::{SysReg, spec};
 use zx_types::{ZX_ARM64_FEATURE_ISA_MOPS, ZX_ARM64_FEATURE_ISA_SVE};
 
 use super::feature::{
-    MPIDR_EL1_RAW, arm64_feature_debug, arm64_feature_init, arm64_isa_features, arm64_mmu_features,
-    feat_pmuv3_enabled,
+    FEAT_PMUV3_ENABLED, MPIDR_EL1_RAW, arm64_feature_debug, arm64_feature_init, arm64_isa_features,
+    arm64_mmu_features,
 };
 use super::mp::{
     arch_curr_cpu_num, arch_max_num_cpus, arch_mp_init_percpu, arch_register_mpid,
@@ -42,6 +42,7 @@ use super::user_copy::arm64_enable_pan;
 use super::vm::is_valid_user_pc;
 use super::{Iframe, UserEntryState, arm64_feature_test, device_memory_barrier, isb, wfi};
 use crate::kernel::thread::{self, get_shadow_call_base, get_stack_top};
+use crate::top::main::lk_init_secondary_cpus;
 
 #[cfg(console_enabled)]
 use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
@@ -54,8 +55,7 @@ use zx_types::ZX_OK;
 
 const LOCAL_TRACE: u32 = 0;
 
-// Kernel Rust always has the shadow call stack on, so only the form of `arm64_uspace_entry` that
-// takes the shadow call stack base is declared.
+// Kernel Rust always has the shadow call stack on. `arm64_uspace_entry` takes its base.
 zr::static_assert!(cfg!(sanitize = "shadow-call-stack"));
 
 // Implemented in or called from assembly.
@@ -66,11 +66,6 @@ unsafe extern "C" {
     static arm64_el1_exception: [u8; 0];
     static arm64_el1_exception_smccc11_workaround: [u8; 0];
     static arm64_el1_exception_smccc10_workaround: [u8; 0];
-}
-
-unsafe extern "C" {
-    fn cpp_phys_handoff_get() -> *const PhysHandoff;
-    fn lk_init_secondary_cpus(secondary_cpu_count: u32);
 }
 
 const CNTKCTL_EL1: SysReg<spec::CNTKCTL_EL1, u64> = SysReg::new();
@@ -278,8 +273,16 @@ fn arm64_install_vbar(table: usize) {
     isb();
 }
 
+/// Returns the current exception level (`CurrentEL.EL`).
+///
+/// # Safety-usable invariant
+///
+/// The returned value equals `CurrentEL.EL` on the calling CPU. Because every CPU runs
+/// `ArmDropToEl1` (`drop-el.S`) before entering the kernel, a return value `>= 2` in the kernel
+/// guarantees execution at EL2h (`CurrentEL.EL == 2`) with `FEAT_VHE` enabled
+/// (`HCR_EL2.E2H == 1`).
 #[inline(always)]
-fn arm64_get_boot_el() -> u64 {
+pub fn arm64_get_boot_el() -> u64 {
     u64::from(CURRENT_EL.read().el())
 }
 
@@ -289,10 +292,9 @@ fn arm64_get_boot_el() -> u64 {
 ///
 /// Each CPU calls this as it starts. Its mpid is registered with `arch_register_mpid`, and
 /// nothing uses per-CPU state through x20 before the CPU's first `arm64_init_percpu_early`
-/// returns: on the boot CPU, `ArchPostHandoffBootstrap` made that call. The boot CPU calls this
+/// returns: on the boot CPU, `post_handoff_bootstrap` made that call. The boot CPU calls this
 /// before any other CPU starts.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arm64_cpu_early_init() {
+pub(super) unsafe fn arm64_cpu_early_init() {
     // Make sure the per cpu pointer is set up.
     // SAFETY: The caller guarantees that this CPU's mpid is registered and that nothing uses
     // per-CPU state through x20 before its first call returns. A later call, as on the boot CPU,
@@ -396,9 +398,9 @@ pub unsafe extern "C" fn arm64_cpu_early_init() {
     }
 
     // Enable cycle counter, if FEAT_PMUv3 is enabled.
-    // SAFETY: Only the boot CPU's `arm64_feature_init` writes `feat_pmuv3_enabled`, before any
+    // SAFETY: Only the boot CPU's `arm64_feature_init` writes `FEAT_PMUV3_ENABLED`, before any
     // other CPU starts. On the boot CPU, that call just returned.
-    if unsafe { feat_pmuv3_enabled } {
+    if unsafe { FEAT_PMUV3_ENABLED } {
         PMCR_EL0.write(PMCR_EL0_ENABLE_BIT | PMCR_EL0_LONG_COUNTER_BIT);
         isb();
         PMCNTENSET_EL0.write(PMCNTENSET_EL0_ENABLE);
@@ -422,31 +424,43 @@ pub unsafe extern "C" fn arm64_cpu_early_init() {
 }
 
 /// Early platform initialization, before UART, MMU, kernel command line args, etc.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_early_init() {
+///
+/// # Safety
+///
+/// Must be called once on the boot CPU with interrupts disabled after `post_handoff_bootstrap`
+/// and while `gPhysHandoff` is valid, before any secondary CPUs start.
+pub unsafe fn arch_early_init() {
     // Collect the setting that physboot determined.  arch_late_init_percpu()
     // will call arm64_select_vbar to use it later, when gPhysHandoff may no
     // longer be available.
-    // SAFETY: `cpp_phys_handoff_get` takes no arguments and only reads `gPhysHandoff`.
-    debug_assert!(!unsafe { cpp_phys_handoff_get() }.is_null());
+    // SAFETY: `arch_early_init` runs between `post_handoff_bootstrap` and `end_handoff` without
+    // concurrent mutation of `gPhysHandoff`.
+    debug_assert!(!unsafe { PhysHandoff::as_ptr() }.is_null());
     // SAFETY: The kernel calls `arch_early_init` once, on the boot CPU, before any other CPU
     // starts, so nothing reads `ALTERNATE_VBAR` concurrently. Physboot stored a valid
-    // `Arm64AlternateVbar` in the hand-off.
+    // `Arm64AlternateVbar` in the hand-off, which remains live until `end_handoff`.
     unsafe { ALTERNATE_VBAR.init(PhysHandoff::get().arch_handoff.alternate_vbar) };
 
     // put the cpu in a working state and read the feature flags
-    // SAFETY: `ArchPostHandoffBootstrap` registered the boot CPU's mpid and made its first
+    // SAFETY: `post_handoff_bootstrap` registered the boot CPU's mpid and made its first
     // `arm64_init_percpu_early` call, and no other CPU has started.
     unsafe { arm64_cpu_early_init() };
 }
 
 /// Perform any set up required before virtual memory is enabled, or the heap is set up.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_prevm_init() {}
+///
+/// # Safety
+///
+/// Must be called once on the boot CPU during early boot before VM initialization.
+pub unsafe fn arch_prevm_init() {}
 
 /// Perform any set up required after heap/MMU is available.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_init() {
+///
+/// # Safety
+///
+/// Must be called once on the boot CPU after `arch_early_init` and VM/heap initialization, before
+/// secondary CPUs are booted.
+pub unsafe fn arch_init() {
     arch_mp_init_percpu();
 
     dprintf!(INFO, "ARM boot EL{}\n", arm64_get_boot_el());
@@ -467,8 +481,12 @@ pub extern "C" fn arch_init() {
 }
 
 /// Perform any per-CPU set up required.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_late_init_percpu() {
+///
+/// # Safety
+///
+/// Must be called on the target CPU after its per-CPU pointer (`x20`) and `ALTERNATE_VBAR` have
+/// been initialized, with interrupts disabled or thread migration prevented.
+pub unsafe fn arch_late_init_percpu() {
     let need_spectre_v2_mitigation = !BootOptions::get().arm64_disable_spec_mitigations
         && arm64_uarch_needs_spectre_v2_mitigation();
 
@@ -495,9 +513,12 @@ pub extern "C" fn arch_late_init_percpu() {
 }
 
 /// Puts the calling CPU in a low-power state until an interrupt arrives. Backs
-/// `ArchIdlePowerThread::EnterIdleState()`, whose contract the caller follows.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_enter_idle_state() {
+/// [`enter_idle_state`](crate::arch_rs::ops::enter_idle_state), whose contract the caller follows.
+///
+/// # Safety
+///
+/// Caller upholds the idle-thread, interrupt-disabled, and preempt-disabled invariants.
+pub unsafe extern "C" fn arch_enter_idle_state() {
     // section K14.2.3 of the ARM ARM (DDI 0487K.a) says:
     //
     // ```
@@ -577,8 +598,8 @@ pub unsafe extern "C" fn arch_enter_uspace(iframe: *const Iframe) -> ! {
         iframe_ref.usp,
         iframe_ref.elr
     );
-    // Kernel Rust always has the shadow call stack, as asserted at the top of this file, so this
-    // and the entry below are the C++ `__has_feature(shadow_call_stack)` paths.
+    // Kernel Rust always has the shadow call stack, as asserted at the top of this file, so the
+    // entry below takes its base.
     // SAFETY: As above.
     let scsp_base = unsafe { get_shadow_call_base(ct) };
     ltracef!(
@@ -598,8 +619,7 @@ pub unsafe extern "C" fn arch_enter_uspace(iframe: *const Iframe) -> ! {
 
 /// Called during clock selection (if it is called at all) before secondary CPUs
 /// have started.
-#[unsafe(no_mangle)]
-pub extern "C" fn arm64_allow_pct_in_el0() {
+pub fn arm64_allow_pct_in_el0() {
     ALLOW_PCT_IN_EL0.store(true, Ordering::Relaxed);
     setup_cntkctl_el1();
 }
@@ -611,9 +631,8 @@ pub extern "C" fn arm64_allow_pct_in_el0() {
 /// # Safety
 ///
 /// The kernel calls this once, on the boot CPU, before anything uses per-CPU state or runs from
-/// the TTBR0 trampoline mapping. `_arch_handoff` is not read.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ArchPostHandoffBootstrap(_arch_handoff: *const ArchPhysHandoff) {
+/// the TTBR0 trampoline mapping.
+pub(crate) unsafe fn post_handoff_bootstrap() {
     // Clear any phys exception handlers.
     VBAR_EL1.write(VectorBaseAddressRegister::from(0));
 

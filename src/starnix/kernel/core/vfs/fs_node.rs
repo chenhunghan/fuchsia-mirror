@@ -13,12 +13,13 @@ use crate::vfs::pipe::{Pipe, PipeHandle};
 use crate::vfs::rw_queue::{RwQueue, RwQueueReadGuard, RwQueueWriteGuard};
 use crate::vfs::socket::SocketHandle;
 use crate::vfs::{
-    CheckAccessReason, DefaultDirEntryOps, DirEntry, DirEntryOps, FileObject, FileObjectState,
-    FileOps, FileSystem, FileSystemHandle, FileWriteGuardMode, FileWriteGuardRef,
+    CanonicalDirEntry, CheckAccessReason, DefaultDirEntryOps, DirEntry, DirEntryOps, FileObject,
+    FileObjectState, FileOps, FileSystem, FileSystemHandle, FileWriteGuardMode, FileWriteGuardRef,
     FileWriteGuardState, FsLockDepType, FsStr, FsString, MAX_LFS_FILESIZE, MountInfo,
     NamespaceNode, OPathOps, OpenAccessCheck, RecordLockCommand, RecordLockOwner, RecordLocks,
-    WeakFileHandle, checked_add_offset_and_length, inotify_hook,
+    WeakFileHandle, inotify_hook,
 };
+use atomic_bitflags::atomic_bitflags;
 use bitflags::bitflags;
 use fuchsia_runtime::UtcInstant;
 use linux_uapi::{XATTR_SECURITY_PREFIX, XATTR_SYSTEM_PREFIX, XATTR_TRUSTED_PREFIX};
@@ -29,9 +30,9 @@ use starnix_lifecycle::{ObjectReleaser, ReleaserAction};
 use starnix_logging::{log_error, track_stub};
 use starnix_sync::{
     BlockDeviceFsNodeAppendLevel, DynamicLockDepRwLock, FsNodeAppend, FsNodeAppendRecursive,
-    FsNodeFlockInfoLock, FsNodeFsVerityLock, FsNodeInfoLevel, FsNodeInfoRecursiveLevel,
-    FsNodeWriteGuardStateLock, FuseFsNodeAppendLevel, FuseFsNodeInfoLevel, LockDepMutex,
-    LockDepReadGuard, allow_subclass,
+    FsNodeCanonicalDirEntryLock, FsNodeFlockInfoLock, FsNodeFsVerityLock, FsNodeInfoLevel,
+    FsNodeInfoRecursiveLevel, FsNodeWriteGuardStateLock, FuseFsNodeAppendLevel,
+    FuseFsNodeInfoLevel, LockDepMutex, LockDepReadGuard, allow_subclass,
 };
 use starnix_types::ownership::{Releasable, ReleaseGuard};
 use starnix_types::time::{NANOS_PER_SECOND, timespec_from_time};
@@ -53,12 +54,12 @@ use starnix_uapi::{
     FALLOC_FL_COLLAPSE_RANGE, FALLOC_FL_INSERT_RANGE, FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE,
     FALLOC_FL_UNSHARE_RANGE, FALLOC_FL_ZERO_RANGE, LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN,
     STATX__RESERVED, STATX_ATIME, STATX_ATTR_VERITY, STATX_BASIC_STATS, STATX_BLOCKS, STATX_CTIME,
-    STATX_GID, STATX_INO, STATX_MTIME, STATX_NLINK, STATX_SIZE, STATX_UID, XATTR_USER_PREFIX,
-    errno, error, fsverity_descriptor, gid_t, ino_t, statx, statx_timestamp, timespec, uapi, uid_t,
+    STATX_GID, STATX_INO, STATX_MTIME, STATX_NLINK, STATX_SIZE, STATX_UID, XATTR_NAME_CAPS,
+    XATTR_USER_PREFIX, errno, error, fsverity_descriptor, gid_t, ino_t, statx, statx_timestamp,
+    timespec, uapi, uid_t,
 };
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use syncio::zxio_node_attr_has_t;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsNodeLinkBehavior {
@@ -75,9 +76,19 @@ impl Default for FsNodeLinkBehavior {
 pub type AppendLockGuard<'a> = RwQueueReadGuard<'a>;
 pub type AppendLockWriteGuard<'a> = RwQueueWriteGuard<'a>;
 
-bitflags! {
+atomic_bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct FsNodeFlags: u8 {
+        /// If set, Mandatory and Discretionary Access Control checks are skipped on this node.
         const IS_PRIVATE = 1 << 0;
+
+        /// If set, this node is guaranteed not to have any privileges (such as `S_ISUID`,
+        /// `S_ISGID`, or `security.capability`) that need to be applied on `execve(2)` or
+        /// cleared on modification. Always set for non-regular and private files.
+        // TODO(https://fxbug.dev/565936266): Serialize `security.*` extended attribute mutations
+        // with a per-node lock held across the underlying `FsNodeOps` call and evolve capability
+        // state to cache `{ Unknown, Known(Option<FileCapabilities>) }`.
+        const HAS_NO_PRIVILEGES = 1 << 1;
     }
 }
 
@@ -86,7 +97,12 @@ pub struct FsNode {
     pub ino: ino_t,
 
     /// Flags for this node.
-    pub flags: FsNodeFlags,
+    flags: AtomicFsNodeFlags,
+
+    /// Copy of `info.mode` that can be read without taking the `info` lock. Every path that
+    /// changes `info.mode` must update it through `sync_cached_mode`. Used for lock-free file type
+    /// checks.
+    cached_mode: AtomicU32,
 
     /// The FsNodeOps for this FsNode.
     ///
@@ -117,6 +133,12 @@ pub struct FsNode {
 
     /// Cached FsVerity state associated with this node.
     pub fsverity: LockDepMutex<FsVerityState, FsNodeFsVerityLock>,
+
+    /// Canonical live directory entry for this node when it is a directory.
+    ///
+    /// Used to splice an unlocked lookup onto an existing live `DirEntry` (such as a direct-boot
+    /// `NO_KEY` entry pinned by a bind mount) rather than creating a second `DirEntry` tree.
+    pub(crate) canonical_dir_entry: LockDepMutex<CanonicalDirEntry, FsNodeCanonicalDirEntryLock>,
 
     /// The security state associated with this node. Must always be acquired last
     /// relative to other `FsNode` locks.
@@ -196,6 +218,24 @@ pub struct FscryptNodePolicy {
     pub flags: FscryptPolicyFlags,
 }
 
+bitflags! {
+    /// Flags indicating which [`FsNodeInfo`] attributes are being updated in
+    /// [`FsNode::update_attributes`].
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct FsNodeAttrFlags: u16 {
+        const MODE = 1 << 0;
+        const UID = 1 << 1;
+        const GID = 1 << 2;
+        const RDEV = 1 << 3;
+        const TIME_ACCESS = 1 << 4;
+        const TIME_MODIFY = 1 << 5;
+        const CASEFOLD = 1 << 6;
+        const ENCRYPTION_POLICY = 1 << 7;
+        /// Bypasses `setattr` access checks.
+        const FORCE = 1 << 8;
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct FsNodeInfo {
     pub mode: FileMode,
@@ -239,7 +279,7 @@ impl FsNodeInfo {
     }
 
     pub fn storage_size(&self) -> usize {
-        self.blksize.saturating_mul(self.blocks)
+        self.blocks.saturating_mul(DEFAULT_BYTES_PER_BLOCK)
     }
 
     pub fn chmod(&mut self, mode: FileMode) {
@@ -253,6 +293,13 @@ impl FsNodeInfo {
         if let Some(group) = group {
             self.gid = group;
         }
+        // From <https://man7.org/linux/man-pages/man2/chown.2.html>:
+        //
+        //   When the owner or group of an executable file is changed by an
+        //   unprivileged user, the S_ISUID and S_ISGID mode bits are cleared.
+        //   POSIX does not specify whether this also should happen when root
+        //   does the chown(); the Linux behavior depends on the kernel version,
+        //   and since Linux 2.2.13, root is treated like other users.
         self.clear_suid_and_sgid_bits();
     }
 
@@ -386,7 +433,7 @@ impl FileObject {
             // 1. File is not locked
             if flock_info.locked_exclusive.is_none() {
                 flock_info.locked_exclusive = Some(operation.is_lock_exclusive());
-                flock_info.locking_handles.push(self.weak_handle.clone());
+                flock_info.locking_handles.push(self.weak_handle().clone());
                 return Ok(());
             }
 
@@ -417,7 +464,7 @@ impl FileObject {
             // 3. File is locked, and fd doesn't have a lock.
             if !file_lock_is_exclusive && !operation.is_lock_exclusive() {
                 // The lock is not exclusive, let's grab it.
-                flock_info.locking_handles.push(self.weak_handle.clone());
+                flock_info.locking_handles.push(self.weak_handle().clone());
                 return Ok(());
             }
 
@@ -559,6 +606,20 @@ impl FallocMode {
             Some(Self::UnshareRange)
         } else {
             None
+        }
+    }
+
+    /// Converts this mode back into `FALLOC_FL_*` bitflags.
+    pub fn into_bits(self) -> u32 {
+        match self {
+            Self::Allocate { keep_size: false } => 0,
+            Self::Allocate { keep_size: true } => FALLOC_FL_KEEP_SIZE,
+            Self::PunchHole => FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+            Self::Collapse => FALLOC_FL_COLLAPSE_RANGE,
+            Self::Zero { keep_size: false } => FALLOC_FL_ZERO_RANGE,
+            Self::Zero { keep_size: true } => FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE,
+            Self::InsertRange => FALLOC_FL_INSERT_RANGE,
+            Self::UnshareRange => FALLOC_FL_UNSHARE_RANGE,
         }
     }
 }
@@ -724,7 +785,7 @@ pub trait FsNodeOps: Send + Sync + AsAny + 'static {
     ) -> Result<(), Errno>;
 
     /// Acquire the necessary append lock for the operations that depend on them.
-    /// Should be done before calling `allocate` or `truncate` to avoid lock ordering issues.
+    /// Should be done before calling `fallocate` or `truncate` to avoid lock ordering issues.
     fn append_lock_read<'a>(
         &'a self,
         node: &'a FsNode,
@@ -743,24 +804,16 @@ pub trait FsNodeOps: Send + Sync + AsAny + 'static {
     }
 
     /// Change the length of the file.
+    ///
+    /// `file` is `Some` for `ftruncate(2)` so filesystems like FUSE can use the open file handle.
+    /// It is `None` for path-based `truncate(2)` and for `open(2)` with `O_TRUNC`, which
+    /// truncates before the `FileObject` is created.
     fn truncate(
         &self,
         _guard: &AppendLockWriteGuard<'_>,
         _node: &FsNode,
         _current_task: &CurrentTask,
-        _length: u64,
-    ) -> Result<(), Errno> {
-        error!(EINVAL)
-    }
-
-    /// Manipulate allocated disk space for the file.
-    fn allocate(
-        &self,
-        _guard: &AppendLockWriteGuard<'_>,
-        _node: &FsNode,
-        _current_task: &CurrentTask,
-        _mode: FallocMode,
-        _offset: u64,
+        _file: Option<&FileObject>,
         _length: u64,
     ) -> Result<(), Errno> {
         error!(EINVAL)
@@ -806,7 +859,7 @@ pub trait FsNodeOps: Send + Sync + AsAny + 'static {
         _node: &FsNode,
         _current_task: &CurrentTask,
         _info: &FsNodeInfo,
-        _has: zxio_node_attr_has_t,
+        _has: FsNodeAttrFlags,
     ) -> Result<(), Errno> {
         Ok(())
     }
@@ -1199,7 +1252,7 @@ impl FsNode {
     /// Returns true if the `fs_node` is private to the `Kernel`/`FileSystem`, in which
     /// case both MAC and DAC checks should be skipped.
     pub fn is_private(&self) -> bool {
-        self.flags.contains(FsNodeFlags::IS_PRIVATE)
+        self.flags.load(Ordering::Relaxed).contains(FsNodeFlags::IS_PRIVATE)
     }
 
     /// Create a node without inserting it into the FileSystem node cache.
@@ -1222,13 +1275,35 @@ impl FsNode {
         ops: Box<dyn FsNodeOps>,
         fs: Weak<FileSystem>,
         info: FsNodeInfo,
-        flags: FsNodeFlags,
+        mut flags: FsNodeFlags,
     ) -> Self {
         // Allow the FsNodeOps to populate initial info.
         let mut info = info;
         ops.initial_info(&mut info);
 
+        // From <https://man7.org/linux/man-pages/man3/write.3p.html>:
+        //
+        //   If the file is a regular file, the S_ISUID and S_ISGID bits of the file
+        //   mode may be cleared.
+        //
+        // From <https://man7.org/linux/man-pages/man7/capabilities.7.html>:
+        //
+        //   Since Linux 2.6.24, the kernel supports associating capability sets with
+        //   an executable file using setcap(8).  The file capability sets are stored
+        //   in an extended attribute (see setxattr(2) and xattr(7)) named
+        //   security.capability.
+        //
+        // Non-regular and kernel-private nodes never have privileges to clear, whereas
+        // regular files start without `HAS_NO_PRIVILEGES` unless the caller knows that no
+        // capability extended attributes exist on the node.
+        if !info.mode.is_reg() || flags.contains(FsNodeFlags::IS_PRIVATE) {
+            flags |= FsNodeFlags::HAS_NO_PRIVILEGES;
+        } else if info.has_suid_or_sgid_bits() {
+            flags.remove(FsNodeFlags::HAS_NO_PRIVILEGES);
+        }
+
         let is_blk = info.mode.is_blk();
+        let cached_mode = AtomicU32::new(info.mode.bits());
         let fs_lockdep_type =
             fs.upgrade().map(|fs| fs.fs_lockdep_type()).unwrap_or(FsLockDepType::Normal);
         let info_lock = match fs_lockdep_type {
@@ -1248,7 +1323,8 @@ impl FsNode {
 
         Self {
             ino,
-            flags,
+            flags: flags.into(),
+            cached_mode,
             ops,
             fs,
             info: info_lock,
@@ -1256,6 +1332,7 @@ impl FsNode {
             rare_data: Default::default(),
             write_guard_state: Default::default(),
             fsverity: Default::default(),
+            canonical_dir_entry: Default::default(),
             security_state: Default::default(),
         }
     }
@@ -1404,7 +1481,6 @@ impl FsNode {
         name: &FsStr,
         mut mode: FileMode,
         dev: DeviceId,
-        mut owner: FsCred,
     ) -> Result<FsNodeHandle, Errno> {
         assert!(
             !matches!(mode.fmt(), FileMode::EMPTY | FileMode::IFLNK),
@@ -1447,6 +1523,7 @@ impl FsNode {
         }
 
         // Propagate sticky bit(s) from parent directory to the child.
+        let mut owner = current_task.current_fscred();
         self.update_metadata_for_child(current_task, &mut mode, &mut owner);
 
         // Delegate to the `ops` implementation to actually create the node.
@@ -1455,6 +1532,9 @@ impl FsNode {
         } else {
             self.ops().mknod(self, current_task, name, mode, dev, owner)?
         };
+
+        // Newly created nodes do not have pre-existing file capabilities.
+        new_node.set_has_no_privileges_if_not_suid_or_sgid();
 
         // Allow the LSM to apply a security label to the new node.
         self.init_new_node_security_on_create(current_task, &new_node, name)?;
@@ -1468,7 +1548,6 @@ impl FsNode {
         mount: &MountInfo,
         name: &FsStr,
         target: &FsStr,
-        owner: FsCred,
     ) -> Result<FsNodeHandle, Errno> {
         self.check_access(
             current_task,
@@ -1479,6 +1558,9 @@ impl FsNode {
         )?;
         security::check_fs_node_symlink_access(current_task, self, name, target)?;
 
+        let mut mode = FileMode::IFLNK;
+        let mut owner = current_task.current_fscred();
+        self.update_metadata_for_child(current_task, &mut mode, &mut owner);
         let new_node = self.ops().create_symlink(self, current_task, name, target, owner)?;
 
         self.init_new_node_security_on_create(current_task, &new_node, name)?;
@@ -1531,7 +1613,6 @@ impl FsNode {
         current_task: &CurrentTask,
         mount: &MountInfo,
         mut mode: FileMode,
-        mut owner: FsCred,
         link_behavior: FsNodeLinkBehavior,
     ) -> Result<FsNodeHandle, Errno> {
         self.check_access(
@@ -1541,8 +1622,10 @@ impl FsNode {
             CheckAccessReason::InternalPermissionChecks,
             security::Auditable::Location(std::panic::Location::caller()),
         )?;
+        let mut owner = current_task.current_fscred();
         self.update_metadata_for_child(current_task, &mut mode, &mut owner);
         let node = self.ops().create_tmpfile(self, current_task, mode, owner)?;
+        node.set_has_no_privileges_if_not_suid_or_sgid();
         self.init_new_node_security_on_create(current_task, &node, "".into())?;
         if link_behavior == FsNodeLinkBehavior::Disallowed {
             node.ensure_rare_data().link_behavior.set(link_behavior).unwrap();
@@ -1692,6 +1775,10 @@ impl FsNode {
         if self.is_dir() {
             return error!(EISDIR);
         }
+        // Reject other non-regular files before `truncate_common` checks `RLIMIT_FSIZE`.
+        if !self.is_reg() {
+            return error!(EINVAL);
+        }
         self.check_access(
             current_task,
             mount,
@@ -1716,16 +1803,20 @@ impl FsNode {
         // seals (e.g., `check_no_seal`).
         let _write_guard = self.create_write_guard(FileWriteGuardMode::WriteFile)?;
 
-        let guard = self.ops().append_lock_write(self, current_task)?;
-        self.truncate_locked(&guard, current_task, length)
+        self.truncate_common(current_task, None, length)
     }
 
     /// Avoid calling this method directly. You probably want to call `FileObject::ftruncate()`
     /// which will also perform all file-descriptor based verifications.
-    pub fn ftruncate(&self, current_task: &CurrentTask, length: u64) -> Result<(), Errno> {
-        if self.is_dir() {
-            // When truncating a file descriptor, if the descriptor references a directory,
-            // return EINVAL. This is different from the truncate() syscall which returns EISDIR.
+    pub fn ftruncate(
+        &self,
+        current_task: &CurrentTask,
+        file: &FileObject,
+        length: u64,
+    ) -> Result<(), Errno> {
+        if !self.is_reg() {
+            // Only regular files can be truncated. When truncating via a file descriptor,
+            // directories also return `EINVAL` rather than `EISDIR`.
             //
             // See https://man7.org/linux/man-pages/man2/ftruncate.2.html#ERRORS
             return error!(EINVAL);
@@ -1746,64 +1837,47 @@ impl FsNode {
         // "With ftruncate(), the file must be open for writing; with truncate(),
         // the file must be writable."
 
-        let guard = self.ops().append_lock_write(self, current_task)?;
-        self.truncate_locked(&guard, current_task, length)
+        self.truncate_common(current_task, Some(file), length)
     }
 
     // Called by `truncate` and `ftruncate` above.
-    pub fn truncate_locked(
-        &self,
-        guard: &AppendLockWriteGuard<'_>,
-        current_task: &CurrentTask,
-        length: u64,
-    ) -> Result<(), Errno> {
-        if length > MAX_LFS_FILESIZE as u64 {
-            return error!(EINVAL);
-        }
-        if length > current_task.thread_group().get_rlimit(Resource::FSIZE) {
-            send_standard_signal(current_task, SignalInfo::kernel(SIGXFSZ));
-            return error!(EFBIG);
-        }
-        self.clear_suid_and_sgid_bits(current_task)?;
-
-        self.ops().truncate(guard, self, current_task, length)?;
-        self.update_ctime_mtime();
-        Ok(())
-    }
-
-    /// Avoid calling this method directly. You probably want to call `FileObject::fallocate()`
-    /// which will also perform additional verifications.
-    pub fn fallocate(
+    fn truncate_common(
         &self,
         current_task: &CurrentTask,
-        mode: FallocMode,
-        offset: u64,
+        file: Option<&FileObject>,
         length: u64,
     ) -> Result<(), Errno> {
         let guard = self.ops().append_lock_write(self, current_task)?;
-        self.fallocate_locked(&guard, current_task, mode, offset, length)
+        if length > MAX_LFS_FILESIZE as u64 {
+            return error!(EINVAL);
+        }
+        self.check_size_limit(current_task, length)?;
+        self.clear_privilege_bits(current_task)?;
+
+        self.ops().truncate(&guard, self, current_task, file, length)?;
+        self.update_ctime_mtime();
+        Ok(())
     }
 
-    pub fn fallocate_locked(
+    /// Enforces `RLIMIT_FSIZE` for an operation whose target end offset is `new_size`.
+    ///
+    /// Sends `SIGXFSZ` and returns `EFBIG` only when `new_size` exceeds both `RLIMIT_FSIZE` and
+    /// the current file size, allowing files already above the limit to shrink. `fallocate`
+    /// implementations call this after validating `mode` so unsupported modes do not raise
+    /// `SIGXFSZ`. On success, returns `new_size` as a `usize`.
+    pub fn check_size_limit(
         &self,
-        guard: &AppendLockWriteGuard<'_>,
         current_task: &CurrentTask,
-        mode: FallocMode,
-        offset: u64,
-        length: u64,
-    ) -> Result<(), Errno> {
-        let allocate_size = checked_add_offset_and_length(offset as usize, length as usize)
-            .map_err(|_| errno!(EFBIG))? as u64;
-        if allocate_size > current_task.thread_group().get_rlimit(Resource::FSIZE) {
+        new_size: u64,
+    ) -> Result<usize, Errno> {
+        // Read the current size last because it may require a filesystem round trip.
+        if new_size > current_task.thread_group().get_rlimit(Resource::FSIZE)
+            && new_size > self.get_size(current_task)? as u64
+        {
             send_standard_signal(current_task, SignalInfo::kernel(SIGXFSZ));
             return error!(EFBIG);
         }
-
-        self.clear_suid_and_sgid_bits(current_task)?;
-
-        self.ops().allocate(guard, self, current_task, mode, offset, length)?;
-        self.update_ctime_mtime();
-        Ok(())
+        usize::try_from(new_size).map_err(|_| errno!(EFBIG))
     }
 
     fn update_metadata_for_child(
@@ -1965,10 +2039,19 @@ impl FsNode {
 
     /// Updates node attributes and persists changes via [`FsNodeOps::update_attributes`].
     ///
+    /// If `force` is `true`, bypasses [`security::check_fs_node_setattr_access`] (for example,
+    /// during kernel-enforced privilege revocation or when forwarding an already-checked update to
+    /// an underlying node).
+    ///
     /// For directory-level attributes like `casefold` and `wrapping_key_id`, callers should
     /// use directory helpers (such as [`DirEntry::set_casefold`]) to synchronize child caches
     /// and directory locks.
-    pub fn update_attributes<F>(&self, current_task: &CurrentTask, mutator: F) -> Result<(), Errno>
+    pub fn update_attributes<F>(
+        &self,
+        current_task: &CurrentTask,
+        force: bool,
+        mutator: F,
+    ) -> Result<(), Errno>
     where
         F: FnOnce(&mut FsNodeInfo) -> Result<(), Errno>,
     {
@@ -1996,35 +2079,35 @@ impl FsNode {
         }
         new_info.time_status_change = utc::utc_now();
 
-        let mut has = zxio_node_attr_has_t { ..Default::default() };
-        has.modification_time = info.time_modify != new_info.time_modify;
-        has.access_time = info.time_access != new_info.time_access;
-        has.mode = info.mode != new_info.mode;
-        has.uid = info.uid != new_info.uid;
-        has.gid = info.gid != new_info.gid;
-        has.rdev = info.rdev != new_info.rdev;
-        has.casefold = info.casefold != new_info.casefold;
-        has.encryption_policy = info.encryption_policy != new_info.encryption_policy;
+        let mut has = FsNodeAttrFlags::empty();
+        has.set(FsNodeAttrFlags::TIME_MODIFY, info.time_modify != new_info.time_modify);
+        has.set(FsNodeAttrFlags::TIME_ACCESS, info.time_access != new_info.time_access);
+        has.set(FsNodeAttrFlags::MODE, info.mode != new_info.mode);
+        has.set(FsNodeAttrFlags::UID, info.uid != new_info.uid);
+        has.set(FsNodeAttrFlags::GID, info.gid != new_info.gid);
+        has.set(FsNodeAttrFlags::RDEV, info.rdev != new_info.rdev);
+        has.set(FsNodeAttrFlags::CASEFOLD, info.casefold != new_info.casefold);
+        has.set(
+            FsNodeAttrFlags::ENCRYPTION_POLICY,
+            info.encryption_policy != new_info.encryption_policy,
+        );
 
-        if has.casefold && !self.fs().has_casefold_support() {
+        if has.contains(FsNodeAttrFlags::CASEFOLD) && !self.fs().has_casefold_support() {
             return error!(ENOTSUP);
         }
-        security::check_fs_node_setattr_access(current_task, &self, &has)?;
+        if !force {
+            security::check_fs_node_setattr_access(current_task, &self, has)?;
+        }
 
-        // Call `update_attributes(..)` to persist the changes for the following fields.
-        if has.modification_time
-            || has.access_time
-            || has.mode
-            || has.uid
-            || has.gid
-            || has.rdev
-            || has.casefold
-            || has.encryption_policy
-        {
+        // Call `update_attributes(..)` if any persisted attributes changed.
+        if !has.is_empty() {
+            has.set(FsNodeAttrFlags::FORCE, force);
             self.ops().update_attributes(self, current_task, &new_info, has)?;
         }
 
         *info = new_info;
+        self.update_has_no_privileges(&info);
+        self.sync_cached_mode(info.mode);
         Ok(())
     }
 
@@ -2038,7 +2121,7 @@ impl FsNode {
         mut mode: FileMode,
     ) -> Result<(), Errno> {
         mount.check_readonly_filesystem()?;
-        self.update_attributes(current_task, |info| {
+        self.update_attributes(current_task, /* force = */ false, |info| {
             if info.uid != current_task.current_creds().fsuid {
                 security::check_task_capable(current_task, CAP_FOWNER)?;
             }
@@ -2059,7 +2142,7 @@ impl FsNode {
         group: Option<gid_t>,
     ) -> Result<(), Errno> {
         mount.check_readonly_filesystem()?;
-        self.update_attributes(current_task, |info| {
+        self.update_attributes(current_task, /* force = */ false, |info| {
             if security::is_task_capable_noaudit(current_task, CAP_CHOWN) {
                 info.chown(owner, group);
                 return Ok(());
@@ -2072,13 +2155,14 @@ impl FsNode {
                 }
             }
 
-            let (euid, is_in_group) = {
+            let (fsuid, is_in_group) = {
                 let current_creds = current_task.current_creds();
-                (current_creds.euid, group.map(|gid| current_creds.is_in_group(gid)))
+                (current_creds.fsuid, group.map(|gid| current_creds.is_in_fs_group(gid)))
             };
 
-            // The owner can change the group.
-            if info.uid == euid {
+            // The owner can change the group. Like the other file permission checks, ownership is
+            // determined by the filesystem user ID.
+            if info.uid == fsuid {
                 // To a group that it belongs.
                 if let Some(is_in_group) = is_in_group {
                     if !is_in_group {
@@ -2103,17 +2187,17 @@ impl FsNode {
             info.chown(None, None);
             Ok(())
         })?;
+        // `FsNodeInfo::chown` clears `S_ISUID` and `S_ISGID` on `FsNodeInfo` inside
+        // `update_attributes`, but cannot clear `security.capability` there because the
+        // `update_attributes` mutator runs on a cloned `FsNodeInfo` while holding the `info`
+        // write lock and before `check_fs_node_setattr_access` and `FsNodeOps::update_attributes`
+        // validate and persist the change.
+        //
         // From <https://man7.org/linux/man-pages/man2/chown.2.html>:
         //
-        //   When the owner or group of an executable file is changed by an
-        //   unprivileged user, the S_ISUID and S_ISGID mode bits are cleared.
-        //   POSIX does not specify whether this also should happen when root
-        //   does the chown(); the Linux behavior depends on the kernel version,
-        //   and since Linux 2.2.13, root is treated like other users.
-        //   ...
         //   When the owner or group of an executable file is changed (by any user),
         //   all capability sets for the file are cleared.
-        self.clear_suid_and_sgid_bits(current_task)
+        self.clear_privilege_bits(current_task)
     }
 
     /// Forcefully change the owner and group of this node.
@@ -2132,29 +2216,44 @@ impl FsNode {
         });
     }
 
+    #[inline]
+    fn cached_file_mode(&self) -> FileMode {
+        FileMode::from_bits(self.cached_mode.load(Ordering::Relaxed))
+    }
+
+    /// Updates the lock-free copy of the mode. `update_info` and `update_attributes` call this
+    /// already; `FsNodeOps` that write `info` directly must call it with the new `info.mode`.
+    #[inline]
+    pub fn sync_cached_mode(&self, mode: FileMode) {
+        let bits = mode.bits();
+        if self.cached_mode.load(Ordering::Relaxed) != bits {
+            self.cached_mode.store(bits, Ordering::Relaxed);
+        }
+    }
+
     /// Whether this node is a regular file.
     pub fn is_reg(&self) -> bool {
-        self.info().mode.is_reg()
+        self.cached_file_mode().is_reg()
     }
 
     /// Whether this node is a directory.
     pub fn is_dir(&self) -> bool {
-        self.info().mode.is_dir()
+        self.cached_file_mode().is_dir()
     }
 
     /// Whether this node is a socket.
     pub fn is_sock(&self) -> bool {
-        self.info().mode.is_sock()
+        self.cached_file_mode().is_sock()
     }
 
     /// Whether this node is a FIFO.
     pub fn is_fifo(&self) -> bool {
-        self.info().mode.is_fifo()
+        self.cached_file_mode().is_fifo()
     }
 
     /// Whether this node is a symbolic link.
     pub fn is_lnk(&self) -> bool {
-        self.info().mode.is_lnk()
+        self.cached_file_mode().is_lnk()
     }
 
     pub fn dev(&self) -> DeviceId {
@@ -2326,9 +2425,31 @@ impl FsNode {
                 }
             }
         } else {
-            panic!("Unknown extended attribute prefix: {}", name);
+            // Unknown prefixes still undergo discretionary access checks before
+            // `validate_xattr_name` rejects the unknown namespace with ENOTSUP.
+            self.check_access(
+                current_task,
+                mount,
+                access,
+                CheckAccessReason::InternalPermissionChecks,
+                security::Auditable::Name(name),
+            )?;
         }
         Ok(())
+    }
+
+    fn validate_xattr_name(name: &FsStr) -> Result<(), Errno> {
+        for prefix in [
+            XATTR_USER_PREFIX.to_bytes(),
+            XATTR_TRUSTED_PREFIX.to_bytes(),
+            XATTR_SYSTEM_PREFIX.to_bytes(),
+            XATTR_SECURITY_PREFIX.to_bytes(),
+        ] {
+            if let Some(suffix) = name.strip_prefix(prefix) {
+                return if suffix.is_empty() { error!(EINVAL) } else { Ok(()) };
+            }
+        }
+        error!(ENOTSUP)
     }
 
     pub fn get_xattr(
@@ -2343,6 +2464,8 @@ impl FsNode {
 
         // LSM access checks must be performed after discretionary checks.
         security::check_fs_node_getxattr_access(current_task, self, name)?;
+
+        Self::validate_xattr_name(name)?;
 
         if name.starts_with(XATTR_SECURITY_PREFIX.to_bytes()) {
             // If the attribute is in the security.* domain then allow the LSM to handle the
@@ -2368,6 +2491,8 @@ impl FsNode {
         // LSM access checks must be performed after discretionary checks.
         security::check_fs_node_setxattr_access(current_task, self, name, value, op)?;
 
+        Self::validate_xattr_name(name)?;
+
         if name.starts_with(XATTR_SECURITY_PREFIX.to_bytes()) {
             // If the attribute is in the security.* domain then allow the LSM to handle the
             // request, or to delegate to `FsNodeOps::set_xattr()`.
@@ -2389,7 +2514,13 @@ impl FsNode {
 
         // LSM access checks must be performed after discretionary checks.
         security::check_fs_node_removexattr_access(current_task, self, name)?;
-        self.ops().remove_xattr(self, current_task, name)
+        Self::validate_xattr_name(name)?;
+
+        self.ops().remove_xattr(self, current_task, name)?;
+        if name == XATTR_NAME_CAPS.to_bytes() {
+            self.set_has_no_privileges_if_not_suid_or_sgid();
+        }
+        Ok(())
     }
 
     pub fn list_xattrs(
@@ -2436,7 +2567,10 @@ impl FsNode {
         current_task: &CurrentTask,
         flags: StatxFlags,
     ) -> Result<LockDepReadGuard<'_, FsNodeInfo>, Errno> {
-        self.ops().fetch_and_refresh_info(self, current_task, &self.info, flags)
+        let info = self.ops().fetch_and_refresh_info(self, current_task, &self.info, flags)?;
+        self.update_has_no_privileges(&info);
+        self.sync_cached_mode(info.mode);
+        Ok(info)
     }
 
     pub fn update_info<F, T>(&self, mutator: F) -> T
@@ -2444,35 +2578,80 @@ impl FsNode {
         F: FnOnce(&mut FsNodeInfo) -> T,
     {
         let mut info = self.info.write();
-        mutator(&mut info)
+        let result = mutator(&mut info);
+        self.update_has_no_privileges(&info);
+        self.sync_cached_mode(info.mode);
+        result
+    }
+
+    /// Returns `true` if [`FsNodeFlags::HAS_NO_PRIVILEGES`] is set on this node.
+    pub fn has_no_privileges(&self) -> bool {
+        self.flags.load(Ordering::Acquire).contains(FsNodeFlags::HAS_NO_PRIVILEGES)
+    }
+
+    /// Sets [`FsNodeFlags::HAS_NO_PRIVILEGES`] if `self.info()` does not have `S_ISUID` or
+    /// `S_ISGID` mode bits set, holding the `info` read guard across the check and flag update
+    /// to serialize against concurrent [`Self::update_attributes`] and [`Self::update_info`] calls.
+    pub fn set_has_no_privileges_if_not_suid_or_sgid(&self) {
+        // TODO(https://fxbug.dev/565936266): Synchronize with concurrent `setxattr` calls.
+        let info = self.info();
+        if !info.has_suid_or_sgid_bits() {
+            self.flags.fetch_or(FsNodeFlags::HAS_NO_PRIVILEGES, Ordering::Release);
+        }
+    }
+
+    /// Clears [`FsNodeFlags::HAS_NO_PRIVILEGES`] if `info` has `S_ISUID` or `S_ISGID` mode bits
+    /// set, so that subsequent modifications will clear them via [`Self::clear_privilege_bits`].
+    fn update_has_no_privileges(&self, info: &FsNodeInfo) {
+        if self.is_private() || !info.has_suid_or_sgid_bits() {
+            return;
+        }
+        self.flags.fetch_and(!FsNodeFlags::HAS_NO_PRIVILEGES, Ordering::Release);
+    }
+
+    /// Clears [`FsNodeFlags::HAS_NO_PRIVILEGES`] on a non-private regular file so that subsequent
+    /// modifications will clear privilege state via [`Self::clear_privilege_bits`].
+    pub(crate) fn clear_has_no_privileges(&self) {
+        if self.is_private() || !self.is_reg() {
+            return;
+        }
+        self.flags.fetch_and(!FsNodeFlags::HAS_NO_PRIVILEGES, Ordering::Release);
     }
 
     /// Clears the `S_ISUID` and `S_ISGID` mode bits (unless `current_task` has [`CAP_FSETID`]),
     /// and removes any `security.capability` extended attribute.
-    pub fn clear_suid_and_sgid_bits(&self, current_task: &CurrentTask) -> Result<(), Errno> {
-        // Clear `S_ISUID` and `S_ISGID` before removing `security.capability` so that a
-        // SUID-root binary whose capabilities are restricted by `security.capability` cannot
-        // be observed with `S_ISUID` still set after `security.capability` is removed.
-        //
+    pub fn clear_privilege_bits(&self, current_task: &CurrentTask) -> Result<(), Errno> {
+        if self.has_no_privileges() {
+            return Ok(());
+        }
+
         // From <https://man7.org/linux/man-pages/man7/capabilities.7.html>:
         //
         //   CAP_FSETID
         //          •  Don't clear set-user-ID and set-group-ID mode bits when a
         //             file is modified;
-        if self.info().has_suid_or_sgid_bits()
-            && !security::is_task_capable_noaudit(current_task, CAP_FSETID)
-        {
-            self.update_attributes(current_task, |info| {
+        let clear_suid_and_sgid = self.info().has_suid_or_sgid_bits()
+            && !security::is_task_capable_noaudit(current_task, CAP_FSETID);
+
+        // Always clear `security.capability` when file contents or ownership are modified,
+        // regardless of `CAP_FSETID`.
+        let kill_priv = security::fs_node_needs_killpriv(current_task, self);
+
+        // Clear `S_ISUID` and `S_ISGID` before removing `security.capability` so that if
+        // persisting the mode update fails, a SUID-root binary whose capabilities are restricted
+        // by `security.capability` is not left with `S_ISUID` still set after
+        // `security.capability` has been removed.
+        if clear_suid_and_sgid {
+            self.update_attributes(current_task, /* force = */ true, |info| {
                 info.clear_suid_and_sgid_bits();
                 Ok(())
             })?;
         }
-
-        // Always clear `security.capability` when file contents or ownership are modified,
-        // regardless of `CAP_FSETID`.
-        if security::fs_node_needs_killpriv(current_task, self)? {
+        if kill_priv {
             security::fs_node_killpriv(current_task, self)?;
         }
+
+        self.set_has_no_privileges_if_not_suid_or_sgid();
         Ok(())
     }
 
@@ -2524,7 +2703,7 @@ impl FsNode {
             // This function is called by `utimes(..)` which will update the access and
             // modification time. We need to call `update_attributes()` to update the mtime of
             // filesystems that manages file timestamps.
-            self.update_attributes(current_task, |info| {
+            self.update_attributes(current_task, /* force = */ false, |info| {
                 let now = utc::utc_now();
                 let get_time = |time: TimeUpdateType| match time {
                     TimeUpdateType::Now => Some(now),
@@ -2619,10 +2798,7 @@ impl Releasable for FsNode {
 /// This is the case if `gid` is the task's fsgid or one of its supplementary groups, or if the
 /// task has `CAP_FSETID`. Note that the egid is intentionally not considered.
 fn can_retain_sgid(current_task: &CurrentTask, gid: gid_t) -> bool {
-    let in_group = {
-        let current_creds = current_task.current_creds();
-        gid == current_creds.fsgid || current_creds.groups.contains(&gid)
-    };
+    let in_group = current_task.current_creds().is_in_fs_group(gid);
     in_group || security::check_task_capable(current_task, CAP_FSETID).is_ok()
 }
 
@@ -2639,7 +2815,7 @@ fn check_access(
         let current_creds = current_task.current_creds();
         if current_creds.fsuid == node_uid {
             mode.user_access()
-        } else if current_creds.is_in_group(node_gid) {
+        } else if current_creds.is_in_fs_group(node_gid) {
             mode.group_access()
         } else {
             mode.other_access()
@@ -2740,13 +2916,14 @@ mod tests {
     async fn node_info_is_reflected_in_stat() {
         spawn_kernel_and_run(async |current_task| {
             // Create a node.
-            let node = &current_task
+            let created = current_task
                 .fs()
                 .root()
                 .create_node(&current_task, "zero".into(), FileMode::IFCHR, DeviceId::ZERO)
-                .expect("create_node")
-                .entry
-                .node;
+                .expect("create_node");
+            let node = &created.entry.node;
+            assert!(!node.is_sock());
+            assert!(!node.is_reg());
             node.update_info(|info| {
                 info.mode = FileMode::IFSOCK;
                 info.size = 1;
@@ -2760,6 +2937,8 @@ mod tests {
                 info.time_modify = UtcInstant::from_nanos(3);
                 info.rdev = DeviceId::new(13, 13);
             });
+            assert!(node.is_sock());
+            assert!(!node.is_reg());
             let stat = node.stat(&current_task).expect("stat");
 
             assert_eq!(stat.st_mode, FileMode::IFSOCK.bits());
@@ -2776,6 +2955,11 @@ mod tests {
             assert_eq!(stat.st_mtime, 0);
             assert_eq!(stat.st_mtime_nsec, 3);
             assert_eq!(stat.st_rdev, DeviceId::new(13, 13).bits());
+
+            node.chmod(&current_task, &created.mount, FileMode::from_bits(0o755)).expect("chmod");
+            assert_eq!(node.cached_file_mode(), FileMode::IFSOCK | FileMode::from_bits(0o755));
+            assert!(node.is_sock());
+            assert!(!node.is_reg());
         })
         .await;
     }
@@ -3000,7 +3184,7 @@ mod tests {
 
             assert!(!file_node.node.fs().has_casefold_support());
             assert_eq!(
-                file_node.node.update_attributes(&current_task, |info| {
+                file_node.node.update_attributes(&current_task, /* force = */ false, |info| {
                     info.casefold = true;
                     Ok(())
                 }),
@@ -3020,6 +3204,163 @@ mod tests {
                 .entry;
             assert_eq!(dir_entry.set_casefold(&current_task, true), error!(ENOTSUP));
             assert_eq!(dir_entry.set_casefold(&current_task, false), Ok(()));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    fn test_falloc_mode_bits_roundtrip() {
+        let modes = [
+            FallocMode::Allocate { keep_size: false },
+            FallocMode::Allocate { keep_size: true },
+            FallocMode::PunchHole,
+            FallocMode::Collapse,
+            FallocMode::Zero { keep_size: false },
+            FallocMode::Zero { keep_size: true },
+            FallocMode::InsertRange,
+            FallocMode::UnshareRange,
+        ];
+        for mode in modes {
+            assert_eq!(FallocMode::from_bits(mode.into_bits()), Some(mode));
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_fallocate_rlimit_fsize() {
+        spawn_kernel_and_run(async |current_task| {
+            current_task
+                .fs()
+                .root()
+                .create_node(
+                    &current_task,
+                    "rlimit_file".into(),
+                    mode!(IFREG, 0o666),
+                    DeviceId::NONE,
+                )
+                .expect("create_node");
+            let file = current_task
+                .open_file("rlimit_file".into(), OpenFlags::RDWR)
+                .expect("open rlimit_file");
+            file.fallocate(&current_task, FallocMode::Allocate { keep_size: false }, 0, 4096)
+                .expect("fallocate before setting the limit");
+            current_task
+                .thread_group()
+                .limits
+                .lock()
+                .set(Resource::FSIZE, starnix_uapi::rlimit { rlim_cur: 1024, rlim_max: 1024 });
+            let take_sigxfsz = || {
+                current_task
+                    .write()
+                    .signals_mut()
+                    .take_next_where(|sig| sig.signal == SIGXFSZ)
+                    .is_some()
+            };
+
+            // A range past the limit is allowed if it does not grow the file.
+            assert_eq!(
+                file.fallocate(&current_task, FallocMode::Allocate { keep_size: false }, 0, 2048),
+                Ok(())
+            );
+            // Modes the filesystem does not support fail with its error rather than `EFBIG`,
+            // even if they would extend the file past `RLIMIT_FSIZE`.
+            assert_eq!(
+                file.fallocate(&current_task, FallocMode::Zero { keep_size: false }, 4096, 4096),
+                error!(EOPNOTSUPP)
+            );
+            assert!(!take_sigxfsz());
+
+            // Linux tmpfs enforces `RLIMIT_FSIZE` even when `keep_size` leaves `st_size` unchanged.
+            for keep_size in [false, true] {
+                assert_eq!(
+                    file.fallocate(&current_task, FallocMode::Allocate { keep_size }, 4096, 4096),
+                    error!(EFBIG)
+                );
+                assert!(take_sigxfsz());
+            }
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_truncate_rlimit_fsize() {
+        spawn_kernel_and_run(async |current_task| {
+            let node = current_task
+                .fs()
+                .root()
+                .create_node(
+                    &current_task,
+                    "truncate_rlimit".into(),
+                    mode!(IFREG, 0o666),
+                    DeviceId::NONE,
+                )
+                .expect("create_node");
+            let file = current_task
+                .open_file("truncate_rlimit".into(), OpenFlags::RDWR)
+                .expect("open truncate_rlimit");
+            file.ftruncate(&current_task, 4096).expect("ftruncate before setting the limit");
+            current_task
+                .thread_group()
+                .limits
+                .lock()
+                .set(Resource::FSIZE, starnix_uapi::rlimit { rlim_cur: 1024, rlim_max: 1024 });
+            let take_sigxfsz = || {
+                current_task
+                    .write()
+                    .signals_mut()
+                    .take_next_where(|sig| sig.signal == SIGXFSZ)
+                    .is_some()
+            };
+
+            // Shrinking a file already larger than `RLIMIT_FSIZE` succeeds, even if the new length
+            // remains above the limit.
+            assert_eq!(file.ftruncate(&current_task, 2048), Ok(()));
+            assert_eq!(node.truncate(&current_task, 1536), Ok(()));
+            assert_eq!(node.entry.node.info().size, 1536);
+            assert!(!take_sigxfsz());
+
+            // Growing past `RLIMIT_FSIZE` raises `SIGXFSZ` and fails with `EFBIG`.
+            assert_eq!(file.ftruncate(&current_task, 2048), error!(EFBIG));
+            assert!(take_sigxfsz());
+            assert_eq!(node.truncate(&current_task, 2048), error!(EFBIG));
+            assert!(take_sigxfsz());
+            assert_eq!(node.entry.node.info().size, 1536);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_truncate_non_regular_file_ignores_rlimit_fsize() {
+        spawn_kernel_and_run(async |current_task| {
+            let node = current_task
+                .fs()
+                .root()
+                .create_node(
+                    &current_task,
+                    "truncate_fifo".into(),
+                    mode!(IFIFO, 0o666),
+                    DeviceId::NONE,
+                )
+                .expect("create_node");
+            current_task
+                .thread_group()
+                .limits
+                .lock()
+                .set(Resource::FSIZE, starnix_uapi::rlimit { rlim_cur: 1024, rlim_max: 1024 });
+
+            // Truncating a FIFO past `RLIMIT_FSIZE` fails with `EINVAL`, not `EFBIG`, and does not
+            // raise `SIGXFSZ`.
+            assert_eq!(node.truncate(&current_task, 4096), error!(EINVAL));
+            let file = current_task
+                .open_file("truncate_fifo".into(), OpenFlags::RDWR | OpenFlags::NONBLOCK)
+                .expect("open truncate_fifo");
+            assert_eq!(file.ftruncate(&current_task, 4096), error!(EINVAL));
+            assert!(
+                current_task
+                    .write()
+                    .signals_mut()
+                    .take_next_where(|sig| sig.signal == SIGXFSZ)
+                    .is_none()
+            );
         })
         .await;
     }

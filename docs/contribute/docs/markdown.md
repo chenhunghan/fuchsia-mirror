@@ -442,7 +442,7 @@ you want to override the default `id`, add the
 
 For every second- and third-level heading, fuchsia.dev automatically generates a
 table of contents (TOC) for the page. To hide headers from the TOC, add the
-[custom attribute](#custom-attribute)
+[custom attribute](#custom-attributes)
 `{:.hide-from-toc}` at the end of the header.
 
 *   {Markdown}
@@ -474,7 +474,7 @@ Each of the following will produce a horizontal rule:
 ---------------------------------------
 ```
 
-## Images
+## Images {#images}
 
 Markdown uses an image syntax that is intended to resemble the syntax
 for links, allowing for two styles: inline and reference.

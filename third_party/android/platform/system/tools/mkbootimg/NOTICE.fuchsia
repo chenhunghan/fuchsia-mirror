@@ -2,7 +2,10 @@
 The following files are covered by this license:
   - src/include/bootimg/bootimg.h
 --------------------------------------------------------------------------------
-* Redistribution and use in source and binary forms, with or without modification,
+/*
+ * Copyright (C) 2007 The Android Open Source Project
+ *
+ * Redistribution and use in source and binary forms, with or without modification,
  * are permitted provided that the following conditions are met:
  *
  * 1. Redistributions of source code must retain the above copyright notice, this

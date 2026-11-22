@@ -40,6 +40,7 @@ executable("sysmem_executable") {
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/sys/cpp",
     "//sdk/lib/vfs/cpp",
+    "//zircon/system/ulib/image-format",
     "//zircon/system/ulib/trace-provider",
   ]
 }
@@ -99,13 +100,17 @@ source_set("sysmem_common_srcs") {
     "//sdk/lib/fit",
     "//sdk/lib/inspect/component/cpp",
     "//sdk/lib/memory_barriers",
+    "//sdk/lib/sys/cpp",
     "//sdk/lib/syslog/cpp",
     "//src/devices/bind/fuchsia.sysmem.heap:fuchsia.sysmem.heap_cpp",
     "//src/lib/metrics_buffer",
     "//src/sysmem/metrics",
     "//zircon/system/ulib/closure-queue",
     "//zircon/system/ulib/fbl",
-    "//zircon/system/ulib/image-format",
+
+    # The image-format implementation is chosen by the binaries that include
+    # this, so that they don't end up with more than one.
+    "//zircon/system/ulib/image-format:api",
     "//zircon/system/ulib/inspect",
     "//zircon/system/ulib/region-alloc",
     "//zircon/system/ulib/sync",
@@ -113,11 +118,6 @@ source_set("sysmem_common_srcs") {
     "//zircon/system/ulib/trace",
     "//zircon/system/ulib/zx",
     "//zircon/third_party/ulib/safemath",
-  ]
-
-  deps = [
-    "//zircon/system/ulib/image-format",
-    "//zircon/system/ulib/region-alloc",
   ]
 }
 

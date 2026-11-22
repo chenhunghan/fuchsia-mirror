@@ -13,7 +13,6 @@ fidl_library(
     ],
     api_area = "Bluetooth",
     category = "partner",
-    enable_hlcpp = True,
     stable = True,
     visibility = ["//visibility:public"],
     deps = [

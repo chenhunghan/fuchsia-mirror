@@ -8,7 +8,6 @@
 #include <stdint.h>
 
 #include <kernel/ffi.h>
-#include <kernel/wait_ffi.h>
 
 #ifdef UNITTESTS_ENABLED
 #include <stddef.h>
@@ -20,6 +19,8 @@
 #ifndef WAIT_QUEUE_DEPTH_TRACING_ENABLED
 #define WAIT_QUEUE_DEPTH_TRACING_ENABLED false
 #endif
+
+class WaitQueueCollection;
 
 namespace {
 
@@ -33,6 +34,8 @@ inline void WqTraceDepth(const WaitQueueCollection* collection, uint32_t depth) 
 }  // namespace
 
 extern "C" {
+
+void cpp_wq_trace_depth(const WaitQueueCollection* collection, uint32_t depth);
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_wq_trace_depth(const WaitQueueCollection* collection, uint32_t depth) {

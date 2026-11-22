@@ -7,18 +7,46 @@ load("//build/bazel/rules/host_tests:host_cc_test.bzl", "host_cc_test")
 
 package(default_applicable_licenses = ["//:license"])
 
+# The names of the environment variables that indicate an AI agent come from
+# //tools/devshell/lib, which is the source of truth for all languages.
+genrule(
+    name = "gen_agent_environments",
+    srcs = ["//tools/devshell/lib:agents.txt"],
+    outs = [
+        # GN action() outputs require an explicit $target_gen_dir prefix.
+        "agent_environments.inc",  # @bazel2gn:path_overwrite:$target_gen_dir/agent_environments.inc
+    ],
+    cmd = "$(location :gen_environment_variable_list.sh) $@ $<",
+    tools = [":gen_environment_variable_list.sh"],
+)
+
+genrule(
+    name = "gen_agent_session_id_environments",
+    srcs = ["//tools/devshell/lib:agent_session_ids.txt"],
+    outs = [
+        # GN action() outputs require an explicit $target_gen_dir prefix.
+        "agent_session_id_environments.inc",  # @bazel2gn:path_overwrite:$target_gen_dir/agent_session_id_environments.inc
+    ],
+    cmd = "$(location :gen_environment_variable_list.sh) $@ $<",
+    tools = [":gen_environment_variable_list.sh"],
+)
+
+# GN depends on the generated include files via `deps`, whereas Bazel compiles
+# against the genrule outputs via `srcs`.
+# @bazel2gn:raw_attribute:deps = [ ":gen_agent_environments", ":gen_agent_session_id_environments" ]
 fx_cc_library(
     name = "testable_internals",
     srcs = [
         "environment_status.cc",
         "persistent_status.cc",
+        ":gen_agent_environments",  # @bazel2gn:skip
+        ":gen_agent_session_id_environments",  # @bazel2gn:skip
     ],
     hdrs = [
         "environment_status.h",
         "persistent_status.h",
     ],
     deps = [
-        "//sdk/lib/syslog/cpp",
         "//src/lib/analytics/cpp/metric_properties",
         "//src/lib/uuid",
     ],
@@ -52,6 +80,7 @@ fx_cc_library(
     ],
     visibility = [
         "//src/developer/debug/zxdb/client:__pkg__",
+        "//src/developer/debug/zxdb/console:__pkg__",
         "//tools/fidlcat:__pkg__",
         "//tools/fidlcat/lib:__pkg__",
         "//tools/symbolizer:__pkg__",
@@ -72,6 +101,8 @@ host_cc_test(
     srcs = [
         "environment_status_unittest.cc",
         "persistent_status_unittest.cc",
+        ":gen_agent_environments",
+        ":gen_agent_session_id_environments",
     ],
     test_args = ["env HOME=/tmp"],
     visibility = ["//src/lib/analytics:__pkg__"],

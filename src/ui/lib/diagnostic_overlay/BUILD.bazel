@@ -1,0 +1,106 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_build_info//:args.bzl", "target_cpu")
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/584843931): Switch to a non-IDK //third_party/Vulkan-Loader target once available.
+# @bazel2gn:skip
+cc_import(
+    name = "libvulkan",
+    interface_library = "@fuchsia_in_tree_idk//arch/" + target_cpu + ":lib/libvulkan.so",
+    shared_library = "@fuchsia_in_tree_idk//arch/" + target_cpu + ":debug/libvulkan.so",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+expect_includes(
+    name = "diagnostic_overlay_includes",
+    includes = ["meta/client.shard.cml"],
+)
+
+rustc_library(
+    name = "diagnostic_overlay",
+    srcs = [
+        "src/debug_font.rs",
+        "src/lib.rs",
+        "src/overlay.rs",
+        "src/renderer.rs",
+        "src/swapchain.rs",
+        "src/touch.rs",
+        "src/vulkan.rs",
+    ],
+    aspect_hints = [":diagnostic_overlay_includes"],
+    edition = "2024",
+    link_deps = [":libvulkan"],
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//sdk/fidl/fuchsia.images2:fuchsia.images2_rust",
+        "//sdk/fidl/fuchsia.math:fuchsia.math_rust",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_rust",
+        "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//sdk/fidl/fuchsia.ui.pointer:fuchsia.ui.pointer_rust",
+        "//sdk/fidl/fuchsia.ui.policy:fuchsia.ui.policy_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/ui/fuchsia-scenic",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:ash",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+# The diagnostic_overlay_tests and diagnostic_overlay_vulkan_tests packages are
+# defined in BUILD.gn until //src/lib/vulkan has a Ninja dependency edge for
+# fuchsia_platform Bazel builds.
+rustc_test(
+    name = "diagnostic_overlay_test",
+    aspect_hints = [":diagnostic_overlay_includes"],
+    crate = ":diagnostic_overlay",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia"],
+)
+
+rustc_test(
+    name = "diagnostic_overlay_vulkan_test",
+    srcs = [
+        "src/debug_font.rs",
+        "src/overlay.rs",
+        "src/renderer.rs",
+        "src/swapchain.rs",
+        "src/vulkan.rs",
+        "src/vulkan_tests.rs",
+    ],
+    crate_root = "src/vulkan_tests.rs",
+    edition = "2024",
+    link_deps = [":libvulkan"],
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.images2:fuchsia.images2_rust",
+        "//sdk/fidl/fuchsia.math:fuchsia.math_rust",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/trace/rust:trace",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:ash",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

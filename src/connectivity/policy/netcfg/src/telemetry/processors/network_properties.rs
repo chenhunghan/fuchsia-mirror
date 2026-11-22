@@ -146,6 +146,14 @@ impl<S: InspectSender> NetworkPropertiesProcessor<S> {
             ts.matrix.fold_or_log_error(1u64 << bit_index);
         }
     }
+
+    pub fn log_network_removed(&mut self, network_id: u64) {
+        for ts in self.connectivity_matrices.iter().flatten() {
+            if ts.network_id == network_id {
+                ts.matrix.fold_or_log_error(0);
+            }
+        }
+    }
 }
 
 #[derive(Unit, PartialEq, Eq, Hash)]
@@ -159,12 +167,7 @@ struct NetworkData {
 impl From<NetworkEventMetadata> for NetworkData {
     fn from(metadata: NetworkEventMetadata) -> Self {
         let NetworkEventMetadata { id, name, transport, is_fuchsia_provisioned, .. } = metadata;
-        Self {
-            id: id,
-            name: name.unwrap_or_else(|| "unknown".to_string()),
-            transport: format!("{:?}", transport),
-            is_fuchsia_provisioned,
-        }
+        Self { id, name, transport: format!("{:?}", transport), is_fuchsia_provisioned }
     }
 }
 
@@ -281,7 +284,7 @@ mod tests {
     fn log_network_events<S: InspectSender>(processor: &mut NetworkPropertiesProcessor<S>) {
         let eth_metadata = NetworkEventMetadata {
             id: 0,
-            name: Some("eth0".to_string()),
+            name: "eth0".to_string(),
             transport: fnp_properties::NetworkType::Ethernet,
             is_fuchsia_provisioned: true,
             connectivity_state: None,
@@ -289,7 +292,7 @@ mod tests {
 
         let wlan_metadata = NetworkEventMetadata {
             id: 1,
-            name: Some("wlan0".to_string()),
+            name: "wlan0".to_string(),
             transport: fnp_properties::NetworkType::Wifi,
             is_fuchsia_provisioned: false,
             connectivity_state: None,
@@ -340,7 +343,7 @@ mod tests {
 
         let eth_metadata = NetworkEventMetadata {
             id: 0,
-            name: Some("eth0".to_string()),
+            name: "eth0".to_string(),
             transport: fnp_properties::NetworkType::Ethernet,
             is_fuchsia_provisioned: true,
             connectivity_state: Some(fnp_properties::ConnectivityState::FullConnectivity),
@@ -348,7 +351,7 @@ mod tests {
 
         let wlan_metadata = NetworkEventMetadata {
             id: 1,
-            name: Some("wlan0".to_string()),
+            name: "wlan0".to_string(),
             transport: fnp_properties::NetworkType::Wifi,
             is_fuchsia_provisioned: false,
             connectivity_state: Some(fnp_properties::ConnectivityState::LocalConnectivity),
@@ -356,16 +359,19 @@ mod tests {
 
         processor.log_network_changed(eth_metadata, &harness.mock_time_matrix_client);
         processor.log_network_changed(wlan_metadata, &harness.mock_time_matrix_client);
+        processor.log_network_removed(0);
+        // Removing an unknown network is a no-op.
+        processor.log_network_removed(99);
 
         let mut time_matrix_calls = harness.mock_time_matrix_client.drain_calls();
 
-        // FullConnectivity maps to bit 3 -> value 2^3 = 8
+        // FullConnectivity maps to bit 3 -> value 2^3 = 8, followed by 0 on removal.
         assert_eq!(
             &time_matrix_calls.drain::<u64>("network_0/connectivity")[..],
-            &[TimeMatrixCall::Fold(Timed::now(1 << 3))]
+            &[TimeMatrixCall::Fold(Timed::now(1 << 3)), TimeMatrixCall::Fold(Timed::now(0))]
         );
 
-        // LocalConnectivity maps to bit 1 -> value 2^1 = 2
+        // LocalConnectivity maps to bit 1 -> value 2^1 = 2; unaffected by network 0's removal.
         assert_eq!(
             &time_matrix_calls.drain::<u64>("network_1/connectivity")[..],
             &[TimeMatrixCall::Fold(Timed::now(1 << 1))]
@@ -385,7 +391,7 @@ mod tests {
 
         let eth_metadata = NetworkEventMetadata {
             id: 0,
-            name: Some("eth0".to_string()),
+            name: "eth0".to_string(),
             transport: fnp_properties::NetworkType::Ethernet,
             is_fuchsia_provisioned: true,
             connectivity_state: Some(fnp_properties::ConnectivityState::FullConnectivity),
@@ -509,7 +515,7 @@ mod tests {
         for i in 0..16 {
             let metadata = NetworkEventMetadata {
                 id: i as u64,
-                name: Some(format!("eth{}", i)),
+                name: format!("eth{}", i),
                 transport: fnp_properties::NetworkType::Ethernet,
                 is_fuchsia_provisioned: true,
                 connectivity_state: Some(fnp_properties::ConnectivityState::FullConnectivity),
@@ -534,7 +540,7 @@ mod tests {
         // Log a 17th network. This should trigger eviction of slot 0 (network 0).
         let metadata = NetworkEventMetadata {
             id: 16,
-            name: Some("eth16".to_string()),
+            name: "eth16".to_string(),
             transport: fnp_properties::NetworkType::Ethernet,
             is_fuchsia_provisioned: true,
             connectivity_state: Some(fnp_properties::ConnectivityState::LocalConnectivity),

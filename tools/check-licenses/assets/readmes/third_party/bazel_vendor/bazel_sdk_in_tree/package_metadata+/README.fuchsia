@@ -1,0 +1,8 @@
+Name: package_metadata+
+URL:  https://github.com/bazel-contrib/supply-chain/tree/main/metadata
+Version: 0.0.3
+Revision: dc57fd2da27c8efcfca4bf4fb3aa9df1fa8bdf22
+Security Critical: yes
+
+License: Apache-2.0
+License File: LICENSE

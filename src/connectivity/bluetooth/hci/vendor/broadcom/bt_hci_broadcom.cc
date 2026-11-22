@@ -172,7 +172,8 @@ std::optional<CrashEventType> ClassifyCrashEvent(const std::vector<uint8_t>& byt
 const std::unordered_map<uint16_t, std::string> BtHciBroadcom::kFirmwareMap = {
     {PDEV_PID_BCM43458, "BCM4345C5.hcd"},
     {PDEV_PID_BCM4359, "BCM4359C0.hcd"},
-    {PDEV_PID_BCM4381A1, "BCM4381A1.hcd"}};
+    {PDEV_PID_BCM4381A1, "BCM4381A1.hcd"},
+    {PDEV_PID_BCM4390B1, "BCM4390B1.hcd"}};
 
 HciEventHandler::HciEventHandler(fit::function<void(std::vector<uint8_t>&)> on_receive_callback)
     : on_receive_callback_(std::move(on_receive_callback)) {}
@@ -325,8 +326,8 @@ void BtHciBroadcom::Start(fdf::DriverContext context, fdf::StartCompleter comple
 
   serial_pid_ = result.value()->info.serial_pid;
 
-  if (serial_pid_ == PDEV_PID_BCM4381A1) {
-    // BCM4381 board requires flow control by default.
+  if (serial_pid_ == PDEV_PID_BCM4381A1 || serial_pid_ == PDEV_PID_BCM4390B1) {
+    // BCM4381 and BCM4390 boards require flow control by default.
     fdf::Arena config_arena('CONF');
     const uint32_t flags = fhsi::kSerialDataBits8 | fhsi::kSerialStopBits1 |
                            fhsi::kSerialParityNone | fhsi::kSerialFlowCtrlCtsRts;

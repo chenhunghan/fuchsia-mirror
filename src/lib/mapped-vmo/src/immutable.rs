@@ -68,6 +68,16 @@ impl ImmutableMapping {
     }
 }
 
+// SAFETY: `ImmutableMapping` maps an immutable `SNAPSHOT | NO_WRITE` child VMO with `PERM_READ`
+// into the process-wide `vmar_root_self()`, so moving ownership to another thread and unmapping on
+// `Drop` from any thread in the process is valid.
+unsafe impl Send for ImmutableMapping {}
+
+// SAFETY: `ImmutableMapping` only exposes shared `&[u8]` slices backed by read-only, non-resizable
+// memory that is never mutated for the lifetime of the mapping, so concurrent reads across threads
+// cannot race.
+unsafe impl Sync for ImmutableMapping {}
+
 impl std::ops::Deref for ImmutableMapping {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
@@ -202,5 +212,12 @@ mod tests {
         let mapping = ImmutableMapping::create_from_vmo(&vmo, immediately_page).unwrap();
 
         assert_eq!(*mapping, []);
+    }
+
+    #[test]
+    fn implements_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ImmutableMapping>();
+        assert_send_sync::<crate::TruncatedImmutableMapping>();
     }
 }

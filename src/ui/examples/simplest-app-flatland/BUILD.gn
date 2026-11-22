@@ -2,20 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-fuchsia_component("simplest-app-flatland") {
-  component_name = "simplest-app-flatland"
-  manifest = "meta/simplest-app-flatland.cml"
-  deps = [ ":bin" ]
-}
-
-fuchsia_component("simplest-app-flatland-session") {
-  component_name = "simplest-app-flatland-session"
-  manifest = "meta/simplest-app-flatland-session.cml"
-  deps = [ ":bin" ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -70,4 +56,32 @@ rustc_binary("bin") {
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
   ]
+}
+
+fuchsia_component_manifest("simplest-app-flatland_manifest") {
+  component_name = "simplest-app-flatland"
+  manifest = "meta/simplest-app-flatland.cml"
+}
+
+fuchsia_component("simplest-app-flatland") {
+  cm_label = ":simplest-app-flatland_manifest"
+  visibility = [
+    ":*",
+    "//src/ui/examples:*",
+  ]
+  deps = [ ":bin" ]
+}
+
+fuchsia_component_manifest("simplest-app-flatland-session_manifest") {
+  component_name = "simplest-app-flatland-session"
+  manifest = "meta/simplest-app-flatland-session.cml"
+}
+
+fuchsia_component("simplest-app-flatland-session") {
+  cm_label = ":simplest-app-flatland-session_manifest"
+  visibility = [
+    ":*",
+    "//src/ui/examples:*",
+  ]
+  deps = [ ":bin" ]
 }

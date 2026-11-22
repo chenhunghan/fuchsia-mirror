@@ -101,7 +101,7 @@ which offers the same interface. While the design proposed in this RFC is only
 concerned with implementing the global `/proc/pressure/memory` file at this
 time, the internal measurement mechanisms described in this RFC can be reused to
 implement a similar feature, too, should the need arise (see
-[Drawbacks, alternatives, and unknowns](#drawbacks_alternatives_and_unknowns)
+[Drawbacks, alternatives, and unknowns](#drawbacks-alternatives-and-unknowns)
 for more details).
 
 For the sake of minimizing divergences in the magnitude of the measured memory
@@ -202,7 +202,8 @@ and increment the global `some` and `full` values accordingly.
 
 In addition, the `StallAggregator` will notify registered watchers when the
 resulting growth rate exceeds the threshold that they set (see
-[The new `zx_system_watch_memory_stall` syscall](#the_new_zx_system_watch_memory_stall_syscall)
+[The new `zx_system_watch_memory_stall`
+syscall](#the-new-zx-system-watch-memory-stall-syscall)
 for details).
 
 ### The Stall resource
@@ -239,7 +240,7 @@ This topic will be queried by Starnix to synthesize the `/proc/pressure/memory`
 file. In addition, Starnix will also sample it at regular intervals to
 internally compute the rolling averages over the last 10, 60 and 300 seconds.
 
-### The new `zx_system_watch_memory_stall` syscall
+### The new zx_system_watch_memory_stall syscall {:#the-new-zx-system-watch-memory-stall-syscall}
 
 Similarly to the existing [`zx_system_get_event`][zx_system_get_event] syscall,
 the new `zx_system_watch_memory_stall` syscall will also return an event handle,
@@ -327,7 +328,8 @@ Zircon kernel when the stall thresholds are crossed. If needed, it will be
 possible to mitigate this by proxying access through a dedicated user-space
 component that will aggregate and serve multiple clients through a single
 Zircon subscription. Similarly to Zircon (see
-[The new `zx_system_watch_memory_stall` syscall](#the_new_zx_system_watch_memory_stall_syscall)
+[The new `zx_system_watch_memory_stall`
+syscall](#the-new-zx-system-watch-memory-stall-syscall)
 above), such a proxy would be allowed to drop precision from the requested
 values in order to maximize aggregation opportunities.
 
@@ -387,7 +389,7 @@ implementation detail and will not be included in the documentation, to leave
 the possibility of further expansion and tuning of such conditions without
 breaking the API.
 
-## Drawbacks, alternatives, and unknowns
+## Drawbacks, alternatives, and unknowns {:#drawbacks-alternatives-and-unknowns}
 
 ### Syscall surface
 

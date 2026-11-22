@@ -175,9 +175,13 @@ compiler_config("compiler") {
 }
 
 # LINT.IfChange(nolibc)
+# Suppress the default -lc and resolve implicit libraries (such as -lm) to
+# empty stubs, while keeping the default sysroot startup files (Scrt1.o).
+# Targets providing an alternative libc (such as //sdk/lib/c:new-libc)
+# propagate this via public_configs so dependents do not link against the
+# sysroot libc.so, without omitting Scrt1.o from C++ links or diverging from
+# Rust's built-in Fuchsia target spec (which always links Scrt1.o).
 compiler_config("nolibc") {
-  compiler_configs = [ "//build/config:nostartfiles" ]
-
   ldflags = [ "-nolibc" ]
   rustflags = [ "-Cdefault-linker-libraries=no" ]
 
@@ -198,6 +202,23 @@ compiler_config("nolibc") {
   # doesn't translate that to also passing -L... to the _linker_ as C++ does.
   rustflags += [ "-Lnative=" + rebase_path("libc-stub", root_build_dir) ]
   rust_linker_flags = [ "-L" + rebase_path("libc-stub", root_build_dir) ]
+
+  # rustc_remote_wrapper.py uploads --sysroot automatically, but does not scan
+  # -L / -Lnative directories for remote execution inputs.
+  if (rust_rbe_enable) {
+    rustflags +=
+        [ "--remote-inputs=" + rebase_path("libc-stub", root_build_dir) ]
+  }
+}
+
+# Standalone environments and targets that neither link against the sysroot
+# libc nor use the default sysroot startup files (either defining their own
+# _start or supplying an explicit crt1 object).
+compiler_config("nolibc-nostartfiles") {
+  compiler_configs = [
+    "//build/config:nostartfiles",
+    ":nolibc",
+  ]
 }
 
 # LINT.ThenChange(BUILD.bazel:nolibc)
@@ -285,7 +306,7 @@ config("no_maybe_uninitialized") {
 variant("user") {
   compiler_configs = [
     "//build/config:cpu_baseline",
-    ":nolibc",
+    ":nolibc-nostartfiles",
   ]
   deps = [ "//sdk/lib/c/include:headers" ]
 
@@ -319,7 +340,7 @@ variant("user-link") {
 variant("user-executable") {
   compiler_configs = [
     ":no-dynamic-linker",
-    ":nolibc",
+    ":nolibc-nostartfiles",
   ]
 
   if (is_gcc) {

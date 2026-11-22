@@ -22,6 +22,10 @@
     use: [
         { protocol: "fuchsia.scheduler.RoleManager" },
         { service: "fuchsia.driver.compat.Service" },
+        {
+            service: "fuchsia.hardware.badblock.Service",
+            availability: "optional",
+        },
     ],
     expose: [
         {

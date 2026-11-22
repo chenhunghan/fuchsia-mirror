@@ -76,15 +76,17 @@ pub unsafe fn riscv64_thread_vector_save(thread: *mut core::ffi::c_void, status:
     match status {
         ExtensionStatus::Dirty => {
             // The hardware state is dirty, save the old state.
-            // SAFETY: Caller guarantees thread is valid; saves Vector hardware state.
-            let arch = unsafe { &mut *thread_arch(thread) };
-            // SAFETY: `riscv64_vector_save` writes the vector register file into
-            // `arch.vector_state`, which is uniquely borrowed here and large enough.
-            unsafe { riscv64_vector_save(core::ptr::addr_of_mut!(arch.vector_state)) };
+            // SAFETY: Caller guarantees `thread` is valid and uniquely owns its vector arch state;
+            // raw-pointer field projection avoids creating `&mut ArchThread` while a `&Thread`
+            // reference may be live.
+            unsafe {
+                let arch = thread_arch(thread);
+                riscv64_vector_save(&raw mut (*arch).vector_state);
 
-            // Record that this thread has modified the state and will need to restore it
-            // from now on out on every context switch.
-            arch.vector_dirty = true;
+                // Record that this thread has modified the state and will need to restore it
+                // from now on out on every context switch.
+                (*arch).vector_dirty = true;
+            }
         }
         // These three states means the thread didn't modify the state, so do not
         // write anything back.
@@ -118,15 +120,18 @@ pub unsafe fn riscv64_thread_vector_restore(
     debug_assert!(!thread.is_null());
     debug_assert!(feature::has_vector());
 
-    // SAFETY: Caller guarantees thread is valid; restores Vector registers or resets to initial.
-    let arch = unsafe { &*thread_arch(thread as *mut _) };
-    if arch.vector_dirty {
+    // SAFETY: Caller guarantees `thread` is valid; raw-pointer field projection avoids creating
+    // `&ArchThread` over the full arch struct.
+    let arch = unsafe { thread_arch(thread.cast_mut()) };
+    // SAFETY: Caller guarantees `thread` is valid and `arch` points to its `ArchThread`.
+    let vector_dirty = unsafe { (*arch).vector_dirty };
+    if vector_dirty {
         // Restore the state from the new thread
         // SAFETY: `riscv64_vector_restore` loads the vector register file from
-        // `arch.vector_state`, which belongs to the live arch state borrowed above, and
-        // the CSR updates touch only the VS field of this hart's `sstatus`.
+        // `(*arch).vector_state`, and the CSR updates touch only the VS field of this hart's
+        // `sstatus`.
         unsafe {
-            riscv64_vector_restore(core::ptr::addr_of!(arch.vector_state));
+            riscv64_vector_restore(&raw const (*arch).vector_state);
 
             // Set the vector hardware state to clean.  These stay as csrc/csrs rather
             // than an SSTATUS read-modify-write so that the bits hardware owns -- vs

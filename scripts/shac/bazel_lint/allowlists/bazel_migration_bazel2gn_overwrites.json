@@ -1,0 +1,454 @@
+{
+    "entries": [
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "sdk/lib/driver/component/rust/BUILD.bazel",
+            "targets": [
+                "rust"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "sdk/lib/driver/runtime/rust/env/BUILD.bazel",
+            "targets": [
+                "env"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "sdk/lib/driver/runtime/rust/fidl/BUILD.bazel",
+            "targets": [
+                "fidl"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "sdk/lib/fdio/BUILD.bazel",
+            "targets": [
+                "fdio"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "sdk/lib/fidl_base/BUILD.bazel",
+            "targets": [
+                "fidl_txn_header"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/connectivity/lib/at-commands/BUILD.bazel",
+            "targets": [
+                "at-commands",
+                "lib_tests"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/connectivity/wlan/drivers/lib/timer/BUILD.bazel",
+            "targets": [
+                "cpp"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/developer/adb/bin/adb-file-sync/BUILD.bazel",
+            "targets": [
+                "adb-file-sync-test-bin"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/developer/debug/zxdb/client/BUILD.bazel",
+            "targets": [
+                "client"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/560343570",
+            "path": "src/developer/ffx/lib/uefi_disk/BUILD.bazel",
+            "targets": [
+                "lib"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584854611",
+            "path": "src/developer/ffx/plugins/assembly/BUILD.bazel",
+            "targets": [
+                "ffx_assembly"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/devices/board/lib/dml-config/BUILD.bazel",
+            "targets": [
+                "dml-config"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/devices/tee/bin/BUILD.bazel",
+            "targets": [
+                "tee-test"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/graphics/display/testing/software-compositor/BUILD.bazel",
+            "targets": [
+                "software-compositor-tests-bin"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/assembly/config_schema/BUILD.bazel",
+            "targets": [
+                "config_schema"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/560343570",
+            "path": "src/lib/assembly/test_keys/BUILD.bazel",
+            "targets": [
+                "test_keys"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/captive-thread/BUILD.bazel",
+            "targets": [
+                "captive-thread-unittests",
+                "fake-step"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/captive-thread/testing/BUILD.bazel",
+            "targets": [
+                "captive-thread-testing",
+                "headers"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/diagnostics/inspect/runtime/rust/BUILD.bazel",
+            "targets": [
+                "inspect_test_component_bin"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/diagnostics/inspect/rust/testing/BUILD.bazel",
+            "targets": [
+                "inspect_testing"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/diagnostics/log/message/rust/BUILD.bazel",
+            "targets": [
+                "lib"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/elf-search/rust/BUILD.bazel",
+            "targets": [
+                "lib"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/elflib/BUILD.bazel",
+            "targets": [
+                "elflib"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/fdomain/client/BUILD.bazel",
+            "targets": [
+                "client"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/fidl/rust/fidl/BUILD.bazel",
+            "targets": [
+                "fidl"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/fxl/test/BUILD.bazel",
+            "targets": [
+                "gtest_main_no_testonly"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/include_bytes_from_working_dir/BUILD.bazel",
+            "targets": [
+                "include_bytes_from_working_dir"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/testing/loop_fixture/BUILD.bazel",
+            "targets": [
+                "gtest",
+                "loop_fixture"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/trace/rust/BUILD.bazel",
+            "targets": [
+                "trace-provider"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/ui/fuchsia-vulkan/BUILD.bazel",
+            "targets": [
+                "fuchsia-vulkan"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/zbitl/BUILD.bazel",
+            "targets": [
+                "headers"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/lib/zxdump/BUILD.bazel",
+            "targets": [
+                "zxdump"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/media/audio/examples/tones/BUILD.bazel",
+            "targets": [
+                "bin"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/media/lib/internal_buffer/BUILD.bazel",
+            "targets": [
+                "internal_buffer"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/media/lib/test/BUILD.bazel",
+            "targets": [
+                "codec_client"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/security/bin/kms/BUILD.bazel",
+            "targets": [
+                "bin"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/security/lib/kms-stateless/BUILD.bazel",
+            "targets": [
+                "kms-stateless"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/security/lib/tee/rust/BUILD.bazel",
+            "targets": [
+                "tee"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/starnix/lib/syncio/BUILD.bazel",
+            "targets": [
+                "syncio"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/starnix/modules/kgsl/BUILD.bazel",
+            "targets": [
+                "kgsl",
+                "kgsl_test"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/starnix/modules/perfetto_consumer/lib/perfetto/BUILD.bazel",
+            "targets": [
+                "perfetto_protos"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/storage/fxfs/test-fxfs/BUILD.bazel",
+            "targets": [
+                "bin"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/storage/fxfs/unicode/BUILD.bazel",
+            "targets": [
+                "fxfs_unicode_test"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/sys/component_manager/BUILD.bazel"
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/sys/lib/config_encoder/BUILD.bazel",
+            "targets": [
+                "config_encoder"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/sys/pkg/bin/system-update-configurator/BUILD.bazel",
+            "targets": [
+                "lib"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/sys/pkg/bin/system-updater/BUILD.bazel",
+            "targets": [
+                "bin"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/sys/pkg/lib/tuf/BUILD.bazel",
+            "targets": [
+                "test-component"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/sys/pkg/lib/update-package/BUILD.bazel",
+            "targets": [
+                "update-package"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/sys/pkg/scripts/BUILD.bazel",
+            "targets": [
+                "all_tests"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/sys/test_runners/starnix/BUILD.bazel",
+            "targets": [
+                "bin"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/sysmem/format_costs/arm_mali/BUILD.bazel",
+            "targets": [
+                "arm_mali"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/sysmem/format_costs/powervr/BUILD.bazel",
+            "targets": [
+                "powervr"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/sysmem/format_costs/video_decoder_nv12/BUILD.bazel",
+            "targets": [
+                "video_decoder_nv12"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/testing/end_to_end/honeydew/honeydew/affordances/ui/screenshot/tests/unit_tests/resources/BUILD.bazel",
+            "targets": [
+                "resources"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "src/ui/scenic/lib/shutdown/tests/BUILD.bazel",
+            "targets": [
+                "unittests"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "third_party/boringssl/rust/BUILD.bazel",
+            "targets": [
+                "bssl-macros"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "third_party/libpng/BUILD.bazel",
+            "targets": [
+                "libpng"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "tools/fidl/fidlc/tests/BUILD.bazel",
+            "targets": [
+                "fidlc-test_bin"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "tools/integration/fint/BUILD.bazel",
+            "targets": [
+                "proto_lib"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "tools/integration/fint/proto/BUILD.bazel",
+            "targets": [
+                "proto"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "zircon/system/ulib/bitmap/BUILD.bazel",
+            "targets": [
+                "bitmap"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "zircon/system/ulib/sysmem-version/BUILD.bazel",
+            "targets": [
+                "sysmem-version"
+            ]
+        },
+        {
+            "bug": "https://fxbug.dev/584376026",
+            "path": "zircon/system/ulib/trace-provider/BUILD.bazel",
+            "targets": [
+                "trace-handler"
+            ]
+        }
+    ]
+}

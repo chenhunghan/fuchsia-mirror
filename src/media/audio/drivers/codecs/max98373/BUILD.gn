@@ -51,7 +51,6 @@ fuchsia_driver_component("max98373") {
   dml_label = ":max98373-dml"
   component_name = "max98373"
   deps = [ ":max98373-driver" ]
-  info = "meta/max98373-info.json"
 }
 
 fuchsia_driver_package("package") {

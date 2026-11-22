@@ -7,12 +7,11 @@
 import("//zircon/kernel/kernel_rust_mod.gni")
 
 source_set("lockdep") {
-  sources = [ "lock_dep.cc" ]
-  deps = [
-    "//zircon/kernel/lib/init",
-    "//zircon/kernel/lib/ktl",
-    "//zircon/kernel/vm:headers",
+  sources = [
+    "lock_dep_ffi.cc",
+    "lock_dep_ffi.h",
   ]
+  deps = [ "//zircon/kernel/lib/ktl" ]
   public_deps = [
     # The kernel lockdep library is just a slight augmentation of the
     # userland lockdep library, which supplies all the API headers.  So
@@ -23,13 +22,23 @@ source_set("lockdep") {
 }
 
 kernel_rust_mod("lockdep-rs") {
-  sources = [ "lock_dep.rs" ]
+  sources = [
+    "lock_dep.rs",
+    "lock_dep_ffi.rs",
+  ]
   deps = [
+    "//sdk/rust/zx-status",
+    "//sdk/rust/zx-types",
     "//src/lib/kprint",
+    "//src/lib/ksync",
+    "//src/lib/lazy_init:lazy_init_rs",
+    "//src/lib/lockdep/rust:lockdep",
     "//src/lib/zr",
     "//third_party/rust_crates:pin-init",
-    "//zircon/kernel/kernel:percpu-bindings",
+    "//zircon/kernel/lib/backtrace:backtrace-rs",
     "//zircon/kernel/lib/console:console_rs",
+    "//zircon/kernel/lib/debug",
+    "//zircon/kernel/lib/init:init_rust",
   ]
 }
 

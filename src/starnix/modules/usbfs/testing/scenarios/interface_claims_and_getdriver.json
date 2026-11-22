@@ -1,0 +1,138 @@
+{
+    "name": "interface_claims_and_getdriver",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 255,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "type": "open",
+            "fd": "fd1",
+            "mode": "rdwr"
+        },
+        {
+            "type": "open",
+            "fd": "fd2",
+            "mode": "rdwr"
+        },
+        {
+            "type": "get_driver",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd1",
+            "interface": 5
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd1",
+            "interface": 99
+        },
+        {
+            "type": "release_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "get_driver",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd2",
+            "interface": 0
+        },
+        {
+            "type": "release_interface",
+            "fd": "fd2",
+            "interface": 0
+        },
+        {
+            "type": "release_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "disconnect_claim",
+            "fd": "fd2",
+            "interface": 0,
+            "flags": [
+                "EXCEPT_DRIVER"
+            ],
+            "driver": "other"
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "close",
+            "fd": "fd2"
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "release_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "close",
+            "fd": "fd1"
+        }
+    ]
+}

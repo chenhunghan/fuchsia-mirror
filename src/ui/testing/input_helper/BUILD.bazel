@@ -1,0 +1,123 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/ui:target_tests.
+test_suite(
+    name = "tests",
+    tests = [":input-helper-tests"],
+    visibility = ["//src/ui:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/input_device.rs",
+        "src/input_device_registry.rs",
+        "src/input_reports_reader.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "input_testing",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+        "//sdk/fidl/fuchsia.input.injection:fuchsia.input.injection_rust",
+        "//sdk/fidl/fuchsia.input.report:fuchsia.input.report_rust",
+        "//sdk/fidl/fuchsia.math:fuchsia.math_rust",
+        "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+        "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
+        "//sdk/fidl/fuchsia.ui.display.singleton:fuchsia.ui.display.singleton_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//sdk/fidl/fuchsia.ui.test.input:fuchsia.ui.test.input_rust",
+        "//sdk/rust/zx",
+        "//src/lib/async-utils",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/ui/keymaps",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Matches the GN with_unit_tests binary name and keeps the GN test
+    # binary name unique in root_out_dir.
+    crate_name = "input_testing_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_unittest_package(
+    name = "input-helper-tests",
+    unit_tests = [":lib_test"],
+)
+
+rustc_binary(
+    name = "input_helper_bin",
+    srcs = ["src/main.rs"],
+    binary_name = "input_helper_bin",
+    edition = "2024",
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.ui.test.input:fuchsia.ui.test.input_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/trace/rust:trace-provider",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "input_helper_bin_packaged",
+    binary = ":input_helper_bin",
+    binary_name = "input_helper_bin",
+)
+
+fx_component_manifest(
+    name = "input-helper-component-manifest",
+    component_name = "input-helper",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:use.shard",
+    ],
+    manifest = "meta/input-helper.cml",
+)
+
+fx_component(
+    name = "input-helper-component",
+    compiled_manifest = ":input-helper-component-manifest",
+    visibility = [
+        "//src/ui:__pkg__",
+        "//src/ui/testing/ui_test_realm:__pkg__",
+    ],
+    deps = [":input_helper_bin_packaged"],
+)

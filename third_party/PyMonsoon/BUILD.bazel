@@ -1,0 +1,119 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@rules_license//rules:license.bzl", "license")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = [":license"])
+
+# Third-party license metadata is Bazel-only; GN tracks licensing via README.fuchsia.
+# @bazel2gn:skip
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:MIT"],
+    license_text = "src/LICENSE",
+)
+
+# Bazel py_library() lacks GN's library_name/source_root, so stage src/*.py under Monsoon/.
+# @bazel2gn:skip
+copy_file(
+    name = "copy_hvpm",
+    src = "src/HVPM.py",
+    out = "Monsoon/HVPM.py",
+)
+
+# @bazel2gn:skip
+copy_file(
+    name = "copy_lvpm",
+    src = "src/LVPM.py",
+    out = "Monsoon/LVPM.py",
+)
+
+# @bazel2gn:skip
+copy_file(
+    name = "copy_main",
+    src = "src/Main.py",
+    out = "Monsoon/Main.py",
+)
+
+# @bazel2gn:skip
+copy_file(
+    name = "copy_operations",
+    src = "src/Operations.py",
+    out = "Monsoon/Operations.py",
+)
+
+# @bazel2gn:skip
+copy_file(
+    name = "copy_init",
+    src = "src/__init__.py",
+    out = "Monsoon/__init__.py",
+)
+
+# @bazel2gn:skip
+copy_file(
+    name = "copy_calibration_data",
+    src = "src/calibrationData.py",
+    out = "Monsoon/calibrationData.py",
+)
+
+# @bazel2gn:skip
+copy_file(
+    name = "copy_pmapi",
+    src = "src/pmapi.py",
+    out = "Monsoon/pmapi.py",
+)
+
+# @bazel2gn:skip
+copy_file(
+    name = "copy_reflash",
+    src = "src/reflash.py",
+    out = "Monsoon/reflash.py",
+)
+
+# @bazel2gn:skip
+copy_file(
+    name = "copy_sample_engine",
+    src = "src/sampleEngine.py",
+    out = "Monsoon/sampleEngine.py",
+)
+
+# @bazel2gn:skip
+copy_file(
+    name = "copy_setup",
+    src = "src/setup.py",
+    out = "Monsoon/setup.py",
+)
+
+# Bazel py_library() lacks GN's library_name/source_root attributes; keep them in GN
+# for remaining GN consumers via raw_attribute.
+# TODO(https://fxbug.dev/584376026): Remove raw_attribute annotations once GN consumers are migrated.
+# @bazel2gn:raw_attribute:library_name = "Monsoon"
+# @bazel2gn:raw_attribute:source_root = "src"
+# @bazel2gn:raw_attribute:sources = [ "HVPM.py", "LVPM.py", "Main.py", "Operations.py", "PyMonsoon.pyproj", "PyMonsoon.sln", "README", "README.txt", "__init__.py", "calibrationData.py", "pmapi.py", "reflash.py", "sampleEngine.py", "setup.py" ]
+py_library(
+    name = "PyMonsoon",
+    # GN stages source_root = "src" under library_name = "Monsoon"; Bazel stages Monsoon/*.py via copy_file.
+    # @bazel2gn:skip
+    srcs = [
+        "Monsoon/HVPM.py",
+        "Monsoon/LVPM.py",
+        "Monsoon/Main.py",
+        "Monsoon/Operations.py",
+        "Monsoon/__init__.py",
+        "Monsoon/calibrationData.py",
+        "Monsoon/pmapi.py",
+        "Monsoon/reflash.py",
+        "Monsoon/sampleEngine.py",
+        "Monsoon/setup.py",
+    ],
+    # GN python_library() forbids `imports` alongside `library_name` and `source_root`.
+    # @bazel2gn:skip
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/tests/end_to_end/power:__pkg__"],
+    deps = ["//third_party/pylibs/pyusb"],
+)

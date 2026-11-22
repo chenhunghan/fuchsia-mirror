@@ -90,6 +90,7 @@ def golden_test(
         name = name,
         srcs = ["test_script.py"],
         main = "test_script.py",
+        main_callable = "main",
         target_compatible_with = target_compatible_with,
         test_args = [
             test_dir,

@@ -69,9 +69,22 @@ impl EmulatorInstances {
     /// Given an instance name, empty and remove the instance directory associated with that name
     /// in the primary and all backup roots. Fails if a directory can't be removed; returns Ok(())
     /// if it doesn't exist.
+    ///
+    /// A backup root's directory is left alone while its emulator is still running. Callers only
+    /// check whether the instance that `get_instance_dir` resolves to is running, which is the
+    /// primary root's copy if it has one, so a same-named instance started by an older ffx in a
+    /// backup root could otherwise lose its directory and become impossible to find or stop.
     pub fn clean_up_instance_dir(&self, instance_name: &str) -> Result<()> {
-        for root in std::iter::once(&self.instance_root).chain(&self.backup_roots) {
-            Self::remove_instance_dir(&root.join(instance_name))?;
+        Self::remove_instance_dir(&self.instance_root.join(instance_name))?;
+        for root in &self.backup_roots {
+            let path = root.join(instance_name);
+            if let Ok(EngineOption::DoesExist(data)) = read_from_disk(&path)
+                && data.is_running()
+            {
+                log::warn!("Not removing {path:?}: its emulator is still running");
+                continue;
+            }
+            Self::remove_instance_dir(&path)?;
         }
         Ok(())
     }
@@ -557,6 +570,36 @@ mod tests {
 
         emu_instances.clean_up_instance_dir("backup_two")?;
         assert!(!backup_two_dir.exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_clean_up_keeps_running_backup_instance() -> Result<()> {
+        let primary_temp = tempdir().expect("primary tempdir");
+        let backup_temp = tempdir().expect("backup tempdir");
+        let emu_instances = EmulatorInstances::from(vec![
+            primary_temp.path().to_path_buf(),
+            backup_temp.path().to_path_buf(),
+        ]);
+
+        // A stale copy in the primary root, and a running instance with the same name in the
+        // backup root (this test's own process stands in for the emulator).
+        let primary_dir = primary_temp.path().join("shared_name");
+        create_dir_all(&primary_dir)?;
+        write_to_disk(
+            &EmulatorInstanceData::new_with_state("shared_name", EngineState::Staged),
+            &primary_dir,
+        )?;
+        let backup_dir = backup_temp.path().join("shared_name");
+        create_dir_all(&backup_dir)?;
+        let mut running = EmulatorInstanceData::new_with_state("shared_name", EngineState::Running);
+        running.set_pid(std::process::id());
+        write_to_disk(&running, &backup_dir)?;
+
+        emu_instances.clean_up_instance_dir("shared_name")?;
+        assert!(!primary_dir.exists());
+        assert!(backup_dir.join(SERIALIZE_FILE_NAME).exists());
 
         Ok(())
     }

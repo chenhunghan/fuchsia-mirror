@@ -1,0 +1,61 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":bt-le-broadcast-assistant-unittests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/address_lookup.rs",
+        "src/assistant.rs",
+        "src/commands.rs",
+        "src/main.rs",
+        "src/repl.rs",
+    ],
+    binary_name = "bt-le-broadcast-assistant",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth.le:fuchsia.bluetooth.le_rust",
+        "//sdk/fidl/fuchsia.bluetooth.sys:fuchsia.bluetooth.sys_rust",
+        "//src/connectivity/bluetooth/lib/bt-gatt-fuchsia",
+        "//src/connectivity/bluetooth/lib/bt-repl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bt-bass",
+        "//third_party/rust_crates/vendor:bt-broadcast-assistant",
+        "//third_party/rust_crates/vendor:bt-common",
+        "//third_party/rust_crates/vendor:bt-gatt",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "bt_le_broadcast_assistant_bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//src/lib/fidl/rust/fidl",
+    ],
+)
+
+fx_unittest_package(
+    name = "bt-le-broadcast-assistant-unittests",
+    unit_tests = [":bt_le_broadcast_assistant_bin_test"],
+)

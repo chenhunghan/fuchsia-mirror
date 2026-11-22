@@ -20,6 +20,15 @@ type Info = struct {
     /// The first entry is the device's preferred mode.
     modes vector<fuchsia.hardware.display.types.Mode>:MAX;
 
+    /// Variable-refresh-rate capabilities parallel to `modes`.
+    ///
+    /// Either empty or the same length as `modes`. Entries for modes without
+    /// [`fuchsia.hardware.display.types/ModeFlags.VARIABLE_REFRESH_RATE`] are
+    /// empty tables.
+    // TODO(https://fxbug.dev/42150719): Fold per-mode capabilities into a
+    // table-based mode or display info representation.
+    mode_vrr_configs vector<fuchsia.hardware.display.types.VrrConfig>:MAX;
+
     /// Pixel formats that can be directly displayed on the attached display.
     ///
     /// This field will be revised to better reflect the subtleties around

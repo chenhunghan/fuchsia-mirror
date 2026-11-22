@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/cpp/library_headers.gni")
+
+library_headers("headers") {
+  headers = [ "phys/elf/image.h" ]
+  public_deps = [
+    "//zircon/kernel/lib/ktl:headers",
+    "//zircon/kernel/lib/libc:headers",
+
+    # <phys/elf/image.h> has #include <lib/arch/cache.h>
+    # <phys/elf/image.h> has #include <lib/arch/paging.h>
+    "//zircon/kernel/lib/arch:headers",
+
+    # <phys/elf/image.h> has #include <lib/code-patching/code-patching.h>
+    "//zircon/kernel/lib/code-patching:headers",
+
+    # <phys/elf/image.h> has #include <lib/elfldltl/init-fini.h>
+    # <phys/elf/image.h> has #include <lib/elfldltl/load.h>
+    # <phys/elf/image.h> has #include <lib/elfldltl/memory.h>
+    # <phys/elf/image.h> has #include <lib/elfldltl/note.h>
+    # <phys/elf/image.h> has #include <lib/elfldltl/static-vector.h>
+    "//src/lib/elfldltl:headers",
+
+    # <phys/elf/image.h> has #include <lib/fit/function.h>
+    # <phys/elf/image.h> has #include <lib/fit/result.h>
+    "//sdk/lib/fit:headers",
+
+    # <phys/elf/image.h> has #include <lib/zbitl/items/bootfs.h>
+    # <phys/elf/image.h> has #include <lib/zbitl/view.h>
+    "//src/lib/zbitl:headers",
+
+    # <phys/elf/image.h> has #include <phys/address-space/address-space.h>
+    "//zircon/kernel/phys/address-space:headers",
+
+    # <phys/elf/image.h> has #include <phys/allocation/allocation.h>
+    "//zircon/kernel/phys/allocation:headers",
+  ]
+}
+
+static_library("elf") {
+  complete_static_lib = true
+
+  public_deps = [ ":headers" ]
+
+  sources = [
+    "image-mapinto.cc",
+    "image.cc",
+  ]
+  deps = [
+    "//sdk/lib/fit",
+    "//src/lib/elfldltl",
+    "//src/lib/zbitl",
+    "//zircon/kernel/lib/arch",
+    "//zircon/kernel/lib/code-patching",
+    "//zircon/kernel/lib/ktl",
+    "//zircon/kernel/lib/libc",
+    "//zircon/kernel/phys/address-space:headers",
+    "//zircon/kernel/phys/allocation",
+    "//zircon/system/ulib/zx",
+  ]
+}

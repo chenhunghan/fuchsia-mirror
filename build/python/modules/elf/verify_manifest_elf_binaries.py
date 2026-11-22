@@ -70,6 +70,8 @@ from .elfinfo import get_elf_info
 # 6) Verify that unstripped files for binaries are provided
 #    in the build root directory, or toolchain-specific lib directories.
 #    Prebuilts are an exception, and are allowed not to have unstripped files.
+#    When .build-id directories are given (the Bazel build), the debug file
+#    is instead looked up by build-id in those directories.
 #
 
 
@@ -257,15 +259,76 @@ class VerificationFailure(Exception):
         return "\n".join(lines)
 
 
+def find_debug_file_by_build_id(
+    info: Any,
+    build_id_dirs: list[str],
+    debug_files_by_build_id: dict[str, str],
+    depfile_items: set[str],
+) -> str | None:
+    """Find the debug file of an ELF binary by build-id.
+
+    Args:
+      info: The ElfInfo value of the binary.
+      build_id_dirs: A list of .build-id directories, each of which holds
+        debug files at xx/yyyyyy.debug, where xx are the first two hex chars
+        of the build-id and yyyyyy is the rest.
+      debug_files_by_build_id: A {build_id: path} map of other debug files.
+      depfile_items: the set of examined files to be updated if needed.
+
+    Returns:
+      None if the debug file was found, or an error message otherwise.
+    """
+    build_id = info.build_id
+    if not build_id:
+        return "%s has no build-id, so its debug file cannot be found" % (
+            info.filename
+        )
+    debugfile = debug_files_by_build_id.get(build_id)
+    if debugfile:
+        depfile_items.add(debugfile)
+        return None
+    debug_path = os.path.join(build_id[:2], build_id[2:] + ".debug")
+    for build_id_dir in build_id_dirs:
+        debugfile = os.path.join(build_id_dir, debug_path)
+        if os.path.exists(debugfile):
+            depfile_items.add(debugfile)
+            return None
+    return "No debug file with build-id %s found for %s in: %s" % (
+        build_id,
+        info.filename,
+        ", ".join(build_id_dirs + sorted(debug_files_by_build_id.values())),
+    )
+
+
 def verify_manifest_elf_binaries(
     manifest_entries: dict[str, str],
     toolchain_lib_dirs: list[str],
+    build_id_dirs: list[str] | None = None,
+    debug_files: list[str] | None = None,
 ) -> set[str]:
     """Verify a set of manifest entries, throwing a VerificationFailure exception on failure.
+
+    Args:
+      manifest_entries: A {target_path: source_path} map of package entries.
+      toolchain_lib_dirs: Toolchain-provided lib directories used to locate
+        the unstripped files of toolchain runtime libraries.
+      build_id_dirs: If not None, locate the debug file of each ELF binary by
+        its build-id in these .build-id directories, instead of guessing the
+        path of its unstripped file. Bazel uses this, because its output
+        layout doesn't match the paths that find_unstripped_file() expects.
+      debug_files: Additional unstripped files that are looked up by build-id
+        along with build_id_dirs, for prebuilt stripped binaries whose
+        unstripped files are not in a .build-id directory (e.g. ld.so.1).
 
     Returns a set of inputs for depfile inclusion on verification success.
     """
     depfile_items = set()
+
+    debug_files_by_build_id: dict[str, str] = {}
+    for debug_file in debug_files or []:
+        debug_info = get_elf_info(debug_file)
+        if debug_info is not None and debug_info.build_id:
+            debug_files_by_build_id[debug_info.build_id] = debug_file
 
     # Filter the input manifest entries to keep only the ELF ones
     # that are not under data/, lib/firmware/ or meta/
@@ -342,12 +405,31 @@ def verify_manifest_elf_binaries(
         # See: https://fxbug.dev/42170486
         if "/prebuilt/" in source_file:
             continue
-        if target in elf_entries:
-            unstripped = find_unstripped_file(
-                source_file, depfile_items, toolchain_lib_dirs
+        if target not in elf_entries:
+            continue
+        if build_id_dirs is not None:
+            # Bazel source paths are relative to the execroot (so they lack
+            # the `../../` prefix that makes GN paths contain "/prebuilt/"),
+            # and Bazel reaches prebuilts through external repositories that
+            # are symlinks into //prebuilt.
+            if "/prebuilt/" in "/" + source_file or "/prebuilt/" in (
+                os.path.realpath(source_file)
+            ):
+                continue
+            error = find_debug_file_by_build_id(
+                elf_entries[target],
+                build_id_dirs,
+                debug_files_by_build_id,
+                depfile_items,
             )
-            if unstripped is None:
-                errors.append("No unstripped file found for " + source_file)
+            if error:
+                errors.append(error)
+            continue
+        unstripped = find_unstripped_file(
+            source_file, depfile_items, toolchain_lib_dirs
+        )
+        if unstripped is None:
+            errors.append("No unstripped file found for " + source_file)
 
     if errors:
         raise (VerificationFailure(errors, extras))

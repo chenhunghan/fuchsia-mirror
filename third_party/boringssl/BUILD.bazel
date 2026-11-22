@@ -4,6 +4,7 @@
 
 load("@rules_cc//cc:defs.bzl", "cc_import", "cc_library", "cc_shared_library")
 load("@rules_license//rules:license.bzl", "license")
+load("//build/bazel/rules/cc:shared_library.bzl", "shared_library_gn_outputs")
 load(
     ":BUILD.generated.bzl",
     "crypto_headers",
@@ -146,6 +147,9 @@ _CRYPTO_COPTS = _BORINGSSL_COPTS + select({
         # performance is significantly worse, impacting pave and boot times on
         # debug builds. See https://fxbug.dev/42133086.
         "-O3",
+        # Like GN removing //build/config:default_optimize, which also drops
+        # LTO in LTO-enabled compilation modes.
+        "-fno-lto",
         # TODO(https://fxbug.dev/42138737): profile instrumentation significantly affects performance.
         "-fno-profile-instr-generate",
         "-fno-coverage-mapping",
@@ -178,6 +182,9 @@ cc_library(
     hdrs = _CRYPTO_HDRS,
     copts = _CRYPTO_COPTS,
     cxxopts = _BORINGSSL_CXXOPTS,
+    # Like GN removing //build/config:default_optimize, also drop the
+    # size-tuned ML inliner of optimized builds, which "-O3" does not undo.
+    features = ["-ml_inliner"],
     includes = _BORINGSSL_INCLUDES,
     local_defines = _BORINGSSL_STATIC_LOCAL_DEFINES,
     visibility = ["//:__subpackages__"],
@@ -195,6 +202,9 @@ cc_library(
     hdrs = _CRYPTO_HDRS,
     copts = _CRYPTO_COPTS,
     cxxopts = _BORINGSSL_CXXOPTS,
+    # Like GN removing //build/config:default_optimize, also drop the
+    # size-tuned ML inliner of optimized builds, which "-O3" does not undo.
+    features = ["-ml_inliner"],
     includes = _BORINGSSL_INCLUDES,
     local_defines = _BORINGSSL_SHARED_LOCAL_DEFINES,
     visibility = ["//visibility:private"],
@@ -217,6 +227,14 @@ cc_import(
     visibility = ["//:__subpackages__"],
     deps = [":crypto-headers"],
 )
+
+# Exposes the Bazel-built libcrypto.so outputs for import into GN.
+# See //build/bazel/bazel_shared_library.gni.
+shared_library_gn_outputs(
+    name = "crypto_gn_outputs",
+    shared_library = ":_crypto_shared_lib",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
 # LINT.ThenChange(BUILD.gn:crypto_targets)
 
 # LINT.IfChange(ssl_targets)
@@ -233,7 +251,12 @@ _SSL_COPTS = _BORINGSSL_COPTS + select({
     # boringssl should always be optimized for speed because otherwise
     # performance is significantly worse, impacting pave and boot times on
     # debug builds (https://fxbug.dev/42133086).
-    "@platforms//os:fuchsia": ["-O3"],
+    "@platforms//os:fuchsia": [
+        "-O3",
+        # Like GN removing //build/config:default_optimize, which also drops
+        # LTO in LTO-enabled compilation modes.
+        "-fno-lto",
+    ],
     "//conditions:default": [],
 })
 
@@ -251,6 +274,9 @@ cc_library(
     hdrs = ssl_headers,
     copts = _SSL_COPTS,
     cxxopts = _BORINGSSL_CXXOPTS,
+    # Like GN removing //build/config:default_optimize, also drop the
+    # size-tuned ML inliner of optimized builds, which "-O3" does not undo.
+    features = ["-ml_inliner"],
     includes = _BORINGSSL_INCLUDES,
     local_defines = _BORINGSSL_STATIC_LOCAL_DEFINES,
     visibility = ["//:__subpackages__"],
@@ -266,6 +292,9 @@ cc_library(
     hdrs = ssl_headers,
     copts = _SSL_COPTS,
     cxxopts = _BORINGSSL_CXXOPTS,
+    # Like GN removing //build/config:default_optimize, also drop the
+    # size-tuned ML inliner of optimized builds, which "-O3" does not undo.
+    features = ["-ml_inliner"],
     includes = _BORINGSSL_INCLUDES,
     local_defines = _BORINGSSL_SHARED_LOCAL_DEFINES,
     visibility = ["//visibility:private"],

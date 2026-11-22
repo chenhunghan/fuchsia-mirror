@@ -2,6 +2,13 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
@@ -11,4 +18,189 @@ exports_files(
         "meta/test_realm.root_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/bootstrap-lib-loader-cache.shard",
+    shard = "meta/bootstrap-lib-loader-cache.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/bootstrap-runner-memfs.shard",
+    shard = "meta/bootstrap-runner-memfs.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/bootstrap-test-memfs.shard",
+    shard = "meta/bootstrap-test-memfs.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/chromium_test_realm.shard",
+    shard = "meta/chromium_test_realm.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/driver-system-tests.shard",
+    shard = "meta/driver-system-tests.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/lib-loader-cache.shard",
+    shard = "meta/lib-loader-cache.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/runner-memfs.shard",
+    shard = "meta/runner-memfs.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/runners/netemul-test-runner.shard",
+    shard = "meta/runners/netemul-test-runner.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/runners/stress-test-runner.shard",
+    shard = "meta/runners/stress-test-runner.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/starnix-tests.shard",
+    shard = "meta/starnix-tests.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/test-memfs.shard",
+    shard = "meta/test-memfs.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/runners/bootstrap-test-runners.shard",
+    includes = [
+        ":meta/bootstrap-lib-loader-cache.shard",
+        ":meta/bootstrap-runner-memfs.shard",
+    ],
+    shard = "meta/runners/bootstrap-test-runners.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/runners/fuzz-test-runner.shard",
+    includes = [":meta/lib-loader-cache.shard"],
+    shard = "meta/runners/fuzz-test-runner.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/runners/standard-test-runners.shard",
+    includes = [
+        ":meta/lib-loader-cache.shard",
+        ":meta/runner-memfs.shard",
+    ],
+    shard = "meta/runners/standard-test-runners.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/runners/starnix-test-runner.shard",
+    includes = [
+        ":meta/lib-loader-cache.shard",
+        ":meta/runner-memfs.shard",
+        ":meta/test-memfs.shard",
+    ],
+    shard = "meta/runners/starnix-test-runner.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/storage-tests.shard",
+    includes = ["//sdk/lib/trace:client.shard"],
+    shard = "meta/storage-tests.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/system-tests.shard",
+    includes = [":meta/test-memfs.shard"],
+    shard = "meta/system-tests.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/test-arch-tests.shard",
+    includes = [":meta/test-memfs.shard"],
+    shard = "meta/test-arch-tests.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+fx_component_manifest(
+    name = "test_realm_manifest",
+    testonly = True,
+    component_name = "test_realm",
+    includes = [
+        ":meta/chromium_test_realm.shard",
+        ":meta/driver-system-tests.shard",
+        ":meta/runners/fuzz-test-runner.shard",
+        ":meta/runners/netemul-test-runner.shard",
+        ":meta/runners/standard-test-runners.shard",
+        ":meta/runners/starnix-test-runner.shard",
+        ":meta/runners/stress-test-runner.shard",
+        ":meta/starnix-tests.shard",
+        ":meta/storage-tests.shard",
+        ":meta/system-tests.shard",
+        ":meta/test-arch-tests.shard",
+        "//sdk/ctf:test_realm/meta/test-collection.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/connectivity/network:meta/test-collection.shard",
+        "//src/devices/testing:devices_test_realm.shard",
+        "//src/lib/vulkan:vulkan_test_realm.shard",
+        "//src/media:testing/drm_test_realm.shard",
+        "//src/sys/component_manager:meta/component-framework-tests.shard",
+        "//src/sys/component_manager/tests/capability_provider_vfs_compliance:vfs_compliance_test_realm.shard",
+        "//src/testing/system-validation:meta/system_validation_test_realm.shard",
+    ],
+    manifest = "meta/test_realm.cml",
+)
+
+fx_component(
+    name = "test_realm",
+    testonly = True,
+    compiled_manifest = ":test_realm_manifest",
+)
+
+fx_component_manifest(
+    name = "bootstrap_test_realm_manifest",
+    testonly = True,
+    component_name = "bootstrap_test_realm",
+    includes = [
+        ":meta/bootstrap-test-memfs.shard",
+        ":meta/driver-system-tests.shard",
+        ":meta/runners/bootstrap-test-runners.shard",
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    manifest = "meta/bootstrap_test_realm.cml",
+)
+
+# This is brought directly into the test_manager's 'pkg_for_bootstrap' target.
+fx_component(
+    name = "bootstrap_test_realm",
+    testonly = True,
+    compiled_manifest = ":bootstrap_test_realm_manifest",
+    visibility = ["//src/sys/test_manager:__pkg__"],
 )

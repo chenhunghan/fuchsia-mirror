@@ -8,6 +8,7 @@ load(
     "fx_component",
     "fx_component_manifest",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
@@ -46,4 +47,14 @@ fx_component(
     compiled_manifest = ":echo-server_manifest",
     visibility = ["//examples/fidl/echo-realm:__pkg__"],
     deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "echo-cpp-async",
+    components = [
+        ":echo-server",
+        "//examples/fidl/cpp/client:echo-client",
+        "//examples/fidl/echo-realm:echo_realm",
+    ],
+    visibility = ["//examples/fidl/cpp:__pkg__"],
 )

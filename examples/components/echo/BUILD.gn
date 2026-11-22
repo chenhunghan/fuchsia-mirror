@@ -4,7 +4,7 @@
 
 assert(is_fuchsia, "These targets are only compiled in the fuchsia toolchain.")
 
-import("//build/components.gni")
+import("//build/bazel/bazel_fuchsia_package.gni")
 
 group("echo") {
   testonly = true
@@ -14,17 +14,16 @@ group("echo") {
   ]
 }
 
+# Intentionally empty: //examples/components:hermetic_tests still references
+# this target in GN while unit tests run via //examples:target_tests.
 group("hermetic_tests") {
   testonly = true
-  deps = [
-    "cpp:hermetic_tests",
-    "rust:hermetic_tests",
-  ]
 }
 
-fuchsia_package("echo-example") {
-  deps = [
-    "cpp:component",
-    "rust:component",
-  ]
+# //examples/components still references :echo-example from GN.
+# LINT.IfChange
+bazel_fuchsia_package("echo-example") {
+  bazel_config = "fuchsia_platform"
+  package_name = "echo-example"
 }
+# LINT.ThenChange(BUILD.bazel)

@@ -59,7 +59,7 @@ namespace ld {
 // elfldltl::SegmentWithVmo::AlignSegments with a separate VMO.  Any new VMO
 // becomes immutable (with no ZX_RIGHT_WRITE on the only handle) once its final
 // partial page has been zeroed.
-template <class Elf = elfldltl::Elf<>>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>>
 class RemoteDecodedModule;
 
 // This is a shorthand for the <lib/elfldltl/container.h> wrappers used here.
@@ -87,7 +87,7 @@ class RemoteDecodedFile : public fbl::RefCounted<RemoteDecodedFile>,
 
   // If this is an ld::RemoteDecodedModule<Elf> object, return a RefPtr to it.
   // Otherwise return a null RefPtr.
-  template <class Elf>
+  template <elfldltl::ElfApi Elf>
   fbl::RefPtr<const RemoteDecodedModule<Elf>> GetIf() const {
     using Ehdr = Elf::Ehdr;
 
@@ -107,7 +107,7 @@ class RemoteDecodedFile : public fbl::RefCounted<RemoteDecodedFile>,
   // This is the same, but if it returns a null pointer then the Diagnostics
   // object will report the same failure details that would come from this same
   // VMO being passed to ld::RemoteDecodedModule<Elf>::Create.
-  template <class Elf, class Diagnostics>
+  template <elfldltl::ElfApi Elf, class Diagnostics>
   fbl::RefPtr<const RemoteDecodedModule<Elf>> GetIf(Diagnostics& diag) const {
     using Ehdr = Elf::Ehdr;
 
@@ -207,12 +207,12 @@ class RemoteDecodedFile : public fbl::RefCounted<RemoteDecodedFile>,
 static_assert(fbl::internal::has_fbl_recycle_v<RemoteDecodedFile>);
 
 // This is an implementation detail of RemoteDecodedModule, below.
-template <class Elf>
+template <elfldltl::ElfApi Elf>
 using RemoteDecodedModuleBase =
     DecodedModule<Elf, RemoteContainer, AbiModuleInline::kYes, DecodedModuleRelocInfo::kYes,
                   elfldltl::SegmentWithVmo::Copy>;
 
-template <class Elf>
+template <elfldltl::ElfApi Elf>
 class RemoteDecodedModule : public RemoteDecodedFile, public RemoteDecodedModuleBase<Elf> {
  public:
   // ld::RemoteDecodedModule is usually used only via const pointer.

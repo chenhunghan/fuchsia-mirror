@@ -34,18 +34,14 @@ constexpr InstrumentationDataVmoFfi ToFfi(const InstrumentationDataVmo& vmo) {
 __BEGIN_CDECLS
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_llvm_profdata_vmo(InstrumentationDataVmoFfi* out) {
-  *out = ToFfi(LlvmProfdataVmo());
+FFI_ALWAYS_INLINE void cpp_sancov_get_pc_vmo(ffi::Uninitialized<InstrumentationDataVmoFfi>* out) {
+  out->Initialize(ToFfi(SancovGetPcVmo()));
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_sancov_get_pc_vmo(InstrumentationDataVmoFfi* out) {
-  *out = ToFfi(SancovGetPcVmo());
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_sancov_get_counts_vmo(InstrumentationDataVmoFfi* out) {
-  *out = ToFfi(SancovGetCountsVmo());
+FFI_ALWAYS_INLINE void cpp_sancov_get_counts_vmo(
+    ffi::Uninitialized<InstrumentationDataVmoFfi>* out) {
+  out->Initialize(ToFfi(SancovGetCountsVmo()));
 }
 
 __END_CDECLS

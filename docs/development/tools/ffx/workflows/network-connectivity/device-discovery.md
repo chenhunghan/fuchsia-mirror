@@ -1,12 +1,25 @@
 # Troubleshoot network connectivity: Device discovery
 
-Once the network interface is properly configured, you can begin to probe for
-the presence of the Fuchsia target device.
+Once your physical or virtual connection is configured, you can probe for the
+presence of the Fuchsia target device across each discovery mechanism supported
+by `ffx`.
 
-Note: The Fuchsia emulator (both AEMU and QEMU) uses different discovery
-mechanisms, which are out of scope in this documentation.
+The sections below show how to manually verify and debug each discovery source
+using standard Linux command-line tools:
 
-The examples on this page use [`avahi`][avahi] to inspect mDNS records. The
+* [Multicast DNS (mDNS) resolution](#multicast-dns-resolution)
+* [mDNS packet inspection](#mdns-packet-inspection)
+* [mDNS firewall and netfilter rules](#mdns-firewall-and-netfilter-rules)
+* [Multicast ping](#multicast-ping)
+* [USB Fastboot discovery](#usb-fastboot-discovery)
+* [USB VSOCK discovery](#usb-vsock-discovery)
+* [Emulator discovery](#emulator-discovery)
+* [Manual target discovery](#manual-target-discovery)
+* [Network Fastboot discovery](#fastboot-file-discovery)
+* [GCE instance discovery](#gce-discovery)
+* [UART discovery](#uart-discovery)
+
+The mDNS examples on this page use [`avahi`][avahi] to inspect mDNS records. The
 `avahi` toolchain communicates with a local daemon, which may or may not be
 running. If the daemon is not running, `avahi` commands will generally
 fail with a message saying `Daemon not running`.
@@ -107,11 +120,9 @@ To                         Action      From
 Anywhere (v6)              ALLOW       fe80::/10 5353/udp         # Fuchsia MDNS
 33331:33340/udp            ALLOW       fe80::/10                  # Fuchsia Netboot Protocol
 8083/tcp                   ALLOW       fe80::/10                  # Fuchsia Package Server
-Anywhere (v6)              ALLOW       fe80::/10 33340/udp        # Fuchsia Netboot TFTP Source Port
 33331:33340/udp            ALLOW       fc00::/7                   # Fuchsia Netboot Prot
 ocol
 8083/tcp                   ALLOW       fc00::/7                   # Fuchsia Package Server
-Anywhere (v6)              ALLOW       fc00::/7 33340/udp         # Fuchsia Netboot TFTP Source Port
 Anywhere (v6)              ALLOW       fc00::/7 5353/udp          # Fuchsia MDNS
 ```
 
@@ -232,8 +243,323 @@ A good rule of thumb is that the device responding in far less than a
 millisecond is generally the localhost responding, and anything approaching one
 or more milliseconds to respond is likely the Fuchsia target device.
 
+## USB Fastboot discovery {:#usb-fastboot-discovery}
+
+`ffx` discovers USB Fastboot devices on Linux by scanning `/sys/bus/usb/devices`
+for USB devices with Google's Vendor ID (`0x18d1`) that expose a Fastboot USB
+interface descriptor:
+
+* `idVendor`: `18d1`
+* `bInterfaceClass`: `ff` (Vendor Specific)
+* `bInterfaceSubClass`: `42` (Fastboot)
+* `bInterfaceProtocol`: `03` (Fastboot)
+
+To manually verify if a connected USB device exposes the Fastboot interface,
+inspect its USB descriptors with `lsusb`:
+
+```posix-terminal
+lsusb -v -d 18d1:
+```
+
+Or inspect the kernel `sysfs` interface descriptors and serial number directly:
+
+```posix-terminal
+grep -H . /sys/bus/usb/devices/*/idVendor /sys/bus/usb/devices/*/*/bInterface{Class,SubClass,Protocol}
+```
+
+For a matching device directory (for example, `/sys/bus/usb/devices/1-2`), check
+its serial number and verify that its `usbfs` device node is writable by your
+user:
+
+```posix-terminal
+cat /sys/bus/usb/devices/1-2/serial
+```
+
+If the device is visible in `sysfs` and `lsusb` with interface `ff/42/03`, you
+can also verify direct Fastboot communication using the standalone `fastboot`
+CLI tool:
+
+```posix-terminal
+fastboot devices -l
+fastboot getvar serialno
+```
+
+If `fastboot devices` reports `no permissions` or fails to open the device,
+check the character device node permissions under `/dev/bus/usb/<BUS>/<DEVICE>`.
+See [Are the USB device node permissions configured?][usb-permissions].
+
+## USB VSOCK discovery {:#usb-vsock-discovery}
+
+When `connectivity.enable_usb` is enabled, `ffx` discovers Fuchsia devices in
+Product mode over USB using the USB VSOCK bridge protocol. A Fuchsia target
+supporting USB VSOCK exposes a vendor-specific USB interface with:
+
+* `idVendor`: `18d1`
+* `bInterfaceClass`: `ff` (Vendor Specific)
+* `bInterfaceSubClass`: `43` (`VSOCK_BRIDGE`)
+* `bInterfaceProtocol`: `00`
+
+On the host, the background `ffx-usb-driver` daemon claims this USB interface
+and publishes discovered targets over a local Unix domain socket (by default at
+`${XDG_RUNTIME_DIR}/ffx_usb.sock`, configured via
+`connectivity.usb_socket_path`).
+
+To manually diagnose USB VSOCK discovery using standard Linux commands:
+
+1. Verify that the device is enumerated on the USB bus with the `ff/43/00`
+   VSOCK bridge interface:
+
+   ```posix-terminal
+   grep -H . /sys/bus/usb/devices/*/idVendor /sys/bus/usb/devices/*/*/bInterface{Class,SubClass,Protocol}
+   ```
+
+2. Verify that your user has write permission to the
+   `/dev/bus/usb/<BUS>/<DEVICE>` node (see
+   [Are the USB device node permissions configured?][usb-permissions]), and
+   check whether another process is holding the USB device open:
+
+   ```posix-terminal
+   lsof /dev/bus/usb/001/015
+   ```
+
+3. Check that the background `ffx-usb-driver` process is running and listening
+   on the Unix domain socket:
+
+   ```posix-terminal
+   ps aux | grep usb-driver
+   ss -xlp | grep ffx_usb.sock
+   ls -l "${XDG_RUNTIME_DIR}/ffx_usb.sock"
+   ```
+
+4. Inspect the `ffx-usb-driver` log files for USB bulk endpoint or VSOCK
+   synchronization errors:
+
+   ```posix-terminal
+   ls -lt "${XDG_STATE_HOME:-$HOME/.local/share}/ffx_usb/"
+   tail -n 50 "${XDG_STATE_HOME:-$HOME/.local/share}/ffx_usb/"ffx_usb.*.0.log
+   ```
+
+## Emulator discovery {:#emulator-discovery}
+
+`ffx` discovers local emulator instances by scanning the emulator instance
+directory (by default `~/.local/share/Fuchsia/ffx/shared/emu/instances`,
+configured via `emu.instance_dir`) for `<instance-name>/engine.json` files and
+checking whether the emulator process `pid` recorded in `engine.json` is
+currently alive.
+
+To manually diagnose emulator discovery using standard Linux commands:
+
+1. Check if any `qemu` or `aemu` emulator processes are running on the host:
+
+   ```posix-terminal
+   ps aux | grep -E 'qemu|aemu'
+   ```
+
+2. List the instance directories and inspect the `engine.json` state file:
+
+   ```posix-terminal
+   ls -la ~/.local/share/Fuchsia/ffx/shared/emu/instances/
+   cat ~/.local/share/Fuchsia/ffx/shared/emu/instances/fuchsia-emulator/engine.json
+   ```
+
+3. Verify that the process ID (`pid`) recorded in `engine.json` is running:
+
+   ```posix-terminal
+   ps -p <pid>
+   ```
+
+4. If the emulator process is running in user networking mode (`--net user`),
+   check the `port_map` in `engine.json` and verify that the host `ssh` port is
+   listening:
+
+   ```posix-terminal
+   ss -tlnp | grep <ssh-port>
+   ```
+
+   If the emulator was started in Tun/Tap networking mode (`--net tap` without
+   VSOCK), `ffx` discovers it via [mDNS](#multicast-dns-resolution) over the
+   `qemu` tap interface rather than `engine.json`. Verify that the `qemu` tap
+   network interface exists and is up:
+
+   ```posix-terminal
+   ip addr show qemu
+   ```
+
+5. Inspect the emulator host and serial logs (by default under
+   `~/.local/share/Fuchsia/ffx/cache/logs/`, or at the path recorded in
+   `emulator_configuration.host.log` in `engine.json`) for boot failures or
+   kernel panics:
+
+   ```posix-terminal
+   tail -n 50 ~/.local/share/Fuchsia/ffx/cache/logs/emulator-fuchsia-emulator.log
+   tail -n 50 ~/.local/share/Fuchsia/ffx/cache/logs/emulator-fuchsia-emulator.log.serial
+   ```
+
+For more information on managing emulator instances, see
+[Start the Fuchsia emulator][start-emulator].
+
+## Manual target discovery {:#manual-target-discovery}
+
+`ffx` discovers manual targets by reading the `targets.manual` object from the
+user configuration file (by default
+`~/.local/share/Fuchsia/ffx/config/.ffx_user_config.json`) and attempting a TCP
+connection (with a 1-second timeout) to each configured `<ip>:<port>` address.
+If the TCP connection fails or times out, `ffx` treats the manual target as
+disconnected and omits it from discovery results.
+
+To manually diagnose manual target discovery using standard Linux commands:
+
+1. Inspect the `targets.manual` entries in the user configuration file:
+
+   ```posix-terminal
+   cat "${XDG_CONFIG_HOME:-$HOME/.local/share}/Fuchsia/ffx/config/.ffx_user_config.json"
+   ```
+
+2. Test TCP reachability to the configured IP address and port directly with
+   `nc` (netcat):
+
+   ```posix-terminal
+   nc -zv -w 1 <ip> <port>
+   ```
+
+3. If the manual target points to a local forwarded port (such as
+   `127.0.0.1:8022` from an SSH tunnel), verify that a local process is actively
+   listening on that port:
+
+   ```posix-terminal
+   ss -tlnp | grep <port>
+   ```
+
+4. If the manual target uses a link-local IPv6 address
+   (`[fe80::...%<interface>]:<port>`), verify that the network interface scope
+   ID exists and has a link-local IPv6 address assigned:
+
+   ```posix-terminal
+   ip -6 --oneline addr
+   ```
+
+## Network Fastboot discovery {:#fastboot-file-discovery}
+
+`ffx` discovers network-attached Fastboot targets listed in the Fastboot devices
+file (by default `~/.fastboot/devices`, configured via
+`fastboot.devices_file.path`), as well as Fastboot-over-TCP/UDP targets
+advertising `_fastboot._tcp.local.` or `_fastboot._udp.local.` over
+[mDNS](#multicast-dns-resolution). In `~/.fastboot/devices`, each non-empty line
+must be formatted as `tcp:<ip>:<port>` or `udp:<ip>:<port>`. During discovery,
+`ffx` connects to each target and sends a Fastboot `getvar:serialno` query.
+
+To manually diagnose network Fastboot discovery using standard Linux commands:
+
+1. If using a Fastboot devices file, inspect the file and verify that each line
+   uses lowercase `tcp:` or `udp:` followed by a valid socket address
+   (`<ip>:<port>`):
+
+   ```posix-terminal
+   cat ~/.fastboot/devices
+   ```
+
+   If the target uses Fastboot over mDNS, check whether `_fastboot._tcp` or
+   `_fastboot._udp` is advertised on the network (see
+   [Multicast DNS resolution](#multicast-dns-resolution)):
+
+   ```posix-terminal
+   avahi-browse --resolve _fastboot._tcp
+   avahi-browse --resolve _fastboot._udp
+   ```
+
+2. For `tcp:<ip>:<port>` entries, test TCP reachability with `nc`:
+
+   ```posix-terminal
+   nc -zv -w 1 <ip> <port>
+   ```
+
+3. Test Fastboot protocol communication directly using the standalone `fastboot`
+   CLI tool:
+
+   ```posix-terminal
+   fastboot -s tcp:<ip>:<port> getvar serialno
+   ```
+
+   (Or for UDP targets, use `fastboot -s udp:<ip>:<port> getvar serialno`.)
+
+## GCE instance discovery {:#gce-discovery}
+
+`ffx` discovers Google Compute Engine (GCE) instances by watching the GCE
+instance directory (by default
+`~/.local/share/Fuchsia/ffx/shared/gce_instances`, configured via
+`gce.instance_dir`) for JSON state files named
+`<project>_<zone>_<instance-name>.json`. `ffx` reports an instance as
+discovered only if the local background SSH tunnel `pid` recorded in the JSON
+file is running and `ssh_port` is non-zero.
+
+To manually diagnose GCE discovery using standard Linux commands:
+
+1. List and inspect the GCE instance state files:
+
+   ```posix-terminal
+   ls -la ~/.local/share/Fuchsia/ffx/shared/gce_instances/
+   cat ~/.local/share/Fuchsia/ffx/shared/gce_instances/<project>_<zone>_<instance-name>.json
+   ```
+
+2. Verify that the background SSH tunnel process (`pid` in the JSON file) is
+   running and listening on `127.0.0.1:<ssh_port>`:
+
+   ```posix-terminal
+   ps -p <pid>
+   ss -tlnp | grep <ssh_port>
+   ```
+
+3. Test local TCP connectivity to the forwarded SSH port:
+
+   ```posix-terminal
+   nc -zv 127.0.0.1 <ssh_port>
+   ```
+
+## UART discovery {:#uart-discovery}
+
+When `connectivity.enable_uart` is enabled, `ffx` discovers UART-connected
+targets by monitoring the UART runtime directory (by default
+`~/.local/share/Fuchsia/ffx/shared/ffx_uart/`) for connection metadata files
+matching `ffx_uart_*.json`. `ffx` reports a target as discovered only when its
+metadata `status` is `"Connected"` and the `ffx-uart-driver` daemon `pid` is
+running.
+
+To manually diagnose UART discovery using standard Linux commands:
+
+1. Verify that the serial character device exists (for example, `/dev/ttyUSB0`)
+   and that your user belongs to the `dialout` group:
+
+   ```posix-terminal
+   ls -l /dev/ttyUSB*
+   id
+   ```
+
+2. Check whether another process (such as `minicom`, `screen`, `picocom`, or a
+   stale driver instance) holds an exclusive lock or open file descriptor on the
+   serial port:
+
+   ```posix-terminal
+   lsof /dev/ttyUSB0
+   fuser -v /dev/ttyUSB0
+   ```
+
+3. Inspect the UART metadata files and verify that the `ffx-uart-driver` daemon
+   process is running:
+
+   ```posix-terminal
+   ls -la ~/.local/share/Fuchsia/ffx/shared/ffx_uart/
+   cat ~/.local/share/Fuchsia/ffx/shared/ffx_uart/ffx_uart_*.json
+   ps aux | grep ffx-uart-driver
+   ```
+
+For more details on setting up and troubleshooting the UART transport, see
+[UART Transport][uart-transport].
+
 <!-- Reference links -->
 
 [avahi]: https://avahi.org/
 [netfilter]: https://www.netfilter.org/
 [rfc-4291]: https://datatracker.ietf.org/doc/html/rfc4291#section-2.7.1
+[usb-permissions]: interface-configuration.md#usb-device-permissions
+[start-emulator]: /docs/development/tools/ffx/workflows/start-the-fuchsia-emulator.md
+[uart-transport]: /docs/development/tools/ffx/uart.md#troubleshooting

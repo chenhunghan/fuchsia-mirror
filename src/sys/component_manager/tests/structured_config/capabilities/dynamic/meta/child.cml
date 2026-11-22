@@ -14,24 +14,26 @@
     ],
     use: [
         {
-            from: "parent",
             config: "fuchsia.config.MyFlag",
+            from: "parent",
             key: "my_flag",
             type: "bool",
         },
         {
-            from: "parent",
             config: "fuchsia.config.MyInt",
+            from: "parent",
             key: "my_int",
             availability: "optional",
             type: "uint8",
+            default: 0,
         },
         {
-            from: "parent",
             config: "fuchsia.config.MyTransitional",
+            from: "parent",
             key: "transitional",
             availability: "transitional",
             type: "uint8",
+            default: 5,
         },
     ],
     expose: [
@@ -40,8 +42,4 @@
             from: "self",
         },
     ],
-    config: {
-        my_int: { type: "uint8" },
-        transitional: { type: "uint8" },
-    },
 }

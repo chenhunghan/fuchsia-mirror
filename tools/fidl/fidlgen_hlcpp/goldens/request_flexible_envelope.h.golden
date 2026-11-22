@@ -45,12 +45,12 @@ class FlexibleFoo final {
   static FlexibleFoo WithS(::std::string&&);
   static FlexibleFoo WithI(int32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
     kUnknown = 0,
 
     kS = 1,  // 0x1
     kI = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<FlexibleFoo> New();
@@ -89,7 +89,7 @@ class FlexibleFoo final {
     return i_;
   }
   FlexibleFoo& set_i(int32_t value);
-  FlexibleFoo& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes);
+  FlexibleFoo& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes);
 
   ::test::requestflexibleenvelope::FlexibleFoo::Tag Which() const {
     switch (tag_) {
@@ -104,7 +104,7 @@ class FlexibleFoo final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -118,9 +118,9 @@ class FlexibleFoo final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid);
   union {
     ::std::string s_;
     int32_t i_;
@@ -148,11 +148,11 @@ class StrictFoo final {
   static StrictFoo WithS(::std::string&&);
   static StrictFoo WithI(int32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kS = 1,  // 0x1
     kI = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<StrictFoo> New();
@@ -198,7 +198,7 @@ class StrictFoo final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -206,9 +206,9 @@ class StrictFoo final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid);
   union {
     ::std::string s_;
     int32_t i_;
@@ -360,7 +360,7 @@ class Protocol_ResponseEncoder {
 namespace fidl {
 
 template <>
-struct IsFidlXUnion<::test::requestflexibleenvelope::FlexibleFoo> : public std::true_type {};
+struct IsFidlUnion<::test::requestflexibleenvelope::FlexibleFoo> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::requestflexibleenvelope::FlexibleFoo>
@@ -372,9 +372,9 @@ struct CodingTraits<std::unique_ptr<::test::requestflexibleenvelope::FlexibleFoo
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::requestflexibleenvelope::FlexibleFoo>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -404,7 +404,7 @@ struct Equality<::test::requestflexibleenvelope::FlexibleFoo> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid):
         return true;
       case ::test::requestflexibleenvelope::FlexibleFoo::Tag::kS:
         return ::fidl::Equals(_lhs.s_, _rhs.s_);
@@ -416,7 +416,7 @@ struct Equality<::test::requestflexibleenvelope::FlexibleFoo> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::requestflexibleenvelope::StrictFoo> : public std::true_type {};
+struct IsFidlUnion<::test::requestflexibleenvelope::StrictFoo> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::requestflexibleenvelope::StrictFoo>
@@ -428,9 +428,9 @@ struct CodingTraits<std::unique_ptr<::test::requestflexibleenvelope::StrictFoo>>
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::requestflexibleenvelope::StrictFoo>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -460,7 +460,7 @@ struct Equality<::test::requestflexibleenvelope::StrictFoo> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid):
         return true;
       case ::test::requestflexibleenvelope::StrictFoo::Tag::kS:
         return ::fidl::Equals(_lhs.s_, _rhs.s_);

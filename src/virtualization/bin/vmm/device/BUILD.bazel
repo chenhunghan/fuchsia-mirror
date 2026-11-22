@@ -1,0 +1,129 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":device_unittests_test"],
+    visibility = ["//src/virtualization:__pkg__"],
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = [
+        "phys_mem.cc",
+        "virtio_queue.cc",
+    ],
+    hdrs = [
+        "block.h",
+        "config.h",
+        "input.h",
+        "phys_mem.h",
+        "virtio_queue.h",
+    ],
+    build_flags = ["//build/config:all_source"],
+    visibility = ["//src/virtualization:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.virtualization.hardware:fuchsia.virtualization.hardware_hlcpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/fit",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/virtio",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "virtio",
+    hdrs = [
+        "device_base.h",
+        "stream_base.h",
+    ],
+    visibility = [":__subpackages__"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.virtualization.hardware:fuchsia.virtualization.hardware_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fsl",
+        "//zircon/system/ulib/trace",
+        "//zircon/system/ulib/trace-provider",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "qcow_test_data",
+    hdrs = ["qcow_test_data.h"],
+    visibility = ["//src/virtualization:__subpackages__"],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "device_unittests",
+    srcs = [
+        "phys_mem_unittest.cc",
+        "virtio_queue_unittest.cc",
+    ],
+    deps = [
+        ":lib",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/virtualization/bin/vmm/device/tests:virtio_queue_fake",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "device_unittests_packaged_bin",
+    testonly = True,
+    binary = ":device_unittests",
+    binary_name = "device_unittests",
+)
+
+fx_component_manifest(
+    name = "device_unittests_manifest",
+    testonly = True,
+    component_name = "device_unittests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/device_unittests.cml",
+)
+
+fx_test_component(
+    name = "device_unittests_component",
+    compiled_manifest = ":device_unittests_manifest",
+    deps = [":device_unittests_packaged_bin"],
+)
+
+fx_package(
+    name = "device_unittests_package",
+    package_name = "device_unittests",
+    test_components = [":device_unittests_component"],
+)
+
+fx_test(
+    name = "device_unittests_test",
+    max_log_severity = "FATAL",
+    package = ":device_unittests_package",
+)

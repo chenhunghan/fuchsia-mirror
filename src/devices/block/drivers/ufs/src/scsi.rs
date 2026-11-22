@@ -14,8 +14,8 @@
 
 use crate::constants::{
     CDB_FUA_BIT, MAX_LUN_INDEX, RPMB_SECURITY_PROTOCOL_SPECIFIC, SCSI_WELL_KNOWN_LUN_ID,
-    SCSI_WELL_KNOWN_LUN_MASK, SERVICE_ACTION_READ_CAPACITY_16, UFS_SECURITY_PROTOCOL,
-    UFS_WELL_KNOWN_LUN_ID,
+    SCSI_WELL_KNOWN_LUN_MASK, SERVICE_ACTION_READ_CAPACITY_16, START_STOP_POWER_CONDITION_SHIFT,
+    UFS_SECURITY_PROTOCOL, UFS_WELL_KNOWN_LUN_ID,
 };
 use crate::request_list::DataDirection;
 use static_assertions::const_assert_eq;
@@ -55,6 +55,8 @@ impl ScsiStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SenseKey {
+    NoSense = 0x00,
+    RecoveredError = 0x01,
     NotReady = 0x02,
     IllegalRequest = 0x05,
     UnitAttention = 0x06,
@@ -64,6 +66,8 @@ impl SenseKey {
     /// Converts a 4-bit raw sense key into a known [`SenseKey`].
     pub const fn from_raw(raw: u8) -> Option<Self> {
         match raw {
+            0x00 => Some(Self::NoSense),
+            0x01 => Some(Self::RecoveredError),
             0x02 => Some(Self::NotReady),
             0x05 => Some(Self::IllegalRequest),
             0x06 => Some(Self::UnitAttention),
@@ -75,6 +79,18 @@ impl SenseKey {
     pub const fn as_u8(self) -> u8 {
         self as u8
     }
+}
+
+/// 4-bit `POWER CONDITIONS` field of the `START STOP UNIT` CDB (UFS 4.0 section 7.4.2,
+/// Table 7.9, and section 11.3.10).
+///
+/// Not the `bCurrentPowerMode` attribute values (`UfsPowerMode`) or the driver's `PowerState`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum StartStopPowerCondition {
+    Active = 0x1,
+    Sleep = 0x2,
+    PowerDown = 0x3,
 }
 
 /// Whether a `WRITE` sets Force Unit Access (`FUA`): the data must reach the medium before the
@@ -115,8 +131,12 @@ pub fn ufs_lun_from_scsi_lun(scsi_lun: u16) -> Result<u8, zx::Status> {
 pub enum ScsiOpcode {
     /// Checks if the logical unit is ready (`TEST UNIT READY`, `0x00`).
     TestUnitReady = 0x00,
+    /// Requests sense data (`REQUEST SENSE`, `0x03`).
+    RequestSense = 0x03,
     /// Queries standard device identification (`INQUIRY`, `0x12`).
     Inquiry = 0x12,
+    /// Reads mode pages using 6-byte CDB (`MODE SENSE (6)`, `0x1A`).
+    ModeSense6 = 0x1A,
     /// Controls logical unit power condition (`START STOP UNIT`, `0x1B`).
     StartStopUnit = 0x1B,
     /// Writes a device buffer (`WRITE BUFFER`, `0x3B`).
@@ -133,6 +153,8 @@ pub enum ScsiOpcode {
     SynchronizeCache10 = 0x35,
     /// Deallocates / trims logical block ranges (`UNMAP`, `0x42`).
     Unmap = 0x42,
+    /// Reads mode pages using 10-byte CDB (`MODE SENSE (10)`, `0x5A`).
+    ModeSense10 = 0x5A,
     /// Reads logical blocks using 16-byte CDB (`READ (16)`, `0x88`).
     Read16 = 0x88,
     /// Writes logical blocks using 16-byte CDB (`WRITE (16)`, `0x8A`).
@@ -145,6 +167,62 @@ pub enum ScsiOpcode {
     SecurityProtocolIn = 0xA2,
     /// Transmits security protocol frames such as RPMB (`SECURITY PROTOCOL OUT`, `0xB5`).
     SecurityProtocolOut = 0xB5,
+}
+
+impl ScsiOpcode {
+    /// Converts a raw CDB byte 0 opcode into a known [`ScsiOpcode`].
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0x00 => Some(Self::TestUnitReady),
+            0x03 => Some(Self::RequestSense),
+            0x12 => Some(Self::Inquiry),
+            0x1A => Some(Self::ModeSense6),
+            0x1B => Some(Self::StartStopUnit),
+            0x25 => Some(Self::ReadCapacity10),
+            0x28 => Some(Self::Read10),
+            0x2A => Some(Self::Write10),
+            0x35 => Some(Self::SynchronizeCache10),
+            0x3B => Some(Self::WriteBuffer),
+            0x3C => Some(Self::ReadBuffer),
+            0x42 => Some(Self::Unmap),
+            0x5A => Some(Self::ModeSense10),
+            0x88 => Some(Self::Read16),
+            0x8A => Some(Self::Write16),
+            0x9E => Some(Self::ReadCapacity16),
+            0xA0 => Some(Self::ReportLuns),
+            0xA2 => Some(Self::SecurityProtocolIn),
+            0xB5 => Some(Self::SecurityProtocolOut),
+            _ => None,
+        }
+    }
+
+    /// Returns whether residual underflow is permitted because the response payload is
+    /// variable-length up to the CDB allocation length. READ CAPACITY (16) (fixed 32-byte
+    /// parameter data) and SECURITY PROTOCOL IN (whole 512-byte RPMB frames) stay strict: a
+    /// short transfer of a fixed-size payload is unusable.
+    pub const fn allows_underflow(self) -> bool {
+        match self {
+            Self::RequestSense
+            | Self::Inquiry
+            | Self::ModeSense6
+            | Self::ModeSense10
+            | Self::ReadBuffer
+            | Self::ReportLuns => true,
+            Self::TestUnitReady
+            | Self::StartStopUnit
+            | Self::ReadCapacity10
+            | Self::Read10
+            | Self::Write10
+            | Self::SynchronizeCache10
+            | Self::WriteBuffer
+            | Self::Unmap
+            | Self::Read16
+            | Self::Write16
+            | Self::ReadCapacity16
+            | Self::SecurityProtocolIn
+            | Self::SecurityProtocolOut => false,
+        }
+    }
 }
 
 /// Standard SCSI Inquiry Data response (36 bytes minimum).
@@ -284,6 +362,14 @@ impl ScsiOpcode {
     pub fn build_test_unit_ready_cdb() -> [u8; 16] {
         let mut cdb = [0u8; 16];
         cdb[0] = ScsiOpcode::TestUnitReady as u8;
+        cdb
+    }
+
+    /// Builds a 16-byte padded `START STOP UNIT` CDB with `power_condition` in bits 7:4 of byte 4.
+    pub fn build_start_stop_unit_cdb(power_condition: StartStopPowerCondition) -> [u8; 16] {
+        let mut cdb = [0u8; 16];
+        cdb[0] = ScsiOpcode::StartStopUnit as u8;
+        cdb[4] = (power_condition as u8) << START_STOP_POWER_CONDITION_SHIFT;
         cdb
     }
 
@@ -445,13 +531,13 @@ pub struct UnmapParameterList {
 
 impl UnmapParameterList {
     /// Byte length of the `UNMAP DATA LENGTH` field itself (excluded from `unmap_data_length`).
-    const DATA_LENGTH_FIELD_BYTES: usize = std::mem::size_of::<U16>();
+    const DATA_LENGTH_FIELD_BYTES: usize = size_of::<U16>();
 
     /// Creates a 24-byte UNMAP parameter list containing a single block range descriptor.
     pub fn new(lba: u64, num_blocks: u32) -> Self {
-        const DATA_LEN: u16 = (std::mem::size_of::<UnmapParameterList>()
-            - UnmapParameterList::DATA_LENGTH_FIELD_BYTES) as u16;
-        const DESC_LEN: u16 = std::mem::size_of::<UnmapBlockDescriptor>() as u16;
+        const DATA_LEN: u16 =
+            (size_of::<UnmapParameterList>() - UnmapParameterList::DATA_LENGTH_FIELD_BYTES) as u16;
+        const DESC_LEN: u16 = size_of::<UnmapBlockDescriptor>() as u16;
         Self {
             unmap_data_length: U16::new(DATA_LEN),
             unmap_block_descriptor_data_length: U16::new(DESC_LEN),

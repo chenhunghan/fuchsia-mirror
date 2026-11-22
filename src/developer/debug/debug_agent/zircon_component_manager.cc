@@ -43,8 +43,9 @@ namespace debug_agent {
 
 namespace {
 
-// Maximum time we wait for reading "elf/job_id" in the runtime directory.
-constexpr uint64_t kMaxWaitMsForJobId = 1000;
+// Cold test runners load the test binary before serving the runtime directory, which can exceed
+// one second under disk contention.
+constexpr uint64_t kMaxWaitMsForJobId = 5000;
 
 // Helper to simplify request pipelining.
 template <typename Protocol>
@@ -122,9 +123,8 @@ std::string SeverityToString(int32_t severity) {
   return "INVALID";
 }
 
-void SendLogs(
-    DebugAgent* debug_agent,
-    const std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>>& batch) {
+void SendLogs(DebugAgent* debug_agent,
+              const std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>>& batch) {
   debug_ipc::NotifyIO notify;
   notify.timestamp = GetNowTimestamp();
   notify.process_koid = 0;
@@ -134,8 +134,8 @@ void SendLogs(
     if (msg.is_error()) {
       LOGS(Warn) << "Failed to parse log: " << msg.error();
     } else {
-      notify.data += SeverityToString(msg.value().severity) + ": ";
-      notify.data.insert(notify.data.end(), msg.value().msg.begin(), msg.value().msg.end());
+      notify.data += SeverityToString(msg.value().severity()) + ": ";
+      notify.data.insert(notify.data.end(), msg.value().msg().begin(), msg.value().msg().end());
       notify.data.push_back('\n');
     }
   }
@@ -466,10 +466,9 @@ class ZirconComponentManager::TestLauncher : public fxl::RefCountedThreadSafe<Te
         auto& artifact = event.details()->suite_artifact_generated()->artifact().value();
         if (artifact.log()) {
           FX_CHECK(artifact.log()->batch());
-          fuchsia::diagnostics::BatchIteratorPtr log_listener;
-          log_listener.Bind(artifact.log()->batch()->TakeChannel());
           log_listener_ = std::make_unique<diagnostics::fidl_log_message_parser::LogBatchIterator>(
-              std::move(log_listener), fuchsia::diagnostics::Format::FXT);
+              std::move(artifact.log()->batch().value()), fuchsia_diagnostics::Format::kFxt,
+              async_get_default_dispatcher());
           log_listener_->GetNext(
               [self = fxl::RefPtr<TestLauncher>(this)](auto res) { self->OnLog(std::move(res)); });
         }
@@ -493,7 +492,7 @@ class ZirconComponentManager::TestLauncher : public fxl::RefCountedThreadSafe<Te
 
   // Handle logs.
   void OnLog(fpromise::result<
-             std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>>, std::string>
+             std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>>, std::string>
                  result) {
     if (result.is_ok() && !result.value().empty()) {
       if (debug_agent_) {

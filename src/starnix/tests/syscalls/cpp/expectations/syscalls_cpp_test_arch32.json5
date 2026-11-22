@@ -13,8 +13,10 @@
         {
             type: "expect_failure",
             matchers: [
-                // fgetxattr is not implemented on arch32.
+                // fgetxattr, fremovexattr, and lremovexattr are not implemented on arch32.
+                "XattrTest.EmptyNameReturnsErangeBeforeAccess",
                 "XattrTest.FsetxattrValueLengthLimits",
+                "XattrInvalidNames/XattrInvalidNameAccessTest.ChecksPermissionsBeforePrefix/*",
             ],
         },
     ],

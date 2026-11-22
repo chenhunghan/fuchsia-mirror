@@ -23,7 +23,7 @@ namespace buttons {
 namespace {
 
 fuchsia_buttons::GpioButtonsMetadata ConvertMetadata(
-    const buttons_metadata::ButtonsMetadata& parsed) {
+    const buttons_metadata::GpioButtonsMetadata& parsed) {
   fuchsia_buttons::GpioButtonsMetadata metadata;
   if (parsed.buttons.has_value()) {
     std::vector<fuchsia_buttons::GpioButtonConfig> buttons;
@@ -145,7 +145,7 @@ zx::result<> Buttons::Start(fdf::DriverContext context) {
                  metadata_result, dict_result);
       return metadata_result.take_error();
     }
-    auto parsed = buttons_metadata::ButtonsMetadata::Parse(dict_result.value());
+    auto parsed = buttons_metadata::GpioButtonsMetadata::Parse(dict_result.value());
     if (!parsed.has_value()) {
       fdf::error("Failed to parse GpioButtonsMetadata from Dictionary");
       return zx::error(ZX_ERR_INTERNAL);

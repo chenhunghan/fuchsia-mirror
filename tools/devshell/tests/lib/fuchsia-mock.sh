@@ -64,14 +64,6 @@ def summarize_rbe_metrics_from_logdir(reproxy_logdir):
     return None
 EOF
 
-  # Mock credentials.sh to avoid executing real credentials isolation in unit tests
-  btf::make_mock "${_FUCHSIA_DIR}/tools/devshell/lib/credentials.sh"
-  cat > "${_FUCHSIA_DIR}/tools/devshell/lib/credentials.sh.mock_side_effects" <<EOF
-function fx-setup-isolated-adc {
-  :
-}
-EOF
-
   # Create centralized mock profiles for RbeProfile and RsProfile loading
   mkdir -p "${_FUCHSIA_DIR}/.fx/config"
   cat > "${_FUCHSIA_DIR}/.fx/config/rbe_profile.json" <<EOF

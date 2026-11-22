@@ -20,8 +20,7 @@ class EndpointImpl;
 
 class NetworkContext;
 class EndpointManager;
-class Endpoint : public fuchsia::netemul::network::Endpoint,
-                 public fuchsia::netemul::network::DeviceProxy {
+class Endpoint : public fuchsia::netemul::network::Endpoint {
  public:
   // The port identifier to use when creating netemul endpoints.
   static constexpr uint8_t kPortId = 11;
@@ -29,7 +28,6 @@ class Endpoint : public fuchsia::netemul::network::Endpoint,
   static constexpr fuchsia::hardware::network::FrameType kFrameType =
       fuchsia::hardware::network::FrameType::ETHERNET;
   using FEndpoint = fuchsia::netemul::network::Endpoint;
-  using FProxy = fuchsia::netemul::network::DeviceProxy;
   using Config = fuchsia::netemul::network::EndpointConfig;
   using EndpointClosedCallback = fit::function<void(const Endpoint&)>;
 
@@ -47,11 +45,6 @@ class Endpoint : public fuchsia::netemul::network::Endpoint,
   void GetName(GetNameCallback callback) override;
   void SetLinkUp(bool up, SetLinkUpCallback callback) override;
   void GetPort(fidl::InterfaceRequest<fuchsia::hardware::network::Port> port) override;
-  void GetProxy(fidl::InterfaceRequest<FProxy> proxy) override;
-
-  // fuchsia.netemul.network/DeviceProxy FIDL APIs.
-  void ServeController(fidl::InterfaceRequest<fuchsia::device::Controller> controller) override;
-  void ServeDevice(fidl::InterfaceRequest<fuchsia::hardware::network::Device> device) override;
 
   // Installs a data sink on endpoint.
   // Data sinks will be notified via ->Consume of any data that is sent to the
@@ -77,7 +70,6 @@ class Endpoint : public fuchsia::netemul::network::Endpoint,
   NetworkContext* parent_;
   std::string name_;
   fidl::BindingSet<FEndpoint> bindings_;
-  fidl::BindingSet<FProxy> proxy_bindings_;
 };
 
 }  // namespace netemul

@@ -138,10 +138,10 @@ success("TableUnionWithVectorStructSandwich") {
             0x04, 0x05, 0x06, 0x00, // vector<envelope>[2].num_bytes  0x30
             0x00, 0x00, 0x01, 0x00, // vector<envelope>[2].num_handles
 
-            0x03, 0x00, 0x00, 0x00, // UnionWithVector.xunion.ordinal (string)
-            0x00, 0x00, 0x00, 0x00, // UnionWithVector.xunion.padding
-            0x18, 0x00, 0x00, 0x00, // UnionWithVector.xunion.envelope.size  0x50
-            0x00, 0x00, 0x00, 0x00, // UnionWithVector.xunion.envelope.size [cont.]
+            0x03, 0x00, 0x00, 0x00, // UnionWithVector.union.ordinal (string)
+            0x00, 0x00, 0x00, 0x00, // UnionWithVector.union.padding
+            0x18, 0x00, 0x00, 0x00, // UnionWithVector.union.envelope.size  0x50
+            0x00, 0x00, 0x00, 0x00, // UnionWithVector.union.envelope.size [cont.]
 
             0x05, 0x00, 0x00, 0x00, // string.size  0x60
             0x00, 0x00, 0x00, 0x00, // string.size [cont.]
@@ -650,13 +650,13 @@ success("Regression6Bits") {
     },
 }
 
-success("Regression7TableUnionXUnion") {
-    value = Regression7TableUnionXUnion{
-        value: TableOfUnionThenXUnionThenTableThenXUnionThenUnion{
-            member: UnionOfXUnionThenTableThenXUnionThenUnion{
-                variant: XUnionOfTableThenXUnionThenUnion{
-                    variant: TableOfXUnionThenUnion{
-                        member: XUnionOfUnion{
+success("Regression7TableUnionFlexibleUnion") {
+    value = Regression7TableUnionFlexibleUnion{
+        value: TableOfUnionThenFlexibleUnionThenTableThenFlexibleUnionThenUnion{
+            member: UnionOfFlexibleUnionThenTableThenFlexibleUnionThenUnion{
+                variant: FlexibleUnionOfTableThenFlexibleUnionThenUnion{
+                    variant: TableOfFlexibleUnionThenUnion{
+                        member: FlexibleUnionOfUnion{
                             variant: UnionAtTheBottom{
                                 tiny: 8,
                             },
@@ -668,40 +668,40 @@ success("Regression7TableUnionXUnion") {
     },
     bytes = {
         v2 = [
-            // 0: TableOfUnionThenXUnionThenTableThenXUnionThenUnion header
+            // 0: TableOfUnionThenFlexibleUnionThenTableThenFlexibleUnionThenUnion header
             num(3):8, repeat(0xff):8,
 
-            // 16: TableOfUnionThenXUnionThenTableThenXUnionThenUnion env1
+            // 16: TableOfUnionThenFlexibleUnionThenTableThenFlexibleUnionThenUnion env1
             repeat(0x00):8,
 
-            // 32: TableOfUnionThenXUnionThenTableThenXUnionThenUnion env2
+            // 32: TableOfUnionThenFlexibleUnionThenTableThenFlexibleUnionThenUnion env2
             repeat(0x00):8,
 
-            // 48: TableOfUnionThenXUnionThenTableThenXUnionThenUnion env3
+            // 48: TableOfUnionThenFlexibleUnionThenTableThenFlexibleUnionThenUnion env3
             num(0x60):4, num(0):2, num(0):2,
 
-            // 64: UnionOfXUnionThenTableThenXUnionThenUnion-as-xunion header
+            // 64: UnionOfFlexibleUnionThenTableThenFlexibleUnionThenUnion-as-envelope-union header
             num(3):8,
             num(0x50):4, num(0):2, num(0):2,
 
-            // 88: XUnionOfTableThenXUnionThenUnion header
+            // 88: FlexibleUnionOfTableThenFlexibleUnionThenUnion header
             num(1):8,
             num(0x40):4, num(0):2, num(0):2,
 
-            // 112: TableOfXUnionThenUnion header
+            // 112: TableOfFlexibleUnionThenUnion header
             num(2):8, repeat(0xff):8,
 
-            // 128: TableOfXUnionThenUnion env1
+            // 128: TableOfFlexibleUnionThenUnion env1
             repeat(0x00):8,
 
-            // 146: TableOfXUnionThenUnion env2
+            // 146: TableOfFlexibleUnionThenUnion env2
             num(0x20):4, num(0):2, num(0):2,
 
-            // 172: XUnionOfUnion header
+            // 172: FlexibleUnionOfUnion header
             num(1):8,
             num(0x10):4, num(0):2, num(0):2,
 
-            // 196: UnionAtTheBottom-as-xunion (uses inlined envelope)
+            // 196: UnionAtTheBottom-as-envelope-union (uses inlined envelope)
             num(3):8,
             num(0x08):1, padding:3, num(0):2, num(1):2,
         ],
@@ -719,19 +719,19 @@ success("Regression8OptUnionSize12Aligned4") {
     },
     bytes = {
         v2 = [
-            // 0: opt_union1, UnionSize12Aligned4-as-xunion present
+            // 0: opt_union1, UnionSize12Aligned4-as-envelope-union present
             0x04, 0x00, 0x00, 0x00, // ordinal
             0x00, 0x00, 0x00, 0x00, // padding
             0x08, 0x00, 0x00, 0x00, // num_bytes
             0x00, 0x00, 0x00, 0x00, // num_handles
 
-            // 24: opt_union2, UnionSize12Aligned4-as-xunion absent
+            // 24: opt_union2, UnionSize12Aligned4-as-envelope-union absent
             0x00, 0x00, 0x00, 0x00, // ordinal
             0x00, 0x00, 0x00, 0x00, // padding
             0x00, 0x00, 0x00, 0x00, // num_bytes
             0x00, 0x00, 0x00, 0x00, // num_handles
 
-            // 48: opt_union3, UnionSize12Aligned4-as-xunion present
+            // 48: opt_union3, UnionSize12Aligned4-as-envelope-union present
             0x04, 0x00, 0x00, 0x00, // ordinal
             0x00, 0x00, 0x00, 0x00, // padding
             0x08, 0x00, 0x00, 0x00, // num_bytes
@@ -770,31 +770,31 @@ success("Regression8VectorOfOptUnionSize12Aligned4") {
             0xff, 0xff, 0xff, 0xff, //
             0xff, 0xff, 0xff, 0xff, //
 
-            // 16: vector[0] UnionSize12Aligned4-as-xunion absent
+            // 16: vector[0] UnionSize12Aligned4-as-envelope-union absent
             0x00, 0x00, 0x00, 0x00, // ordinal
             0x00, 0x00, 0x00, 0x00, // padding
             0x00, 0x00, 0x00, 0x00, // num_bytes
             0x00, 0x00, 0x00, 0x00, // num_handles
 
-            // 40: vector[1] UnionSize12Aligned4-as-xunion present
+            // 40: vector[1] UnionSize12Aligned4-as-envelope-union present
             0x04, 0x00, 0x00, 0x00, // ordinal
             0x00, 0x00, 0x00, 0x00, // padding
             0x08, 0x00, 0x00, 0x00, // num_bytes
             0x00, 0x00, 0x00, 0x00, // num_handles
 
-            // 64: vector[2] UnionSize12Aligned4-as-xunion absent
+            // 64: vector[2] UnionSize12Aligned4-as-envelope-union absent
             0x00, 0x00, 0x00, 0x00, // ordinal
             0x00, 0x00, 0x00, 0x00, // padding
             0x00, 0x00, 0x00, 0x00, // num_bytes
             0x00, 0x00, 0x00, 0x00, // num_handles
 
-            // 88: vector[3] UnionSize12Aligned4-as-xunion present
+            // 88: vector[3] UnionSize12Aligned4-as-envelope-union present
             0x04, 0x00, 0x00, 0x00, // ordinal
             0x00, 0x00, 0x00, 0x00, // padding
             0x08, 0x00, 0x00, 0x00, // num_bytes
             0x00, 0x00, 0x00, 0x00, // num_handles
 
-            // 112: vector[4] UnionSize12Aligned4-as-xunion absent
+            // 112: vector[4] UnionSize12Aligned4-as-envelope-union absent
             0x00, 0x00, 0x00, 0x00, // ordinal
             0x00, 0x00, 0x00, 0x00, // padding
             0x00, 0x00, 0x00, 0x00, // num_bytes
@@ -849,13 +849,13 @@ success("Regression8TableWithUnionSize12Aligned4") {
             0xbb, 0x00, 0x00, 0x00, //
             0x00, 0x00, 0x01, 0x00, //
 
-            // 56: env3.data, UnionSize12Aligned4-as-xunion
+            // 56: env3.data, UnionSize12Aligned4-as-envelope-union
             0x04, 0x00, 0x00, 0x00, // ordinal
             0x00, 0x00, 0x00, 0x00, // padding
             0x08, 0x00, 0x00, 0x00, // num_bytes
             0x00, 0x00, 0x00, 0x00, // num_handles
 
-            // 72: UnionSize12Aligned4-as-xunion.data
+            // 72: UnionSize12Aligned4-as-envelope-union.data
             0xb1, 0xb2, 0xb3, 0xb4, // array<uint8>:6
             0xb5, 0xb6, 0x00, 0x00, // array<uint8>:6 (cont.) + padding
         ],
@@ -888,19 +888,19 @@ success("Regression9Response") {
             0x00, 0x00, 0x00, 0x00, //
             0x69, 0xc9, 0xcb, 0x56, //
 
-            // 16: result union xunion header
+            // 16: result union union header
             0x01, 0x00, 0x00, 0x00, // ordinal (success)
             0x00, 0x00, 0x00, 0x00, //
             0x50, 0x00, 0x00, 0x00, // num bytes
             0x00, 0x00, 0x00, 0x00, // num handles
 
-            // 40: Unions.u xunion header
+            // 40: Unions.u union header
             0x01, 0x00, 0x00, 0x00, // ordinal
             0x00, 0x00, 0x00, 0x00, //
             0x30, 0x00, 0x00, 0x00, // num bytes
             0x00, 0x00, 0x00, 0x00, // num handles
 
-            // 64: Unions.nullable_u xunion header
+            // 64: Unions.nullable_u union header
             0x02, 0x00, 0x00, 0x00, // ordinal
             0x00, 0x00, 0x00, 0x00, //
             0x00, 0x00, 0x00, 0x00, // num bytes
@@ -1076,9 +1076,9 @@ success("Sandwich9Case1") {
         v2 = [
             0x01, 0x02, 0x00, 0x00, // before
             0x00, 0x00, 0x00, 0x00, //
-            0x01, 0x00, 0x00, 0x00, // xunion tag
+            0x01, 0x00, 0x00, 0x00, // union tag
             0x00, 0x00, 0x00, 0x00, //
-            0x40, 0x00, 0x00, 0x00, // xunion size
+            0x40, 0x00, 0x00, 0x00, // union size
             0x00, 0x00, 0x00, 0x00, //
             0x11, 0x12, 0x00, 0x00, // after
             0x00, 0x00, 0x00, 0x00, //
@@ -1233,14 +1233,14 @@ success("RegressionNoUnionLauncherCreateComponentRequest") {
     },
     value = CreateComponentRequest{
         launch_info: LaunchInfo{
-            url: "fuchsia-pkg://fuchsia.com/fidl_compatibility_test_server_rust_write_xunion#meta/fidl_compatibility_test_server_rust_write_xunion.cmx",
+            url: "fuchsia-pkg://fuchsia.com/fidl_compatibility_test_server_rust_write_union#meta/fidl_compatibility_test_server_rust_write_union.cmx",
             directory_request: #0,
         },
         controller: #1,
     },
     bytes = {
         v2 = [
-            0x84, 0x00, 0x00, 0x00, // begin LaunchInfo: component_url (string size 0x84)
+            0x82, 0x00, 0x00, 0x00, // begin LaunchInfo: component_url (string size 0x82)
             0x00, 0x00, 0x00, 0x00,
             0xFF, 0xFF, 0xFF, 0xFF, // component_url (string present)
             0xFF, 0xFF, 0xFF, 0xFF,
@@ -1277,22 +1277,22 @@ success("RegressionNoUnionLauncherCreateComponentRequest") {
             0x5F, 0x72, 0x75, 0x73,
             0x74, 0x5F, 0x77, 0x72,
             0x69, 0x74, 0x65, 0x5F,
-            0x78, 0x75, 0x6E, 0x69,
-            0x6F, 0x6E, 0x23, 0x6D,
-            0x65, 0x74, 0x61, 0x2F,
-            0x66, 0x69, 0x64, 0x6C,
-            0x5F, 0x63, 0x6F, 0x6D,
-            0x70, 0x61, 0x74, 0x69,
-            0x62, 0x69, 0x6C, 0x69,
-            0x74, 0x79, 0x5F, 0x74,
-            0x65, 0x73, 0x74, 0x5F,
-            0x73, 0x65, 0x72, 0x76,
-            0x65, 0x72, 0x5F, 0x72,
-            0x75, 0x73, 0x74, 0x5F,
-            0x77, 0x72, 0x69, 0x74,
-            0x65, 0x5F, 0x78, 0x75,
-            0x6E, 0x69, 0x6F, 0x6E,
-            0x2E, 0x63, 0x6D, 0x78,
+            0x75, 0x6E, 0x69, 0x6F,
+            0x6E, 0x23, 0x6D, 0x65,
+            0x74, 0x61, 0x2F, 0x66,
+            0x69, 0x64, 0x6C, 0x5F,
+            0x63, 0x6F, 0x6D, 0x70,
+            0x61, 0x74, 0x69, 0x62,
+            0x69, 0x6C, 0x69, 0x74,
+            0x79, 0x5F, 0x74, 0x65,
+            0x73, 0x74, 0x5F, 0x73,
+            0x65, 0x72, 0x76, 0x65,
+            0x72, 0x5F, 0x72, 0x75,
+            0x73, 0x74, 0x5F, 0x77,
+            0x72, 0x69, 0x74, 0x65,
+            0x5F, 0x75, 0x6E, 0x69,
+            0x6F, 0x6E, 0x2E, 0x63,
+            0x6D, 0x78, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00,
         ],
     },
@@ -1307,7 +1307,7 @@ success("CompatTable") {
             union_member: CompatUnion{b: true},
             array_member: [0x5129679d, 0x9491b48e, 0x93d21b51],
             table_member: CompatTableString{s: "AB"},
-            xunion_member: CompatXUnion{s: "CD"},
+            flexible_union_member: CompatFlexibleUnion{s: "CD"},
         },
         empty: "",
     },
@@ -1341,7 +1341,7 @@ success("CompatTable") {
             0x28, 0x00, 0x00, 0x00, // envelope num bytes
             0x00, 0x00, 0x00, 0x00, // envelope num handles
 
-            // 64: env1.data, union-as-xunion header
+            // 64: env1.data, union-as-envelope-union header
             0x02, 0x00, 0x00, 0x00, //
             0x00, 0x00, 0x00, 0x00, //
             0x01, 0x00, 0x00, 0x00, //
@@ -1373,19 +1373,19 @@ success("CompatTable") {
             0x41, 0x42, 0x00, 0x00, //
             0x00, 0x00, 0x00, 0x00, //
 
-            // 136: env4.data, xunion
+            // 136: env4.data, union
             0x01, 0x00, 0x00, 0x00, // explicit ordinal
             0x00, 0x00, 0x00, 0x00, //
             0x18, 0x00, 0x00, 0x00, //
             0x00, 0x00, 0x00, 0x00, //
 
-            // 152: string header (xunion.data)
+            // 152: string header (union.data)
             0x02, 0x00, 0x00, 0x00, //
             0x00, 0x00, 0x00, 0x00, //
             0xff, 0xff, 0xff, 0xff, //
             0xff, 0xff, 0xff, 0xff, //
 
-            // 168: string.data (xunion.data cont.)
+            // 168: string.data (union.data cont.)
             0x43, 0x44, 0x00, 0x00, //
             0x00, 0x00, 0x00, 0x00, //
         ],

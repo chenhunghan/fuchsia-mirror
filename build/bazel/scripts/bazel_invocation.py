@@ -28,6 +28,9 @@ VALID_RESULTSTORE_CONFIGS = frozenset(
 # Consumed in main_build.py, generate_invocation_bazelrc.py, wrapper.bazel.sh,
 # and bazel_launcher.sh.
 ENV_BAZEL_RBE_SOCKET = "FX_INTERNAL_BAZEL_RBE_SOCKET_PATH"
+ENV_BAZEL_BES_SOCKET = "FX_INTERNAL_BAZEL_BES_SOCKET_PATH"
+# Deprecated: Use ENV_BAZEL_BES_SOCKET for buildeventservice proxy sockets.
+# Kept for backward compatibility until recipes pass --bes-proxy-socket.
 ENV_BAZEL_RESULTSTORE_SOCKET = "FX_INTERNAL_BAZEL_RESULTSTORE_SOCKET_PATH"
 
 ENV_RESULTSTORE_BAZEL = "FX_INTERNAL_RESULTSTORE_BAZEL"
@@ -42,13 +45,22 @@ BAZEL_LOGS_DIRNAME = "bazel_logs"
 def socket_env_vars(
     rbe_socket: Path | str | None = None,
     resultstore_socket: Path | str | None = None,
+    bes_socket: Path | str | None = None,
 ) -> dict[str, str]:
-    """Generates the environment variables mapping CLI proxy sockets."""
+    """Generates the environment variables mapping CLI proxy sockets.
+
+    Args:
+        rbe_socket: Optional socket path for remote execution / CAS proxy.
+        resultstore_socket: (Deprecated) Socket path for ResultStore/BES proxy.
+        bes_socket: Optional socket path for buildeventservice proxy.
+    """
     env: dict[str, str] = {}
     if rbe_socket:
         env[ENV_BAZEL_RBE_SOCKET] = str(rbe_socket)
     if resultstore_socket:
         env[ENV_BAZEL_RESULTSTORE_SOCKET] = str(resultstore_socket)
+    if bes_socket:
+        env[ENV_BAZEL_BES_SOCKET] = str(bes_socket)
     return env
 
 
@@ -92,14 +104,6 @@ def resultstore_bazel_config(
     return CONFIG_RESULTSTORE_INFRA
 
 
-def _needs_gcertauth(
-    rbe_auth_type: str,
-    resultstore_auth_type: str,
-) -> bool:
-    """Returns True if Bazel should use the LOAS gcertauth credential helper."""
-    return rbe_auth_type == "loas" or resultstore_auth_type == "loas"
-
-
 def build_config_option(config: str, option: str) -> str:
     """Formats a bazelrc command that maps an option into a config definition."""
     return f"build:{config} {option}"
@@ -113,10 +117,13 @@ def generate_service_proxies_bazelrc(env: Mapping[str, str]) -> Iterable[str]:
             CONFIG_REMOTE_COMMON, f"--remote_proxy=unix://{rbe_socket}"
         )
 
-    rs_socket = env.get(ENV_BAZEL_RESULTSTORE_SOCKET)
-    if rs_socket:
+    # Prefer the dedicated BES socket; fall back to the deprecated resultstore socket.
+    bes_socket = env.get(ENV_BAZEL_BES_SOCKET) or env.get(
+        ENV_BAZEL_RESULTSTORE_SOCKET
+    )
+    if bes_socket:
         yield build_config_option(
-            CONFIG_RESULTSTORE_COMMON, f"--bes_proxy=unix://{rs_socket}"
+            CONFIG_RESULTSTORE_COMMON, f"--bes_proxy=unix://{bes_socket}"
         )
 
 
@@ -132,7 +139,11 @@ def generate_auth_bazelrc(
         resultstore_auth_type: ResultStore auth mode ("loas", "oauth",
           "machine", or "none").
     """
-    if _needs_gcertauth(rbe_auth_type, resultstore_auth_type):
+    if rbe_auth_type == "loas":
         yield build_config_option(
             CONFIG_REMOTE_COMMON, f"--config={CONFIG_GCERTAUTH}"
+        )
+    if resultstore_auth_type == "loas":
+        yield build_config_option(
+            CONFIG_RESULTSTORE_COMMON, f"--config={CONFIG_GCERTAUTH}"
         )

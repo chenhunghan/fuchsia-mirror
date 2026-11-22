@@ -1,0 +1,9 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// Capabilities the Thread integration test fixture uses. Included by the
+// components of tests that use the fixture.
+{
+    include: [ "//src/connectivity/network/testing/netemul/service/meta/client.shard.cml" ],
+}

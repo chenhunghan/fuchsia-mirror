@@ -5,7 +5,7 @@
 #include "src/developer/forensics/feedback_data/data_provider.h"
 
 #include <fidl/fuchsia.feedback/cpp/fidl.h>
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.io/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/fpromise/result.h>
 #include <lib/inspect/cpp/vmo/types.h>
@@ -53,7 +53,7 @@ using testing::UnorderedElementsAreArray;
 
 const std::set<std::string> kDefaultAnnotations = {
     feedback::kBuildBoardKey, feedback::kBuildLatestCommitDateKey, feedback::kBuildProductKey,
-    feedback::kBuildVersionKey, feedback::kDeviceBoardNameKey};
+    feedback::kDeviceBoardNameKey};
 
 constexpr zx::duration kDefaultSnapshotFlowDuration = zx::usec(5);
 
@@ -90,9 +90,9 @@ class DataProviderTest : public UnitTestFixture {
     attachment_manager_ = std::make_unique<feedback::AttachmentManager>(
         dispatcher(), &clock_, attachment_allowlist, attachment_providers);
     data_provider_ = std::make_unique<DataProvider>(
-        dispatcher(), services(), &clock_, &redactor_, /*is_first_instance=*/true,
-        default_snapshot_annotations, attachment_allowlist, cobalt_.get(),
-        annotation_manager_.get(), attachment_manager_.get(), inspect_data_budget_.get());
+        dispatcher(), services(), &clock_, &redactor_, default_snapshot_annotations,
+        attachment_allowlist, cobalt_.get(), annotation_manager_.get(), attachment_manager_.get(),
+        inspect_data_budget_.get());
   }
 
   Snapshot GetSnapshot(std::optional<zx::channel> channel = std::nullopt,
@@ -165,10 +165,7 @@ class DataProviderTest : public UnitTestFixture {
 
   std::map<std::string, std::string> UnpackArchive(const fuchsia_feedback::Attachment& archive) {
     std::map<std::string, std::string> unpacked_attachments;
-    fuchsia::mem::Buffer buffer;
-    FX_CHECK(archive.value().vmo().duplicate(ZX_RIGHT_SAME_RIGHTS, &buffer.vmo) == ZX_OK);
-    buffer.size = archive.value().size();
-    FX_CHECK(Unpack(buffer, &unpacked_attachments));
+    FX_CHECK(Unpack(archive.value(), &unpacked_attachments));
     return unpacked_attachments;
   }
 
@@ -235,19 +232,19 @@ TEST_F(DataProviderTest, GetSnapshotViaChannel) {
     // Archive sent through channel, so no archive here in snapshot.
     ASSERT_FALSE(snapshot.archive().has_value());
 
-    fuchsia::io::FilePtr archive;
-    archive.Bind(std::move(client_end));
-    ASSERT_TRUE(archive.is_bound());
+    fidl::Client<fuchsia_io::File> archive(fidl::ClientEnd<fuchsia_io::File>(std::move(client_end)),
+                                           dispatcher());
+    ASSERT_TRUE(archive.is_valid());
 
     // Get archive attributes.
     uint64_t archive_size{};
-    archive->GetAttributes(fuchsia::io::NodeAttributesQuery::CONTENT_SIZE,
-                           [&archive_size](fuchsia::io::Node_GetAttributes_Result result) {
-                             ASSERT_TRUE(result.is_response());
-                             if (result.response().immutable_attributes.has_content_size()) {
-                               archive_size = result.response().immutable_attributes.content_size();
-                             }
-                           });
+    archive->GetAttributes({fuchsia_io::NodeAttributesQuery::kContentSize})
+        .Then([&archive_size](fidl::Result<fuchsia_io::File::GetAttributes>& result) {
+          ASSERT_TRUE(result.is_ok());
+          if (result->immutable_attributes().content_size().has_value()) {
+            archive_size = *result->immutable_attributes().content_size();
+          }
+        });
 
     RunLoopUntilIdle();
     ASSERT_TRUE(archive_size > 0);
@@ -255,10 +252,13 @@ TEST_F(DataProviderTest, GetSnapshotViaChannel) {
     uint64_t read_count = 0;
     uint64_t increment = 0;
     do {
-      archive->Read(fuchsia::io::MAX_BUF, [&increment](fuchsia::io::Readable_Read_Result result) {
-        EXPECT_TRUE(result.is_response()) << zx_status_get_string(result.err());
-        increment = result.response().data.size();
-      });
+      // Reset so a failed read ends the loop instead of reusing the previous size.
+      increment = 0;
+      archive->Read({fuchsia_io::kMaxBuf})
+          .Then([&increment](fidl::Result<fuchsia_io::File::Read>& result) {
+            ASSERT_TRUE(result.is_ok()) << result.error_value().FormatDescription();
+            increment = result->data().size();
+          });
       RunLoopUntilIdle();
       read_count += increment;
     } while (increment);
@@ -349,16 +349,12 @@ TEST_F(DataProviderTest, GetSnapshot_AnnotationsAsAttachment) {
     },
     "%s": {
       "type": "string"
-    },
-    "%s": {
-      "type": "string"
     }
   },
   "additionalProperties": false
 })",
                        feedback::kBuildBoardKey, feedback::kBuildLatestCommitDateKey,
-                       feedback::kBuildProductKey, feedback::kBuildVersionKey,
-                       feedback::kDeviceBoardNameKey))
+                       feedback::kBuildProductKey, feedback::kDeviceBoardNameKey))
                    .HasParseError());
   rapidjson::SchemaDocument schema(schema_json);
   rapidjson::SchemaValidator validator(schema);

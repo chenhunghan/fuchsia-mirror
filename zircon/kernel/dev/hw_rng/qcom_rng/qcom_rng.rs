@@ -10,17 +10,35 @@ use crate::kernel::thread::sleep_relative;
 use crate::kernel::types::PAddr;
 use crate::platform_rs::timer::DurationMono;
 use bitrs::layout;
-use core::ffi::c_void;
-use core::mem::MaybeUninit;
-use core::ptr::{self, NonNull, copy_nonoverlapping, with_exposed_provenance};
+use core::pin::Pin;
+use core::ptr::{self, copy_nonoverlapping, with_exposed_provenance};
 use explicit_memory::{ZeroOnDrop, mandatory_memset};
 use kprint::kprint;
+use lazy_init::{LazyInit, NoCheck};
+use pin_init::pin_init;
 use regio::{MmioBank, MmioPtr, Offset, Ro};
 use zbi::{DcfgQcomRng, QcomRngFlags};
 
 zr::static_assert_size_and_align!(DcfgQcomRng, 16, 8);
 
-crate::ksync_kernel::declare_singleton_mutex!(QcomRngLock);
+#[ksync::guarded]
+struct QcomRngLock {
+    #[mutex]
+    lock: ksync::KMutex<crate::ksync_kernel::TrackedMutex>,
+}
+
+static QCOM_RNG_LOCK: LazyInit<QcomRngLock, NoCheck> = LazyInit::uninit();
+
+fn qcom_rng_lock_init(_level: init::LkInitLevel) {
+    // SAFETY: lk init hooks run once during single-threaded early boot before `QCOM_RNG_LOCK` can
+    // be acquired by `hw_rng_get_entropy` or unit tests.
+    let Ok(()) = unsafe {
+        Pin::static_ref(&QCOM_RNG_LOCK).init_pin(pin_init!(QcomRngLock {
+            lock <- ksync::KMutex::init(),
+        }))
+    };
+}
+init::lk_init_hook!(qcom_rng_lock, qcom_rng_lock_init, init::LK_INIT_LEVEL_EARLIEST);
 
 layout!({
     struct StatusRegister(u32);
@@ -53,8 +71,10 @@ static mut MMIO_BASE: usize = 0;
 ///
 /// `mmio_base` must be a valid, 4-byte aligned virtual address of an `MMIO_BANK_SIZE`-byte
 /// register bank that remains mapped and readable without trapping for the duration of the call.
-unsafe fn get_entropy(mmio_base: usize, buf: &mut [MaybeUninit<u8>]) -> &mut [u8] {
-    ksync::lock!(let _guard = QcomRngLock::lock());
+unsafe fn get_entropy(mmio_base: usize, buf: &mut [u8]) -> usize {
+    // SAFETY: `QCOM_RNG_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST`, before `get_entropy` can
+    // be called.
+    ksync::lock!(let _guard = unsafe { QCOM_RNG_LOCK.get_unchecked() }.lock_lock());
     let mut buffer = &mut *buf;
     let mmio = MmioBank::new(
         // SAFETY: The caller guarantees `mmio_base` is a valid, 4-byte aligned virtual address
@@ -75,11 +95,12 @@ unsafe fn get_entropy(mmio_base: usize, buf: &mut [MaybeUninit<u8>]) -> &mut [u8
         if !status_register.data_ready() {
             if retries == MAX_RETRIES {
                 // We failed to generate enough random data, scrub everything and bail out.
-                // SAFETY: `buf` is a valid mutable slice of `buf.len()` bytes.
+                let len = buf.len();
+                // SAFETY: `buf` is a valid mutable slice of `len` bytes.
                 unsafe {
-                    mandatory_memset(buf.as_mut_ptr().cast::<u8>(), 0, buf.len());
+                    mandatory_memset(buf.as_mut_ptr(), 0, len);
                 }
-                return &mut [];
+                return 0;
             }
             retries += 1;
             let _ = sleep_relative(RETRY_DELAY);
@@ -96,40 +117,29 @@ unsafe fn get_entropy(mmio_base: usize, buf: &mut [MaybeUninit<u8>]) -> &mut [u8
         buffer = &mut buffer[copy_size..];
     }
 
-    // SAFETY: Every byte of `buf` was initialized in the loop above.
-    unsafe { buf.assume_init_mut() }
+    buf.len()
 }
 
-/// # Safety
-///
-/// If `len > 0`, `buf` must be `Some` and point to writable memory of at least `len` bytes
-/// that is not accessed concurrently for the duration of the call. Must only be called after
-/// `qcom_rng_init` has initialized the driver.
-unsafe extern "C" fn hw_rng_get_entropy(buf: Option<NonNull<c_void>>, len: usize) -> usize {
-    let buf = buf.map_or(core::ptr::null_mut(), NonNull::as_ptr).cast::<MaybeUninit<u8>>();
-    // SAFETY: When `len > 0`, the caller guarantees `buf` is non-null and points to `len` writable
-    // bytes that are not accessed concurrently for the duration of the call. When `len == 0`,
-    // `zr::slice_from_raw_parts_mut` returns `&mut []` for any pointer, including null.
-    let slice: &mut [MaybeUninit<u8>] = unsafe { zr::slice_from_raw_parts_mut(buf, len) };
-    // SAFETY: Initialized once by `qcom_rng_init` during early boot before `hw_rng_get_entropy`
-    // can be called.
-    let mmio_base = unsafe { MMIO_BASE };
-    // Return the number of bytes provided.
-    // SAFETY: `mmio_base` was initialized by `qcom_rng_init` from a peripheral mapping that
-    // remains valid for the lifetime of the kernel.
-    unsafe { get_entropy(mmio_base, slice) }.len()
+struct QcomRng;
+
+impl HwRngOps for QcomRng {
+    fn get_entropy(&self, buf: &mut [u8]) -> usize {
+        // SAFETY: Initialized once by `qcom_rng_init` before `DRIVER` is registered, from a
+        // peripheral mapping valid for the lifetime of the kernel.
+        unsafe { get_entropy(MMIO_BASE, buf) }
+    }
 }
 
-static OPS: HwRngOps = HwRngOps { hw_rng_get_entropy };
+static DRIVER: QcomRng = QcomRng;
 
 /// Initializes the driver.
 ///
 /// # Safety
 ///
-/// Must only be called once, during early boot single-threaded initialization before
-/// secondary CPUs and multi-threading are started. `config.mmio_phys` must be the physical
-/// address of the Qualcomm hardware RNG register bank in the peripheral memory map.
-pub unsafe fn qcom_rng_init(config: &DcfgQcomRng) {
+/// Must be called at most once during boot initialization, ordered against `hw_rng_*` calls as
+/// [`hw_rng_register`] requires. `config.mmio_phys` must be the physical address of the Qualcomm
+/// hardware RNG register bank in the peripheral memory map.
+unsafe fn qcom_rng_init(config: &DcfgQcomRng) {
     // Check that the HWRNG unit has been handed off ready for use, otherwise complain and move on.
     if !config.flags.contains(QcomRngFlags::ENABLED) {
         kprint!("QCOM HWRNG: Handed off disabled.\n");
@@ -137,11 +147,10 @@ pub unsafe fn qcom_rng_init(config: &DcfgQcomRng) {
     }
     let mmio_base = periph_paddr_to_vaddr(PAddr(config.mmio_phys as usize))
         .expect("qcom rng registers not in peripheral map");
-    // SAFETY: Called once during single-threaded early boot initialization.
+    // SAFETY: The caller guarantees one-time initialization before `DRIVER` is registered.
     unsafe { MMIO_BASE = mmio_base.0 };
-    // SAFETY: Registration occurs during early boot before multi-threading, and `OPS` is a
-    // `'static` with a valid callback.
-    unsafe { hw_rng_register(&OPS) };
+    // SAFETY: The caller upholds `hw_rng_register`'s one-time, synchronized registration contract.
+    unsafe { hw_rng_register(&DRIVER) };
     kprint!(
         "QCOM HWRNG: Registered {{mmio={:u},flags={:u}}}.\n",
         config.mmio_phys,
@@ -149,17 +158,14 @@ pub unsafe fn qcom_rng_init(config: &DcfgQcomRng) {
     );
 }
 
-/// FFI wrapper for C++ callers.
+/// C-ABI entry point invoked during platform driver handoff.
 ///
 /// # Safety
 ///
-/// Must only be called once, during early boot single-threaded initialization before
-/// secondary CPUs and multi-threading are started. `config` must reference a valid,
-/// initialized `DcfgQcomRng` with a valid hardware register address.
+/// Same as [`qcom_rng_init`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_qcom_rng_init(config: &DcfgQcomRng) {
-    // SAFETY: The caller guarantees early boot single-threaded invocation and valid hardware
-    // config.
+pub unsafe extern "C" fn QcomRngInit(config: &DcfgQcomRng) {
+    // SAFETY: The caller upholds `qcom_rng_init`'s requirements.
     unsafe { qcom_rng_init(config) };
 }
 
@@ -168,7 +174,6 @@ pub unsafe extern "C" fn rust_qcom_rng_init(config: &DcfgQcomRng) {
 #[unittest::suite(name = "qcom_rng")]
 mod tests {
     use super::get_entropy;
-    use core::mem::MaybeUninit;
     use unittest::{assert_eq, assert_true};
 
     /// Tests drawing random bytes from an initialized, ready hardware RNG register bank.
@@ -177,31 +182,31 @@ mod tests {
         let regs: [u32; 2] = [0xdead_beef, 1];
         let mmio_base = regs.as_ptr().expose_provenance();
 
-        // 0-byte draw returns an empty slice.
-        let mut buf0: [MaybeUninit<u8>; 0] = [];
+        // 0-byte draw returns 0.
+        let mut buf0: [u8; 0] = [];
         // SAFETY: `regs` is a live, aligned 8-byte array on the stack, satisfying `mmio_base`.
-        let out0 = unsafe { get_entropy(mmio_base, &mut buf0) };
-        assert_eq!(out0.len(), 0);
+        let len0 = unsafe { get_entropy(mmio_base, &mut buf0) };
+        assert_eq!(len0, 0);
 
         // Exact 4-byte word draw.
-        let mut buf4 = [MaybeUninit::uninit(); 4];
+        let mut buf4 = [0u8; 4];
         // SAFETY: `regs` is a live, aligned 8-byte array on the stack, satisfying `mmio_base`.
-        let out4 = unsafe { get_entropy(mmio_base, &mut buf4) };
-        assert_eq!(out4.len(), 4);
-        assert_true!(out4 == 0xdead_beefu32.to_ne_bytes());
+        let len4 = unsafe { get_entropy(mmio_base, &mut buf4) };
+        assert_eq!(len4, 4);
+        assert_true!(buf4 == 0xdead_beefu32.to_ne_bytes());
 
         // Partial word draw (2 bytes).
-        let mut buf2 = [MaybeUninit::uninit(); 2];
+        let mut buf2 = [0u8; 2];
         // SAFETY: `regs` is a live, aligned 8-byte array on the stack, satisfying `mmio_base`.
-        let out2 = unsafe { get_entropy(mmio_base, &mut buf2) };
-        assert_eq!(out2.len(), 2);
-        assert_true!(out2 == &0xdead_beefu32.to_ne_bytes()[..2]);
+        let len2 = unsafe { get_entropy(mmio_base, &mut buf2) };
+        assert_eq!(len2, 2);
+        assert_true!(buf2 == 0xdead_beefu32.to_ne_bytes()[..2]);
 
         // Multi-word draw (6 bytes).
-        let mut buf6 = [MaybeUninit::uninit(); 6];
+        let mut buf6 = [0u8; 6];
         // SAFETY: `regs` is a live, aligned 8-byte array on the stack, satisfying `mmio_base`.
-        let out6 = unsafe { get_entropy(mmio_base, &mut buf6) };
-        assert_eq!(out6.len(), 6);
+        let len6 = unsafe { get_entropy(mmio_base, &mut buf6) };
+        assert_eq!(len6, 6);
         let expected = [
             0xdead_beefu32.to_ne_bytes()[0],
             0xdead_beefu32.to_ne_bytes()[1],
@@ -210,7 +215,7 @@ mod tests {
             0xdead_beefu32.to_ne_bytes()[0],
             0xdead_beefu32.to_ne_bytes()[1],
         ];
-        assert_true!(out6 == expected);
+        assert_true!(buf6 == expected);
     }
 
     /// Tests that exhausting retries when data is not ready scrubs the buffer to zeroes.
@@ -219,16 +224,12 @@ mod tests {
         let regs: [u32; 2] = [0xdead_beef, 0];
         let mmio_base = regs.as_ptr().expose_provenance();
 
-        let mut buf = [MaybeUninit::new(0xa5u8); 8];
+        let mut buf = [0xa5u8; 8];
         // SAFETY: `regs` is a live, aligned 8-byte array on the stack, satisfying `mmio_base`.
-        let out = unsafe { get_entropy(mmio_base, &mut buf) };
-        assert_eq!(out.len(), 0);
+        let len = unsafe { get_entropy(mmio_base, &mut buf) };
+        assert_eq!(len, 0);
 
-        // Verify that the buffer was scrubbed with zeroes by `mandatory_memset`.
-        for b in &buf {
-            // SAFETY: The buffer was zeroed by `mandatory_memset`, so each byte is initialized
-            // to 0.
-            let val = unsafe { b.assume_init() };
+        for val in buf {
             assert_eq!(val, 0);
         }
     }

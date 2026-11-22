@@ -9,6 +9,7 @@ load(
     "fx_component",
     "fx_component_manifest",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 
 # [END imports]
@@ -56,5 +57,15 @@ fx_component(
     compiled_manifest = ":echo-client_manifest",
     visibility = ["//examples/fidl/echo-realm:__pkg__"],
     deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "echo-cpp-wire-client",
+    components = [
+        ":echo-client",
+        "//examples/fidl/cpp/server/wire:echo-server",
+        "//examples/fidl/echo-realm:echo_realm",
+    ],
+    visibility = ["//examples/fidl/cpp:__pkg__"],
 )
 # [END rest]

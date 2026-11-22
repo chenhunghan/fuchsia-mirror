@@ -1,0 +1,55 @@
+{
+  "name": "suspend",
+  "description": "Allows, but does not force suspend of the power elements of the matching driver node and its dependents.",
+  "examples": [
+    "To suspend a node by moniker\n\n    $ driver suspend dev.sys.platform.example.example-device\n\nTo disambiguate colliding monikers\n\n    $ driver suspend dev.sys.example#0123456789abcdef\n    $ driver suspend dev.sys.example --disambiguator 0123456789abcdef"
+  ],
+  "flags": [
+    {
+      "kind": "Switch",
+      "optionality": "optional",
+      "long": "--help",
+      "short": null,
+      "description": "display usage information",
+      "hidden": false
+    },
+    {
+      "kind": {
+        "Option": {
+          "arg_name": "disambiguator"
+        }
+      },
+      "optionality": "optional",
+      "long": "--disambiguator",
+      "short": null,
+      "description": "16-character structural disambiguator (from `driver node list -v` or `driver node show`) to disambiguate colliding monikers.",
+      "hidden": false
+    },
+    {
+      "kind": "Switch",
+      "optionality": "optional",
+      "long": "--select",
+      "short": "s",
+      "description": "if this exists, the user will be prompted for a component to select.",
+      "hidden": false
+    }
+  ],
+  "notes": [
+    "This does not force suspend: it only removes the system-wide power dependency\nkeeping the node (and the nodes bound beneath it) active while the system is\nawake (for example, from wake leases or execution/activity leases). If another\nentity holds a direct lease on the driver's power element (or another element\nthat depends on it), the driver will remain active and will not suspend. The\nnode must have a driver bound to it. `driver node list -v` and `driver node show`\nreport a node's moniker, disambiguator, and owner (which is a driver URL if a\ndriver is bound to it). When multiple nodes share a moniker, pass\n--disambiguator (or `<moniker>#<disambiguator>`) to disambiguate.\nThe suspend session remains active until the command is interrupted (e.g. with\nCtrl+C)."
+  ],
+  "commands": [],
+  "positionals": [
+    {
+      "name": "moniker",
+      "description": "component moniker of the node to be suspended (optionally `<moniker>#<disambiguator>`).",
+      "optionality": "required",
+      "hidden": false
+    }
+  ],
+  "error_codes": [
+    {
+      "code": 1,
+      "description": "Failed to connect to the driver development service"
+    }
+  ]
+}

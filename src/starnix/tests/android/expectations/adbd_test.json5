@@ -10,6 +10,13 @@
             ],
         },
         {
+            type: "expect_failure",
+            matchers: [
+                // TODO(https://fxbug.dev/587403712): /proc/<pid>/personality is not implemented.
+                "ShellServiceTest.Shell4kPageSizePersonalitySubprocess",
+            ],
+        },
+        {
             type: "skip",
             matchers: [
                 // TODO(https://fxbug.dev/530314562): Flakey only in CI, root cause unknown.

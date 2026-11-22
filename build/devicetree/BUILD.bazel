@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Devicetree build tools."""
+
+load("@rules_python//python:defs.bzl", "py_binary")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+py_binary(
+    name = "dtc_py",
+    srcs = ["dtc.py"],
+    main = "dtc.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build/bazel/rules/devicetree:__pkg__"],
+)

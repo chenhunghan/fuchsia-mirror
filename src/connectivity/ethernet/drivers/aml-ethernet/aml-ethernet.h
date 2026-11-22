@@ -34,6 +34,11 @@ class AmlEthernet : public DeviceType,
 
   static zx_status_t Create(void* ctx, zx_device_t* parent);
 
+  // Returns the DML global ID of the consumer of the board service, or std::nullopt if the board
+  // doesn't provide the metadata that DML boards generate. Fails if that metadata is present but
+  // doesn't have exactly one consumer.
+  static zx::result<std::optional<uint32_t>> GetGlobalId(fdf::PDev& pdev);
+
   // DDK Hooks.
   void DdkRelease();
 
@@ -63,6 +68,9 @@ class AmlEthernet : public DeviceType,
   std::optional<component::OutgoingDirectory> outgoing_;
   fidl::ServerEnd<fuchsia_io::Directory> outgoing_server_end_;
   fidl::ServerBindingGroup<fuchsia_hardware_ethernet_board::EthBoard> bindings_;
+
+  // Published as the device's `fuchsia.ID` when present.
+  std::optional<uint32_t> global_id_;
 
   std::optional<fdf::MmioBuffer> periph_mmio_;
   std::optional<fdf::MmioBuffer> hhi_mmio_;

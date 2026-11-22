@@ -4,6 +4,8 @@
 
 #include "msd_vsi_connection.h"
 
+#include <limits>
+
 #include "address_space_layout.h"
 #include "msd_vsi_buffer.h"
 #include "msd_vsi_context.h"
@@ -59,6 +61,11 @@ void MsdVsiAbiConnection::MsdSetNotificationCallback(msd::NotificationHandler* h
 
 magma::Status MsdVsiConnection::MapBufferGpu(std::shared_ptr<MsdVsiBuffer> buffer, uint64_t gpu_va,
                                              uint64_t page_offset, uint64_t page_count) {
+  if (buffer->platform_buffer()->size() > std::numeric_limits<uint32_t>::max()) {
+    MAGMA_LOG(ERROR, "buffer size 0x%lx exceeds 32-bit addressable limit",
+              buffer->platform_buffer()->size());
+    return MAGMA_STATUS_INVALID_ARGS;
+  }
   uint64_t end_gpu_va = gpu_va + (page_count * magma::page_size());
   if (!AddressSpaceLayout::IsValidClientGpuRange(gpu_va, end_gpu_va)) {
     MAGMA_LOG(ERROR, "failed to map buffer to [0x%lx, 0x%lx), lies outside client region", gpu_va,

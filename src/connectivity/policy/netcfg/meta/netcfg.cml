@@ -29,6 +29,7 @@
                 "fuchsia.net.policy.properties.Networks",
                 "fuchsia.net.policy.properties.NetworkTokenResolver",
                 "fuchsia.net.policy.properties.PrivilegedNetworkLookup",
+                "fuchsia.net.policy.socketproxy.SocketProviderConnector",
                 "fuchsia.net.reachability.Monitor",
             ],
         },
@@ -36,6 +37,7 @@
     use: [
         {
             protocol: [
+                "fuchsia.driver.token.NodeBusTopology",
                 "fuchsia.net.dhcp.ClientProvider",
                 "fuchsia.net.filter.Control",
                 "fuchsia.net.interfaces.admin.Installer",
@@ -54,6 +56,10 @@
         },
         {
             protocol: "fuchsia.net.dhcpv6.ClientProvider",
+            availability: "optional",
+        },
+        {
+            protocol: "fuchsia.posix.socket.Provider",
             availability: "optional",
         },
         { service: "fuchsia.hardware.network.Service" },
@@ -82,6 +88,22 @@
             from: "parent/diagnostics",
             availability: "optional",
         },
+        {
+            config: "fuchsia.netcfg.ConfigData",
+            key: "config_data",
+            type: "string",
+            max_size: 100,
+            availability: "optional",
+            default: "/netcfg-config/netcfg_default.json5",
+        },
+        {
+            config: "fuchsia.netcfg.MinSeverity",
+            key: "min_severity",
+            type: "string",
+            max_size: 10,
+            availability: "optional",
+            default: "INFO",
+        },
     ],
     expose: [
         {
@@ -93,6 +115,7 @@
                 "fuchsia.net.policy.properties.Networks",
                 "fuchsia.net.policy.properties.NetworkTokenResolver",
                 "fuchsia.net.policy.properties.PrivilegedNetworkLookup",
+                "fuchsia.net.policy.socketproxy.SocketProviderConnector",
                 "fuchsia.net.reachability.Monitor",
             ],
             from: "self",

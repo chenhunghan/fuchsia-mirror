@@ -37,7 +37,7 @@ class VirtualAudioCodec : public VirtualAudioCodecDeviceType,
   void ShutdownAsync() override;
 
  protected:
-  // FIDL LLCPP method for fuchsia.hardware.audio.CodecConnector.
+  // FIDL wire method for fuchsia.hardware.audio.CodecConnector.
   void Connect(ConnectRequestView request, ConnectCompleter::Sync& completer) override;
 
   // FIDL natural C++ methods for fuchsia.hardware.audio.Codec.

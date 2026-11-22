@@ -13,6 +13,8 @@
 // Concocted patch case IDs.
 #define CASE_ID_ADD_ONE 17
 #define CASE_ID_MULTIPLY_BY_FACTOR 35
+#define CASE_ID_ADD_VALUE 53
+#define CASE_ID_MULTIPLY_BY_FACTOR_TWIN 71
 
 #if defined(__aarch64__)
 
@@ -48,6 +50,10 @@ constexpr size_t kAddOnePatchSize = PATCH_SIZE_ADD_ONE;
 constexpr uint32_t kMultiplyByFactorCaseId = CASE_ID_MULTIPLY_BY_FACTOR;
 constexpr size_t kMultiplyByFactorPatchSize = PATCH_SIZE_MULTIPLY_BY_FACTOR;
 
+constexpr uint32_t kAddValueCaseId = CASE_ID_ADD_VALUE;
+
+constexpr uint32_t kMultiplyByFactorTwinCaseId = CASE_ID_MULTIPLY_BY_FACTOR_TWIN;
+
 // Mark with cfi_unchecked_callee since these are defined in ASM so CFI will
 // not generate appropriate metadata for them.
 using TestFn = uint64_t(uint64_t x) [[clang::cfi_unchecked_callee]];
@@ -57,6 +63,10 @@ extern "C" TestFn AddOne;
 
 // Defined via code_patching_hermetic_stub().
 extern "C" TestFn multiply_by_factor;
+extern "C" TestFn multiply_by_factor_twin;
+
+// Defined via code_patching_hermetic_multiversion().
+extern "C" TestFn add_value;
 
 #endif  // !__ASSEMBLER__
 

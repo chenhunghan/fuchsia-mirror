@@ -16,13 +16,13 @@ namespace forensics {
 namespace crash_reports {
 namespace {
 
-std::optional<SizedData> MakeAttachment(const fuchsia::mem::Buffer& buffer) {
-  if (!buffer.vmo.is_valid()) {
+std::optional<SizedData> MakeAttachment(const fuchsia_mem::Buffer& buffer) {
+  if (!buffer.vmo().is_valid()) {
     return std::nullopt;
   }
 
-  SizedData data(buffer.size, 0u);
-  if (const zx_status_t status = buffer.vmo.read(data.data(), /*offset=*/0u, /*len=*/data.size());
+  SizedData data(buffer.size(), 0u);
+  if (const zx_status_t status = buffer.vmo().read(data.data(), /*offset=*/0u, /*len=*/data.size());
       status != ZX_OK) {
     FX_PLOGS(ERROR, status) << "Failed to read vmo";
     return std::nullopt;
@@ -40,9 +40,9 @@ bool IsPrintableAscii(const std::string& str) {
 fpromise::result<Report> Report::MakeReport(const ReportId report_id,
                                             const class ProgramShortname& program_shortname,
                                             const AnnotationMap& annotations,
-                                            std::map<std::string, fuchsia::mem::Buffer> attachments,
+                                            std::map<std::string, fuchsia_mem::Buffer> attachments,
                                             std::string snapshot_uuid,
-                                            std::optional<fuchsia::mem::Buffer> minidump,
+                                            std::optional<fuchsia_mem::Buffer> minidump,
                                             const bool is_hourly_report) {
   std::map<std::string, SizedData> attachment_copies;
   for (const auto& [k, v] : attachments) {

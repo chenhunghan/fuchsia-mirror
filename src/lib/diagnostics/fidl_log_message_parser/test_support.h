@@ -5,8 +5,8 @@
 #ifndef SRC_LIB_DIAGNOSTICS_FIDL_LOG_MESSAGE_PARSER_TEST_SUPPORT_H_
 #define SRC_LIB_DIAGNOSTICS_FIDL_LOG_MESSAGE_PARSER_TEST_SUPPORT_H_
 
-#include <fuchsia/diagnostics/cpp/fidl.h>
-#include <fuchsia/logger/cpp/fidl.h>
+#include <fidl/fuchsia.diagnostics/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
 #include <lib/fpromise/result.h>
 #include <lib/syslog/structured_backend/cpp/log_buffer.h>
 #include <lib/zx/time.h>
@@ -41,9 +41,9 @@ std::vector<zx::vmo> EncodeJsonBatchToFxtVmos(const std::vector<std::string>& js
 // Test compatibility shim: parses JSON FormattedContent using the legacy Archivist schema,
 // validates payloads, converts valid messages to FXT records, and decodes them via
 // ConvertFormattedContentToLogMessages. Forwards FXT FormattedContent directly.
-fpromise::result<std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>>,
+fpromise::result<std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>>,
                  std::string>
-ConvertFormattedContentForTest(fuchsia::diagnostics::FormattedContent content);
+ConvertFormattedContentForTest(fuchsia_diagnostics::FormattedContent content);
 
 }  // namespace diagnostics::fidl_log_message_parser::testing
 

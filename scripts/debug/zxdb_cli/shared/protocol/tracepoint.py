@@ -5,7 +5,7 @@
 from typing import Any, ClassVar, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from shared.protocol.base import BaseRequest
+from shared.protocol.base import THREAD_ID_ALIAS, BaseRequest
 from shared.protocol.watch_request import WatchAccessType
 
 COMMAND_NAME: Final = "tracepoint"
@@ -75,10 +75,10 @@ def _has_non_default_options(req: "TracepointRequest") -> bool:
 
 def _validate_bounds(req: "TracepointRequest") -> None:
     """Validates ID aliases, positive integer bounds, and non-empty strings."""
-    if req.id is not None:
-        if req.tracepoint_id is not None and req.tracepoint_id != req.id:
-            raise ValueError("Conflicting 'id' and 'tracepoint_id' values")
-        req.tracepoint_id = req.id
+    # `_copy_id_to_tracepoint_id` already copied `id` into `tracepoint_id`
+    # when only `id` was given, so any difference here is a conflict.
+    if req.id is not None and req.tracepoint_id != req.id:
+        raise ValueError("Conflicting 'id' and 'tracepoint_id' values")
     if req.tracepoint_id is not None and req.tracepoint_id < 1:
         raise ValueError("tracepoint_id must be >= 1")
     if req.line is not None and req.line < 1:
@@ -161,7 +161,9 @@ class TracepointRequest(BaseRequest[TracepointResponse]):
     watch: str | None = None
     size: int | None = None
     access_type: WatchAccessType = "write"
-    thread_id: int | None = None
+    thread_id: int | None = Field(
+        default=None, validation_alias=THREAD_ID_ALIAS
+    )
     frame_index: int = 0
     condition: str | None = None
     expressions: list[str] = Field(default_factory=list)
@@ -175,6 +177,21 @@ class TracepointRequest(BaseRequest[TracepointResponse]):
     tracepoint_id: int | None = None
     list_all: bool = False
     response_type: ClassVar[Any] = TracepointResponse
+
+    @model_validator(mode="before")
+    @classmethod
+    def _copy_id_to_tracepoint_id(cls, data: Any) -> Any:
+        """Treats `id` as an alias for `tracepoint_id` when only `id` is set.
+
+        Done before validation because requests are frozen.
+        """
+        if (
+            isinstance(data, dict)
+            and data.get("id") is not None
+            and data.get("tracepoint_id") is None
+        ):
+            return data | {"tracepoint_id": data["id"]}
+        return data
 
     @model_validator(mode="after")
     def validate_request(self) -> Self:

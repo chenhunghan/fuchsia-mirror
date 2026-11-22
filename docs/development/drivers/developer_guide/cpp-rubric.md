@@ -294,7 +294,7 @@ connection to the `DriverTestRealm` service, perform necessary configuration in
 [node-offers]: /sdk/lib/driver/component/cpp/node_offers.h
 [node-properties]: /sdk/lib/driver/component/cpp/node_properties.h
 [driver-logger]: /sdk/lib/driver/logging/cpp/logger.h
-[logging-guidelines]: /docs/contribute/governance/rfcs/0003_logging.md#log_severity_levels
+[logging-guidelines]: /docs/contribute/governance/rfcs/0003_logging.md#log-severity-levels
 [mmio-buffer]: /sdk/lib/driver/mmio/cpp/mmio-buffer.h
 [bitfields]: /zircon/system/ulib/hwreg/include/hwreg/bitfields.h
 [clock-fidl]: /sdk/fidl/fuchsia.hardware.clock/clock.fidl
@@ -314,7 +314,7 @@ connection to the `DriverTestRealm` service, perform necessary configuration in
 [mock-mmio]: /sdk/lib/driver/mock-mmio
 [dtr]: /sdk/lib/driver_test_realm/
 [vmo-registration]: /docs/development/drivers/best_practices/vmo-registration-pattern.md
-[precondition-checks]: /docs/development/drivers/driver_guides/display/register-definitions.md#precondition_checks
-[dma-cache-coherency]: /docs/development/drivers/concepts/driver_development/dma.md#cache_coherency
+[precondition-checks]: /docs/development/drivers/driver_guides/display/register-definitions.md#precondition-checks
+[dma-cache-coherency]: /docs/development/drivers/concepts/driver_development/dma.md#cache-coherency
 [zx-result]: /zircon/system/ulib/zx/include/lib/zx/result.h
 [dispatcher-threads]: /docs/concepts/drivers/driver-dispatcher-and-threads.md#synchronized-and-unsynchronized

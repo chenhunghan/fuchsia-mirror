@@ -500,6 +500,7 @@ mod tests {
             display::Info {
                 id: display_types::DisplayId { value: 1 },
                 modes: Vec::new(),
+                mode_vrr_configs: Vec::new(),
                 pixel_format: Vec::new(),
                 manufacturer_name: "Foo".to_string(),
                 monitor_name: "what".to_string(),
@@ -512,6 +513,7 @@ mod tests {
             display::Info {
                 id: display_types::DisplayId { value: 2 },
                 modes: Vec::new(),
+                mode_vrr_configs: Vec::new(),
                 pixel_format: Vec::new(),
                 manufacturer_name: "Bar".to_string(),
                 monitor_name: "who".to_string(),

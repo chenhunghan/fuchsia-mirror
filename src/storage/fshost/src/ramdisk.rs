@@ -28,7 +28,7 @@ async fn create_ramdisk(zbi_vmo: zx::Vmo) -> Result<Box<dyn Device>, Error> {
     );
     ensure!(header.magic == zbi::ITEM_MAGIC, "invalid ZBI_TYPE_STORAGE_RAMDISK item header: magic");
     ensure!(
-        header.r#type == zbi::Type::StorageRamdisk,
+        header.r#type == zbi::Type::STORAGE_RAMDISK,
         "invalid ZBI_TYPE_STORAGE_RAMDISK item header: type"
     );
 
@@ -62,7 +62,7 @@ async fn create_ramdisk(zbi_vmo: zx::Vmo) -> Result<Box<dyn Device>, Error> {
 pub async fn set_up_ramdisk() -> Result<Option<Box<dyn Device>>, Error> {
     let proxy = connect_to_protocol::<fidl_fuchsia_boot::ItemsMarker>()?;
     let (maybe_vmo, _length) = proxy
-        .get(zbi::Type::StorageRamdisk.into(), 0)
+        .get(zbi::Type::STORAGE_RAMDISK.into(), 0)
         .await
         .context("boot items get failed (fidl failure)")?;
 

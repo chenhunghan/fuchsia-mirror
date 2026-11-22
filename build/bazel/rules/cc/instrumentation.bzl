@@ -4,7 +4,10 @@
 
 """Common instrumentation definitions for Fuchsia C++ macros."""
 
-visibility("private")
+visibility([
+    "//build/bazel/rules/cc/...",
+    "//build/bazel/rules/python/...",
+])
 
 # The C++ toolchain features that build a target with instrumentation, such as
 # sanitizers. These are disabled for targets that set
@@ -14,17 +17,28 @@ visibility("private")
 _INSTRUMENTATION_FEATURES = [
     "asan",
     "coverage",
+    "coverage-cts",
     "coverage-rust",
+    "fuzzer",
+    "heapdump",
     "hwasan",
+    "instrumented",
     "lsan",
     "msan",
     "profile",
     "profile-rust",
+    "profile-use",
+    "profile-use-rust",
     "sancov",
     "tsan",
     "ubsan",
 ]
-# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:sanitizer_features)
+# LINT.ThenChange(
+#     //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:sanitizer_features,
+#     //src/starnix/containers/linux_resource.bzl:instrumentation_features,
+# )
+
+DISABLE_INSTRUMENTATION_FEATURES = ["-" + f for f in _INSTRUMENTATION_FEATURES]
 
 CC_INSTRUMENTATION_ATTRS = {
     "disable_instrumentation": attr.bool(
@@ -63,5 +77,5 @@ def get_cc_instrumentation_features(features, disable_instrumentation):
         The updated list of features.
     """
     if disable_instrumentation:
-        return (features or []) + ["-" + f for f in _INSTRUMENTATION_FEATURES]
+        return (features or []) + DISABLE_INSTRUMENTATION_FEATURES
     return features

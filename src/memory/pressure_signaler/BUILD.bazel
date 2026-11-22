@@ -2,9 +2,97 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":memory_pressure_signaler_tests"],
+    visibility = ["//src/memory:__pkg__"],
+)
 
 exports_files(
     ["meta/memory_pressure_signaler.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/main.rs",
+        "src/pressure_notifier.rs",
+        "src/pressure_observer.rs",
+    ],
+    binary_name = "memory_pressure_signaler",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+        "//sdk/fidl/fuchsia.memory.debug:fuchsia.memory.debug_rust",
+        "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/trace/rust:trace-provider",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Preserves the GN test binary name from `rustc_binary(name = "bin", with_unit_tests = true)`.
+    crate_name = "memory_pressure_signaler_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "memory_pressure_signaler_tests",
+    unit_tests = [":bin_test"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "memory_pressure_signaler",
+)
+
+fx_component_manifest(
+    name = "memory_pressure_signaler_manifest",
+    component_name = "memory_pressure_signaler",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    manifest = "meta/memory_pressure_signaler.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":memory_pressure_signaler_manifest",
+    visibility = [
+        "//src/ui/a11y/lib/semantics/tests:__pkg__",
+        "//src/ui/tests:__subpackages__",
+    ],
+    deps = [":bin_packaged"],
 )

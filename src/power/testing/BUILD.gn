@@ -19,6 +19,5 @@ group("tests") {
     "fake-shutdown-shim:tests",
     "system-integration:tests",
     "thermal-test-control:tests",
-    "topology-test-daemon:tests",
   ]
 }

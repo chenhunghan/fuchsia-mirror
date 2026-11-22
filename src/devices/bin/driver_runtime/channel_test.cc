@@ -20,7 +20,9 @@
 #include <lib/zx/channel.h>
 #include <lib/zx/event.h>
 
+#include <numeric>
 #include <set>
+#include <span>
 
 #include <zxtest/zxtest.h>
 
@@ -106,13 +108,11 @@ void ChannelTest::AllocateTestData(fdf_arena_t* arena, size_t size, void** out_d
 
 void ChannelTest::AllocateTestDataWithStartValue(fdf_arena_t* arena, size_t size,
                                                  size_t start_value, void** out_data) {
-  uint32_t nums[size / sizeof(uint32_t)];
-  for (uint32_t i = 0; i < size / sizeof(uint32_t); i++) {
-    nums[i] = i;
-  }
+  ASSERT_EQ(size % sizeof(uint32_t), 0u);
   void* data = arena->Allocate(size);
   ASSERT_NOT_NULL(data);
-  memcpy(data, nums, size);
+  std::span<uint32_t> nums(static_cast<uint32_t*>(data), size / sizeof(uint32_t));
+  std::ranges::iota(nums, static_cast<uint32_t>(start_value));
   *out_data = data;
 }
 

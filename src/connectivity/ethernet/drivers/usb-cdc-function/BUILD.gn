@@ -68,7 +68,6 @@ fuchsia_driver_component("usb-cdc-function") {
 
   dml_label = ":usb-cdc-function-dml"
   deps = [ ":usb-cdc-function-driver" ]
-  info = "meta/usb-cdc-function-info.json"
 }
 
 fuchsia_driver_package("package") {

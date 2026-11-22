@@ -715,6 +715,7 @@ type DatagramSocketRecvControlData = table {
 };
 
 /// Metadata of a received datagram.
+@available(removed=NEXT)
 type RecvMsgMeta = table {
     /// The from address of the datagram.
     1: from fuchsia.net.SocketAddress;
@@ -725,6 +726,7 @@ type RecvMsgMeta = table {
 };
 
 /// Metadata of a sent datagram.
+@available(removed=NEXT)
 type SendMsgMeta = table {
     /// The destination address, if specified.
     1: to fuchsia.net.SocketAddress;
@@ -739,13 +741,11 @@ type SendMsgMeta = table {
 /// is defined in `//zircon/system/public/zircon/types.h` and bounds the number of eventpairs
 /// in a single call to `zx_object_wait_many`. The bias leaves room to allow clients to wait
 /// for errors on the zircon socket in the same call.
+@available(removed=NEXT)
 const FAST_UDP_WAIT_MANY_MAXIMUM_ITEMS uint32 = 63;
 
-/// Legacy protocol name. Use the generated discoverable protocol name instead.
-@available(removed=29)
-const DATAGRAM_SOCKET_PROTOCOL_NAME string = "fuchsia.posix.socket/DatagramSocket";
-
 /// A datagram socket.
+@available(removed=NEXT)
 @discoverable(server="platform")
 closed protocol DatagramSocket {
     compose BaseDatagramSocket;
@@ -834,17 +834,9 @@ closed protocol DatagramSocket {
             /// Identifies whether the `IP_RECVORIGDSTADDR` control message is requested.
             @available(added=15)
             IP_RECVORIGDSTADDR = 0x20;
-            /// Identifies whether the `IP_PKTINFO` control message is requested.
-            @available(added=HEAD)
-            IP_PKTINFO = 0x40;
         };
     }) error fuchsia.posix.Errno;
 };
-
-/// Legacy protocol name. Use the generated discoverable protocol name instead.
-@available(removed=29)
-const SYNCHRONOUS_DATAGRAM_SOCKET_PROTOCOL_NAME string
-        = "fuchsia.posix.socket/SynchronousDatagramSocket";
 
 /// A synchronous datagram socket.
 ///
@@ -909,10 +901,6 @@ closed protocol SynchronousDatagramSocket {
         len int64;
     }) error fuchsia.posix.Errno;
 };
-
-/// Legacy protocol name. Use the generated discoverable protocol name instead.
-@available(removed=29)
-const STREAM_SOCKET_PROTOCOL_NAME string = "fuchsia.posix.socket/StreamSocket";
 
 /// A stream socket.
 ///
@@ -1314,7 +1302,7 @@ closed protocol Provider {
         s client_end:StreamSocket;
     }) error fuchsia.posix.Errno;
     /// Requests a datagram socket with the specified parameters.
-    /// TODO(https://fxbug.dev/42165881): Remove this method once no more callers rely on it.
+    @available(removed=NEXT)
     @selector("fuchsia.posix.socket/Provider.DatagramSocket")
     strict DatagramSocketDeprecated(struct {
         domain Domain;
@@ -1323,12 +1311,23 @@ closed protocol Provider {
         s client_end:SynchronousDatagramSocket;
     }) error fuchsia.posix.Errno;
     /// Requests a datagram socket with the specified parameters.
+    @available(replaced=NEXT)
     @selector("fuchsia.posix.socket/Provider.DatagramSocketTransitional")
     strict DatagramSocket(struct {
         domain Domain;
         proto DatagramSocketProtocol;
     }) -> (@strict_audit(bug="https://fxbug.dev/467128725", state="PENDING_REVIEW") strict resource union {
         1: datagram_socket client_end:DatagramSocket;
+        2: synchronous_datagram_socket client_end:SynchronousDatagramSocket;
+    }) error fuchsia.posix.Errno;
+
+    /// Requests a datagram socket with the specified parameters.
+    @available(added=NEXT)
+    @selector("fuchsia.posix.socket/Provider.DatagramSocketTransitional")
+    strict DatagramSocket(struct {
+        domain Domain;
+        proto DatagramSocketProtocol;
+    }) -> (flexible resource union {
         2: synchronous_datagram_socket client_end:SynchronousDatagramSocket;
     }) error fuchsia.posix.Errno;
 
@@ -1339,9 +1338,8 @@ closed protocol Provider {
         domain Domain;
         proto DatagramSocketProtocol;
         opts SocketCreationOptions;
-    }) -> (@strict_audit(bug="https://fxbug.dev/467128725", state="PENDING_REVIEW") strict resource union {
-        1: datagram_socket client_end:DatagramSocket;
-        2: synchronous_datagram_socket client_end:SynchronousDatagramSocket;
+    }) -> (flexible resource union {
+        1: synchronous_datagram_socket client_end:SynchronousDatagramSocket;
     }) error fuchsia.posix.Errno;
 
     /// Looks up an interface by its index and returns its name. Returns

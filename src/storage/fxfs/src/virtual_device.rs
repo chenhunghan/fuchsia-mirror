@@ -146,7 +146,7 @@ mod tests {
     async fn test_read_only_virtual_device() {
         const BLOCK_SIZE: usize = 4096;
         const TEST_FILE_BLOCK_COUNT: usize = 64;
-        let device = DeviceHolder::new(FakeDevice::new(512, BLOCK_SIZE as u32));
+        let device = DeviceHolder::new(FakeDevice::new(1024, BLOCK_SIZE as u32));
         let fs = FxFilesystem::new_empty(device).await.unwrap();
         let handle = create_test_file(&fs, TEST_FILE_BLOCK_COUNT).await;
         let handle_as_device = ReadOnlyDevice::new(handle).unwrap();

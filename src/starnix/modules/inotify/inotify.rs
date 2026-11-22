@@ -274,7 +274,7 @@ impl FileOps for InotifyFileObject {
         };
 
         for dir_entry in dir_entries {
-            dir_entry.node.ensure_watchers().remove_by_ref(&file.weak_handle);
+            dir_entry.node.ensure_watchers().remove_by_ref(file.weak_handle());
         }
     }
 

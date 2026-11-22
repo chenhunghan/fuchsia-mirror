@@ -3,28 +3,35 @@
 // found in the LICENSE file.
 
 use crate::CapabilityBound;
-use fidl::handle;
+#[cfg(target_os = "fuchsia")]
 use fuchsia_sync::Mutex;
+#[cfg(target_os = "fuchsia")]
 use std::sync::Arc;
 
 /// A capability that wraps a single Zircon handle.
+#[cfg(target_os = "fuchsia")]
 #[derive(Debug)]
-pub struct Handle(Mutex<Option<handle::NullableHandle>>);
+pub struct Handle(Mutex<Option<zx::NullableHandle>>);
 
+#[cfg(not(target_os = "fuchsia"))]
+#[derive(Debug)]
+pub struct Handle;
+
+#[cfg(target_os = "fuchsia")]
 impl Handle {
     /// Creates a new [Handle] containing a Zircon `handle`.
-    pub fn new(handle: handle::NullableHandle) -> Arc<Self> {
+    pub fn new(handle: zx::NullableHandle) -> Arc<Self> {
         Arc::new(Self(Mutex::new(Some(handle))))
     }
 
     /// Gets a duplicate of the inner handle. Returns None if the handle has been taken or the
     /// duplicate operation fails.
-    pub fn duplicate(&self) -> Option<handle::NullableHandle> {
-        self.0.lock().as_ref().and_then(|h| h.duplicate_handle(handle::Rights::SAME_RIGHTS).ok())
+    pub fn duplicate(&self) -> Option<zx::NullableHandle> {
+        self.0.lock().as_ref().and_then(|h| h.duplicate_handle(zx::Rights::SAME_RIGHTS).ok())
     }
 
     /// Removes the inner handle and returns it.
-    pub fn take(&self) -> Option<handle::NullableHandle> {
+    pub fn take(&self) -> Option<zx::NullableHandle> {
         self.0.lock().take()
     }
 }
@@ -35,6 +42,7 @@ impl CapabilityBound for Handle {
     }
 }
 
+#[cfg(target_os = "fuchsia")]
 impl Handle {
     pub fn try_clone(&self) -> Result<Arc<Self>, ()> {
         self.duplicate().map(Self::new).ok_or(())

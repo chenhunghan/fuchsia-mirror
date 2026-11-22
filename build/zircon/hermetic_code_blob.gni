@@ -31,6 +31,11 @@ import("//build/zircon/c_utils.gni")
 #     - Type: list(label)
 #     - Default: []
 #
+#   * remove_configs
+#     - Optional: Configs removed from the default list for compilation.
+#     - Type: list(label)
+#     - Default: []
+#
 #   * entrypoint
 #     - Optional: The name of the symbol (or C function) that is the entrypoint
 #     to this code blob.
@@ -92,6 +97,7 @@ template("hermetic_code_blob") {
                              "public",
                              "public_configs",
                              "public_deps",
+                             "remove_configs",
                              "testonly",
                              "visibility",
                            ])
@@ -105,6 +111,10 @@ template("hermetic_code_blob") {
     configs -= [ "//build/config/zircon:static-pie-link" ]
     if (defined(invoker.add_configs)) {
       configs += invoker.add_configs
+    }
+    if (defined(invoker.remove_configs)) {
+      configs += invoker.remove_configs
+      configs -= invoker.remove_configs
     }
 
     ldflags += [ "-Wl,-defsym,HERMETIC_ENTRY=$entrypoint" ]

@@ -25,6 +25,7 @@ rustc_library(
         "src/ssh_connector.rs",
         "src/store.rs",
         "src/target_connector.rs",
+        "src/transport_connector.rs",
         "src/uart_connector.rs",
         "src/usb_connector.rs",
         "src/vsock_connector.rs",

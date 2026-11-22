@@ -61,6 +61,7 @@ rustc_library("diagnostics-hierarchy") {
   sources = [
     "src/lib.rs",
     "src/macros.rs",
+    "src/matcher.rs",
     "src/serialization/deserialize.rs",
     "src/serialization/mod.rs",
     "src/serialization/serialize.rs",

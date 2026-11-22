@@ -1,0 +1,93 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":scenic_cpp_tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+_TEST_SRCS = [
+    "fake_flatland_unittests.cc",
+    "view_identity_test.cc",
+    "view_ref_pair_test.cc",
+    "view_token_pair_test.cc",
+]
+
+_TEST_DEPS = [
+    "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_hlcpp",
+    "//sdk/lib/ui/scenic/cpp",
+    "//sdk/lib/ui/scenic/cpp/testing",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/loop_fixture",
+]
+
+# Compile and package the tests explicitly for each SDK-supported C++ standard
+# version (C++17, C++20, C++23), matching GN's sdk_cpp_test() and
+# sdk_cpp_unittest_package() templates without top-level comprehensions.
+# Note: Static targets do not dynamically track experimental_cxx_version.
+
+fx_cc_test_binary(
+    name = "scenic_cpp_unittests-cxx17",
+    srcs = _TEST_SRCS,
+    build_flags = ["//build/config:c++17"],
+    deps = _TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "scenic_cpp_tests_component-cxx17",
+    binary = ":scenic_cpp_unittests-cxx17",
+    component_name = "_sdk_cpp_unittest_package.scenic_cpp_tests.component-cxx17",
+)
+
+fx_cc_test_binary(
+    name = "scenic_cpp_unittests-cxx20",
+    srcs = _TEST_SRCS,
+    build_flags = ["//build/config:c++20"],
+    deps = _TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "scenic_cpp_tests_component-cxx20",
+    binary = ":scenic_cpp_unittests-cxx20",
+    component_name = "_sdk_cpp_unittest_package.scenic_cpp_tests.component-cxx20",
+)
+
+fx_cc_test_binary(
+    name = "scenic_cpp_unittests-cxx23",
+    srcs = _TEST_SRCS,
+    build_flags = ["//build/config:c++23"],
+    deps = _TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "scenic_cpp_tests_component-cxx23",
+    binary = ":scenic_cpp_unittests-cxx23",
+    component_name = "_sdk_cpp_unittest_package.scenic_cpp_tests.component-cxx23",
+)
+
+fx_package(
+    name = "scenic_cpp_tests_package",
+    package_name = "scenic_cpp_tests",
+    test_components = [
+        ":scenic_cpp_tests_component-cxx17",
+        ":scenic_cpp_tests_component-cxx20",
+        ":scenic_cpp_tests_component-cxx23",
+    ],
+)
+
+fx_test(
+    name = "scenic_cpp_tests",
+    package = ":scenic_cpp_tests_package",
+)

@@ -2,17 +2,18 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
 import("//build/bazel/export_fuchsia_package_to_bazel.gni")
 import("//build/components.gni")
-import("//build/components/fuchsia_structured_config.gni")
-import("//build/rust/rustc_binary.gni")
-import("//build/rust/rustc_library.gni")
-import("//build/rust/rustc_test.gni")
-import("//src/fonts/build/fonts.gni")
+
+bazel_test_suite("bazel_tests") {
+  host_tests = [ "//src/fonts:fonts_host_tests" ]
+}
 
 group("tests") {
   testonly = true
   public_deps = [
+    ":bazel_tests",
     ":font_provider_hermetic_for_test",
     ":font_provider_unit_tests",
     "char_set:tests",
@@ -32,155 +33,34 @@ group("downstream_test_deps") {
   public_deps = [ ":downstream-test-fonts-collection" ]
 }
 
-rustc_binary("font_provider") {
-  name = "font_provider"
-  with_unit_tests = true
-  edition = "2024"
-
-  deps = [
-    ":config",
-    "char_set",
-    "font_info",
-    "manifest",
-    "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_rust",
-    "//sdk/fidl/fuchsia.fonts.experimental:fuchsia.fonts.experimental_rust",
-    "//sdk/fidl/fuchsia.intl:fuchsia.intl_rust",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-    "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
-    "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
-    "//sdk/rust/zx",
-    "//src/fonts/fidl_fuchsia_fonts_ext",
-    "//src/lib/diagnostics/inspect/runtime/rust",
-    "//src/lib/diagnostics/inspect/rust",
-    "//src/lib/fdio/rust:fdio",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component",
-    "//src/lib/fuchsia-fs",
-    "//src/lib/fuchsia-url",
-    "//src/lib/trace/rust:trace",
-    "//src/lib/trace/rust:trace-provider",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:argh",
-    "//third_party/rust_crates:async-trait",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:heck",
-    "//third_party/rust_crates:itertools",
-    "//third_party/rust_crates:log",
-    "//third_party/rust_crates:lru",
-    "//third_party/rust_crates:thiserror",
-    "//third_party/rust_crates:unicase",
-  ]
-
-  # TODO(https://fxbug.dev/42182239): Fix the leaks and remove this.
-  deps += [ "//build/config/sanitizers:suppress-lsan.DO-NOT-USE-THIS" ]
-
-  test_deps = [
-    "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
-    "//src/lib/intl/unicode_utils/char_collection",
-    "//third_party/rust_crates:maplit",
-    "//third_party/rust_crates:pretty_assertions",
-    "//third_party/rust_crates:test-case",
-  ]
-
-  non_rust_deps = [ "//third_party/freetype2" ]
-
-  sources = [
-    "src/font_service/asset/asset.rs",
-    "src/font_service/asset/cache.rs",
-    "src/font_service/asset/collection.rs",
-    "src/font_service/asset/loader.rs",
-    "src/font_service/asset/mod.rs",
-    "src/font_service/builder.rs",
-    "src/font_service/config.rs",
-    "src/font_service/debug.rs",
-    "src/font_service/family.rs",
-    "src/font_service/inspect.rs",
-    "src/font_service/mod.rs",
-    "src/font_service/typeface/collection.rs",
-    "src/font_service/typeface/matcher.rs",
-    "src/font_service/typeface/mod.rs",
-    "src/font_service/typeface/test_util.rs",
-    "src/font_service/typeface/typeface.rs",
-    "src/main.rs",
-  ]
-}
-
-fuchsia_component_manifest("manifest") {
-  manifest = "meta/fonts.cml"
-  component_name = "fonts"
-}
-
-fuchsia_component("font_provider_cm") {
-  cm_label = ":manifest"
-  deps = [ ":font_provider" ]
-}
-
-fuchsia_structured_config_rust_lib("config") {
-  cm_label = ":manifest"
-}
-
+# Retained in GN for //bundles/assembly/bazel_inputs/src/fonts:pkg while
+# //src/storage/lib/vfs/rust:vfs_dylib is dual-built in GN.
 fuchsia_package("pkg") {
   package_name = "fonts"
   deps = [ ":font_provider_cm" ]
 }
 
-fuchsia_component_manifest("font_provider_unit_tests_cmp_manifest") {
-  manifest = "meta/font_provider_bin_test.cml"
-  component_name = "font_provider_bin_test"
-}
-
-fuchsia_component("font_provider_unit_tests_cmp") {
-  testonly = true
-  cm_label = ":font_provider_unit_tests_cmp_manifest"
-  component_name = "font_provider_bin_test"
-  deps = [ ":font_provider_test" ]
-}
-
-fuchsia_component("font_provider_hermetic_for_test") {
-  testonly = true
-  manifest = "meta/fonts_for_test.cml"
-  deps = [
-    ":font_provider",
-    "//src/fonts/collections:downstream-test-fonts-collection",
-  ]
-}
-
 # A hermetic fonts provider which includes the fonts resources useful for
-# testing.
+# testing. Retained in GN for //src/chromium/base_deps.gni.
 fuchsia_package("fonts_hermetic_for_test") {
-  testonly = true
   deps = [ ":font_provider_hermetic_for_test" ]
 }
 
 export_fuchsia_package_to_bazel("fonts_hermetic_for_test.bazel_input") {
-  testonly = true
   package = ":fonts_hermetic_for_test"
-}
-
-fuchsia_test_package("font_provider_unit_tests") {
-  test_components = [ ":font_provider_unit_tests_cmp" ]
-}
-
-## Fonts server for tests: the test fixture will supply their own tests.
-
-fuchsia_component("fonts_configurable_for_test_component") {
-  testonly = true
-  component_name = "fonts_configurable_for_test"
-  manifest = "meta/fonts_configurable_for_test.cml"
-  deps = [ ":font_provider_cm" ]
 }
 
 # A font server without any bundled fonts, intended for testing only.
 # The user must route the fonts in via `config-data`.
+# Retained in GN for //src/chromium/base_deps.gni.
 fuchsia_package("fonts_configurable_for_test") {
-  testonly = true
-  deps = [ ":fonts_configurable_for_test_component" ]
+  deps = [
+    ":font_provider_cm",
+    ":fonts_configurable_for_test_component",
+  ]
 }
 
 export_fuchsia_package_to_bazel("fonts_configurable_for_test.bazel_input") {
-  testonly = true
   package = ":fonts_configurable_for_test"
 }
 
@@ -194,7 +74,6 @@ group("open-fonts") {
 # Font collection for semi-hermetic downstream tests (e.g. Chromium) that need
 # to use a fixed set of fonts.
 group("downstream-test-fonts-collection") {
-  testonly = true
   deps = [ "collections:downstream-test-fonts-collection" ]
 }
 
@@ -211,4 +90,225 @@ group("open-fonts-collection") {
 # `cache_package_labels`.
 group("empty-font-collection") {
   deps = [ "collections:empty-font-collection" ]
+}
+
+## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
+#
+#  ________  _________  ________  ________
+# |\   ____\|\___   ___\\   __  \|\   __  \
+# \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+#  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+#   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+#     ____\_\  \   \ \__\ \ \_______\ \__\
+#    |\_________\   \|__|  \|_______|\|__|
+#    \|_________|
+#
+#
+# AUTO-GENERATED - DO NOT EDIT
+#
+# The targets below are auto-generated based on the targets defined in the
+# BUILD.bazel file from the same directory. If you made changes to targets in
+# Bazel, instead of editing this file manually, run:
+#
+#   > fx bazel2gn
+#
+# Please do NOT edit this file directly. Instead, edit the BUILD.bazel file and
+# rerun bazel2gn.
+
+import("//build/tools/bazel2gn/bazel_migration.gni")
+
+if (is_fuchsia) {
+  rustc_binary("font_provider") {
+    sources = [
+      "src/font_service/asset/asset.rs",
+      "src/font_service/asset/cache.rs",
+      "src/font_service/asset/collection.rs",
+      "src/font_service/asset/loader.rs",
+      "src/font_service/asset/mod.rs",
+      "src/font_service/builder.rs",
+      "src/font_service/config.rs",
+      "src/font_service/debug.rs",
+      "src/font_service/family.rs",
+      "src/font_service/inspect.rs",
+      "src/font_service/mod.rs",
+      "src/font_service/typeface/collection.rs",
+      "src/font_service/typeface/matcher.rs",
+      "src/font_service/typeface/mod.rs",
+      "src/font_service/typeface/test_util.rs",
+      "src/font_service/typeface/typeface.rs",
+      "src/main.rs",
+    ]
+    edition = "2024"
+    link_deps = [
+      "//build/config/sanitizers:suppress-lsan.DO-NOT-USE-THIS",
+      "//third_party/freetype2",
+    ]
+    proc_macro_deps = [ "//third_party/rust_crates:async-trait" ]
+    visibility = [
+      ":*",
+      "//src/fonts/asset_providers:*",
+      "//src/fonts/tests/integration:*",
+    ]
+    deps = [
+      ":config",
+      "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_rust",
+      "//sdk/fidl/fuchsia.fonts.experimental:fuchsia.fonts.experimental_rust",
+      "//sdk/fidl/fuchsia.intl:fuchsia.intl_rust",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+      "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+      "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
+      "//sdk/rust/zx",
+      "//src/fonts/char_set",
+      "//src/fonts/fidl_fuchsia_fonts_ext",
+      "//src/fonts/font_info",
+      "//src/fonts/manifest",
+      "//src/lib/diagnostics/inspect/runtime/rust",
+      "//src/lib/diagnostics/inspect/rust",
+      "//src/lib/fdio/rust:fdio",
+      "//src/lib/fidl/rust/fidl",
+      "//src/lib/fuchsia",
+      "//src/lib/fuchsia-async",
+      "//src/lib/fuchsia-component",
+      "//src/lib/fuchsia-fs",
+      "//src/lib/fuchsia-url",
+      "//src/lib/trace/rust:trace",
+      "//src/lib/trace/rust:trace-provider",
+      "//third_party/rust_crates:anyhow",
+      "//third_party/rust_crates:argh",
+      "//third_party/rust_crates:futures",
+      "//third_party/rust_crates:heck",
+      "//third_party/rust_crates:itertools",
+      "//third_party/rust_crates:log",
+      "//third_party/rust_crates:lru",
+      "//third_party/rust_crates:thiserror",
+      "//third_party/rust_crates:unicase",
+    ]
+  }
+}
+if (is_fuchsia) {
+  rustc_test("font_provider_bin_test") {
+    sources = [
+      "src/font_service/asset/asset.rs",
+      "src/font_service/asset/cache.rs",
+      "src/font_service/asset/collection.rs",
+      "src/font_service/asset/loader.rs",
+      "src/font_service/asset/mod.rs",
+      "src/font_service/builder.rs",
+      "src/font_service/config.rs",
+      "src/font_service/debug.rs",
+      "src/font_service/family.rs",
+      "src/font_service/inspect.rs",
+      "src/font_service/mod.rs",
+      "src/font_service/typeface/collection.rs",
+      "src/font_service/typeface/matcher.rs",
+      "src/font_service/typeface/mod.rs",
+      "src/font_service/typeface/test_util.rs",
+      "src/font_service/typeface/typeface.rs",
+      "src/main.rs",
+    ]
+    edition = "2024"
+    link_deps = [
+      "//build/config/sanitizers:suppress-lsan.DO-NOT-USE-THIS",
+      "//third_party/freetype2",
+    ]
+    proc_macro_deps = [ "//third_party/rust_crates:async-trait" ]
+    deps = [
+             ":config",
+             "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_rust",
+             "//sdk/fidl/fuchsia.fonts.experimental:fuchsia.fonts.experimental_rust",
+             "//sdk/fidl/fuchsia.intl:fuchsia.intl_rust",
+             "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+             "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+             "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
+             "//sdk/rust/zx",
+             "//src/fonts/char_set",
+             "//src/fonts/fidl_fuchsia_fonts_ext",
+             "//src/fonts/font_info",
+             "//src/fonts/manifest",
+             "//src/lib/diagnostics/inspect/runtime/rust",
+             "//src/lib/diagnostics/inspect/rust",
+             "//src/lib/fdio/rust:fdio",
+             "//src/lib/fidl/rust/fidl",
+             "//src/lib/fuchsia",
+             "//src/lib/fuchsia-async",
+             "//src/lib/fuchsia-component",
+             "//src/lib/fuchsia-fs",
+             "//src/lib/fuchsia-url",
+             "//src/lib/trace/rust:trace",
+             "//src/lib/trace/rust:trace-provider",
+             "//third_party/rust_crates:anyhow",
+             "//third_party/rust_crates:argh",
+             "//third_party/rust_crates:futures",
+             "//third_party/rust_crates:heck",
+             "//third_party/rust_crates:itertools",
+             "//third_party/rust_crates:log",
+             "//third_party/rust_crates:lru",
+             "//third_party/rust_crates:thiserror",
+             "//third_party/rust_crates:unicase",
+           ] + [
+             "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+             "//src/lib/intl/unicode_utils/char_collection",
+             "//third_party/rust_crates:maplit",
+             "//third_party/rust_crates:pretty_assertions",
+             "//third_party/rust_crates:test-case",
+           ]
+    source_root = "src/main.rs"
+  }
+}
+
+fuchsia_component_manifest("manifest") {
+  component_name = "fonts"
+  manifest = "meta/fonts.cml"
+}
+
+fuchsia_structured_config_rust_lib("config") {
+  cm_label = ":manifest"
+}
+
+fuchsia_component("font_provider_cm") {
+  cm_label = ":manifest"
+  deps = [ ":font_provider" ]
+}
+
+fuchsia_component_manifest("font_provider_unit_tests_cmp_manifest") {
+  testonly = true
+  component_name = "font_provider_bin_test"
+  manifest = "meta/font_provider_bin_test.cml"
+}
+
+fuchsia_test_component("font_provider_unit_tests_cmp") {
+  cm_label = ":font_provider_unit_tests_cmp_manifest"
+  deps = [ ":font_provider_bin_test" ]
+}
+
+fuchsia_test_package("font_provider_unit_tests") {
+  package_name = "font_provider_unit_tests-gn"
+  test_components = [ ":font_provider_unit_tests_cmp" ]
+}
+
+fuchsia_component_manifest("font_provider_hermetic_for_test_manifest") {
+  component_name = "font_provider_hermetic_for_test"
+  manifest = "meta/fonts_for_test.cml"
+}
+
+fuchsia_component("font_provider_hermetic_for_test") {
+  cm_label = ":font_provider_hermetic_for_test_manifest"
+  visibility = [
+    ":*",
+    "//src/ui/a11y/lib/semantics/tests:*",
+    "//src/ui/tests/*",
+  ]
+  deps = [
+    ":font_provider",
+    "//src/fonts/collections:downstream-test-fonts-collection",
+  ]
+}
+
+fuchsia_component_manifest("fonts_configurable_for_test_manifest") {
+  component_name = "fonts_configurable_for_test"
+  manifest = "meta/fonts_configurable_for_test.cml"
+}
+
+fuchsia_component("fonts_configurable_for_test_component") {
+  cm_label = ":fonts_configurable_for_test_manifest"
 }

@@ -143,7 +143,10 @@ _PRODUCT_CACHE_PACKAGES = [
     "//src/tests/fidl/compatibility:fidl-compatibility-vector-harness_pkg",
     "//src/tests/fidl/compatibility/cpp",
     "//src/tests/fidl/compatibility/hlcpp",
-    "//src/tests/fidl/compatibility/llcpp",
+    "//src/tests/fidl/compatibility/cpp_wire",
+    # TODO(https://fxbug.dev/585933898): Remove once out-of-tree tests resolve
+    # fidl-compatibility-test-cpp_wire instead of fidl-compatibility-test-llcpp.
+    "//src/tests/fidl/compatibility/cpp_wire:legacy_llcpp_package",
     "//src/tests/fidl/compatibility/rust",
 ]
 

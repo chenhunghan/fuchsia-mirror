@@ -18,7 +18,7 @@ pub use tracking::{DynamicLockTracking, LockLevelToken};
 mod tracking {
     use fuchsia_rcu::RcuDroppable;
     use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::marker::PhantomData;
 
     /// Represents a lock held by the current thread.
     struct HeldLock {
@@ -28,11 +28,13 @@ mod tracking {
         active_subclass_tokens: usize,
         /// The name of the lock level.
         name: &'static str,
+        /// The number of live `LockLevelToken`s that refer to this entry.
+        token_refs: usize,
     }
 
     impl HeldLock {
         fn new(encoded_value: usize, name: &'static str) -> Self {
-            Self { encoded_value, active_subclass_tokens: 0, name }
+            Self { encoded_value, active_subclass_tokens: 0, name, token_refs: 1 }
         }
     }
 
@@ -102,46 +104,79 @@ mod tracking {
         }
     }
 
+    /// Removes the held lock with `target_value` from `held_locks` and returns it.
+    ///
+    /// If `release_token_ref` is true, this releases one token reference instead and removes the
+    /// lock only if that was the last one, returning `Ok(None)` while references remain. Returns an
+    /// error if the lock is not held, or if it would be removed while subclass tokens are active.
+    #[inline(always)]
+    fn remove_held_lock(
+        held_locks: &mut Vec<HeldLock>,
+        target_value: usize,
+        release_token_ref: bool,
+    ) -> Result<Option<HeldLock>, String> {
+        let Some(pos) = held_locks.iter().rposition(|v| v.encoded_value == target_value) else {
+            return Err(format!(
+                "LockDep: Attempted to pop a tracked lock that was not tracked. \
+                Discrepancy detected. Target Lock : {target_value}"
+            ));
+        };
+        let lock = &mut held_locks[pos];
+        if release_token_ref && lock.token_refs > 1 {
+            lock.token_refs -= 1;
+            return Ok(None);
+        }
+        if lock.active_subclass_tokens > 0 {
+            let stack_str = held_locks
+                .iter()
+                .map(|v| format!("{:X}:{}", v.encoded_value, v.active_subclass_tokens))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "LockDep: Attempted to drop a lock with active subclass tokens! \
+                    Target: {:X}, tokens: {}, Stack: [{}]",
+                target_value, held_locks[pos].active_subclass_tokens, stack_str
+            ));
+        }
+        Ok(Some(held_locks.remove(pos)))
+    }
+
     /// Removes a lock from the thread-local stack when it is released.
     #[inline(always)]
     #[track_caller]
     fn pop_lock(target_value: usize) -> Option<HeldLock> {
         let held_lock = STATE.try_with(|state| {
-            let mut s = state.borrow_mut();
-            let Some(pos) = s.held_locks.iter().rposition(|v| v.encoded_value == target_value)
-            else {
-                return Err(format!(
-                    "LockDep: Attempted to pop a tracked lock that was not tracked. \
-                    Discrepancy detected. Target Lock : {target_value}"
-                ));
-            };
-            let lock = &s.held_locks[pos];
-            if lock.active_subclass_tokens > 0 {
-                let stack_str = s
-                    .held_locks
-                    .iter()
-                    .map(|v| format!("{:X}:{}", v.encoded_value, v.active_subclass_tokens))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(format!(
-                    "LockDep: Attempted to drop a lock with active subclass tokens! \
-                        Target: {:X}, tokens: {}, Stack: [{}]",
-                    target_value, lock.active_subclass_tokens, stack_str
-                ));
-            }
-            Ok(s.held_locks.remove(pos))
+            remove_held_lock(&mut state.borrow_mut().held_locks, target_value, false)
         });
         match held_lock.ok()? {
             Err(panic_message) => {
                 panic!("{panic_message}");
             }
-            Ok(held_lock) => Some(held_lock),
+            Ok(held_lock) => held_lock,
+        }
+    }
+
+    /// Releases one token reference to the lock with `target_value`, removing the lock from the
+    /// thread-local stack when the last reference is released.
+    #[inline(always)]
+    #[track_caller]
+    fn release_token_ref(target_value: usize) {
+        let result = STATE.try_with(|state| {
+            remove_held_lock(&mut state.borrow_mut().held_locks, target_value, true)
+        });
+        if let Ok(Err(panic_message)) = result {
+            panic!("{panic_message}");
         }
     }
 
     #[cfg(test)]
     pub fn clear_state() {
         STATE.with(|state| state.borrow_mut().held_locks.clear());
+    }
+
+    #[cfg(test)]
+    pub fn held_lock_count() -> usize {
+        STATE.with(|state| state.borrow().held_locks.len())
     }
 
     /// Retrieves the allowed subclass for a given lock ID.
@@ -218,13 +253,13 @@ mod tracking {
 
     /// A token that represents a lock level being held for lockdep purposes.
     /// This does not actually hold a lock, but updates the lockdep state as if it did.
-    #[derive(Clone)]
+    ///
+    /// Clones of a token share a single entry on the thread-local lock stack, which is
+    /// reference counted by `HeldLock::token_refs` and removed when the last clone is dropped.
     pub struct LockLevelToken {
-        inner: Rc<InternalLockLevelToken>,
-    }
-
-    struct InternalLockLevelToken {
         target_value: usize,
+        /// The token refers to thread-local state, so it must be neither `Send` nor `Sync`.
+        _not_send: PhantomData<*const ()>,
     }
 
     impl LockLevelToken {
@@ -234,18 +269,18 @@ mod tracking {
             assert!(subclass < 16, "subclass must be between 0 and 15");
             let target_value = lock_id | (subclass as usize & 0xF);
             check_and_push_lock(HeldLock::new(target_value, name));
-            Self { inner: Rc::new(InternalLockLevelToken { target_value }) }
+            Self { target_value, _not_send: PhantomData }
         }
 
         fn target_value(&self) -> usize {
-            self.inner.target_value
+            self.target_value
         }
 
         #[track_caller]
         pub(super) fn check_maximal(&self) {
             let panic_message = STATE.try_with(|state| {
                 if let Some(last) = state.borrow().held_locks.last() {
-                    if last.encoded_value != self.inner.target_value {
+                    if last.encoded_value != self.target_value {
                         return Err(format!(
                             "Condvar wait requires the lock to be the latest acquired lock.",
                         ));
@@ -307,9 +342,23 @@ mod tracking {
         }
     }
 
-    impl Drop for InternalLockLevelToken {
+    impl Clone for LockLevelToken {
+        fn clone(&self) -> Self {
+            let _ = STATE.try_with(|state| {
+                let mut s = state.borrow_mut();
+                if let Some(lock) =
+                    s.held_locks.iter_mut().rev().find(|v| v.encoded_value == self.target_value)
+                {
+                    lock.token_refs += 1;
+                }
+            });
+            Self { target_value: self.target_value, _not_send: PhantomData }
+        }
+    }
+
+    impl Drop for LockLevelToken {
         fn drop(&mut self) {
-            pop_lock(self.target_value);
+            release_token_ref(self.target_value);
         }
     }
 
@@ -1000,26 +1049,39 @@ mod tests {
 
     lock_ordering! {
         LevelA => LevelB,
-        Terminal(TerminalC),
+        LevelA => LevelC,
         Terminal(TerminalD),
+        Terminal(TerminalE),
     }
 
     #[test]
     fn test_valid_lock_ordering() {
         tracking::clear_state();
+        assert!(<LevelA as crate::LockLevel>::LOCK_ID < <LevelB as crate::LockLevel>::LOCK_ID);
+        assert_eq!(<LevelB as crate::LockLevel>::LOCK_ID, <LevelC as crate::LockLevel>::LOCK_ID);
+        assert!(<LevelB as crate::LockLevel>::LOCK_ID < <TerminalD as crate::LockLevel>::LOCK_ID);
+
         let lock_a: LockDepMutex<i32, LevelA> = 0.into();
         let lock_b: LockDepMutex<i32, LevelB> = 0.into();
-        let lock_c: LockDepMutex<i32, TerminalC> = 0.into();
+        let lock_c: LockDepMutex<i32, LevelC> = 0.into();
         let lock_d: LockDepMutex<i32, TerminalD> = 0.into();
+        let lock_e: LockDepMutex<i32, TerminalE> = 0.into();
 
         let _guard_a = lock_a.lock();
-        let _guard_b = lock_b.lock();
-
         {
-            let _guard_c = lock_c.lock();
+            let _guard_b = lock_b.lock();
+            {
+                let _guard_d = lock_d.lock();
+            }
+            {
+                let _guard_e = lock_e.lock();
+            }
         }
         {
-            let _guard_d = lock_d.lock();
+            let _guard_c = lock_c.lock();
+            {
+                let _guard_d = lock_d.lock();
+            }
         }
     }
 
@@ -1146,16 +1208,46 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "LockDep: Invalid lock ordering detected: acquired lock 'TerminalD' while holding lock 'TerminalC'"
+        expected = "LockDep: Invalid lock ordering detected: acquired lock 'TerminalE' while holding lock 'TerminalD'"
     )]
     fn test_terminal_locks_self_deadlock() {
         tracking::clear_state();
         {
-            let lock_c: LockDepMutex<i32, TerminalC> = 0.into();
             let lock_d: LockDepMutex<i32, TerminalD> = 0.into();
+            let lock_e: LockDepMutex<i32, TerminalE> = 0.into();
+
+            let _guard_d = lock_d.lock();
+            let _guard_e = lock_e.lock();
+        }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "LockDep: Invalid lock ordering detected: acquired lock 'LevelC' while holding lock 'LevelB'"
+    )]
+    fn test_unordered_non_terminal_locks_b_then_c() {
+        tracking::clear_state();
+        {
+            let lock_b: LockDepMutex<i32, LevelB> = 0.into();
+            let lock_c: LockDepMutex<i32, LevelC> = 0.into();
+
+            let _guard_b = lock_b.lock();
+            let _guard_c = lock_c.lock();
+        }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "LockDep: Invalid lock ordering detected: acquired lock 'LevelB' while holding lock 'LevelC'"
+    )]
+    fn test_unordered_non_terminal_locks_c_then_b() {
+        tracking::clear_state();
+        {
+            let lock_b: LockDepMutex<i32, LevelB> = 0.into();
+            let lock_c: LockDepMutex<i32, LevelC> = 0.into();
 
             let _guard_c = lock_c.lock();
-            let _guard_d = lock_d.lock();
+            let _guard_b = lock_b.lock();
         }
     }
 
@@ -1267,6 +1359,31 @@ mod tests {
     }
 
     #[test]
+    fn test_cloned_token_keeps_lock_held() {
+        tracking::clear_state();
+        let token = assert_lock_level::<LevelA>();
+        assert_eq!(tracking::held_lock_count(), 1);
+        let clone = token.clone();
+        assert_eq!(tracking::held_lock_count(), 1);
+        std::mem::drop(token);
+        assert_eq!(tracking::held_lock_count(), 1);
+        std::mem::drop(clone);
+        assert_eq!(tracking::held_lock_count(), 0);
+    }
+
+    #[test]
+    fn test_out_of_order_token_drop() {
+        tracking::clear_state();
+        let token_a = assert_lock_level::<LevelA>();
+        let token_b = assert_lock_level::<LevelB>();
+        assert_eq!(tracking::held_lock_count(), 2);
+        std::mem::drop(token_a);
+        assert_eq!(tracking::held_lock_count(), 1);
+        std::mem::drop(token_b);
+        assert_eq!(tracking::held_lock_count(), 0);
+    }
+
+    #[test]
     fn test_dynamic_lockdep_success() {
         tracking::clear_state();
         let l1 = DynamicLockDepMutex::new::<LevelA>(1);
@@ -1372,7 +1489,7 @@ mod tests {
     #[test]
     fn test_rcu_droppable() {
         assert_rcu_droppable::<LevelA>();
-        assert_rcu_droppable::<TerminalC>();
+        assert_rcu_droppable::<TerminalD>();
         assert_rcu_droppable::<DynamicLockDepMutex<i32>>();
         assert_rcu_droppable::<DynamicLockDepRwLock<i32>>();
         assert_rcu_droppable::<LockDepMutex<i32, LevelA>>();

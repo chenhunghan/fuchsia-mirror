@@ -4,9 +4,6 @@
 
 import("//build/bazel/bazel_host_tool.gni")
 import("//build/sdk/sdk_host_tool.gni")
-import("//build/testing/golden_files.gni")
-import("//tools/cmc/build/cml.gni")
-import("//tools/configc/build/config.gni")
 
 if (is_host) {
   bazel_host_tool("configc") {
@@ -26,101 +23,6 @@ if (is_host) {
   group("install") {
     public_deps = [ ":configc" ]
   }
-}
-
-# Config Library Golden Tests
-cm("config_manifest") {
-  manifest = "goldens/config_manifest.cml"
-  output_name = "config_manifest.cm"
-  config_values_package_path = "goldens/config_values.json5"
-}
-
-fidl_config_client_lib_source("fidl_config_lib") {
-  manifest_outputs = get_target_outputs(":config_manifest")
-  compiled_manifest = manifest_outputs[0]
-  name = "my.config.lib"
-  deps = [ ":config_manifest" ]
-  testonly = true
-}
-
-rust_config_client_lib_source("rust_config_lib") {
-  manifest_outputs = get_target_outputs(":config_manifest")
-  compiled_manifest = manifest_outputs[0]
-  fidl_library_name = "my.config.lib"
-  deps = [ ":config_manifest" ]
-  testonly = true
-}
-
-cpp_config_client_lib_source("cpp_elf_config_lib") {
-  manifest_outputs = get_target_outputs(":config_manifest")
-  compiled_manifest = manifest_outputs[0]
-  fidl_library_name = "my.config.lib"
-  deps = [ ":config_manifest" ]
-  testonly = true
-}
-
-_cm = get_target_outputs(":config_manifest")
-_cm = _cm[0]
-
-cvf("example_values") {
-  cm = _cm
-  value_file = "goldens/config_values.json5"
-  deps = [ ":config_manifest" ]
-}
-
-_cvf = get_target_outputs(":example_values")
-_cvf = _cvf[0]
-_dumped_values = "$target_out_dir/dumped_values.json"
-
-dump_structured_config("dump_example_values") {
-  cm = _cm
-  cvf = _cvf
-  output = _dumped_values
-  deps = [
-    ":config_manifest",
-    ":example_values",
-  ]
-}
-
-fidl_lib_outputs = get_target_outputs(":fidl_config_lib")
-rust_lib_outputs = get_target_outputs(":rust_config_lib")
-cpp_elf_lib_outputs = get_target_outputs(":cpp_elf_config_lib")
-
-golden_files("golden_tests") {
-  testonly = true
-  comparisons = [
-    {
-      golden = "goldens/config.fidl.golden"
-      candidate = fidl_lib_outputs[0]
-    },
-    {
-      golden = "goldens/config.rs.golden"
-      candidate = rust_lib_outputs[0]
-    },
-    {
-      golden = "goldens/config.cc.elf.golden"
-      candidate = cpp_elf_lib_outputs[0]
-    },
-    {
-      golden = "goldens/config.h.elf.golden"
-      candidate = cpp_elf_lib_outputs[1]
-    },
-    {
-      golden = "goldens/dumped_values.json.golden"
-      candidate = _dumped_values
-    },
-  ]
-  deps = [
-    ":cpp_elf_config_lib",
-    ":dump_example_values",
-    ":fidl_config_lib",
-    ":rust_config_lib",
-  ]
-}
-
-group("tests") {
-  testonly = true
-  deps = [ ":golden_tests" ]
 }
 
 if (is_host) {

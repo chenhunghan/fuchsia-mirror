@@ -84,6 +84,12 @@ import("//build/testing/host_test_data.gni")
 #    Type: string
 #    Default: "list_host_python_unittests"
 #
+#  produces_perf_results (optional)
+#    Whether this test produces performance results (*.fuchsiaperf.json files).
+#    See test_spec() in //build/testing/test_spec.gni.
+#    Type: boolean
+#    Default: omitted
+#
 #  data_sources (optional)
 #    See build/python/python_binary.gni
 #
@@ -182,6 +188,7 @@ template("python_host_test") {
                              "timeout_secs",
                              "isolated",
                              "expects_ssh",
+                             "produces_perf_results",
                            ])
 
     list_cases_argument = _list_cases_argument

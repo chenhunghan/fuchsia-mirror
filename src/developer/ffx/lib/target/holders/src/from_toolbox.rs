@@ -4,7 +4,7 @@
 
 use fdomain_client::fidl::{DiscoverableProtocolMarker, Proxy};
 use ffx_command_error::Result;
-use fho::{FhoEnvironment, TryFromEnvWith};
+use fho::{FhoEnvironment, TargetNeed, TryFromEnvWith};
 use std::marker::PhantomData;
 
 use crate::{DEFAULT_PROXY_TIMEOUT, connect_to_rcs};
@@ -19,6 +19,7 @@ where
     P: Proxy + 'static,
     P::Protocol: DiscoverableProtocolMarker,
 {
+    const TARGET_NEED: TargetNeed = TargetNeed::Required;
     type Output = P;
     type Error = ffx_command_error::Error;
     async fn try_from_env_with(self, env: &FhoEnvironment) -> Result<Self::Output> {

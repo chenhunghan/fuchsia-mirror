@@ -1,0 +1,81 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":fake-framebuffer-tests",
+    ],
+    visibility = ["//src/graphics/display:__pkg__"],
+)
+
+fx_cc_library(
+    name = "mock-allocator",
+    testonly = True,
+    srcs = [
+        "fake-buffer-collection.cc",
+        "mock-allocator.cc",
+    ],
+    hdrs = [
+        "fake-buffer-collection.h",
+        "mock-allocator.h",
+    ],
+    visibility = ["//src/graphics/display/drivers/intel-display:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp_testing",
+        "//src/graphics/display/lib/api-types/cpp",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/image-format",
+        "//zircon/system/ulib/zx",
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "fake-framebuffer",
+    testonly = True,
+    srcs = [
+        "fake-framebuffer.cc",
+    ],
+    hdrs = [
+        "fake-framebuffer.h",
+    ],
+    visibility = ["//src/graphics/display/drivers/intel-display:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
+        "//sdk/lib/zbi-format",
+        # On Fuchsia, //zircon/system/public would shadow the sysroot's
+        # <zircon/syscalls.h> without the generated syscalls/gen/*.inc files.
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "fake-framebuffer-tests-bin",
+    srcs = ["fake-framebuffer-test.cc"],
+    gn_output_name = "fake-framebuffer-tests",
+    deps = [
+        ":fake-framebuffer",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/zbi-format",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fake-framebuffer-tests",
+    unit_tests = [":fake-framebuffer-tests-bin"],
+)

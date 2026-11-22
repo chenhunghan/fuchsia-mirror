@@ -119,7 +119,7 @@ as the corresponding thread will be paused until the exception is resumed.
 Exception types are defined in
 [`<zircon/syscalls/exception.h>`](/zircon/system/public/zircon/syscalls/exception.h).
 
-## Exception Channel Types
+## Exception channel types {:#exception-channel-types}
 
 Exception channels have different characteristics depending on the task type and
 whether the `ZX_EXCEPTION_CHANNEL_DEBUGGER` flag is passed to
@@ -177,7 +177,7 @@ values delivered in the `synth_code` and `synth_data` fields of
 `zx_exception_context_t`. Currently, user-defined exceptions can be delivered
 only to a job debugger exception channel.
 
-### Process Debugger First... and Possibly Again Later
+### Process debugger first... and possibly again later {:#process-debugger-first-and-possibly-again-later}
 
 In Zircon the process debugger exception channel is tried first. This is useful
 for at least a few reasons:

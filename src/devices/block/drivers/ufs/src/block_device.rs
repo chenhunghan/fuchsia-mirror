@@ -23,8 +23,10 @@ use fidl_fuchsia_storage_block::DeviceFlag;
 use log::{error, warn};
 use mmio::Mmio;
 use std::borrow::Cow;
+use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Weak};
+use std::thread::Builder;
 use zerocopy::IntoBytes;
 use zx::Status;
 
@@ -46,8 +48,8 @@ pub struct UfsBlockDevice<M: Mmio + Send + Sync + 'static> {
     device_info: DeviceInfo,
 }
 
-impl<M: Mmio + Send + Sync + 'static> std::fmt::Debug for UfsBlockDevice<M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<M: Mmio + Send + Sync + 'static> fmt::Debug for UfsBlockDevice<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UfsBlockDevice")
             .field("lun", &self.io.lun)
             .field("block_size", &self.io.block_size)
@@ -92,6 +94,7 @@ impl<M: Mmio + Send + Sync + 'static> UfsBlockDevice<M> {
 
     /// Translates and synchronously submits a block request, completing rejected requests
     /// immediately.
+    #[cfg(test)]
     pub fn handle_operation(
         &self,
         operation: &Operation,
@@ -211,7 +214,7 @@ impl<M: Mmio + Send + Sync + 'static> LunIo<M> {
     ) {
         let unmap_params;
         let prepared = match operation {
-            // TODO(https://fxbug.dev/527952709): Support inline crypto in the Rust UFS driver.
+            // TODO(https://fxbug.dev/588007497): Support inline crypto in the Rust UFS driver.
             Operation::Read {
                 options: block_protocol::ReadOptions { inline_crypto, .. }, ..
             }
@@ -274,17 +277,6 @@ impl<M: Mmio + Send + Sync + 'static> LunIo<M> {
             Err(status) => self.processor.reject_io(self.lun, completion, status),
         }
     }
-
-    /// Submits `requests` in order on the calling thread, blocking for pushback as needed.
-    fn handle_requests_blocking(&self, requests: &[Request]) {
-        for request in requests {
-            self.handle_operation(
-                &request.operation,
-                request.vmo.as_ref(),
-                IoCompletion::Request(request.request_id),
-            );
-        }
-    }
 }
 
 impl<M: Mmio + Send + Sync + 'static> Interface for UfsBlockDevice<M> {
@@ -298,13 +290,12 @@ impl<M: Mmio + Send + Sync + 'static> Interface for UfsBlockDevice<M> {
     /// Runs the session FIFO loop on a dedicated worker thread.
     fn spawn_session(&self, session: Arc<Session<Self>>) {
         let lun = self.io.lun;
-        let spawned =
-            std::thread::Builder::new().name(format!("ufs-lun{lun}-session")).spawn(move || {
-                if let Err(e) = fuchsia_scheduler::set_role_for_this_thread(WORKER_SCHEDULER_ROLE) {
-                    warn!(lun, err:? = e; "Failed to set session thread role");
-                }
-                session.run();
-            });
+        let spawned = Builder::new().name(format!("ufs-lun{lun}-session")).spawn(move || {
+            if let Err(e) = fuchsia_scheduler::set_role_for_this_thread(WORKER_SCHEDULER_ROLE) {
+                warn!(lun, err:? = e; "Failed to set session thread role");
+            }
+            session.run();
+        });
         if let Err(e) = spawned {
             error!(lun, err:% = e; "Failed to spawn session thread");
         }
@@ -313,7 +304,13 @@ impl<M: Mmio + Send + Sync + 'static> Interface for UfsBlockDevice<M> {
     /// Submits `requests` synchronously on the calling session or mapper worker thread, blocking
     /// for pushback while all I/O slots are busy.
     fn on_requests(&self, requests: &[Request]) {
-        self.io.handle_requests_blocking(requests);
+        for request in requests {
+            self.io.handle_operation(
+                &request.operation,
+                request.vmo.as_ref(),
+                IoCompletion::Request(request.request_id),
+            );
+        }
     }
 }
 
@@ -322,13 +319,13 @@ impl<M: Mmio + Send + Sync + 'static> Interface for UfsBlockDevice<M> {
 /// Holds [`Weak<LunBlockServer<M>>`] rather than [`Arc`] to break the reference cycle
 /// `LunBlockServer -> UfsBlockDevice -> TransferRequestProcessor -> BlockServerCompleter ->
 /// LunBlockServer`.
-pub(crate) struct BlockServerCompleter<M: Mmio + Send + Sync + 'static> {
+pub struct BlockServerCompleter<M: Mmio + Send + Sync + 'static> {
     /// Indexed by LUN.
     servers: Vec<Option<Weak<LunBlockServer<M>>>>,
 }
 
-impl<M: Mmio + Send + Sync + 'static> std::fmt::Debug for BlockServerCompleter<M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<M: Mmio + Send + Sync + 'static> fmt::Debug for BlockServerCompleter<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let luns: Vec<usize> = self
             .servers
             .iter()
@@ -341,17 +338,17 @@ impl<M: Mmio + Send + Sync + 'static> std::fmt::Debug for BlockServerCompleter<M
 
 impl<M: Mmio + Send + Sync + 'static> BlockServerCompleter<M> {
     /// Creates a completer for `servers`, given as `(lun, server)` pairs.
-    pub(crate) fn new<'a>(
-        servers: impl IntoIterator<Item = (u8, &'a Arc<LunBlockServer<M>>)>,
+    pub fn new<'a>(
+        lun_servers: impl IntoIterator<Item = (u8, &'a Arc<LunBlockServer<M>>)>,
     ) -> Self {
-        let mut servers_by_lun: Vec<Option<Weak<LunBlockServer<M>>>> = Vec::new();
-        for (lun, server) in servers {
-            if servers_by_lun.len() <= lun as usize {
-                servers_by_lun.resize_with(lun as usize + 1, || None);
+        let mut servers: Vec<Option<Weak<LunBlockServer<M>>>> = Vec::new();
+        for (lun, server) in lun_servers {
+            if servers.len() <= lun as usize {
+                servers.resize_with(lun as usize + 1, || None);
             }
-            servers_by_lun[lun as usize] = Some(Arc::downgrade(server));
+            servers[lun as usize] = Some(Arc::downgrade(server));
         }
-        Self { servers: servers_by_lun }
+        Self { servers }
     }
 }
 
@@ -377,8 +374,13 @@ mod tests {
     };
     use crate::upiu::CommandUpiu;
     use block_protocol::{BlockFifoCommand, BlockFifoRequest, BlockFifoResponse};
+    use diagnostics_assertions::{AnyProperty, assert_data_tree};
+    use fidl::endpoints::{create_proxy, create_proxy_and_stream};
     use fidl_fuchsia_storage_block as fblock;
     use fuchsia_async as fasync;
+    use fuchsia_inspect::Inspector;
+    use futures::channel::oneshot;
+    use std::thread;
     use zerocopy::IntoBytes;
     use zerocopy::byteorder::big_endian::U64;
 
@@ -563,7 +565,7 @@ mod tests {
         );
 
         // Each completion interrupt delivers its outcome.
-        let inspector = fuchsia_inspect::Inspector::default();
+        let inspector = Inspector::default();
         let ufs_node = inspector.root().create_child("ufs");
         processor.record_inspect(&ufs_node);
         inspector.root().record(ufs_node);
@@ -580,7 +582,7 @@ mod tests {
         assert_eq!(delivered(&mut flush_rx), Ok(()));
         assert_eq!(delivered(&mut trim_rx), Ok(()));
 
-        diagnostics_assertions::assert_data_tree!(inspector, root: {
+        assert_data_tree!(inspector, root: {
             ufs: {
                 "block.read.count": 1u64,
                 "block.write.count": 1u64,
@@ -590,7 +592,13 @@ mod tests {
                 "block.write.kib": 4u64,
                 "block.flush.kib": 0u64,
                 "block.trim.kib": 16u64,
-                "auto_hibern8_error_count": 0u64,
+                "client_io_gated": false,
+                "blocked_reservers": 0u64,
+                "blocked_on_admission": 0u64,
+                "inflight_io": 0u64,
+                "free_mask": AnyProperty,
+                "timeout_mask": 0u64,
+                "request_gap_us": AnyProperty,
             }
         });
 
@@ -605,7 +613,7 @@ mod tests {
         );
         assert_eq!(delivered(&mut trim_rx), Err(Status::IO));
         assert_eq!(slot_state(&processor, 0), SlotState::Free);
-        diagnostics_assertions::assert_data_tree!(inspector, root: contains {
+        assert_data_tree!(inspector, root: contains {
             ufs: contains {
                 "block.trim.count": 1u64,
                 "block.trim.kib": 16u64,
@@ -645,15 +653,14 @@ mod tests {
         let server = device(0, &unit, Arc::clone(&processor)).into_server();
         processor.set_io_completer(Arc::new(BlockServerCompleter::new([(0u8, &server)])));
 
-        let (proxy, stream) = fidl::endpoints::create_proxy_and_stream::<fblock::BlockMarker>();
+        let (proxy, stream) = create_proxy_and_stream::<fblock::BlockMarker>();
         let server_task = fasync::Task::local({
             let server = Arc::clone(&server);
             async move {
                 let _ = server.handle_requests(stream).await;
             }
         });
-        let (session, session_server_end) =
-            fidl::endpoints::create_proxy::<fblock::SessionMarker>();
+        let (session, session_server_end) = create_proxy::<fblock::SessionMarker>();
         proxy.open_session(session_server_end).unwrap();
         let fifo: zx::Fifo<BlockFifoResponse, BlockFifoRequest> =
             session.get_fifo().await.unwrap().unwrap().into();
@@ -664,7 +671,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let hardware = std::thread::spawn(move || {
+        let hardware = thread::spawn(move || {
             let mut utp = utp;
             let slot = wait_for_any_doorbell(&utp);
             let command: CommandUpiu = utp.request(slot);
@@ -721,7 +728,7 @@ mod tests {
             let (flush_done, _flush_rx) = io_callback();
             device.handle_operation(&Operation::Flush, None, flush_done);
         }
-        let (done_tx, done_rx) = futures::channel::oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel();
         let submit_task = fasync::unblock(move || {
             let buffer = service.allocate_buffer(4096);
             service
@@ -735,7 +742,7 @@ mod tests {
                 .unwrap();
         });
 
-        let hardware = std::thread::spawn(move || {
+        let hardware = thread::spawn(move || {
             let mut utp = utp;
             utp.complete(0, scsi_response(0, ScsiStatus::Good.as_u8()).as_bytes(), OCS_SUCCESS);
             assert!(utp.wait_for_doorbell(0));
@@ -770,7 +777,7 @@ mod tests {
         let device =
             Device::new(0, 512, &unit, Device::device_flags(&unit), Arc::clone(&processor));
 
-        let inspector = fuchsia_inspect::Inspector::default();
+        let inspector = Inspector::default();
         let ufs_node = inspector.root().create_child("ufs");
         processor.record_inspect(&ufs_node);
         inspector.root().record(ufs_node);
@@ -790,7 +797,7 @@ mod tests {
         assert_eq!(submit_and_complete(&write(1, 1, Fua::Off), OCS_SUCCESS), Ok(()));
         assert_eq!(submit_and_complete(&Operation::Flush, OCS_SUCCESS), Ok(()));
         assert_eq!(submit_and_complete(&trim_one_block, OCS_SUCCESS), Ok(()));
-        diagnostics_assertions::assert_data_tree!(inspector, root: {
+        assert_data_tree!(inspector, root: {
             ufs: contains {
                 "block.read.count": 1u64,
                 "block.write.count": 1u64,
@@ -809,7 +816,7 @@ mod tests {
         assert_eq!(submit_and_complete(&read(0, 1, 0), aborted), Err(Status::IO));
         assert_eq!(submit_and_complete(&write(1, 1, Fua::Off), aborted), Err(Status::IO));
         assert_eq!(submit_and_complete(&trim_one_block, aborted), Err(Status::IO));
-        diagnostics_assertions::assert_data_tree!(inspector, root: {
+        assert_data_tree!(inspector, root: {
             ufs: contains {
                 "block.read.count": 1u64,
                 "block.write.count": 1u64,
@@ -827,7 +834,7 @@ mod tests {
         assert_eq!(submit_and_complete(&write(1, 1, Fua::Off), OCS_SUCCESS), Ok(()));
         assert_eq!(submit_and_complete(&Operation::Flush, OCS_SUCCESS), Ok(()));
         assert_eq!(submit_and_complete(&trim_one_block, OCS_SUCCESS), Ok(()));
-        diagnostics_assertions::assert_data_tree!(inspector, root: {
+        assert_data_tree!(inspector, root: {
             ufs: contains {
                 "block.read.count": 2u64,
                 "block.write.count": 2u64,
@@ -842,11 +849,11 @@ mod tests {
 
         // Non-multiple remainder (3 * 512 = 1536 B -> 1 KiB, then +512 B = 2048 B -> 2 KiB).
         assert_eq!(submit_and_complete(&read(0, 1, 0), OCS_SUCCESS), Ok(()));
-        diagnostics_assertions::assert_data_tree!(inspector, root: {
+        assert_data_tree!(inspector, root: {
             ufs: contains { "block.read.count": 3u64, "block.read.kib": 1u64 }
         });
         assert_eq!(submit_and_complete(&read(0, 1, 0), OCS_SUCCESS), Ok(()));
-        diagnostics_assertions::assert_data_tree!(inspector, root: {
+        assert_data_tree!(inspector, root: {
             ufs: contains { "block.read.count": 4u64, "block.read.kib": 2u64 }
         });
     }

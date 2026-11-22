@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef MSD_ARM_BUFFER_H
-#define MSD_ARM_BUFFER_H
+#ifndef SRC_GRAPHICS_DRIVERS_MSD_ARM_MALI_SRC_MSD_ARM_BUFFER_H_
+#define SRC_GRAPHICS_DRIVERS_MSD_ARM_MALI_SRC_MSD_ARM_BUFFER_H_
 
 #include <lib/magma/platform/platform_buffer.h>
 #include <lib/magma/platform/platform_event.h>
@@ -51,6 +51,8 @@ class MsdArmBuffer {
 
   MsdArmBuffer(std::unique_ptr<magma::PlatformBuffer> platform_buf);
 
+  bool ValidatePageRange(uint64_t start_page, uint64_t page_count) const;
+
   std::unique_ptr<magma::PlatformBuffer> platform_buf_;
 
   std::unordered_set<GpuMapping*> gpu_mappings_;
@@ -83,4 +85,4 @@ class MsdArmAbiBuffer : public msd::Buffer {
   uint32_t magic_;
 };
 
-#endif  // MSD_ARM_BUFFER_H
+#endif  // SRC_GRAPHICS_DRIVERS_MSD_ARM_MALI_SRC_MSD_ARM_BUFFER_H_

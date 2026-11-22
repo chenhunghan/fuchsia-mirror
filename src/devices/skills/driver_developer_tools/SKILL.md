@@ -276,7 +276,7 @@ impl Driver for MyDriver {
         Ok(Self { _node: node, _scope: scope })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }
 
 driver_register!(MyDriver);

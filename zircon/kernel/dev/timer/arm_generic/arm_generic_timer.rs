@@ -5,7 +5,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::arch_rs::arm64::arch_quirks_needs_arm_erratum_858921_mitigation;
+use crate::arch_rs::arm64::{
+    arch_quirks_needs_arm_erratum_858921_mitigation, arm64_allow_pct_in_el0,
+};
 use crate::arch_rs::{curr_cpu_num, ints_disabled};
 use crate::counters::define_kcounter;
 use crate::kernel::deadline::{Deadline, InstantUnknown};
@@ -24,6 +26,7 @@ use boot_options::BootOptions;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering};
 use debug::{dprintf, ltracef, ltracef_level};
+use libarch::EarlyTicks;
 use regio::arm64::{SysReg, spec};
 use zbi::DcfgArmGenericTimerDriver;
 use zx_status::Status;
@@ -79,10 +82,6 @@ static EVENT_STREAM_SHIFT: AtomicU32 = AtomicU32::new(0);
 // Definition of the function signature we use to fetch the value of the chosen
 // reference counter.
 type ReadArmCounterFunc = fn() -> u64;
-
-unsafe extern "C" {
-    fn arm64_allow_pct_in_el0();
-}
 
 fn read_cntp_ctl() -> u32 {
     if libarch::arm64::CURRENT_EL.read().el() == 2 {
@@ -186,15 +185,6 @@ fn read_cntvct() -> u64 {
     TIMER_REG_CNTVCT.read()
 }
 
-/// Early tick sample delivered by the assembly macro `sample_ticks`.
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct EarlyTicks {
-    pub cntpct_el0: u64,
-    pub cntvct_el0: u64,
-}
-
-zr::static_assert_size_and_align!(EarlyTicks, 16, 8);
 zr::static_assert_size_and_align!(DcfgArmGenericTimerDriver, 16, 4);
 
 struct TimerRegProcs {
@@ -453,21 +443,9 @@ macro_rules! define_raw_ticks_exports {
 
 define_raw_ticks_exports! {
     rust_platform_current_raw_ticks_synchronized_0 => 0,
-    rust_platform_current_raw_ticks_synchronized_1 => 1,
-    rust_platform_current_raw_ticks_synchronized_2 => 2,
     rust_platform_current_raw_ticks_synchronized_3 => 3,
-    rust_platform_current_raw_ticks_synchronized_4 => 4,
     rust_platform_current_raw_ticks_synchronized_5 => 5,
-    rust_platform_current_raw_ticks_synchronized_6 => 6,
-    rust_platform_current_raw_ticks_synchronized_7 => 7,
-    rust_platform_current_raw_ticks_synchronized_8 => 8,
-    rust_platform_current_raw_ticks_synchronized_9 => 9,
     rust_platform_current_raw_ticks_synchronized_10 => 10,
-    rust_platform_current_raw_ticks_synchronized_11 => 11,
-    rust_platform_current_raw_ticks_synchronized_12 => 12,
-    rust_platform_current_raw_ticks_synchronized_13 => 13,
-    rust_platform_current_raw_ticks_synchronized_14 => 14,
-    rust_platform_current_raw_ticks_synchronized_15 => 15,
 }
 
 /// Convert a sample taken early on to a proper zx_ticks_t, if possible.
@@ -712,20 +690,14 @@ pub unsafe fn arm_generic_timer_init(config: &DcfgArmGenericTimerDriver) {
         TIMER_IRQ.store(timer_irq, Ordering::Relaxed);
         TIMER_ASSIGNMENT.store(TimerIrqAssignment::Phys as u8, Ordering::Relaxed);
         READ_ARM_COUNTER.store(read_cntpct_a73, Ordering::Relaxed);
-        // SAFETY: FFI call with no preconditions; declared in <arch/arm64.h>.
-        unsafe {
-            arm64_allow_pct_in_el0();
-        }
+        arm64_allow_pct_in_el0();
     } else if irq_sphys != 0 {
         timer_str = "sphys";
         timer_irq = irq_sphys;
         TIMER_IRQ.store(timer_irq, Ordering::Relaxed);
         TIMER_ASSIGNMENT.store(TimerIrqAssignment::Sphys as u8, Ordering::Relaxed);
         READ_ARM_COUNTER.store(read_cntpct_a73, Ordering::Relaxed);
-        // SAFETY: FFI call with no preconditions; declared in <arch/arm64.h>.
-        unsafe {
-            arm64_allow_pct_in_el0();
-        }
+        arm64_allow_pct_in_el0();
     } else {
         panic!("no irqs set in arm_generic_timer_pdev_init\n");
     }
@@ -857,48 +829,6 @@ init::lk_init_hook!(
 );
 
 // C FFI entrypoints for callers in C++.
-
-/// FFI entry point for [`platform_convert_early_ticks`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_convert_early_ticks(sample: EarlyTicks) -> zx_ticks_t {
-    platform_convert_early_ticks(sample)
-}
-
-/// FFI entry point for [`platform_set_oneshot_timer`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_set_oneshot_timer(deadline: zx_ticks_t) -> Result<(), Status> {
-    platform_set_oneshot_timer(deadline)
-}
-
-/// FFI entry point for [`platform_stop_timer`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_stop_timer() {
-    platform_stop_timer();
-}
-
-/// FFI entry point for [`platform_shutdown_timer`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_shutdown_timer() {
-    platform_shutdown_timer();
-}
-
-/// FFI entry point for [`platform_suspend_timer_curr_cpu`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_suspend_timer_curr_cpu() -> Result<(), Status> {
-    platform_suspend_timer_curr_cpu()
-}
-
-/// FFI entry point for [`platform_resume_timer_curr_cpu`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_resume_timer_curr_cpu() -> Result<(), Status> {
-    platform_resume_timer_curr_cpu()
-}
-
-/// FFI entry point for [`platform_usermode_can_access_tick_registers`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_usermode_can_access_tick_registers() -> bool {
-    platform_usermode_can_access_tick_registers()
-}
 
 /// FFI entry point for [`arm_generic_timer_init`].
 ///

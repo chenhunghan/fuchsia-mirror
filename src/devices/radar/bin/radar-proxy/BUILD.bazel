@@ -2,7 +2,32 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":radar-proxy-test"],
+    visibility = ["//src/devices:__pkg__"],
+)
 
 exports_files(
     [
@@ -10,4 +35,223 @@ exports_files(
         "meta/radar-proxy-without-injector.core_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_binary(
+    name = "radar-proxy-bin-with-injector",
+    srcs = [
+        "burst-injector.cc",
+        "burst-injector.h",
+        "main.cc",
+        "radar-provider-proxy.h",
+        "radar-proxy.h",
+        "radar-reader-proxy.cc",
+        "radar-reader-proxy.h",
+        "reader-instance.cc",
+        "reader-instance.h",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.radar:fuchsia.hardware.radar_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fdio-caller",
+        "//sdk/lib/fit",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/devices/radar/lib/vmo-manager",
+        "//src/lib/fsl",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_packaged_binary(
+    name = "radar-proxy-packaged-bin-with-injector",
+    binary = ":radar-proxy-bin-with-injector",
+    binary_name = "radar-proxy-bin-with-injector",
+)
+
+fx_cc_binary(
+    name = "radar-proxy-bin-without-injector",
+    srcs = [
+        "burst-injector.h",
+        "main.cc",
+        "radar-provider-proxy.cc",
+        "radar-provider-proxy.h",
+        "radar-proxy.h",
+        "radar-reader-proxy.h",
+        "reader-instance.h",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.radar:fuchsia.hardware.radar_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fdio-caller",
+        "//sdk/lib/fit",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/devices/radar/lib/vmo-manager",
+        "//src/lib/fsl",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_packaged_binary(
+    name = "radar-proxy-packaged-bin-without-injector",
+    binary = ":radar-proxy-bin-without-injector",
+    binary_name = "radar-proxy-bin-without-injector",
+)
+
+cml_shard(
+    name = "meta/radar-proxy-base.shard",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    shard = "meta/radar-proxy-base.shard.cml",
+)
+
+fx_component_manifest(
+    name = "radar-proxy-manifest-with-injector",
+    component_name = "radar-proxy",
+    includes = [":meta/radar-proxy-base.shard"],
+    manifest = "meta/radar-proxy-with-injector.cml",
+)
+
+fx_component(
+    name = "radar-proxy-component-with-injector",
+    compiled_manifest = ":radar-proxy-manifest-with-injector",
+    visibility = ["//src/devices/radar/tests/radar-integration-test:__pkg__"],
+    deps = [":radar-proxy-packaged-bin-with-injector"],
+)
+
+fx_package(
+    name = "radar-proxy-with-injector",
+    components = [":radar-proxy-component-with-injector"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_component_manifest(
+    name = "radar-proxy-manifest-without-injector",
+    component_name = "radar-proxy",
+    includes = [":meta/radar-proxy-base.shard"],
+    manifest = "meta/radar-proxy-without-injector.cml",
+)
+
+fx_component(
+    name = "radar-proxy-component-without-injector",
+    compiled_manifest = ":radar-proxy-manifest-without-injector",
+    visibility = ["//src/devices/radar/tests/radar-integration-test:__pkg__"],
+    deps = [":radar-proxy-packaged-bin-without-injector"],
+)
+
+fx_package(
+    name = "radar-proxy-without-injector",
+    components = [":radar-proxy-component-without-injector"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_test_binary(
+    name = "radar-proxy-test-bin-with-injector",
+    srcs = [
+        "burst-injector.cc",
+        "burst-injector.h",
+        "radar-proxy.h",
+        "radar-reader-proxy.cc",
+        "radar-reader-proxy.h",
+        "reader-instance.cc",
+        "reader-instance.h",
+        "test/radar-proxy-test.h",
+        "test/radar-reader-proxy-test.cc",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.radar:fuchsia.hardware.radar_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/driver/runtime/testing/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fdio-caller",
+        "//sdk/lib/fit",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/devices/bin/driver_runtime",
+        "//src/devices/radar/lib/vmo-manager",
+        "//src/lib/fsl",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/sync",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_component(
+    name = "radar-proxy-test-component-with-injector",
+    binary = ":radar-proxy-test-bin-with-injector",
+)
+
+fx_cc_test_binary(
+    name = "radar-proxy-test-bin-without-injector",
+    srcs = [
+        "radar-provider-proxy.cc",
+        "radar-provider-proxy.h",
+        "radar-proxy.h",
+        "test/radar-provider-proxy-test.cc",
+        "test/radar-proxy-test.h",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.radar:fuchsia.hardware.radar_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/driver/runtime/testing/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fdio-caller",
+        "//sdk/lib/fit",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/devices/bin/driver_runtime",
+        "//src/devices/radar/lib/vmo-manager",
+        "//src/lib/fsl",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/sync",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_component(
+    name = "radar-proxy-test-component-without-injector",
+    binary = ":radar-proxy-test-bin-without-injector",
+)
+
+fx_package(
+    name = "radar-proxy-test_pkg",
+    package_name = "radar-proxy-test",
+    test_components = [
+        ":radar-proxy-test-component-with-injector",
+        ":radar-proxy-test-component-without-injector",
+    ],
+)
+
+fx_test(
+    name = "radar-proxy-test",
+    max_log_severity = "ERROR",
+    package = ":radar-proxy-test_pkg",
 )

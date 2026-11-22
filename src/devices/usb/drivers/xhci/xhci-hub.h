@@ -26,6 +26,10 @@ struct tt_info_t {
   // tt_port_number: the port number of the High Speed Hub that the full/low speed device/hub
   // environment is connected behind. Set in PARENT_PORT_NUMBER of slot context.
   uint8_t tt_port_number;
+  // multi_tt: whether the ancestor High Speed Hub owning this TT has Multi-TT enabled. Set in
+  // MULTI_TT of slot context for downstream Low-/Full-Speed devices (xHCI 1.2 Section 6.2.2,
+  // Table 6-4).
+  bool multi_tt = false;
 };
 
 // This does need to be arena-allocated since it is freed in interrupt context
@@ -37,12 +41,14 @@ struct HubInfo {
           bool multi_tt)
       : hub_state(hub_state), hub_depth(hub_depth), hub_speed(hub_speed), multi_tt(multi_tt) {}
 
+  // Parent hub's DeviceState (nullptr when this device is attached directly to the root hub).
   fbl::RefPtr<DeviceState> hub_state;
   usb_speed_t speed = 0;
   uint32_t route_string = 0;
   uint8_t hub_depth = 0;
   usb_speed_t hub_speed = 0;
   bool multi_tt = false;
+  bool hub_configured = false;
   uint8_t rh_port = 0;
   // Maps 0-based hub port index (port - 1) to the 0-based device_id (slot - 1) of the attached
   // downstream device, or std::nullopt if no device is attached (since 0 is a valid device_id).

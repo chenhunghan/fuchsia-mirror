@@ -61,13 +61,13 @@ class LoaderServiceTest : public gtest::RealLoopFixture {
 
   // Exercise a LoadObject call and assert that the result matches `expected`.
   //
-  // This takes a non-const reference because LLCPP SyncClient's generated methods are non-const.
+  // This takes a non-const reference because WireSyncClient's generated methods are non-const.
   static void LoadObject(fidl::WireSyncClient<fuchsia_ldsvc::Loader>& client,
                          const std::string& name, zx::result<std::string> expected);
 
   // Exercise a Config call and assert that the result matches `expected`.
   //
-  // This takes a non-const reference because LLCPP SyncClient's generated methods are non-const.
+  // This takes a non-const reference because WireSyncClient's generated methods are non-const.
   static void Config(fidl::WireSyncClient<fuchsia_ldsvc::Loader>& client, const std::string& config,
                      zx::result<zx_status_t> expected);
 

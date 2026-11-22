@@ -4,7 +4,7 @@
 
 #include "codec_adapter_vaapi_encoder.h"
 
-#include <fuchsia/media/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
 #include <zircon/status.h>
 
 #include <va/va_drmcommon.h>
@@ -28,18 +28,18 @@ CodecAdapterVaApiEncoder::~CodecAdapterVaApiEncoder() {
 }
 
 void CodecAdapterVaApiEncoder::CoreCodecInit(
-    const fuchsia::media::FormatDetails& initial_input_format_details) {
-  if (!initial_input_format_details.has_format_details_version_ordinal()) {
+    std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) {
+  if (!initial_input_format_details->format_details_version_ordinal().has_value()) {
     events_->onCoreCodecFailCodec(
         "CoreCodecInit(): Initial input format details missing version "
         "ordinal.");
     return;
   }
   input_format_details_version_ordinal_ =
-      initial_input_format_details.format_details_version_ordinal();
+      initial_input_format_details->format_details_version_ordinal().value();
   vaapi_wrapper_ = std::make_shared<media::VaapiWrapper>();
 
-  if (!HandleInputFormatChange(initial_input_format_details, true)) {
+  if (!HandleInputFormatChange(*initial_input_format_details, true)) {
     return;
   }
   zx_status_t result =
@@ -54,43 +54,44 @@ void CodecAdapterVaApiEncoder::CoreCodecInit(
 }
 
 bool CodecAdapterVaApiEncoder::HandleInputFormatChange(
-    const fuchsia::media::FormatDetails& input_format_details, bool initial) {
+    const fuchsia_media::FormatDetails& input_format_details, bool initial) {
   VADisplay va_dpy = VADisplayWrapper::GetSingleton()->display();
-  const std::string& mime_type = input_format_details.mime_type();
-  if (mime_type != "video/h264") {
+  if (!input_format_details.mime_type().has_value() ||
+      input_format_details.mime_type().value() != "video/h264") {
     events_->onCoreCodecFailCodec("HandleInputFormatChange(): Unknown mime_type %s\n",
-                                  mime_type.c_str());
+                                  input_format_details.mime_type().value_or("").c_str());
     return false;
   }
-  if (!input_format_details.has_image_format()) {
+  if (!input_format_details.image_format().has_value()) {
     events_->onCoreCodecFailCodec("HandleInputFormatChange(): No image_format");
     return false;
   }
-  if (input_format_details.has_profile()) {
-    if (input_format_details.profile() != fuchsia::media::CodecProfile::H264PROFILE_HIGH) {
+  if (input_format_details.profile().has_value()) {
+    if (input_format_details.profile().value() != fuchsia_media::CodecProfile::kH264ProfileHigh) {
       events_->onCoreCodecFailCodec(
           "HandleInputFormatChange(): Encoder only supports HIGH profile");
       return false;
     }
   }
-  const auto& image_format = input_format_details.image_format();
-  if (image_format.has_display_rect() &&
-      (image_format.display_rect().x != 0 || image_format.display_rect().y != 0)) {
+  const auto& image_format = input_format_details.image_format().value();
+  if (image_format.display_rect().has_value() &&
+      (image_format.display_rect()->x() != 0 || image_format.display_rect()->y() != 0)) {
     events_->onCoreCodecFailCodec(
         "HandleInputFormatChange(): Non-zero display_rect origin (%u, %u) is not supported",
-        image_format.display_rect().x, image_format.display_rect().y);
+        image_format.display_rect()->x(), image_format.display_rect()->y());
     return false;
   }
-  uint32_t coded_width = image_format.has_size() ? image_format.size().width : 0;
-  uint32_t coded_height = image_format.has_size() ? image_format.size().height : 0;
-  uint32_t width =
-      image_format.has_display_rect()
-          ? image_format.display_rect().width
-          : (image_format.has_valid_size() ? image_format.valid_size().width : coded_width);
+  uint32_t coded_width = image_format.size().has_value() ? image_format.size()->width() : 0;
+  uint32_t coded_height = image_format.size().has_value() ? image_format.size()->height() : 0;
+  uint32_t width = image_format.display_rect().has_value()
+                       ? image_format.display_rect()->width()
+                       : (image_format.valid_size().has_value() ? image_format.valid_size()->width()
+                                                                : coded_width);
   uint32_t height =
-      image_format.has_display_rect()
-          ? image_format.display_rect().height
-          : (image_format.has_valid_size() ? image_format.valid_size().height : coded_height);
+      image_format.display_rect().has_value()
+          ? image_format.display_rect()->height()
+          : (image_format.valid_size().has_value() ? image_format.valid_size()->height()
+                                                   : coded_height);
   auto checked_width = safemath::CheckedNumeric(width).Cast<int>();
   auto checked_height = safemath::CheckedNumeric(height).Cast<int>();
   if (!checked_width.IsValid() || checked_width.ValueOrDie() == 0) {
@@ -193,34 +194,34 @@ bool CodecAdapterVaApiEncoder::HandleInputFormatChange(
 
   ave_config.max_num_ref_frames = attrib.value;
 
-  // Defaults taken from fuchsia::media fidl.
+  // Defaults taken from fuchsia.media fidl.
   accelerator_config.framerate = 30;
   accelerator_config.bitrate = media::Bitrate::ConstantBitrate(200000u);
   accelerator_config.gop_length = 8 + 1;
-  if (input_format_details.has_encoder_settings()) {
-    auto& encoder_settings = input_format_details.encoder_settings();
-    if (encoder_settings.is_h264()) {
-      auto& h264 = encoder_settings.h264();
-      if (h264.has_frame_rate()) {
-        accelerator_config.framerate = h264.frame_rate();
+  if (input_format_details.encoder_settings().has_value()) {
+    const auto& encoder_settings = input_format_details.encoder_settings().value();
+    if (encoder_settings.h264().has_value()) {
+      const auto& h264 = encoder_settings.h264().value();
+      if (h264.frame_rate().has_value()) {
+        accelerator_config.framerate = h264.frame_rate().value();
       }
-      if (h264.has_bit_rate()) {
-        accelerator_config.bitrate = media::Bitrate::ConstantBitrate(h264.bit_rate());
+      if (h264.bit_rate().has_value()) {
+        accelerator_config.bitrate = media::Bitrate::ConstantBitrate(h264.bit_rate().value());
       }
-      if (h264.has_gop_size()) {
+      if (h264.gop_size().has_value()) {
         // gop_length includes the initial IDR frame, so add 1.
-        auto new_gop_size = safemath::CheckAdd(h264.gop_size(), 1);
+        auto new_gop_size = safemath::CheckAdd(h264.gop_size().value(), 1);
         if (!new_gop_size.IsValid()) {
           events_->onCoreCodecFailCodec("HandleInputFormatChange(): Invalid gop_size %u",
-                                        h264.gop_size());
+                                        h264.gop_size().value());
           return false;
         }
         accelerator_config.gop_length = new_gop_size.ValueOrDie();
       }
-      if (h264.has_force_key_frame()) {
-        next_frame_keyframe_ = next_frame_keyframe_ || h264.force_key_frame();
+      if (h264.force_key_frame().has_value()) {
+        next_frame_keyframe_ = next_frame_keyframe_ || h264.force_key_frame().value();
       }
-      if (h264.has_quantization_params()) {
+      if (h264.quantization_params().has_value()) {
         events_->onCoreCodecFailCodec(
             "HandleInputFormatChange(): Setting quantization params not supported");
         return false;
@@ -284,7 +285,7 @@ void CodecAdapterVaApiEncoder::ProcessInputLoop() {
   while ((maybe_input_item = input_queue_.WaitForElement())) {
     CodecInputItem input_item = std::move(maybe_input_item.value());
     if (input_item.is_format_details()) {
-      if (!HandleInputFormatChange(input_item.format_details(), false)) {
+      if (!HandleInputFormatChange(input_item.format_details2(), false)) {
         // If there's an error, HandleInputFormatChange will signal an async error itself.
         return;
       }

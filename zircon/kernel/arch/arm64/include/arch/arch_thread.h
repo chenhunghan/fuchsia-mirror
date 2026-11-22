@@ -5,19 +5,12 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-#include <zircon/compiler.h>
-
 #ifndef ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_ARCH_THREAD_H_
 #define ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_ARCH_THREAD_H_
 
 #define CURRENT_PERCPU_PTR_OFFSET 16
 #define CURRENT_SCSP_OFFSET 24
-
-#if __has_feature(shadow_call_stack)
 #define CURRENT_MDSCR_OFFSET 56
-#else
-#define CURRENT_MDSCR_OFFSET 48
-#endif
 
 // Offsets of the fields of struct fpstate.
 #define FPSTATE_REGS_OFFSET 0
@@ -98,9 +91,7 @@ struct arch_thread {
   // Must be placed immediately after current_percpu_ptr in the structure because some
   // code in exception save/restore path in exceptions.S uses a double load/store to load
   // this and current_percpu_ptr in one instruction.
-#if __has_feature(shadow_call_stack)
   uintptr_t* shadow_call_sp;
-#endif
 
   // If non-NULL, address to return to on data fault. Additionally the
   // ARM64_DFR_RUN_FAULT_HANDLER_BIT controls whether the fault handler is invoked or not. If not
@@ -144,12 +135,10 @@ static_assert(thread_pointer_offsetof(current_percpu_ptr) == CURRENT_PERCPU_PTR_
               "per cpu ptr offset in wrong place");
 static_assert(thread_pointer_offsetof(mdscr_el1) == CURRENT_MDSCR_OFFSET,
               "mdscr_el1 offset in wrong place");
-#if __has_feature(shadow_call_stack)
 static_assert(thread_pointer_offsetof(shadow_call_sp) == CURRENT_SCSP_OFFSET,
               "shadow call stack pointer offset in wrong place");
 static_assert(CURRENT_SCSP_OFFSET == CURRENT_PERCPU_PTR_OFFSET + 8,
               "shadow call stack pointer not immediately after percpu");
-#endif
 
 static_assert(offsetof(struct fpstate, regs) == FPSTATE_REGS_OFFSET,
               "fpstate regs offset in wrong place");

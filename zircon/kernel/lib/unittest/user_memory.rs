@@ -69,7 +69,8 @@ impl UserMemory {
         // active_aspace should always return the normal aspace as this is only run in the
         // unittests, which do not run threads in restricted mode. We assert this to be true by
         // checking that the restricted state is not set on this thread.
-        debug_assert!(thread::current_restricted_state().is_null());
+        // SAFETY: Unit tests run on an initialized kernel thread.
+        debug_assert!(unsafe { thread::current_restricted_state() }.is_null());
         // SAFETY: The current thread's active aspace reference is valid for the duration of this
         // call.
         let aspace = unsafe { thread::current_active_aspace() };
@@ -102,7 +103,7 @@ impl UserMemory {
         let arch_mmu_flags =
             ARCH_MMU_FLAG_PERM_USER | ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE;
 
-        let mapping_result = vmar.create_vm_mapping(
+        let mapping_result = vmar.create_vm_mapping_no_overwrite(
             /* mapping_offset= */ 0,
             size,
             align_pow2,
@@ -110,7 +111,6 @@ impl UserMemory {
             vmo.clone(),
             /* vmo_offset= */ 0,
             arch_mmu_flags,
-            b"unittest",
         );
 
         match mapping_result {
@@ -201,9 +201,10 @@ impl UserMemory {
         assert!(is_aligned(offset));
         assert!((flags & ARCH_MMU_FLAG_CACHE_MASK) == 0);
         // SAFETY: The size is not zero, the base and size are page aligned, the range is within the
-        // mapping, which is in a user aspace, so it may have its permissions changed and be
-        // unmapped, and the flags have no cache flags and are valid for the mapping, which may map
-        // with any permissions.
+        // mapping, which is in a user aspace, so it may have its permissions changed, nothing
+        // relies on it, or on the rest of any large page it partly covers, staying mapped, and no
+        // Rust reference into that memory is live, and the flags have no cache flags and are valid
+        // for the mapping, which may map with any permissions.
         unsafe {
             self.mapping.debug_protect(
                 self.mapping.base().0 + offset,

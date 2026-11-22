@@ -139,6 +139,135 @@ impl ScannedObject {
     }
 }
 
+/// Live usage accumulated from objects during fsck.
+#[derive(Clone, Copy, Debug)]
+struct LiveUsage {
+    usage: BytesAndNodes,
+    largest_object: (u64, u64),
+    overflowed: bool,
+}
+
+impl LiveUsage {
+    fn new(object_id: u64, allocated_size: u64) -> Self {
+        let (bytes, overflowed) = match i64::try_from(allocated_size) {
+            Ok(b) => (b, false),
+            Err(_) => (0, true),
+        };
+        Self {
+            usage: BytesAndNodes { bytes, nodes: 1 },
+            largest_object: (object_id, allocated_size),
+            overflowed,
+        }
+    }
+
+    fn add_node(&mut self, object_id: u64, allocated_size: u64) {
+        if allocated_size > self.largest_object.1 {
+            self.largest_object = (object_id, allocated_size);
+        }
+        // Don't worry about overflowing nodes. They increment by one at a time, it is impossible
+        // to have enough metadata in Fxfs to overflow this.
+        self.usage.nodes += 1;
+        if self.overflowed {
+            return;
+        }
+        let bytes = i64::try_from(allocated_size).ok();
+        match bytes.and_then(|b| self.usage.bytes.checked_add(b)) {
+            Some(sum) => self.usage.bytes = sum,
+            None => self.overflowed = true,
+        }
+    }
+}
+
+/// Tracks stored versus actual quota usage during fsck.
+#[derive(Debug)]
+struct UsageTracker<K> {
+    /// Usage records read from the store (root directory records only).
+    stored: BTreeMap<K, BytesAndNodes>,
+    /// Live usage accumulated from live object records.
+    actual: BTreeMap<K, LiveUsage>,
+}
+
+impl<K> Default for UsageTracker<K> {
+    fn default() -> Self {
+        Self { stored: BTreeMap::new(), actual: BTreeMap::new() }
+    }
+}
+
+impl<K: Copy + Ord> UsageTracker<K> {
+    /// Creates a new, empty `UsageTracker`.
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records a live object node and its allocated size for the given key.
+    /// Accumulates `allocated_size` and 1 node into `actual`, checking for overflow on bytes.
+    fn add_node(&mut self, key: K, object_id: u64, allocated_size: u64) {
+        self.actual
+            .entry(key)
+            .and_modify(|entry| entry.add_node(object_id, allocated_size))
+            .or_insert_with(|| LiveUsage::new(object_id, allocated_size));
+    }
+
+    /// Records a stored usage record found in the object store.
+    /// If `is_root` is true, updates `stored` (removes for `ObjectValue::None`, inserts for
+    /// `ObjectValue::BytesAndNodes`). Returns `true` if the record value was valid, or `false`
+    /// if the record was malformed.
+    fn record_stored(&mut self, is_root: bool, key: K, value: &ObjectValue) -> bool {
+        match value {
+            ObjectValue::None => {
+                if is_root {
+                    self.stored.remove(&key);
+                }
+                true
+            }
+            ObjectValue::BytesAndNodes(usage) => {
+                if is_root {
+                    self.stored.insert(key, *usage);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Verifies that all keys seen on live objects have stored usage records, and that
+    /// the stored usage matches the accumulated actual usage.
+    fn verify(
+        &self,
+        fsck: &Fsck<'_>,
+        // These arguments are used to keep it generic to support user and group ownership along
+        // with projectid.
+        missing_err: impl Fn(K, u64) -> FsckError,
+        inconsistent_warn: impl Fn(K, (i64, i64), (i64, i64)) -> FsckWarning,
+        overflow_warn: impl Fn(K, u64, u64) -> FsckWarning,
+    ) -> Result<(), Error> {
+        for (&key, live) in &self.actual {
+            if !self.stored.contains_key(&key) {
+                fsck.error(missing_err(key, live.largest_object.0))?;
+            }
+            if live.overflowed {
+                let (object_id, size) = live.largest_object;
+                fsck.warning(overflow_warn(key, object_id, size))?;
+            }
+        }
+        for (&key, stored) in &self.stored {
+            let actual = match self.actual.get(&key) {
+                Some(live) if live.overflowed => continue,
+                Some(live) => live.usage,
+                None => BytesAndNodes::default(),
+            };
+            if *stored != actual {
+                fsck.warning(inconsistent_warn(
+                    key,
+                    (stored.bytes, stored.nodes),
+                    (actual.bytes, actual.nodes),
+                ))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 struct ScannedStore<'a> {
     fsck: &'a Fsck<'a>,
     crypt: Option<Arc<dyn Crypt>>,
@@ -149,10 +278,7 @@ struct ScannedStore<'a> {
     is_encrypted: bool,
     current_object: Option<CurrentObject>,
     root_dir_id: u64,
-    stored_project_usages: BTreeMap<ProjectId, (i64, i64)>,
-    total_project_usages: BTreeMap<ProjectId, (i64, i64)>,
-    /// Tracks project ids used and an example node to examine if it should not have been included.
-    used_project_ids: BTreeMap<ProjectId, u64>,
+    project_usages: UsageTracker<ProjectId>,
 }
 
 struct CurrentObject {
@@ -181,10 +307,17 @@ impl<'a> ScannedStore<'a> {
             is_encrypted,
             current_object: None,
             root_dir_id,
-            stored_project_usages: BTreeMap::new(),
-            total_project_usages: BTreeMap::new(),
-            used_project_ids: BTreeMap::new(),
+            project_usages: UsageTracker::new(),
         }
+    }
+
+    /// Tracks quota usage (project ID, and in the future user/group) for an object.
+    fn track_quota_usage(&mut self, object_id: u64, attributes: &ObjectAttributes) {
+        if let Some(project_id) = attributes.project_id {
+            self.project_usages.add_node(project_id, object_id, attributes.allocated_size);
+        }
+
+        // TODO(https://fxbug.dev/562121082): Accumulate Owner (user/group) usage here.
     }
 
     // Process an object store record, adding or updating any objects known to the ScannedStore.
@@ -207,16 +340,8 @@ impl<'a> ScannedStore<'a> {
                             value.into(),
                         ))?;
                     }
-                    ObjectValue::Object {
-                        kind: ObjectKind::File { refs },
-                        attributes: ObjectAttributes { project_id, allocated_size, .. },
-                    } => {
-                        if let Some(project_id) = project_id {
-                            self.used_project_ids.insert(*project_id, key.object_id);
-                            let entry = self.total_project_usages.entry(*project_id).or_default();
-                            entry.0 += i64::try_from(*allocated_size).unwrap();
-                            entry.1 += 1;
-                        }
+                    ObjectValue::Object { kind: ObjectKind::File { refs }, attributes } => {
+                        self.track_quota_usage(key.object_id, attributes);
                         self.current_object = Some(CurrentObject {
                             object_id: key.object_id,
                             key_ids: HashMap::default(),
@@ -235,7 +360,7 @@ impl<'a> ScannedStore<'a> {
                                 attributes: ScannedAttributes {
                                     attributes: Vec::new(),
                                     tombstoned_attributes: Vec::new(),
-                                    stored_allocated_size: *allocated_size,
+                                    stored_allocated_size: attributes.allocated_size,
                                     observed_allocated_size: 0,
                                     in_graveyard: false,
                                     extended_attributes: Vec::new(),
@@ -248,14 +373,9 @@ impl<'a> ScannedStore<'a> {
                     ObjectValue::Object {
                         // TODO: https://fxbug.dev/356897866: Add validation for fscrypt.
                         kind: ObjectKind::Directory { sub_dirs, dir_type },
-                        attributes: ObjectAttributes { project_id, allocated_size, .. },
+                        attributes,
                     } => {
-                        if let Some(project_id) = project_id {
-                            self.used_project_ids.insert(*project_id, key.object_id);
-                            let entry = self.total_project_usages.entry(*project_id).or_default();
-                            entry.0 += i64::try_from(*allocated_size).unwrap();
-                            entry.1 += 1;
-                        }
+                        self.track_quota_usage(key.object_id, attributes);
                         let parent = if self.root_objects.contains(&key.object_id) {
                             Some(INVALID_OBJECT_ID)
                         } else {
@@ -278,7 +398,7 @@ impl<'a> ScannedStore<'a> {
                                 attributes: ScannedAttributes {
                                     attributes: Vec::new(),
                                     tombstoned_attributes: Vec::new(),
-                                    stored_allocated_size: *allocated_size,
+                                    stored_allocated_size: attributes.allocated_size,
                                     observed_allocated_size: 0,
                                     in_graveyard: false,
                                     extended_attributes: Vec::new(),
@@ -300,7 +420,7 @@ impl<'a> ScannedStore<'a> {
                     }
                     ObjectValue::Object {
                         kind: ObjectKind::Symlink { refs, link },
-                        attributes: ObjectAttributes { project_id, allocated_size, .. },
+                        attributes,
                     } => {
                         if link.len() > MAX_INLINE_SYMLINK_SIZE {
                             self.fsck.warning(FsckWarning::OversizedInlineSymlink(
@@ -308,12 +428,7 @@ impl<'a> ScannedStore<'a> {
                                 key.object_id,
                             ))?;
                         }
-                        if let Some(project_id) = project_id {
-                            self.used_project_ids.insert(*project_id, key.object_id);
-                            let entry = self.total_project_usages.entry(*project_id).or_default();
-                            entry.0 += i64::try_from(*allocated_size).unwrap();
-                            entry.1 += 1;
-                        }
+                        self.track_quota_usage(key.object_id, attributes);
                         self.current_object = Some(CurrentObject {
                             object_id: key.object_id,
                             key_ids: HashMap::default(),
@@ -329,7 +444,7 @@ impl<'a> ScannedStore<'a> {
                                 attributes: ScannedAttributes {
                                     attributes: Vec::new(),
                                     tombstoned_attributes: Vec::new(),
-                                    stored_allocated_size: *allocated_size,
+                                    stored_allocated_size: attributes.allocated_size,
                                     observed_allocated_size: 0,
                                     in_graveyard: false,
                                     extended_attributes: Vec::new(),
@@ -340,7 +455,7 @@ impl<'a> ScannedStore<'a> {
                     }
                     ObjectValue::Object {
                         kind: ObjectKind::EncryptedSymlink { refs, link },
-                        attributes: ObjectAttributes { project_id, allocated_size, .. },
+                        attributes,
                     } => {
                         if link.len() > MAX_INLINE_SYMLINK_SIZE {
                             self.fsck.warning(FsckWarning::OversizedInlineSymlink(
@@ -348,12 +463,7 @@ impl<'a> ScannedStore<'a> {
                                 key.object_id,
                             ))?;
                         }
-                        if let Some(project_id) = project_id {
-                            self.used_project_ids.insert(*project_id, key.object_id);
-                            let entry = self.total_project_usages.entry(*project_id).or_default();
-                            entry.0 += i64::try_from(*allocated_size).unwrap();
-                            entry.1 += 1;
-                        }
+                        self.track_quota_usage(key.object_id, attributes);
                         self.current_object = Some(CurrentObject {
                             object_id: key.object_id,
                             key_ids: HashMap::default(),
@@ -369,7 +479,7 @@ impl<'a> ScannedStore<'a> {
                                 attributes: ScannedAttributes {
                                     attributes: Vec::new(),
                                     tombstoned_attributes: Vec::new(),
-                                    stored_allocated_size: *allocated_size,
+                                    stored_allocated_size: attributes.allocated_size,
                                     observed_allocated_size: 0,
                                     in_graveyard: false,
                                     extended_attributes: Vec::new(),
@@ -380,14 +490,9 @@ impl<'a> ScannedStore<'a> {
                     }
                     ObjectValue::Object {
                         kind: ObjectKind::NonInlineSymlink { refs },
-                        attributes: ObjectAttributes { project_id, allocated_size, .. },
+                        attributes,
                     } => {
-                        if let Some(project_id) = project_id {
-                            self.used_project_ids.insert(*project_id, key.object_id);
-                            let entry = self.total_project_usages.entry(*project_id).or_default();
-                            entry.0 += i64::try_from(*allocated_size).unwrap();
-                            entry.1 += 1;
-                        }
+                        self.track_quota_usage(key.object_id, attributes);
                         self.current_object = Some(CurrentObject {
                             object_id: key.object_id,
                             key_ids: HashMap::default(),
@@ -403,7 +508,7 @@ impl<'a> ScannedStore<'a> {
                                 attributes: ScannedAttributes {
                                     attributes: Vec::new(),
                                     tombstoned_attributes: Vec::new(),
-                                    stored_allocated_size: *allocated_size,
+                                    stored_allocated_size: attributes.allocated_size,
                                     observed_allocated_size: 0,
                                     in_graveyard: false,
                                     extended_attributes: Vec::new(),
@@ -674,7 +779,7 @@ impl<'a> ScannedStore<'a> {
                     ))?;
                 }
             },
-            ObjectKeyData::Project { project_id, property: ProjectProperty::Limit } => {
+            ObjectKeyData::Project { project_id, ref property } => {
                 // Should only be set on the root object store
                 if self.root_dir_id != key.object_id {
                     self.fsck.error(FsckError::NonRootProjectIdMetadata(
@@ -683,43 +788,29 @@ impl<'a> ScannedStore<'a> {
                         project_id,
                     ))?;
                 }
-                match value {
-                    ObjectValue::None | ObjectValue::BytesAndNodes(..) => {}
-                    _ => {
-                        self.fsck.error(FsckError::MalformedObjectRecord(
-                            self.store_id,
-                            key.into(),
-                            value.into(),
-                        ))?;
-                    }
-                }
-            }
-            ObjectKeyData::Project { project_id, property: ProjectProperty::Usage } => {
-                // Should only be set on the root object store
-                if self.root_dir_id != key.object_id {
-                    self.fsck.error(FsckError::NonRootProjectIdMetadata(
-                        self.store_id,
-                        key.object_id,
-                        project_id,
-                    ))?;
-                }
-                match value {
-                    ObjectValue::None => {
-                        if self.root_dir_id == key.object_id {
-                            self.stored_project_usages.remove(&project_id);
+                match property {
+                    ProjectProperty::Limit => match value {
+                        ObjectValue::None | ObjectValue::BytesAndNodes(..) => {}
+                        _ => {
+                            self.fsck.error(FsckError::MalformedObjectRecord(
+                                self.store_id,
+                                key.into(),
+                                value.into(),
+                            ))?;
                         }
-                    }
-                    ObjectValue::BytesAndNodes(BytesAndNodes { bytes, nodes }) => {
-                        if self.root_dir_id == key.object_id {
-                            self.stored_project_usages.insert(project_id, (*bytes, *nodes));
+                    },
+                    ProjectProperty::Usage => {
+                        if !self.project_usages.record_stored(
+                            self.root_dir_id == key.object_id,
+                            project_id,
+                            value,
+                        ) {
+                            self.fsck.error(FsckError::MalformedObjectRecord(
+                                self.store_id,
+                                key.into(),
+                                value.into(),
+                            ))?;
                         }
-                    }
-                    _ => {
-                        self.fsck.error(FsckError::MalformedObjectRecord(
-                            self.store_id,
-                            key.into(),
-                            value.into(),
-                        ))?;
                     }
                 }
             }
@@ -1567,30 +1658,20 @@ pub(super) async fn scan_store(
     }
     scanned.finish_file()?;
 
-    for (project_id, node_id) in scanned.used_project_ids.iter() {
-        if !scanned.stored_project_usages.contains_key(project_id) {
-            fsck.error(FsckError::ProjectUsedWithNoUsageTracking(store_id, *project_id, *node_id))?;
-        }
-    }
-    for (project_id, (bytes_stored, nodes_stored)) in scanned.stored_project_usages.iter() {
-        if let Some((bytes_used, nodes_used)) = scanned.total_project_usages.get(&project_id) {
-            if *bytes_stored != *bytes_used || *nodes_stored != *nodes_used {
-                fsck.warning(FsckWarning::ProjectUsageInconsistent(
-                    store_id,
-                    *project_id,
-                    (*bytes_stored, *nodes_stored),
-                    (*bytes_used, *nodes_used),
-                ))?;
-            }
-        } else if *bytes_stored != 0 || *nodes_stored != 0 {
-            fsck.warning(FsckWarning::ProjectUsageInconsistent(
-                store_id,
-                *project_id,
-                (*bytes_stored, *nodes_stored),
-                (0, 0),
-            ))?;
-        }
-    }
+    scanned.project_usages.verify(
+        fsck,
+        |project_id, node_id| {
+            FsckError::ProjectUsedWithNoUsageTracking(store_id, project_id, node_id)
+        },
+        |project_id, stored, actual| {
+            FsckWarning::ProjectUsageInconsistent(store_id, project_id, stored, actual)
+        },
+        |project_id, object_id, size| {
+            FsckWarning::ProjectUsageOverflow(store_id, project_id, object_id, size)
+        },
+    )?;
+
+    // TODO(https://fxbug.dev/562121082): Verify Owner (user/group) usage here.
 
     // Add a reference for files in the graveyard (which acts as the file's parent until it is
     // purged, leaving only the Object record in the original store and no links to the file).
@@ -1809,4 +1890,176 @@ pub(super) async fn scan_store(
     ));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UsageTracker;
+    use crate::fsck::errors::{FsckError, FsckIssue, FsckWarning};
+    use crate::fsck::{Fsck, FsckOptions};
+    use crate::object_store::object_record::BytesAndNodes;
+    use crate::object_store::{ObjectValue, ProjectId};
+    use fuchsia_sync::Mutex;
+
+    #[fuchsia::test]
+    fn test_usage_tracker_overflow_and_largest_object() {
+        let mut tracker = UsageTracker::<ProjectId>::new();
+        let p1 = ProjectId::new(1).unwrap();
+        let p2 = ProjectId::new(2).unwrap();
+        let p3 = ProjectId::new(3).unwrap();
+
+        // Normal addition records actual usage and tracks the largest object.
+        tracker.add_node(p1, 10, 1000);
+        let live = tracker.actual.get(&p1).unwrap();
+        assert_eq!(live.usage, BytesAndNodes { bytes: 1000, nodes: 1 });
+        assert_eq!(live.largest_object, (10, 1000));
+        assert!(!live.overflowed);
+
+        // Adding an object with u64::MAX overflows bytes calculation and updates the largest object.
+        tracker.add_node(p1, 11, u64::MAX);
+        let live = tracker.actual.get(&p1).unwrap();
+        assert!(live.overflowed);
+        assert_eq!(live.usage.nodes, 2);
+        assert_eq!(live.largest_object, (11, u64::MAX));
+
+        // Further addition of a smaller object increments nodes but preserves the largest object.
+        tracker.add_node(p1, 12, 500);
+        let live = tracker.actual.get(&p1).unwrap();
+        assert_eq!(live.usage.nodes, 3);
+        assert_eq!(live.largest_object, (11, u64::MAX));
+
+        // Initial node exceeding i64::MAX overflows immediately on creation.
+        let oversized = (i64::MAX as u64) + 1;
+        tracker.add_node(p2, 20, oversized);
+        let live = tracker.actual.get(&p2).unwrap();
+        assert!(live.overflowed);
+        assert_eq!(live.usage.nodes, 1);
+        assert_eq!(live.largest_object, (20, oversized));
+
+        // Cumulative checked_add overflow across valid i64 sizes retains the earlier larger object.
+        let max_valid = i64::MAX as u64;
+        tracker.add_node(p3, 30, max_valid);
+        let live = tracker.actual.get(&p3).unwrap();
+        assert!(!live.overflowed);
+        assert_eq!(live.usage, BytesAndNodes { bytes: i64::MAX, nodes: 1 });
+        assert_eq!(live.largest_object, (30, max_valid));
+
+        tracker.add_node(p3, 31, 1);
+        let live = tracker.actual.get(&p3).unwrap();
+        assert!(live.overflowed);
+        assert_eq!(live.usage.nodes, 2);
+        assert_eq!(live.largest_object, (30, max_valid));
+    }
+
+    #[fuchsia::test]
+    fn test_usage_tracker_record_stored() {
+        let mut tracker = UsageTracker::<ProjectId>::new();
+        let p1 = ProjectId::new(1).unwrap();
+
+        let usage_val = ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 500, nodes: 2 });
+        let none_val = ObjectValue::None;
+        let malformed_val = ObjectValue::Some;
+
+        // is_root = false should return true for valid values but NOT modify stored
+        assert!(tracker.record_stored(false, p1, &usage_val));
+        assert!(!tracker.stored.contains_key(&p1));
+
+        // is_root = true should insert into stored
+        assert!(tracker.record_stored(true, p1, &usage_val));
+        assert_eq!(tracker.stored.get(&p1), Some(&BytesAndNodes { bytes: 500, nodes: 2 }));
+
+        // is_root = false with None should return true but NOT remove
+        assert!(tracker.record_stored(false, p1, &none_val));
+        assert!(tracker.stored.contains_key(&p1));
+
+        // is_root = true with None should remove from stored
+        assert!(tracker.record_stored(true, p1, &none_val));
+        assert!(!tracker.stored.contains_key(&p1));
+
+        // Malformed values return false
+        assert!(!tracker.record_stored(true, p1, &malformed_val));
+        assert!(!tracker.record_stored(false, p1, &malformed_val));
+    }
+
+    #[fuchsia::test]
+    fn test_usage_tracker_verify() {
+        // Wrapped in a mutex to share the reference while it is writable.
+        let issues = Mutex::new(Vec::new());
+        let options = FsckOptions {
+            on_error: Box::new(|issue: &FsckIssue| issues.lock().push(issue.clone())),
+            ..Default::default()
+        };
+        let fsck = Fsck::new(&options);
+
+        let p1 = ProjectId::new(1).unwrap();
+        let p2 = ProjectId::new(2).unwrap();
+        let p3 = ProjectId::new(3).unwrap();
+        let p4 = ProjectId::new(4).unwrap();
+        let p5 = ProjectId::new(5).unwrap();
+        let p6 = ProjectId::new(6).unwrap();
+
+        let mut tracker = UsageTracker::<ProjectId>::new();
+        tracker.add_node(p1, 100, 500); // live node for p1
+        tracker.add_node(p2, 200, 1000); // live node for p2
+        tracker.add_node(p4, 400, 100);
+        tracker.add_node(p4, 401, u64::MAX); // overflows for p4
+        tracker.add_node(p5, 500, 750); // consistent live node for p5
+
+        // p1: missing stored usage tracking
+        // p2: inconsistent stored usage (e.g. 500 bytes stored vs 1000 actual)
+        // p3: stored usage exists with no live nodes (non-zero -> inconsistent)
+        // p4: overflowed usage tracking
+        // p5: consistent non-zero stored and actual usage
+        // p6: consistent zero stored usage with no live nodes
+        tracker.record_stored(
+            true,
+            p2,
+            &ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 500, nodes: 1 }),
+        );
+        tracker.record_stored(
+            true,
+            p3,
+            &ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 200, nodes: 1 }),
+        );
+        tracker.record_stored(
+            true,
+            p4,
+            &ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 100, nodes: 2 }),
+        );
+        tracker.record_stored(
+            true,
+            p5,
+            &ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 750, nodes: 1 }),
+        );
+        tracker.record_stored(
+            true,
+            p6,
+            &ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 0, nodes: 0 }),
+        );
+
+        tracker
+            .verify(
+                &fsck,
+                |p, node_id| FsckError::ProjectUsedWithNoUsageTracking(0, p, node_id),
+                |p, stored, actual| FsckWarning::ProjectUsageInconsistent(0, p, stored, actual),
+                |p, object_id, size| FsckWarning::ProjectUsageOverflow(0, p, object_id, size),
+            )
+            .expect("verify should succeed");
+
+        let recorded = issues.lock().clone();
+        assert_eq!(
+            recorded,
+            vec![
+                FsckIssue::Error(FsckError::ProjectUsedWithNoUsageTracking(0, p1, 100)),
+                FsckIssue::Warning(FsckWarning::ProjectUsageOverflow(0, p4, 401, u64::MAX)),
+                FsckIssue::Warning(FsckWarning::ProjectUsageInconsistent(
+                    0,
+                    p2,
+                    (500, 1),
+                    (1000, 1),
+                )),
+                FsckIssue::Warning(FsckWarning::ProjectUsageInconsistent(0, p3, (200, 1), (0, 0))),
+            ]
+        );
+    }
 }

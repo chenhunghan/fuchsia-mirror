@@ -65,8 +65,7 @@ llvm_libc_source_set("threads") {
   ]
 
   # Used by thrd_create*.
-  non_test_deps = [ "../zircon:zx-name.printf" ]
-  testonly_deps = [ "../zircon:zx-name.printf.testonly" ]
+  libc_deps = [ "../zircon:zx-name.printf" ]
 }
 
 # This doesn't need to be libc_source_set() because it's just a header.
@@ -98,7 +97,7 @@ libc_source_set("thread-storage") {
     "//src/lib/elfldltl:headers",
     "//zircon/system/ulib/zx",
 
-    # TODO(https://fxbug.dev/342469121): remove when :musl-tls is removed
+    # TODO(https://fxbug.dev/349433421): remove when :musl-tls is removed
     "..:asm-linkage",
   ]
   sources = [ "thread-storage.cc" ]
@@ -178,7 +177,7 @@ libc_source_set("musl-glue") {
 libc_source_set("musl-tls") {
   visibility = [ ":*" ]
 
-  # TODO(https://fxbug.dev/342469121): When this goes away, all the
+  # TODO(https://fxbug.dev/349433421): When this goes away, all the
   # asm-linkage shenanigans can be removed from thread-storage.h.
   basic_abi = true
   global_symbols = [
@@ -274,7 +273,6 @@ libc_source_set("thread-create") {
   ]
   deps = [
     ":stack-abi",
-    ":thread-list",
     "..:weak",
     "//src/lib/elfldltl:headers",
   ]

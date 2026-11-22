@@ -6,6 +6,8 @@
 
 //! ARM SMMUv2 controller implementation.
 
+#[cfg(is_kernel)]
+use core::convert::Infallible;
 use core::ffi::c_void;
 use core::fmt::Write as _;
 use core::pin::Pin;
@@ -15,73 +17,49 @@ use fbl::{
     Array, DefaultObjectTag, DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode,
     Recyclable, RefPtr, TrackingSize, pin_make_ref_counted,
 };
+#[cfg(is_kernel)]
+use ksync::KMutexGuard;
 use ksync::{KCell, KMutex, LockToken};
+#[cfg(is_kernel)]
+use pin_init::PinInit;
 use pin_init::{pin_data, pinned_drop};
 use zx_status::Status;
 
+#[cfg(ktest)]
+use crate::arm_smmu::common::PAGE_SIZE_USIZE;
+#[allow(unused_imports)]
+pub(crate) use crate::arm_smmu::common::irq::{
+    IrqDef, ZBI_ARM_SMMU_IRQ_FLAGS_ACTIVE_HIGH, ZBI_ARM_SMMU_IRQ_FLAGS_ACTIVE_LOW,
+    ZBI_ARM_SMMU_IRQ_FLAGS_FALLING_EDGE, ZBI_ARM_SMMU_IRQ_FLAGS_RISING_EDGE, ZbiDcfgArmSmmuIrq,
+};
 use crate::arm_smmu::common::{
-    ArmSmmuMode, DRIVER_OOPS_BANNER, EscapedName, InterruptPolarity, InterruptTriggerMode, SmmuEnv,
-    SmmuNoIrqSavePolicy, SmmuRawMutex, SmmuRawSpinLock, ZX_MAX_NAME_LEN, ZX_RSRC_KIND_MMIO,
+    ArmSmmuMode, DRIVER_OOPS_BANNER, EscapedName, SmmuEnv, SmmuNoIrqSavePolicy, SmmuRawMutex,
+    SmmuRawSpinLock, ZX_RSRC_KIND_MMIO,
 };
 use crate::arm_smmu::v2::context_bank::ContextBank;
+use crate::arm_smmu::v2::registers::SmmuMmio;
 use crate::arm_smmu::v2::registers::gr0::{
     ClientPd, Cr0, Cr2, ExidEnable, Gfar, Gfsr, Gfsynr0, Gfsynr1, Idr0, Idr1, Idr2, Idr7, S2cr,
-    S2crBypass, S2crFault, S2crTranslation, S2crType, Smr, Stalld, Tlbgstatus, Tlbgsync,
-    Tlbiallnsnh,
+    S2crTranslation, S2crType, Smr, Stalld, Tlbgstatus, Tlbgsync, Tlbiallnsnh,
 };
-use crate::arm_smmu::v2::registers::gr1::{
-    Cba2r, Cba2rVa64, Cbar, CbarS1TS2Bypass, CbarS1TS2Fault, CbarS1TS2Translate, CbarS2Translation,
-    CbarType, Cbfrsynra,
-};
-use crate::arm_smmu::v2::registers::s1cbr::{
-    Far, Fsr, Fsynr0, Sctlr, Tcr, Tcr32Bit, Tcr64Bit, TcrExt32Bit, Ttbr0_32Bit, Ttbr0_64Bit,
-    Ttbr0Ext32Bit, Ttbr1_32Bit, Ttbr1_64Bit, Ttbr1Ext32Bit,
-};
-use crate::arm_smmu::v2::registers::{FieldDesc, SmmuMmio};
-use crate::arm_smmu::v2::smmu_bti::SmmuBti;
+use crate::arm_smmu::v2::registers::gr1::{Cbar, Cbfrsynra};
+use crate::arm_smmu::v2::registers::s1cbr::{Far, Fsr, Fsynr0, Sctlr};
+use crate::arm_smmu::v2::smmu_bti::{SmmuV2Bti, SmmuV2BtiLockGuard};
 use crate::arm_smmu::v2::stream_match_reg::StreamMatchRegGroup;
 use crate::arm_smmu::v2::utils::{
-    AddrMode, Bitmask128, BtiMode, SmmuParams, SmrValue, arm_cbar_type_to_string,
-    arm_s2cr_type_to_string, arm_smmu_mode_to_string, bti_mode_to_string,
+    Bitmask128, BtiMode, SmmuParams, SmrValue, arm_cbar_type_to_string, arm_s2cr_type_to_string,
 };
 
-/// ZBI ARM SMMU IRQ flag indicating rising-edge trigger (`ZBI_ARM_SMMU_IRQ_FLAGS_RISING_EDGE`).
-pub const ZBI_ARM_SMMU_IRQ_FLAGS_RISING_EDGE: u32 = 1 << 0;
-
-/// ZBI ARM SMMU IRQ flag indicating falling-edge trigger (`ZBI_ARM_SMMU_IRQ_FLAGS_FALLING_EDGE`).
-pub const ZBI_ARM_SMMU_IRQ_FLAGS_FALLING_EDGE: u32 = 1 << 1;
-
-/// ZBI ARM SMMU IRQ flag indicating active-high level polarity
-/// (`ZBI_ARM_SMMU_IRQ_FLAGS_ACTIVE_HIGH`).
-pub const ZBI_ARM_SMMU_IRQ_FLAGS_ACTIVE_HIGH: u32 = 1 << 2;
-
-/// ZBI ARM SMMU IRQ flag indicating active-low level polarity
-/// (`ZBI_ARM_SMMU_IRQ_FLAGS_ACTIVE_LOW`).
-pub const ZBI_ARM_SMMU_IRQ_FLAGS_ACTIVE_LOW: u32 = 1 << 3;
-
-/// Maximum number of IRQ descriptors in [`ZbiDcfgArmSmmuDriver::irqs`].
+/// Maximum number of IRQ descriptors in [`ZbiDcfgArmSmmuV2Driver::irqs`].
 pub const ZBI_ARM_SMMU_MAX_IRQS: usize = 128;
 
-/// Maximum number of handoff SMR entries in [`ZbiDcfgArmSmmuDriver::handoff_smrs`].
+/// Maximum number of handoff SMR entries in [`ZbiDcfgArmSmmuV2Driver::handoff_smrs`].
 pub const ZBI_ARM_SMMU_MAX_HANDOFF_SMRS: usize = 16;
-
-/// ZBI IRQ descriptor for an ARM SMMUv2 interrupt line.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ZbiDcfgArmSmmuIrq {
-    /// Interrupt number (GIC SPI/PPI).
-    pub num: u32,
-    /// Interrupt configuration flags (`ZBI_ARM_SMMU_IRQ_FLAGS_*`).
-    pub flags: u32,
-}
-
-zr::static_assert!(core::mem::size_of::<ZbiDcfgArmSmmuIrq>() == 8);
-zr::static_assert!(core::mem::align_of::<ZbiDcfgArmSmmuIrq>() == 4);
 
 /// ZBI driver configuration payload for an ARM SMMUv2 instance.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct ZbiDcfgArmSmmuDriver {
+pub struct ZbiDcfgArmSmmuV2Driver {
     /// Base physical address of the SMMU address space (Global Register Space 0).
     pub mmio_phys: u64,
     /// Number of context banks that a driver should limit itself to using (`0` for no override).
@@ -101,10 +79,10 @@ pub struct ZbiDcfgArmSmmuDriver {
     pub handoff_smrs: [u32; ZBI_ARM_SMMU_MAX_HANDOFF_SMRS],
 }
 
-zr::static_assert!(core::mem::size_of::<ZbiDcfgArmSmmuDriver>() == 1120);
-zr::static_assert!(core::mem::align_of::<ZbiDcfgArmSmmuDriver>() == 8);
+zr::static_assert!(core::mem::size_of::<ZbiDcfgArmSmmuV2Driver>() == 1120);
+zr::static_assert!(core::mem::align_of::<ZbiDcfgArmSmmuV2Driver>() == 8);
 
-impl Default for ZbiDcfgArmSmmuDriver {
+impl Default for ZbiDcfgArmSmmuV2Driver {
     fn default() -> Self {
         Self {
             mmio_phys: 0,
@@ -130,16 +108,61 @@ pub struct ZxIommuDescArmSmmu {
 zr::static_assert!(core::mem::size_of::<ZxIommuDescArmSmmu>() == 8);
 zr::static_assert!(core::mem::align_of::<ZxIommuDescArmSmmu>() == 8);
 
-ksync::declare_singleton_lock!(pub(crate) SmmuInstanceLock, SmmuRawMutex);
+// Kernel mutexes cannot be constructed in a `const` context, so in the kernel the singleton's
+// mutex is constructed by an lk init hook.
+#[cfg(is_kernel)]
+#[ksync::guarded]
+pub(crate) struct SmmuV2InstanceMutex {
+    #[mutex]
+    pub(crate) lock: ksync::KMutex<SmmuRawMutex>,
+}
+
+#[cfg(is_kernel)]
+pub(crate) type SmmuV2InstanceLock = SmmuV2InstanceMutexLockClass;
+
+#[cfg(is_kernel)]
+static SMMU_V2_INSTANCE_LOCK: lazy_init::LazyInit<SmmuV2InstanceMutex, lazy_init::NoCheck> =
+    lazy_init::LazyInit::uninit();
+
+#[cfg(is_kernel)]
+impl SmmuV2InstanceLock {
+    #[inline]
+    pub(crate) fn get() -> &'static ksync::KMutex<Self, SmmuRawMutex> {
+        // SAFETY: `SMMU_V2_INSTANCE_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` before
+        // `SmmuV2InstanceLock` can be accessed.
+        &unsafe { SMMU_V2_INSTANCE_LOCK.get_unchecked() }.lock
+    }
+
+    #[inline]
+    pub(crate) fn lock() -> impl PinInit<KMutexGuard<'static, Self, SmmuRawMutex>, Infallible> {
+        Self::get().lock()
+    }
+}
+
+#[cfg(is_kernel)]
+fn smmu_v2_instance_lock_init(_level: init::LkInitLevel) {
+    // SAFETY: lk init hooks run once during single-threaded early boot before `SmmuV2InstanceLock`
+    // can be accessed.
+    unsafe {
+        let Ok(()) = Pin::static_ref(&SMMU_V2_INSTANCE_LOCK)
+            .init_pin(pin_init::pin_init!(SmmuV2InstanceMutex { lock <- ksync::KMutex::init() }));
+    }
+}
+#[cfg(is_kernel)]
+init::lk_init_hook!(
+    smmu_v2_instance_lock,
+    smmu_v2_instance_lock_init,
+    init::LK_INIT_LEVEL_EARLIEST
+);
 
 pub(crate) struct GlobalInstanceList {
     initialized: core::cell::UnsafeCell<bool>,
     inner: core::cell::UnsafeCell<
-        core::mem::MaybeUninit<DoublyLinkedList<RefPtr<Smmu>, DefaultObjectTag, TrackingSize>>,
+        core::mem::MaybeUninit<DoublyLinkedList<RefPtr<SmmuV2>, DefaultObjectTag, TrackingSize>>,
     >,
 }
 
-// SAFETY: Access to `GlobalInstanceList` is synchronized via `SmmuInstanceLock`.
+// SAFETY: Access to `GlobalInstanceList` is synchronized via `SmmuV2InstanceLock`.
 unsafe impl Sync for GlobalInstanceList {}
 
 impl GlobalInstanceList {
@@ -152,9 +175,9 @@ impl GlobalInstanceList {
 
     pub(crate) fn get_mut<'a>(
         &'a self,
-        _token: &'a mut LockToken<'_, SmmuInstanceLock>,
-    ) -> Pin<&'a mut DoublyLinkedList<RefPtr<Smmu>, DefaultObjectTag, TrackingSize>> {
-        // SAFETY: Synchronized by the mutable `LockToken` for `SmmuInstanceLock`, which stays
+        _token: &'a mut LockToken<'_, SmmuV2InstanceLock>,
+    ) -> Pin<&'a mut DoublyLinkedList<RefPtr<SmmuV2>, DefaultObjectTag, TrackingSize>> {
+        // SAFETY: Synchronized by the mutable `LockToken` for `SmmuV2InstanceLock`, which stays
         // borrowed for as long as the returned reference is live, so that two calls cannot hand
         // out two live `&mut` references to the list.
         unsafe {
@@ -236,70 +259,17 @@ impl core::fmt::Write for FaultReportWriter<'_> {
     }
 }
 
-/// Parsed IRQ definition for a global or context bank interrupt line.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct IrqDef {
-    /// Interrupt vector number.
-    pub num: u32,
-    /// Interrupt flags (`ZBI_ARM_SMMU_IRQ_FLAGS_*`).
-    pub flags: u32,
-}
-
-impl IrqDef {
-    /// Constructs an [`IrqDef`] from a [`ZbiDcfgArmSmmuIrq`].
-    #[inline]
-    pub const fn from_zbi(irq: ZbiDcfgArmSmmuIrq) -> Self {
-        Self { num: irq.num, flags: irq.flags }
-    }
-
-    /// Returns `true` if exactly one valid trigger/polarity bit is set in `self.flags`.
-    #[inline]
-    pub const fn valid(&self) -> bool {
-        const VALID_BITS: u32 = ZBI_ARM_SMMU_IRQ_FLAGS_RISING_EDGE
-            | ZBI_ARM_SMMU_IRQ_FLAGS_FALLING_EDGE
-            | ZBI_ARM_SMMU_IRQ_FLAGS_ACTIVE_HIGH
-            | ZBI_ARM_SMMU_IRQ_FLAGS_ACTIVE_LOW;
-        (self.flags & VALID_BITS).count_ones() == 1
-    }
-
-    /// Returns the [`InterruptTriggerMode`] for this IRQ.
-    #[inline]
-    pub const fn trigger_mode(&self) -> InterruptTriggerMode {
-        if (self.flags & (ZBI_ARM_SMMU_IRQ_FLAGS_RISING_EDGE | ZBI_ARM_SMMU_IRQ_FLAGS_FALLING_EDGE))
-            != 0
-        {
-            InterruptTriggerMode::Edge
-        } else {
-            InterruptTriggerMode::Level
-        }
-    }
-
-    /// Returns the [`InterruptPolarity`] for this IRQ.
-    #[inline]
-    pub const fn polarity(&self) -> InterruptPolarity {
-        if (self.flags & (ZBI_ARM_SMMU_IRQ_FLAGS_RISING_EDGE | ZBI_ARM_SMMU_IRQ_FLAGS_ACTIVE_HIGH))
-            != 0
-        {
-            InterruptPolarity::High
-        } else {
-            InterruptPolarity::Low
-        }
-    }
-}
-
 /// The cookie registered with the interrupt controller for one global or context interrupt
 /// vector: which SMMU the vector belongs to, and its index in that SMMU's vector table.
 ///
-/// Temporary porting note: in C++ these two members live in the vector structures themselves
-/// (`GlobalIrqVector` / `ContextIrqVector`), and the cookie is a pointer to the vector. The
-/// interrupt thunks read them without holding `irq_lock`, which is fine in C++ because they never
-/// change after initialization. In Rust the vector tables are guarded by `irq_lock` and are
-/// accessed through `&mut` references to the whole table, which an unlocked read of one of their
-/// elements would alias. So the two immutable members are kept here, outside of the guarded
-/// tables.
+/// The interrupt thunks read these two members without holding `irq_lock`, which is sound
+/// because they never change after initialization. They are kept here and not in the vector
+/// structures (`GlobalIrqVector` / `ContextIrqVector`) because the vector tables are guarded by
+/// `irq_lock` and are accessed through `&mut` references to the whole table, which an unlocked
+/// read of one of their elements would alias.
 #[derive(Default)]
 pub(crate) struct IrqCookie {
-    smmu: *const Smmu,
+    smmu: *const SmmuV2,
     ndx: u32,
 }
 
@@ -317,10 +287,10 @@ pub(crate) struct ContextIrqVector {
     pub(crate) enabled: bool,
     pub(crate) registered: bool,
     pub(crate) in_flight: bool,
-    pub(crate) bti: Option<RefPtr<SmmuBti>>,
+    pub(crate) bti: Option<RefPtr<SmmuV2Bti>>,
 }
 
-/// Init-time immutable hardware configuration cached during `Smmu::init`.
+/// Init-time immutable hardware configuration cached during `SmmuV2::init`.
 #[derive(Debug, Default)]
 pub(crate) struct SmmuInitState {
     /// Stashed debug name formatted during initialization.
@@ -342,9 +312,13 @@ pub(crate) struct SmmuInitState {
     pub(crate) num_cbs: AtomicU32,
     pub(crate) num_smrgs: u32,
     /// Virtual address bases of the Global 0, Global 1, and Context Bank 0 register spaces.
-    pub(crate) gr0_base: SmmuMmio,
-    pub(crate) gr1_base: SmmuMmio,
-    pub(crate) cb0_base: SmmuMmio,
+    pub(in crate::arm_smmu) gr0_base: SmmuMmio,
+    pub(in crate::arm_smmu) gr1_base: SmmuMmio,
+    pub(in crate::arm_smmu) cb0_base: SmmuMmio,
+    /// Owned fake MMIO register buffer backing `gr0_base`, `gr1_base`, and `cb0_base` for
+    /// unregistered unit-test `Smmu` instances.
+    #[cfg(ktest)]
+    pub(super) unit_test_regs: Option<core::ptr::NonNull<[u64]>>,
 }
 
 /// An implementation of an `Iommu` based on the ARM SMMUv2 specification:
@@ -355,9 +329,9 @@ pub(crate) struct SmmuInitState {
 #[pin_data(PinnedDrop)]
 #[derive(Recyclable)]
 #[repr(C)]
-pub struct Smmu {
+pub struct SmmuV2 {
     #[pin]
-    pub(crate) list_node: DoublyLinkedListNode<Smmu>,
+    pub(crate) list_node: DoublyLinkedListNode<SmmuV2>,
     phys_reg_base: u64,
     init_state: core::cell::UnsafeCell<SmmuInitState>,
     /// The cookies registered with the interrupt controller, one per entry of `global_irqs` and
@@ -368,11 +342,18 @@ pub struct Smmu {
 
     #[mutex]
     pub(crate) lock: KMutex<SmmuRawMutex>,
+    /// Set while user mode holds this SMMU, given to it by `zx_iommu_create` (`fetch`); a second
+    /// request meanwhile fails with `ALREADY_BOUND`.
+    ///
+    /// Cleared when the IOMMU dispatcher user mode held it through is destroyed, which is when
+    /// its last handle is closed (or when `zx_iommu_create` fails after `fetch`):
+    /// `unbind_user_mode`. So a component which held the handle and restarted can bind the SMMU
+    /// again. BTIs made meanwhile are not undone by that; they hold this object themselves.
     #[guarded_by(lock)]
     pub(crate) user_mode_bound: bool,
     #[pin]
     #[guarded_by(lock)]
-    pub(crate) bti_list: DoublyLinkedList<RefPtr<SmmuBti>, DefaultObjectTag, TrackingSize>,
+    pub(crate) bti_list: DoublyLinkedList<RefPtr<SmmuV2Bti>, DefaultObjectTag, TrackingSize>,
     /// Each SMMU may have up to 128 either stream match register groups, or
     /// context banks, for us to allocate and associate with BTIs. Keep a 128-bit
     /// bitmask for each resource type which tracks which registers/context banks
@@ -393,22 +374,22 @@ pub struct Smmu {
 
 // Manual implementation because `#[pin_data]` copies field attributes onto its internal
 // projection struct literal, where derive helper attributes like `#[dll_node]` are rejected.
-impl DoublyLinkedListContainable<Self> for Smmu {
+impl DoublyLinkedListContainable<Self> for SmmuV2 {
     #[inline]
     fn get_node(&self) -> &DoublyLinkedListNode<Self> {
         &self.list_node
     }
 }
 
-// SAFETY: Mutable fields of `Smmu` are either initialized once in `init()` before publication or
-// synchronized by `lock`, `irq_lock`, or `SmmuInstanceLock`.
-unsafe impl Send for Smmu {}
-// SAFETY: Shared access to `Smmu` synchronizes mutable state via `lock`, `irq_lock`, or
-// `SmmuInstanceLock`.
-unsafe impl Sync for Smmu {}
+// SAFETY: Mutable fields of `SmmuV2` are either initialized once in `init()` before publication or
+// synchronized by `lock`, `irq_lock`, or `SmmuV2InstanceLock`.
+unsafe impl Send for SmmuV2 {}
+// SAFETY: Shared access to `SmmuV2` synchronizes mutable state via `lock`, `irq_lock`, or
+// `SmmuV2InstanceLock`.
+unsafe impl Sync for SmmuV2 {}
 
 #[pinned_drop]
-impl PinnedDrop for Smmu {
+impl PinnedDrop for SmmuV2 {
     fn drop(mut self: Pin<&mut Self>) {
         // By the time that we destruct, all of our interrupts should be unregistered.
         // Assert this.
@@ -431,14 +412,21 @@ impl PinnedDrop for Smmu {
         unsafe {
             let mut_ref = self.as_mut().get_unchecked_mut();
             Pin::new_unchecked(mut_ref.bti_list.get_inner_mut()).clear();
+            #[cfg(ktest)]
+            if let Some(raw_regs) = mut_ref.init_state.get_mut().unit_test_regs.take() {
+                // SAFETY: `raw_regs` was allocated via `Array::<u64>::into_raw` in
+                // `create_for_unit_test`, and `self` is in `PinnedDrop::drop` with `bti_list`
+                // empty, so no `SmmuMmio` handle into `raw_regs` remains live.
+                drop(Array::from_raw(raw_regs.as_ptr()));
+            }
         }
     }
 }
 
 extern "C" fn global_irq_thunk(cookie: *mut c_void) {
     // SAFETY: `cookie` was registered in `register_global_irqs` pointing to an `IrqCookie` in
-    // `Smmu::global_irq_cookies`, which is never written after `init()` and which lives, along
-    // with the `Smmu` it points to, until after `unregister_interrupts` completes.
+    // `SmmuV2::global_irq_cookies`, which is never written after `init()` and which lives, along
+    // with the `SmmuV2` it points to, until after `unregister_interrupts` completes.
     unsafe {
         let cookie = &*(cookie as *const IrqCookie);
         (*cookie.smmu).handle_global_irq(cookie.ndx);
@@ -447,8 +435,8 @@ extern "C" fn global_irq_thunk(cookie: *mut c_void) {
 
 extern "C" fn context_irq_thunk(cookie: *mut c_void) {
     // SAFETY: `cookie` was registered in `register_context_irqs` pointing to an `IrqCookie` in
-    // `Smmu::context_irq_cookies`, which is never written after `init()` and which lives, along
-    // with the `Smmu` it points to, until after `unregister_interrupts` completes.
+    // `SmmuV2::context_irq_cookies`, which is never written after `init()` and which lives, along
+    // with the `SmmuV2` it points to, until after `unregister_interrupts` completes.
     unsafe {
         let cookie = &*(cookie as *const IrqCookie);
         (*cookie.smmu).handle_context_irq(cookie.ndx);
@@ -462,9 +450,9 @@ trait IrqVectorEntry: Sized {
     fn irq_def(&self) -> IrqDef;
     fn registered(&self) -> bool;
     fn set_registered(&mut self, registered: bool);
-    fn cookies(smmu: &Smmu) -> &core::cell::UnsafeCell<Array<IrqCookie>>;
-    fn slice<'b>(guard: &'b SmmuIrqLockGuard<'_>) -> &'b [Self];
-    fn slice_mut<'b>(guard: Pin<&'b mut SmmuIrqLockGuard<'_>>) -> &'b mut [Self];
+    fn cookies(smmu: &SmmuV2) -> &core::cell::UnsafeCell<Array<IrqCookie>>;
+    fn slice<'b>(guard: &'b SmmuV2IrqLockGuard<'_>) -> &'b [Self];
+    fn slice_mut<'b>(guard: Pin<&'b mut SmmuV2IrqLockGuard<'_>>) -> &'b mut [Self];
 }
 
 impl IrqVectorEntry for GlobalIrqVector {
@@ -487,17 +475,17 @@ impl IrqVectorEntry for GlobalIrqVector {
     }
 
     #[inline]
-    fn cookies(smmu: &Smmu) -> &core::cell::UnsafeCell<Array<IrqCookie>> {
+    fn cookies(smmu: &SmmuV2) -> &core::cell::UnsafeCell<Array<IrqCookie>> {
         &smmu.global_irq_cookies
     }
 
     #[inline]
-    fn slice<'b>(guard: &'b SmmuIrqLockGuard<'_>) -> &'b [Self] {
+    fn slice<'b>(guard: &'b SmmuV2IrqLockGuard<'_>) -> &'b [Self] {
         guard.global_irqs()
     }
 
     #[inline]
-    fn slice_mut<'b>(guard: Pin<&'b mut SmmuIrqLockGuard<'_>>) -> &'b mut [Self] {
+    fn slice_mut<'b>(guard: Pin<&'b mut SmmuV2IrqLockGuard<'_>>) -> &'b mut [Self] {
         guard.global_irqs_mut()
     }
 }
@@ -522,22 +510,22 @@ impl IrqVectorEntry for ContextIrqVector {
     }
 
     #[inline]
-    fn cookies(smmu: &Smmu) -> &core::cell::UnsafeCell<Array<IrqCookie>> {
+    fn cookies(smmu: &SmmuV2) -> &core::cell::UnsafeCell<Array<IrqCookie>> {
         &smmu.context_irq_cookies
     }
 
     #[inline]
-    fn slice<'b>(guard: &'b SmmuIrqLockGuard<'_>) -> &'b [Self] {
+    fn slice<'b>(guard: &'b SmmuV2IrqLockGuard<'_>) -> &'b [Self] {
         guard.context_irqs()
     }
 
     #[inline]
-    fn slice_mut<'b>(guard: Pin<&'b mut SmmuIrqLockGuard<'_>>) -> &'b mut [Self] {
+    fn slice_mut<'b>(guard: Pin<&'b mut SmmuV2IrqLockGuard<'_>>) -> &'b mut [Self] {
         guard.context_irqs_mut()
     }
 }
 
-impl Smmu {
+impl SmmuV2 {
     fn format_smmu_name(phys_reg_base: u64) -> ([u8; 32], usize) {
         let mut buf = [0u8; 32];
         let prefix = b"SMMU@0x";
@@ -562,9 +550,10 @@ impl Smmu {
 
     #[inline]
     pub(crate) fn init_state(&self) -> &SmmuInitState {
-        // SAFETY: Non-atomic fields of `init_state` are only mutated inside `init()` while holding
-        // `self.lock` before any interrupt handlers are registered or `self` is published to
-        // `INSTANCES`. Post-registration updates to `num_cbs` use atomic operations.
+        // SAFETY: Non-atomic fields of `init_state` are either initialized before `self` is
+        // allocated or mutated inside `init()` while holding `self.lock` before any interrupt
+        // handlers are registered or `self` is published to `INSTANCES`. Post-registration updates
+        // to `num_cbs` use atomic operations.
         unsafe { &*self.init_state.get() }
     }
 
@@ -585,13 +574,13 @@ impl Smmu {
 
     /// Returns the valid Stream ID mask (`(mask << 16) | id`) for this SMMU instance.
     #[inline]
-    pub fn valid_stream_id_mask(&self) -> u32 {
+    pub(crate) fn valid_stream_id_mask(&self) -> u32 {
         self.init_state().valid_stream_id_mask
     }
 
     /// Returns the size in bytes of each register page (`4096` or `65536`).
     #[inline]
-    pub fn reg_page_size(&self) -> usize {
+    pub(crate) fn reg_page_size(&self) -> usize {
         if self.init_state().idr1.pagesize() != 0 { 1usize << 16 } else { 1usize << 12 }
     }
 
@@ -606,47 +595,47 @@ impl Smmu {
     /// `2^(NUMPAGENDXB + 1)` or `2**(NUMPAGENDXB + 1)` could be used as an acceptable substitute.
     /// Section 8.1.1 uses a proper superscript notation, and is more correct/clear.
     #[inline]
-    pub fn reg_page_cnt(&self) -> usize {
+    pub(crate) fn reg_page_cnt(&self) -> usize {
         1usize << (self.init_state().idr1.numpagendxb() + 1)
     }
 
     /// Returns the effective number of Stream Match Register Groups managed by this SMMU.
     #[inline]
-    pub fn num_smrgs(&self) -> u32 {
+    pub(crate) fn num_smrgs(&self) -> u32 {
         self.init_state().num_smrgs
     }
 
     /// Returns the effective number of Context Banks managed by this SMMU.
     #[inline]
-    pub fn num_cbs(&self) -> u32 {
+    pub(crate) fn num_cbs(&self) -> u32 {
         // `Relaxed` suffices: `num_cbs` is only written during `init()` before `self` is published
-        // under `SmmuInstanceLock` (and before any context IRQ is unmasked), so lock release/acquire
-        // already orders all post-init reads; `AtomicU32` only avoids `&mut SmmuInitState` after
-        // IRQ handlers are registered.
+        // under `SmmuV2InstanceLock` (and before any context IRQ is unmasked), so lock
+        // release/acquire already orders all post-init reads; `AtomicU32` only avoids
+        // `&mut SmmuInitState` after IRQ handlers are registered.
         self.init_state().num_cbs.load(Ordering::Relaxed)
     }
 
     /// Returns the `GR0` MMIO bank handle.
     #[inline]
-    pub fn gr0_base(&self) -> SmmuMmio {
+    pub(in crate::arm_smmu) fn gr0_base(&self) -> SmmuMmio {
         self.init_state().gr0_base
     }
 
     /// Returns the `GR1` MMIO bank handle.
     #[inline]
-    pub fn gr1_base(&self) -> SmmuMmio {
+    pub(in crate::arm_smmu) fn gr1_base(&self) -> SmmuMmio {
         self.init_state().gr1_base
     }
 
     /// Returns the `CB0` MMIO bank handle.
     #[inline]
-    pub fn cb0_base(&self) -> SmmuMmio {
+    pub(in crate::arm_smmu) fn cb0_base(&self) -> SmmuMmio {
         self.init_state().cb0_base
     }
 
     /// Returns the MMIO bank handle for Context Bank `ndx`.
     #[inline]
-    pub fn get_cb_base(&self, ndx: u32) -> SmmuMmio {
+    pub(in crate::arm_smmu) fn get_cb_base(&self, ndx: u32) -> SmmuMmio {
         debug_assert!(ndx < self.num_cbs());
         let page_sz = self.reg_page_size();
         self.cb0_base().sub_bank(page_sz * (ndx as usize), page_sz)
@@ -654,7 +643,10 @@ impl Smmu {
 
     /// Builds an [`SmmuParams`] view implementing `SmmuController` while holding `guard`.
     #[inline]
-    pub(crate) fn controller_params<'a>(&'a self, guard: &'a SmmuLockGuard<'_>) -> SmmuParams<'a> {
+    pub(in crate::arm_smmu) fn controller_params<'a>(
+        &'a self,
+        guard: &'a SmmuV2LockGuard<'_>,
+    ) -> SmmuParams<'a> {
         SmmuParams {
             name: self.name(),
             op_mode: self.op_mode(),
@@ -670,7 +662,7 @@ impl Smmu {
     }
 
     /// Returns the [`IrqDef`] for context bank `ndx`, if within bounds.
-    pub fn get_context_irq(&self, ndx: u32) -> Option<IrqDef> {
+    pub(crate) fn get_context_irq(&self, ndx: u32) -> Option<IrqDef> {
         ksync::lock!(let guard = self.lock_irq_lock());
         let idx = ndx as usize;
         if idx < guard.context_irqs().len() {
@@ -681,7 +673,7 @@ impl Smmu {
     }
 
     fn find_instance(
-        token: &mut LockToken<'_, SmmuInstanceLock>,
+        token: &mut LockToken<'_, SmmuV2InstanceLock>,
         phys_reg_base: u64,
     ) -> Option<RefPtr<Self>> {
         for smmu in INSTANCES.get_mut(token).iter() {
@@ -692,21 +684,32 @@ impl Smmu {
         None
     }
 
-    /// Creates, initializes, and registers a new `Smmu` instance from a ZBI driver config.
-    pub fn create(config: &ZbiDcfgArmSmmuDriver) -> Result<RefPtr<Self>, Status> {
+    /// Creates, initializes, and registers a new `SmmuV2` instance from a ZBI driver config.
+    pub fn create(config: &ZbiDcfgArmSmmuV2Driver) -> Result<RefPtr<Self>, Status> {
         // It is an error to attempt to create an SMMU instance with registers which
         // have already been used.
-        ksync::lock!(let mut instance_guard = SmmuInstanceLock::lock());
+        ksync::lock!(let mut instance_guard = SmmuV2InstanceLock::lock());
         if Self::find_instance(instance_guard.as_mut().token_mut(), config.mmio_phys).is_some() {
             return Err(Status::ALREADY_BOUND);
         }
 
         // Looks like this is a new instance. Allocate an instance, then attempt to
         // initialize it. If we succeed, add the instance to the global list.
-        let instance = pin_make_ref_counted!(Smmu {
+        let instance = Self::allocate_empty(config.mmio_phys, SmmuInitState::default())?;
+
+        instance.init(config)?;
+        INSTANCES.get_mut(instance_guard.as_mut().token_mut()).push_back(instance.clone());
+        Ok(instance)
+    }
+
+    fn allocate_empty(
+        phys_reg_base: u64,
+        init_state: SmmuInitState,
+    ) -> Result<RefPtr<Self>, Status> {
+        pin_make_ref_counted!(SmmuV2 {
             list_node: DoublyLinkedListNode::new(),
-            phys_reg_base: config.mmio_phys,
-            init_state: core::cell::UnsafeCell::new(SmmuInitState::default()),
+            phys_reg_base,
+            init_state: core::cell::UnsafeCell::new(init_state),
             global_irq_cookies: core::cell::UnsafeCell::new(Array::new()),
             context_irq_cookies: core::cell::UnsafeCell::new(Array::new()),
             lock <- KMutex::init(),
@@ -718,29 +721,116 @@ impl Smmu {
             global_irqs: KCell::new(Array::new()),
             context_irqs: KCell::new(Array::new()),
         })
-        .map_err(|_| Status::NO_MEMORY)?;
+        .map_err(|_| Status::NO_MEMORY)
+    }
 
-        instance.init(config)?;
-        INSTANCES.get_mut(instance_guard.as_mut().token_mut()).push_back(instance.clone());
+    /// Creates an unregistered `SmmuV2` backed by an owned fake MMIO register buffer (`GR0`,
+    /// `GR1`, and 6 `CB` pages) for in-kernel unit tests without touching peripheral maps or
+    /// hardware interrupt controllers.
+    #[cfg(ktest)]
+    pub(in crate::arm_smmu) fn create_for_unit_test(
+        op_mode: ArmSmmuMode,
+    ) -> Result<RefPtr<Self>, Status> {
+        const TEST_PHYS_REG_BASE: u64 = 0x0900_0000;
+        const TEST_NUM_SMRGS: u32 = 6;
+        const TEST_NUM_CBS: u32 = 6;
+        // `GR0` + `GR1` + `CB0..CB5` packed back-to-back as independent `SmmuMmio` banks.
+        const TEST_REG_PAGES: usize = 2 + (TEST_NUM_CBS as usize);
+        const UNIT_TEST_FAKE_REG_WORDS: usize =
+            TEST_REG_PAGES * (PAGE_SIZE_USIZE / core::mem::size_of::<u64>());
+
+        let fake_regs = Array::<u64>::try_new_zeroed_slice(UNIT_TEST_FAKE_REG_WORDS)
+            .map_err(|_| Status::NO_MEMORY)?;
+        let raw_regs = fake_regs.into_raw();
+        let mut free_raw_regs = zr::defer(|| {
+            // SAFETY: `raw_regs` came from `fake_regs.into_raw()` above and `allocate_empty`
+            // failed before `SmmuV2` took ownership.
+            unsafe { drop(Array::from_raw(raw_regs)) };
+        });
+        let base_vaddr = raw_regs.cast::<u64>().expose_provenance();
+        // SAFETY: `raw_regs` is an 8-byte-aligned `TEST_REG_PAGES * PAGE_SIZE_USIZE` heap
+        // allocation with exposed provenance, owned by `SmmuInitState::unit_test_regs` until
+        // `SmmuV2`'s `PinnedDrop::drop` runs after all child BTIs/PMTs have been torn down, and
+        // writes to this RAM-backed test buffer cannot cause DMA or hardware UB.
+        let (gr0_base, gr1_base, cb0_base) = unsafe {
+            (
+                SmmuMmio::with_size(base_vaddr, PAGE_SIZE_USIZE),
+                SmmuMmio::with_size(base_vaddr + PAGE_SIZE_USIZE, PAGE_SIZE_USIZE),
+                SmmuMmio::with_size(
+                    base_vaddr + 2 * PAGE_SIZE_USIZE,
+                    (TEST_NUM_CBS as usize) * PAGE_SIZE_USIZE,
+                ),
+            )
+        };
+
+        let (name_buf, name_len) = Self::format_smmu_name(TEST_PHYS_REG_BASE);
+        let mut idr0 = Idr0::from_value(0);
+        // Stage-1 translation + stream matching, 15-bit StreamIDs, 1 global fault IRQ.
+        idr0.set_s1ts(1).set_sms(1).set_numsmrg(TEST_NUM_SMRGS).set_numsidb(15).set_numirpt(1);
+        let mut idr1 = Idr1::from_value(0);
+        // 4 KiB register pages (`pagesize = 0`), `2^(1 + 1) = 4` global pages (`numpagendxb = 1`).
+        idr1.set_pagesize(0).set_numpagendxb(1).set_numcb(TEST_NUM_CBS);
+        let mut idr2 = Idr2::from_value(0);
+        // 48-bit input/output address sizes (`5` per SMMUv2 Table 9-5) and VMSAv8-64 4 KiB granule.
+        idr2.set_ias(5).set_oas(5).set_ptfsv8_4kb(1);
+        let mut idr7 = Idr7::from_value(0);
+        idr7.set_major(2).set_minor(0);
+
+        let init_state = SmmuInitState {
+            name_buf,
+            name_len,
+            op_mode,
+            idr0,
+            idr1,
+            idr2,
+            idr7,
+            valid_stream_id_mask: SmrValue::FULL_VALID_MASK,
+            num_cbs: AtomicU32::new(TEST_NUM_CBS),
+            num_smrgs: TEST_NUM_SMRGS,
+            gr0_base,
+            gr1_base,
+            cb0_base,
+            unit_test_regs: core::ptr::NonNull::new(raw_regs),
+        };
+        let instance = Self::allocate_empty(TEST_PHYS_REG_BASE, init_state)?;
+        free_raw_regs.cancel();
+        {
+            ksync::lock!(let mut guard = instance.lock_lock());
+            guard.as_mut().available_smrgs_mut().set_lowest_n_bits(TEST_NUM_SMRGS);
+            guard.as_mut().available_cbs_mut().set_lowest_n_bits(TEST_NUM_CBS);
+            let params = instance.controller_params(&guard);
+            for i in 0..TEST_NUM_SMRGS {
+                StreamMatchRegGroup::disable_at(&params, i);
+            }
+            for i in 0..TEST_NUM_CBS {
+                ContextBank::disable_at(&params, i);
+            }
+        }
+
         Ok(instance)
     }
 
-    /// Looks up and binds an `Smmu` instance matching `desc` (a [`ZxIommuDescArmSmmu`]).
+    /// Looks up and binds an `SmmuV2` instance matching `desc` (a [`ZxIommuDescArmSmmu`]).
     ///
     /// Returns `Ok(Some(smmu))` when the SMMU is in `Passthru` or `Enforced` mode, or `Ok(None)`
     /// when the global or per-instance SMMU mode is `Disabled` (indicating the caller should
     /// substitute a `StubIommu`).
     pub fn fetch(desc: &[u8]) -> Result<Option<RefPtr<Self>>, Status> {
-        // If the global SMMU mode is set to Disabled, attempt to create a stub IOMMU
-        // for the user. Any SMMUs we have in our global list are only there so we
-        // can dump registers using `k` commands.
-        if SmmuEnv::boot_option_smmu_mode(None) == ArmSmmuMode::Disabled {
-            return Ok(None);
-        }
+        // When SMMUs are disabled by default, a request we cannot match to an instance gets a
+        // stub IOMMU rather than an error: the caller is on a system which, as far as it should
+        // be able to tell, has no SMMU.
+        //
+        // The default does not decide the answer for an instance we do find, though. The mode of
+        // a specific SMMU can be overridden by its base address, in either direction, and it is
+        // the instance's own mode which says whether it is in use (below).
+        let disabled_by_default = SmmuEnv::boot_option_smmu_mode(None) == ArmSmmuMode::Disabled;
 
         // Check our parameters, then go looking for an instance which was created
         // during kernel startup which has not already been bound by user-mode.
         let Ok(bytes): Result<[u8; 8], _> = desc.try_into() else {
+            if disabled_by_default {
+                return Ok(None);
+            }
             dprintf!(INFO, "Bad desc when fetching SMMUv2 ({:p}, {})\n", desc.as_ptr(), desc.len());
             return Err(Status::INVALID_ARGS);
         };
@@ -757,17 +847,17 @@ impl Smmu {
         // that no other handle is currently bound to it.
         let register_base = u64::from_ne_bytes(bytes) & !7u64;
 
-        ksync::lock!(let mut instance_guard = SmmuInstanceLock::lock());
+        ksync::lock!(let mut instance_guard = SmmuV2InstanceLock::lock());
         let Some(instance) =
             Self::find_instance(instance_guard.as_mut().token_mut(), register_base)
         else {
-            return Err(Status::NOT_FOUND);
+            return if disabled_by_default { Ok(None) } else { Err(Status::NOT_FOUND) };
         };
 
-        // At this point, we know that the default `ArmSmmuMode` is _not_ disabled.
-        // But, if we found the instance requested by the user whose mode has been
-        // overridden to disabled, do not return a reference to the disabled
-        // instance. Give them a new stub IOMMU instance instead.
+        // If the instance requested by the user is disabled, whether by default or because its
+        // mode has been overridden, do not return a reference to it. Give them a new stub IOMMU
+        // instance instead. Any disabled SMMUs we have in our global list are only there so we
+        // can dump registers using `k` commands.
         if instance.op_mode() == ArmSmmuMode::Disabled {
             return Ok(None);
         }
@@ -781,17 +871,29 @@ impl Smmu {
         }
     }
 
-    /// Cleanly tears down an `Smmu` instance between tests and removes it from the static
+    /// Ends the binding made by `fetch`: the IOMMU dispatcher user mode held this SMMU through
+    /// has been destroyed, or could not be made at all.
+    ///
+    /// The caller ends each binding exactly once. Nothing else is undone: a BTI made through
+    /// the binding stays in `bti_list` until its own last handle is closed, and whoever binds
+    /// next gets `ALREADY_EXISTS` from `create_bti` for a stream ID such a BTI still has.
+    pub(crate) fn unbind_user_mode(&self) {
+        ksync::lock!(let mut guard = self.lock_lock());
+        assert!(*guard.user_mode_bound());
+        *guard.as_mut().user_mode_bound_mut() = false;
+    }
+
+    /// Cleanly tears down an `SmmuV2` instance between tests and removes it from the static
     /// `INSTANCES` list while verifying destructor invariants.
     ///
-    /// In production kernel boots, `Smmu` instances registered in `INSTANCES` live for the
-    /// lifetime of the kernel, whereas unit and model tests create and destroy multiple `Smmu`
+    /// In production kernel boots, `SmmuV2` instances registered in `INSTANCES` live for the
+    /// lifetime of the kernel, whereas unit and model tests create and destroy multiple `SmmuV2`
     /// instances within a single process.
     #[cfg(any(ktest, not(is_kernel)))]
     pub fn destroy_for_test(smmu: RefPtr<Self>) {
         let mut target: Option<RefPtr<Self>> = None;
         {
-            ksync::lock!(let mut instance_guard = SmmuInstanceLock::lock());
+            ksync::lock!(let mut instance_guard = SmmuV2InstanceLock::lock());
             let list = INSTANCES.get_mut(instance_guard.as_mut().token_mut());
             let found = list.iter().any(|s| core::ptr::eq(s, &*smmu));
             if found {
@@ -804,17 +906,48 @@ impl Smmu {
             return;
         };
 
+        target.teardown_btis_for_test();
+
+        {
+            ksync::lock!(let _guard = target.lock_lock());
+            target.unregister_interrupts();
+        }
+        drop(target);
+    }
+
+    /// Tears down an unregistered `SmmuV2` created by [`Self::create_for_unit_test`], dismantling
+    /// any remaining orphaned or adopted BTIs before dropping the instance.
+    #[cfg(ktest)]
+    pub(in crate::arm_smmu) fn shutdown_for_unit_test(smmu: RefPtr<Self>) {
+        smmu.teardown_btis_for_test();
+        drop(smmu);
+    }
+
+    #[cfg(ktest)]
+    fn teardown_btis_for_test(&self) {
         // Shut down any remaining adopted or quarantined BTIs before unregistering
         // interrupts so all `ContextBank`, `StreamMatchRegGroup`, and `DeviceAspace`
         // resources are cleanly released.
         loop {
             let bti = {
-                ksync::lock!(let guard = target.lock_lock());
+                ksync::lock!(let guard = self.lock_lock());
                 guard.bti_list().front().map(RefPtr::from_ref)
             };
             let Some(bti) = bti else {
                 break;
             };
+
+            // Unpin any PMTs left active by an early test failure before shutting down the BTI.
+            loop {
+                let pmt = {
+                    ksync::lock!(let pmt_guard = bti.lock_pmt_lock());
+                    pmt_guard.active_pmt_list().front().map(RefPtr::from_ref)
+                };
+                let Some(pmt) = pmt else {
+                    break;
+                };
+                pmt.release_pinned_memory();
+            }
 
             let mut handled_adopted_without_cb = false;
             {
@@ -822,6 +955,7 @@ impl Smmu {
                 ksync::lock!(let mut bti_guard = bti.lock_lock());
                 *pmt_guard.as_mut().quarantined_pmt_count_mut() = 0;
                 *pmt_guard.as_mut().quarantined_page_count_mut() = 0;
+                *pmt_guard.as_mut().orphaned_mut() = false;
                 if *bti_guard.mode() == BtiMode::Adopted {
                     if let Some(ref mut cb) = *bti_guard.as_mut().context_bank_mut() {
                         cb.force_mode_for_test(BtiMode::Fault);
@@ -840,8 +974,10 @@ impl Smmu {
 
             if handled_adopted_without_cb {
                 let removed = {
-                    ksync::lock!(let mut guard = target.lock_lock());
-                    // SAFETY: `bti` is at the front of `target.bti_list`.
+                    ksync::lock!(let mut guard = self.lock_lock());
+                    assert!(bti.in_container());
+                    // SAFETY: `bti` was obtained from `self.bti_list` (the only list it can be
+                    // linked in) and verified `in_container()` under `self.lock`.
                     unsafe { guard.as_mut().bti_list_mut().erase(&*bti) }
                 };
                 {
@@ -853,16 +989,19 @@ impl Smmu {
                 bti.on_end_of_life();
             }
         }
-
-        {
-            ksync::lock!(let _guard = target.lock_lock());
-            target.unregister_interrupts();
-        }
-        drop(target);
     }
 
-    /// Creates a new [`SmmuBti`] for `bus_txn_id`.
-    pub fn create_bti(&self, bus_txn_id: u64) -> Result<RefPtr<SmmuBti>, Status> {
+    /// Creates a new [`SmmuV2Bti`] for `bus_txn_id`.
+    pub fn create_bti(&self, bus_txn_id: u64) -> Result<RefPtr<SmmuV2Bti>, Status> {
+        // If our SMMU driver is set to disabled, no one should be attempting to
+        // allocate any BTIs here. They should be using StubIommus instead. Check
+        // upfront before acquiring `self.lock` or touching hardware registers.
+        let bti_mode = match self.op_mode() {
+            ArmSmmuMode::Passthru => BtiMode::Bypass,
+            ArmSmmuMode::Enforced => BtiMode::Translation,
+            ArmSmmuMode::Disabled => return Err(Status::BAD_STATE),
+        };
+
         // Start by making sure the mask/id being passed to us is supported.
         let stream_ids = SmrValue::from_bti_id(bus_txn_id, self.valid_stream_id_mask())?;
 
@@ -888,16 +1027,10 @@ impl Smmu {
         let cb = match ContextBank::create_and_lockdown(&params, cb_ndx) {
             Ok(cb) => cb,
             Err(err) => {
-                // Temporary porting note: the C++ `CreateBti` simply returned here, destroying an
-                // SMRG whose register bookkeeping had not been reset, which tripped
-                // `~StreamMatchRegGroup`'s debug asserts. Explicitly disable it first.
-                //
-                // What the hardware sees which it did not with the C++: one more pass of
-                // `StreamMatchRegGroup::disable_regs` (SMR read and write with VALID, MASK and
-                // ID zero, S2CR read and write with TYPE = Fault, then a barrier). These are the
-                // values `create_and_lockdown` wrote a moment ago with `lock` held throughout,
-                // so no register changes value and the SMRG stays disabled, as it was left by
-                // the C++. This is at least as good: same final state, a few redundant accesses.
+                // An SMRG has to be disabled before it is dropped (its `Drop` asserts this).
+                // The register writes repeat the values `create_and_lockdown` wrote a moment
+                // ago with `lock` held throughout, so no register changes value and the SMRG
+                // stays disabled.
                 let mut smrg = smrg;
                 smrg.disable();
                 return Err(err);
@@ -907,21 +1040,7 @@ impl Smmu {
         // Almost there. Now we just need to construct a BTI, and activate it
         // according to our current SMMU mode of operation (either passthru, or
         // enforced).
-        //
-        // If our SMMU driver is set to disabled, no one should be attempting to
-        // allocate any BTIs here. They should be using StubIommus instead.
-        debug_assert!(
-            self.op_mode() == ArmSmmuMode::Passthru || self.op_mode() == ArmSmmuMode::Enforced,
-            "SMMU must be passthru or enforced when creating a BTI ({})",
-            self.op_mode() as u32
-        );
-        let bti_mode = if self.op_mode() == ArmSmmuMode::Passthru {
-            BtiMode::Bypass
-        } else {
-            BtiMode::Translation
-        };
-
-        let bti = SmmuBti::create(self, &mut guard, smrg, Some(cb), bti_mode)?;
+        let bti = SmmuV2Bti::create(self, &mut guard, smrg, Some(cb), bti_mode)?;
 
         // Victory! Add ourselves to the list of active BTIs, and return a reference
         // for the BTI dispatcher to hold on to.
@@ -929,7 +1048,7 @@ impl Smmu {
         Ok(bti)
     }
 
-    fn init(&self, config: &ZbiDcfgArmSmmuDriver) -> Result<(), Status> {
+    fn init(&self, config: &ZbiDcfgArmSmmuV2Driver) -> Result<(), Status> {
         ksync::lock!(let mut guard = self.lock_lock());
 
         // First, find our register bank in the peripheral map and stash our virtual
@@ -952,7 +1071,8 @@ impl Smmu {
         if reg_vaddr == 0 {
             return Err(Status::NO_RESOURCES);
         }
-        // SAFETY: `reg_vaddr` is the peripheral-map virtual address of `self.phys_reg_base`.
+        // SAFETY: `reg_vaddr` is the peripheral-map virtual address of `self.phys_reg_base`, and
+        // `Smmu` only issues read-only ID register probes through this initial `gr0_base`.
         let gr0_base = unsafe { SmmuMmio::new(reg_vaddr) };
 
         // Read and cache our ID registers. Check the version number to be sure we
@@ -1007,8 +1127,10 @@ impl Smmu {
         // Section 8.1 for the details of the register address space.
         let page_size = self.reg_page_size();
         let reg_size = page_size * self.reg_page_cnt();
-        // SAFETY: `reg_vaddr` is the peripheral-map virtual address of `self.phys_reg_base`, and
-        // `[reg_vaddr, reg_vaddr + 2 * reg_size)` is the SMMUv2 global and context register space.
+        // SAFETY: `reg_vaddr` is the peripheral-map virtual address of `self.phys_reg_base`,
+        // `[reg_vaddr, reg_vaddr + 2 * reg_size)` is the SMMUv2 global and context register space,
+        // and `Smmu` retains exclusive ownership of these handles to uphold SMMU/DMA register
+        // invariants across all writes.
         let (gr0_base, gr1_base, cb0_base) = unsafe {
             (
                 SmmuMmio::with_size(reg_vaddr, page_size),
@@ -1026,7 +1148,8 @@ impl Smmu {
         if op_mode == ArmSmmuMode::Enforced && idr0.s1ts() == 0 {
             dprintf!(
                 INFO,
-                "WARNING - {} does not support Stage 1 Translation, but fully enforced operation was requested.  Downgrading to passthru mode.\n",
+                "WARNING - {} does not support Stage 1 Translation, but fully enforced operation \
+                 was requested.  Downgrading to passthru mode.\n",
                 self.name()
             );
             op_mode = ArmSmmuMode::Passthru;
@@ -1079,7 +1202,8 @@ impl Smmu {
         if idr0.numirpt() != 1 {
             dprintf!(
                 INFO,
-                "ERROR - {} SMMU does not have a dedicated interrupt per context bank. (IDR0 {:#010x})\n",
+                "ERROR - {} SMMU does not have a dedicated interrupt per context bank. \
+                 (IDR0 {:#010x})\n",
                 self.name(),
                 idr0.reg_value()
             );
@@ -1125,21 +1249,12 @@ impl Smmu {
         // Allocate storage for our global and context interrupts based on the values
         // passed to us, and make copies of the configuration.
         //
-        // Temporary porting note: the C++ `Init` only debug-asserted that these counts were
-        // consistent, and went on to build out-of-bounds spans from them in release builds. A
-        // malformed configuration is rejected here instead.
-        //
-        // What the hardware sees for such a configuration: only the reads of IDR0, IDR1, IDR2,
-        // IDR7, CR0 and CR2 above. Nothing is written, no interrupt is configured, and there is
-        // no lockdown or TLB invalidation, so the SMMU stays exactly as the bootloader left it.
-        // That is what both implementations do for every other configuration they reject
-        // before this point (unsupported version, no stream matching, and so on). The C++
-        // either panicked (debug asserts on) or carried on with interrupt definitions read from
-        // past the end of the array, configuring and registering whatever interrupt numbers it
-        // found there, after which what reached the hardware was undefined. A defined refusal
-        // is at least as good as that. It does mean a bad IRQ count leaves bootloader stream
-        // mappings in place where a C++ release build might, by luck, have gone on to lock
-        // them down.
+        // A configuration whose IRQ counts are inconsistent is rejected. So far the SMMU has
+        // only been read (IDR0, IDR1, IDR2, IDR7, CR0 and CR2): nothing has been written, no
+        // interrupt is configured, and there is no lockdown or TLB invalidation, so the SMMU
+        // stays exactly as the bootloader left it, as it does for every other configuration
+        // rejected above (unsupported version, no stream matching, and so on). In particular,
+        // stream mappings set up by the bootloader are left in place, not locked down.
         if (config.irq_cnt as usize) > config.irqs.len() || config.global_irq_cnt > config.irq_cnt {
             dprintf!(
                 INFO,
@@ -1150,8 +1265,6 @@ impl Smmu {
             );
             return Err(Status::INVALID_ARGS);
         }
-        debug_assert!((config.irq_cnt as usize) <= config.irqs.len());
-        debug_assert!(config.global_irq_cnt <= config.irq_cnt);
         let all_irqs = &config.irqs[..config.irq_cnt as usize];
         let global_irqs = &all_irqs[..config.global_irq_cnt as usize];
         let context_irqs = &all_irqs[config.global_irq_cnt as usize..];
@@ -1212,15 +1325,8 @@ impl Smmu {
         // associated stream match register groups and context banks so that they are
         // not automatically locked down, or claimed by user-mode.
         //
-        // Temporary porting note: the C++ `Init` used `config.handoff_smr_cnt` unchecked. The
-        // count is clamped to the size of the array here.
-        //
-        // For a count within the array the register accesses are identical. For a larger one
-        // the C++ read past the end of `handoff_smrs` and treated whatever it found as stream
-        // IDs; any which happened to intersect a valid SMR caused that SMRG to be adopted, and
-        // so left enabled instead of locked down. With the clamp, only stream IDs which are
-        // really in the configuration can exempt an SMRG from lockdown, which is at least as
-        // good: everything else is locked down, as it should be.
+        // The count comes from the bootloader, so it is clamped to the size of the array: only
+        // stream IDs which are really in the configuration can exempt an SMRG from lockdown.
         let handoff_cnt = (config.handoff_smr_cnt as usize).min(config.handoff_smrs.len());
         let handoff_stream_ids = &config.handoff_smrs[..handoff_cnt];
         for &sid in handoff_stream_ids {
@@ -1236,6 +1342,12 @@ impl Smmu {
 
             let early_stream_ids = SmrValue::from_raw(sid, valid_stream_id_mask);
             for i in 0..self.num_smrgs() {
+                // A group adopted for an earlier entry of the list stays valid in hardware, and
+                // a later entry may name the same stream IDs, or others it also matches. It is
+                // already ours; adopting it twice would claim it twice.
+                if !guard.available_smrgs().test_bit(i) {
+                    continue;
+                }
                 let smr = Smr::read_at(&gr0_base, i);
 
                 // When attempting to decide whether or not to adopt an SMRG, we compute
@@ -1261,7 +1373,8 @@ impl Smmu {
                         Ok(()) => {
                             dprintf!(
                                 INFO,
-                                "{} : Locked SMRG {} (MASK {:#06x}, ID {:#06x}) which intersects early-init stream ID (MASK {:#06x}, ID {:#06x})\n",
+                                "{} : Locked SMRG {} (MASK {:#06x}, ID {:#06x}) which intersects \
+                                 early-init stream ID (MASK {:#06x}, ID {:#06x})\n",
                                 self.name(),
                                 i,
                                 smr.mask(),
@@ -1273,7 +1386,8 @@ impl Smmu {
                         Err(status) => {
                             dprintf!(
                                 INFO,
-                                "{} : ERROR - Failed to lock SMRG {} (MASK {:#06x}, ID {:#06x}) (err = {})\n",
+                                "{} : ERROR - Failed to lock SMRG {} (MASK {:#06x}, ID {:#06x}) \
+                                 (err = {})\n",
                                 self.name(),
                                 i,
                                 smr.mask(),
@@ -1299,8 +1413,8 @@ impl Smmu {
                 guard.as_mut().available_cbs_mut().clear_bit(i);
             }
             // `Relaxed` suffices: written while holding `self.lock` before `self` is published
-            // under `SmmuInstanceLock` or any context IRQ is unmasked; `AtomicU32` only avoids forming
-            // `&mut SmmuInitState` after IRQ handlers are registered.
+            // under `SmmuV2InstanceLock` or any context IRQ is unmasked; `AtomicU32` only avoids
+            // forming `&mut SmmuInitState` after IRQ handlers are registered.
             self.init_state().num_cbs.store(context_irq_cnt, Ordering::Relaxed);
         }
 
@@ -1369,7 +1483,7 @@ impl Smmu {
 
         for (i, item) in src.iter().enumerate() {
             arr[i] = GlobalIrqVector { irq_def: IrqDef::from_zbi(*item), registered: false };
-            cookies[i] = IrqCookie { smmu: self as *const Smmu, ndx: i as u32 };
+            cookies[i] = IrqCookie { smmu: self as *const SmmuV2, ndx: i as u32 };
         }
 
         // SAFETY: `self` has not been published yet, we hold `self.lock`, and no interrupt
@@ -1416,7 +1530,7 @@ impl Smmu {
                 in_flight: false,
                 bti: None,
             };
-            cookies[i] = IrqCookie { smmu: self as *const Smmu, ndx: i as u32 };
+            cookies[i] = IrqCookie { smmu: self as *const SmmuV2, ndx: i as u32 };
         }
 
         // SAFETY: `self` has not been published yet, we hold `self.lock`, and no interrupt
@@ -1434,14 +1548,19 @@ impl Smmu {
         let cookies = V::cookies(self);
         ksync::lock!(let mut irq_guard = self.lock_irq_lock());
         let len = V::slice(&irq_guard).len();
+        // SAFETY: `cookies` was sized to `len` in `allocate_*_irqs`, `self` has not been published
+        // yet, and no interrupt handler for `V` has been registered yet, so we have exclusive
+        // access to `*cookies.get()` before entering the registration loop. Extracting `base_ptr`
+        // via `as_mut_ptr()` once upfront preserves mutable provenance without creating any
+        // reference once handlers begin registering.
+        let base_ptr = unsafe { (&mut *cookies.get()).as_mut_ptr() };
 
         for i in 0..len {
             // Validate, configure, and mask the interrupt with `irq_lock` held (interrupts off),
             // dropping `irq_lock` only around `register_int_handler` below.
             let def = V::slice(&irq_guard)[i].irq_def();
-            // SAFETY: `cookies` is immutable after `allocate_*_irqs`, which sized it to match the
-            // corresponding `*_irqs` slice.
-            let v_ptr = unsafe { (&raw const (&*cookies.get())[i]) }.cast_mut().cast::<c_void>();
+            // SAFETY: `i < len` matches the `cookies` allocation length from `allocate_*_irqs`.
+            let v_ptr = unsafe { base_ptr.add(i).cast::<c_void>() };
 
             if !def.valid() {
                 dprintf!(
@@ -1523,7 +1642,7 @@ impl Smmu {
         self.register_irqs::<ContextIrqVector>()
     }
 
-    fn deactivate_irqs<V: IrqVectorEntry>(&self, irq_guard: &mut Pin<&mut SmmuIrqLockGuard<'_>>) {
+    fn deactivate_irqs<V: IrqVectorEntry>(&self, irq_guard: &mut Pin<&mut SmmuV2IrqLockGuard<'_>>) {
         let len = V::slice(irq_guard).len();
         for i in 0..len {
             let maybe_def = {
@@ -1535,7 +1654,8 @@ impl Smmu {
                     irq_guard.as_mut().call_unlocked(|| SmmuEnv::unregister_int_handler(def.num))
                 {
                     panic!(
-                        "{} : Failed to unregister {} IRQ num {:#04x} (flags {:#04x}, err {}) during shutdown.",
+                        "{} : Failed to unregister {} IRQ num {:#04x} (flags {:#04x}, err {}) \
+                         during shutdown.",
                         self.name(),
                         V::KIND,
                         def.num,
@@ -1568,17 +1688,20 @@ impl Smmu {
         // walking our table, and then call `unregister_int_handler` with the lock held, it will
         // attempt to hold `pdev_lock` and we will have set up the potential for deadlock.
         //
-        // So, we drop `irq_lock` while we unregister. Why is this ok? There are only two types of
-        // places that we hold `irq_lock` in this code: during dispatch, where we hold only
-        // `irq_lock`, and when creating/destroying associations between context interrupts and
-        // `SmmuBti`s, or when re-enabling a context bank interrupt after a fault. In each of
-        // these situations, we also hold the top-level `lock` mutex.
+        // So, we drop `irq_lock` while we unregister. Why is this ok? We hold `irq_lock` only:
+        // 1) During interrupt dispatch, where we hold only `irq_lock` and do not mutate our
+        //    interrupt tables.
+        // 2) When associating or disassociating a context interrupt and an `SmmuV2Bti`, where we
+        //    also hold the top-level `lock` mutex.
+        // 3) When re-enabling a context bank interrupt (`reenable_context_bank_irq_locked`),
+        //    where we hold `bti.lock` -> `irq_lock` without `lock`, and return early whenever
+        //    `vec.bti` is `None`.
         //
-        // The IRQ handler is not going to mutate our interrupt tables, so it is fine if there is
-        // an IRQ in flight for us to drop `irq_lock` here and un-register the interrupt. Doing so
-        // synchronizes with the interrupt dispatch, meaning it is safe to re-lock and modify the
-        // table after we have un-registered. For all BTI-related operations, holding the main
-        // `lock` during `unregister_interrupts` is what protects us.
+        // Dropping `irq_lock` around `unregister_int_handler` synchronizes with any in-flight
+        // interrupt dispatch before we re-lock and mutate the table. And `unregister_interrupts`
+        // runs either before the `SmmuV2` is published (`init` error cleanup, when no BTI has been
+        // handed out) or during teardown under `lock` after every BTI has already been shut down
+        // (so every `vec.bti` is `None` and re-enable returns early).
         //
         // TODO(johngro): consider modeling this more formally using a token and a two-lock
         // AssertHeld pattern. Gaining exclusive access to the token requires holding both `lock`
@@ -1613,7 +1736,7 @@ impl Smmu {
         // interrupt. A value of zero means that we have processed everything and
         // are finished.
         let gr0_base = self.gr0_base();
-        let mut gfsr = Gfsr::read_from(&gr0_base);
+        let gfsr = Gfsr::read_from(&gr0_base);
         if gfsr.reg_value() == 0 {
             return;
         }
@@ -1626,7 +1749,8 @@ impl Smmu {
         if gfsr.multi() != 0 {
             dprintf!(
                 INFO,
-                "{} : FAULT - At least one global fault occurred while an existing fault was pending.  Details of subsequent faults have been lost.\n",
+                "{} : FAULT - At least one global fault occurred while an existing fault was \
+                 pending.  Details of subsequent faults have been lost.\n",
                 self.name()
             );
         }
@@ -1671,15 +1795,12 @@ impl Smmu {
         );
 
         // Zero all of the fault-detail registers, then ack the fault(s) in the status
-        // register (GFSR) by writing back the values we read from it at the start of
-        // processing. See section 9.6.15 which says "A value of 1 written to any
-        // non-reserved bit clears that bit".
+        // register (GFSR) by writing back the defined W1C bits we read at the start of
+        // processing (`Gfsr::CLEAR_ALL` leaves reserved UNK/SBZP bits zero; section 9.6.15).
         Gfar::from_value(0).write_to(&gr0_base);
         Gfsynr0::from_value(0).write_to(&gr0_base);
-        // Temporary porting note: the C++ `HandleGlobalIrq` wrote `Gfsynr0` twice instead of
-        // clearing `Gfsynr1`; preserved for 1:1 parity here and fixed in a follow-up commit.
-        Gfsynr0::from_value(0).write_to(&gr0_base);
-        gfsr.write_to(&gr0_base);
+        Gfsynr1::from_value(0).write_to(&gr0_base);
+        Gfsr::from_value(gfsr.reg_value() & Gfsr::CLEAR_ALL).write_to(&gr0_base);
     }
 
     fn handle_context_irq(&self, cb_ndx: u32) {
@@ -1696,24 +1817,40 @@ impl Smmu {
             let target = vec.bti.clone();
             let _ = SmmuEnv::mask_interrupt(irq_num);
             if target.is_some() {
+                // `reenable_context_bank_irq_locked` does not return early on `vec.in_flight`, so
+                // a quarantine release on another CPU can unmask `irq_num` once we release
+                // `bti.lock` below and before we clear `in_flight`. `in_flight` can remain a
+                // plain `bool` (avoiding re-entrant IRQ-time BTI destruction) because the GIC
+                // interrupt controller drivers only EOI after this handler returns, preventing
+                // the same SPI from being redelivered while we are still running.
+                debug_assert!(!vec.in_flight);
                 vec.in_flight = true;
                 vec.enabled = false;
             }
             (target, irq_num)
         };
 
-        if let Some(ref bti) = target {
+        let had_target = target.is_some();
+        if let Some(bti) = target {
             // Enter our target's lock, print our fault details, then inform our BTI of
             // the fault so it can go into lockdown mode and (someday) raise a signal on
             // the kernel object indicating that there was a fault.
             //
             // The only way to restore functionality at this point is for the driver to
             // take control of its hardware, and release the quarantine state on the BTI.
-            ksync::lock!(let mut bti_guard = bti.lock_lock());
-            let name_buf = *bti_guard.name();
-            let bti_name = SmmuBti::name_display(&name_buf);
-            self.print_common_context_irq_fault_details(cb_ndx, Some(bti_name));
-            bti.handle_fault_locked(&mut bti_guard);
+            {
+                ksync::lock!(let mut bti_guard = bti.lock_lock());
+                let name_buf = *bti_guard.name();
+                let bti_name = SmmuV2Bti::name_display(&name_buf);
+                self.print_common_context_irq_fault_details(cb_ndx, Some(bti_name));
+                bti.handle_fault_locked(&mut bti_guard);
+            }
+            // Give up our reference while `in_flight` is still set. A BTI being shut down waits
+            // for `in_flight` to clear, holding references of its own until it has. Once the
+            // flag is clear the shutdown can run to completion on another CPU, and a reference
+            // still held here could then be the last one: the BTI would be destroyed, and its
+            // memory freed, at interrupt time.
+            drop(bti);
         } else {
             // This is very strange, but it is technically possible to receive a CB
             // interrupt with no target if we happen to be shutting down our target
@@ -1731,14 +1868,10 @@ impl Smmu {
             self.print_common_context_irq_fault_details(cb_ndx, None);
         }
 
-        // Clear our `in_flight` flag if we set it above.
-        //
-        // Temporary porting note: the C++ `HandleContextIrq` cleared the flag from an
-        // unconditional deferred action which debug-asserted `vec.in_flight == true`, even though
-        // the flag is only set when a target BTI was found. A context IRQ arriving with no BTI
-        // registered therefore tripped that assert in C++ debug builds. Here the flag is only
-        // checked and cleared when it was set.
-        if target.is_some() {
+        // Clear our `in_flight` flag if we set it above. It is only set when a target BTI was
+        // found; a context IRQ can arrive with no BTI registered, and then there is nothing to
+        // clear.
+        if had_target {
             ksync::lock!(let mut irq_guard = self.lock_irq_lock());
             let vec = &mut irq_guard.as_mut().context_irqs_mut()[cb_ndx as usize];
             debug_assert!(vec.in_flight);
@@ -1758,7 +1891,7 @@ impl Smmu {
 
         // Next attempt to log the relevant details of the fault, even if there is no
         // user-mode BTI associated with this context bank.
-        let mut fsr = Fsr::read_from(&cb_base);
+        let fsr = Fsr::read_from(&cb_base);
         let far = Far::read_from(&cb_base);
         let fsynr0 = Fsynr0::read_from(&cb_base);
         let cbfrsynra = Cbfrsynra::read_at(&gr1_base, cb_ndx);
@@ -1838,16 +1971,16 @@ impl Smmu {
         // Clear any of the fault bookkeeping so we are ready to receive a new context
         // fault when we are able to.
         //
-        // Then ack the fault(s) in the status register (FSR) by writing back the
-        // values we read from it at the start of processing. See section 16.5.9
-        // which says "A value of 1 written to any non-reserved bit clears that bit".
+        // Then ack the fault(s) in the status register (FSR) by writing back the defined
+        // W1C fault bits we read at the start of processing (`Fsr::CLEAR_ALL` leaves
+        // read-only `SS`/`Format` and reserved UNK/SBZP bits zero; section 16.5.9).
         Cbfrsynra::from_value(0).write_at(&gr1_base, cb_ndx);
         Far::from_value(0).write_to(&cb_base);
         Fsynr0::from_value(0).write_to(&cb_base);
-        fsr.write_to(&cb_base);
+        Fsr::from_value(fsr.reg_value() & Fsr::CLEAR_ALL).write_to(&cb_base);
     }
 
-    fn lockdown(&self, guard: &SmmuLockGuard<'_>) {
+    fn lockdown(&self, guard: &SmmuV2LockGuard<'_>) {
         let gr0_base = self.gr0_base();
         let gr1_base = self.gr1_base();
         let params = self.controller_params(guard);
@@ -1930,7 +2063,7 @@ impl Smmu {
     }
 
     /// Shuts down `bti` and removes it from this SMMU's BTI list.
-    pub(crate) fn shutdown_bti(&self, bti: &SmmuBti) {
+    pub(crate) fn shutdown_bti(&self, bti: &SmmuV2Bti) {
         // Shutting a BTI down is a process which takes a bit of care. The sequence
         // is generally as follows:
         //
@@ -1962,6 +2095,7 @@ impl Smmu {
             ksync::lock!(let mut guard = self.lock_lock());
             let maybe_cb_ndx = {
                 ksync::lock!(let bti_guard = bti.lock_lock());
+                assert!(bti_guard.smmu().as_deref().is_some_and(|s| core::ptr::eq(s, self)));
                 bti_guard.context_bank().as_ref().map(|cb| cb.cb_ndx())
             };
 
@@ -1978,22 +2112,24 @@ impl Smmu {
             // and returning all resources to the SMMU's pool in the process. Once we are
             // done with that, we can remove ourselves from the global BTI list and we
             // should be finished.
-            debug_assert!(bti.in_container());
+            assert!(bti.in_container());
             bti.shutdown(&mut guard);
-            // SAFETY: `bti` is in `self.bti_list`.
+            // SAFETY: `bti` was verified to belong to `self` and to be linked in `self.bti_list`
+            // while holding `self.lock`.
             unsafe { guard.as_mut().bti_list_mut().erase(bti) }
         };
         drop(removed);
     }
 
     /// Associates `bti` with the context bank interrupt at `cb_ndx` and unmasks it.
-    pub(crate) fn associate_bti_irq(&self, bti: &RefPtr<SmmuBti>, cb_ndx: u32) {
+    pub(crate) fn associate_bti_irq(&self, bti: &RefPtr<SmmuV2Bti>, cb_ndx: u32) {
         ksync::lock!(let mut irq_guard = self.lock_irq_lock());
         let idx = cb_ndx as usize;
         if idx >= irq_guard.context_irqs().len() {
             dprintf!(
                 INFO,
-                "{} : WARNING - Failed to associate context IRQ with BTI, invalid index ({} >= {})\n",
+                "{} : WARNING - Failed to associate context IRQ with BTI, invalid index ({} \
+                 >= {})\n",
                 self.name(),
                 cb_ndx,
                 irq_guard.context_irqs().len()
@@ -2013,18 +2149,16 @@ impl Smmu {
     /// Masks and disassociates the context bank interrupt at `cb_ndx`, synchronizing with any
     /// in-flight IRQ.
     pub(crate) fn shutdown_context_bank_irq(&self, cb_ndx: u32) {
-        let bti_ref: Option<RefPtr<SmmuBti>>;
+        let bti_ref: Option<RefPtr<SmmuV2Bti>>;
         let mut in_flight: bool;
         let idx = cb_ndx as usize;
         {
             ksync::lock!(let mut irq_guard = self.lock_irq_lock());
             if idx >= irq_guard.context_irqs().len() {
-                // Temporary porting note: the C++ `ShutdownContextBankIrq` and
-                // `ReenableContextBankIrq` had their "re-enable" / "disable" warning messages
-                // swapped; preserved for 1:1 parity here and fixed in a follow-up commit.
                 dprintf!(
                     INFO,
-                    "{} : WARNING - Failed to re-enable context IRQ with BTI, invalid index ({} >= {})\n",
+                    "{} : WARNING - Failed to disable context IRQ with BTI, invalid index ({} \
+                     >= {})\n",
                     self.name(),
                     cb_ndx,
                     irq_guard.context_irqs().len()
@@ -2051,23 +2185,29 @@ impl Smmu {
         }
     }
 
-    /// Re-enables the context bank fault interrupt for `bti`.
-    pub(crate) fn reenable_context_bank_irq(&self, bti: &SmmuBti) {
-        ksync::lock!(let _guard = self.lock_lock());
-        ksync::lock!(let bti_guard = bti.lock_lock());
+    /// Re-enables the context bank fault interrupt of `bti` under `bti`'s lock, discarding any
+    /// faults recorded while `bti` was in its fault state.
+    pub(crate) fn reenable_context_bank_irq_locked(
+        &self,
+        bti: &SmmuV2Bti,
+        bti_guard: &Pin<&mut SmmuV2BtiLockGuard<'_>>,
+    ) {
         // `bti.lock` already disabled interrupts via `IrqSavePolicy`, so acquire `irq_lock`
         // with `SmmuNoIrqSavePolicy`.
         ksync::lock!(let mut irq_guard = self.lock_irq_lock_policy::<SmmuNoIrqSavePolicy>());
 
-        let cb_ndx = SmmuBti::cb_ndx_locked(&bti_guard);
+        let cb_ndx = SmmuV2Bti::cb_ndx_locked(bti_guard);
+        if cb_ndx == u32::MAX {
+            // The BTI has no context bank: it is being shut down, or was adopted without one.
+            // Nothing to re-enable, and nothing wrong.
+            return;
+        }
         let idx = cb_ndx as usize;
         if idx >= irq_guard.context_irqs().len() {
-            // Temporary porting note: the C++ `ShutdownContextBankIrq` and
-            // `ReenableContextBankIrq` had their "re-enable" / "disable" warning messages swapped;
-            // preserved for 1:1 parity here and fixed in a follow-up commit.
             dprintf!(
                 INFO,
-                "{} : WARNING - Failed to disable context IRQ with BTI, invalid index ({} >= {})\n",
+                "{} : WARNING - Failed to re-enable context IRQ with BTI, invalid index ({} \
+                 >= {})\n",
                 self.name(),
                 cb_ndx,
                 irq_guard.context_irqs().len()
@@ -2075,8 +2215,28 @@ impl Smmu {
             return;
         }
 
+        // `vec.enabled` is not consulted: a leaked PMT rewrites a passthru context bank with
+        // `SCTLR.CFIE` clear without going through the interrupt handler, leaving `vec.enabled`
+        // set while the bank's enable bit is off. Our caller only reaches us when transitioning
+        // `bti` out of `BtiMode::Fault` under the same hold of `bti.lock`.
+        //
+        // `vec.in_flight` is only consulted when `SCTLR.CFIE` is still set:
+        // - Once `handle_context_irq` has cleared `SCTLR.CFIE`, put `bti` into `Fault` mode, and
+        //   released `bti.lock`, `vec.in_flight` remains set briefly until the handler clears it
+        //   under `irq_lock`; a release in that tail must still re-arm the interrupt.
+        // - Conversely, if an enforced-mode BTI entered `Fault` mode via a leaked PMT (`CFIE`
+        //   still set) while a context IRQ on another CPU masked the vector (`in_flight` set) and
+        //   is spinning for `bti.lock`, `FSR` belongs to that waiting handler; leaving it intact
+        //   and masked lets the handler report and quarantine that fault cleanly once we drop
+        //   `bti.lock`.
+        //
+        // `vec.bti` is consulted: `shutdown_context_bank_irq` clears `vec.bti` under `SmmuV2::lock`
+        // and `irq_lock` before `SmmuV2Bti::shutdown` takes `bti.lock` to return `cb_ndx` to the
+        // pool, so `vec.bti` is either `None` (shutdown is underway and the interrupt must stay
+        // disabled) or points to `bti`.
         let vec = &mut irq_guard.as_mut().context_irqs_mut()[idx];
-        if !vec.registered || vec.enabled || vec.in_flight {
+        debug_assert!(vec.bti.as_deref().is_none_or(|v| core::ptr::eq(v, bti)));
+        if !vec.registered || vec.bti.is_none() {
             return;
         }
 
@@ -2085,6 +2245,16 @@ impl Smmu {
         }
 
         let cb_base = self.get_cb_base(cb_ndx);
+        if vec.in_flight && Sctlr::read_from(&cb_base).cfie() != 0 {
+            return;
+        }
+
+        // Discard whatever faults were recorded while the BTI was in its fault state: the
+        // device may have carried on issuing transactions, each of which sets `FSR` again, and
+        // the interrupt is asserted for as long as `FSR` is non-zero. Without this, the
+        // interrupt would fire the moment it is enabled and put the BTI straight back into the
+        // fault state it was just released from. (`FSR` fault bits are write-one-to-clear.)
+        Fsr::from_value(Fsr::CLEAR_ALL).write_to(&cb_base);
         Sctlr::read_from(&cb_base).set_cfie(1).write_to(&cb_base);
         let _ = SmmuEnv::unmask_interrupt(vec.irq_def.num);
         vec.enabled = true;
@@ -2097,16 +2267,16 @@ impl Smmu {
     /// things may end up happening:
     ///
     /// 1) If the SMRG state references a context bank which has not yet been adopted, a new
-    ///    `ContextBank` object will be created and adopted, and a new `SmmuBti` object will be
+    ///    `ContextBank` object will be created and adopted, and a new `SmmuV2Bti` object will be
     ///    created to hold the newly adopted SMRG and `ContextBank` objects. The existing SMRG and
     ///    `ContextBank` register state will be left as is. Internal bookkeeping will be updated to
     ///    match the pre-existing state.
     /// 2) If the SMRG state references a `ContextBank` which has already been adopted by a
-    ///    different adopted SMRG, the newly adopted SMRG will be added to the existing `SmmuBti`
+    ///    different adopted SMRG, the newly adopted SMRG will be added to the existing `SmmuV2Bti`
     ///    which was created to contain the pre-existing SMRG(s)/`ContextBank` state.
     fn adopt_smrg(
         &self,
-        guard: &mut Pin<&mut SmmuLockGuard<'_>>,
+        guard: &mut Pin<&mut SmmuV2LockGuard<'_>>,
         smrg_ndx: u32,
         reg_stream_ids: SmrValue,
     ) -> Result<(), Status> {
@@ -2144,7 +2314,7 @@ impl Smmu {
         // which is already using the same context bank as this SMRG. If we find one,
         // just add this SMRG to it. Otherwise, we'll need to create a new BTI.
         if smrg.mode() == S2crType::Translation {
-            let mut found_bti: Option<RefPtr<SmmuBti>> = None;
+            let mut found_bti: Option<RefPtr<SmmuV2Bti>> = None;
             for bti in guard.bti_list().iter() {
                 if bti.cb_ndx() == smrg.cb_ndx() {
                     found_bti = Some(RefPtr::from_ref(bti));
@@ -2164,38 +2334,25 @@ impl Smmu {
             match ContextBank::create_and_adopt(&self.controller_params(guard), smrg.cb_ndx()) {
                 Ok(cb) => Some(cb),
                 Err(err) => {
-                    // Temporary porting note: the C++ `AdoptSmrg` returned here without
-                    // resetting the SMRG's bookkeeping, tripping `~StreamMatchRegGroup`'s debug
-                    // asserts. Disable the SMRG instead (the C++ would have locked it down
-                    // moments later in `Lockdown` anyway, since it was never marked as in use).
+                    // An SMRG has to be disabled before it is dropped (its `Drop` asserts
+                    // this), so a stream match which cannot be adopted is turned off here, not
+                    // left for `lockdown`. In practice this path is an allocation failure
+                    // during early init. What follows from disabling it now:
                     //
-                    // What the hardware sees differently from the C++ on this path (in
-                    // practice, an allocation failure during early init):
-                    //
-                    // 1) The SMR is cleared (VALID, MASK and ID zero) and the S2CR set to Fault
-                    //    now, not when `init` reaches `lockdown`. Until then the C++ let the
-                    //    stream carry on translating through a context bank we had failed to
-                    //    adopt. The order is the one `lockdown` uses (stream matches first,
-                    //    context banks after), and CR0 has already been written, so the
-                    //    now-unmatched stream is handled as it would be after lockdown.
-                    // 2) `lockdown` still finds this SMRG available and disables it again.
-                    //    Those writes repeat the values written here. As the SMR no longer
-                    //    reads as valid, `lockdown` also skips its diagnostic reads (CBAR and
-                    //    SCTLR of the context bank) and its log lines for this SMRG; the caller
-                    //    logs the failure instead.
+                    // 1) The SMR is cleared (VALID, MASK and ID zero) and the S2CR set to
+                    //    Fault, so the stream stops translating through a context bank we
+                    //    failed to adopt. The order is the one `lockdown` uses (stream matches
+                    //    first, context banks after), and CR0 has already been written, so the
+                    //    now-unmatched stream is handled as it will be after lockdown.
+                    // 2) `lockdown` still finds this SMRG available and disables it again,
+                    //    repeating the values written here. As the SMR no longer reads as
+                    //    valid, `lockdown` skips its diagnostic reads (CBAR and SCTLR of the
+                    //    context bank) and its log lines for this SMRG; our caller logs the
+                    //    failure.
                     // 3) A later handoff stream ID which intersects this same SMR no longer
-                    //    sees it as valid, so adoption is not attempted again. The C++ would
-                    //    have called `AdoptSmrg` a second time, and if that attempt succeeded
-                    //    the stream would have stayed adopted.
-                    //
-                    // 1) and 2) end in the state the C++ reached, sooner, and are at least as
-                    // good. 3) is a real difference in outcome, but only for a configuration
-                    // which lists two handoff stream IDs matching one SMR, and only when the
-                    // first attempt failed and the second would not have. The C++ retry was a
-                    // side effect of leaving the SMR valid, not a designed recovery, and gave a
-                    // result which depended on the order of the handoff list. Here a failed
-                    // adoption always ends locked down, which is the fail-closed result the
-                    // C++ gave in every other case.
+                    //    sees it as valid, so adoption is not attempted a second time. A failed
+                    //    adoption always ends locked down, whatever the order of the handoff
+                    //    list.
                     smrg.disable();
                     return Err(err);
                 }
@@ -2204,7 +2361,7 @@ impl Smmu {
             None
         };
 
-        let bti = SmmuBti::create(self, guard, smrg, context_bank, BtiMode::Adopted)?;
+        let bti = SmmuV2Bti::create(self, guard, smrg, context_bank, BtiMode::Adopted)?;
         guard.as_mut().bti_list_mut().push_back(bti);
         Ok(())
     }
@@ -2242,834 +2399,5 @@ impl core::fmt::Write for TagBuf {
         self.buf[self.len..self.len + to_copy].copy_from_slice(&bytes[..to_copy]);
         self.len += to_copy;
         Ok(())
-    }
-}
-
-/// Parsed console argument passed to [`Smmu::console_cmd`].
-#[derive(Clone, Copy, Debug)]
-pub struct ConsoleArg<'a> {
-    /// String token.
-    pub str_val: &'a str,
-    /// Unsigned integer value.
-    pub u: u64,
-}
-
-static DEFAULT_SMMU_NDX: AtomicU32 = AtomicU32::new(0);
-
-fn usage(ret: i32) -> i32 {
-    dprintf!(INFO, "Usage: smmu <cmd>\n");
-    dprintf!(INFO, "Valid commands are:\n");
-    dprintf!(INFO, "  help     : show this message\n");
-    dprintf!(
-        INFO,
-        "  list     : list all discovered IOMMU instances and their currently managed BTIs.\n"
-    );
-    dprintf!(INFO, "  set <id> : set the default SMMU to use with other commands.\n");
-    dprintf!(INFO, "  show <tgt> [-v] [-pmts]\n");
-    dprintf!(INFO, "    Print the current high level status of the selected SMMU.\n");
-    dprintf!(INFO, "    Use <tgt> to select a specific BTI to dump details about, or\n");
-    dprintf!(INFO, "    \"all\" to show the status for the entire smmu\n");
-    dprintf!(INFO, "  dumpregs\n");
-    dprintf!(INFO, "    Print raw register information for the selected SMMU\n");
-    dprintf!(INFO, "  lock <tgt>\n");
-    dprintf!(INFO, "    Attempt to set the operating mode of the target BTI(s) to FAULT.\n");
-    dprintf!(INFO, "  isids <tgt>\n");
-    dprintf!(INFO, "    Attempt to invalidate all Stream IDs of the target BTI(s).\n");
-    dprintf!(INFO, "\n");
-    dprintf!(INFO, "Params:\n");
-    dprintf!(INFO, "  <tgt>   : One of (all | bti <N> | sid <Stream ID>)\n");
-    dprintf!(
-        INFO,
-        "  <--id>  : The ID of the SMMU to operate on, instead of the current default.\n"
-    );
-    dprintf!(
-        INFO,
-        "  [-v]    : Optionally enable verbose output, for sub-commands who support it.\n"
-    );
-    dprintf!(INFO, "  [-pmts] : Show detailed PMT status when using the show command\n");
-    ret
-}
-
-fn find_optional_flag(args: &[ConsoleArg<'_>], option: &str) -> bool {
-    args.iter().any(|arg| arg.str_val == option)
-}
-
-fn find_optional_u32(args: &[ConsoleArg<'_>], option: &str) -> Result<Option<u32>, Status> {
-    let mut ret: Option<u32> = None;
-    let mut i = 0usize;
-    while i < args.len() {
-        if args[i].str_val == option {
-            if ret.is_some() {
-                dprintf!(INFO, "Multiple \"{}\" options specified!\n", option);
-                return Err(Status::ALREADY_EXISTS);
-            }
-            i += 1;
-            if i >= args.len() {
-                dprintf!(INFO, "No value specified for option \"{}\"!\n", option);
-                return Err(Status::INVALID_ARGS);
-            }
-            let val = args[i].u;
-            if val > (u32::MAX as u64) {
-                dprintf!(INFO, "Value out of range for for option \"{}\" ({})!\n", option, val);
-                return Err(Status::OUT_OF_RANGE);
-            }
-            ret = Some(val as u32);
-        }
-        i += 1;
-    }
-    Ok(ret)
-}
-
-/// Formats and prints a register and its bitfields to the kernel console.
-pub(crate) fn dump_reg(
-    tag: &str,
-    raw_val: u64,
-    byte_width: usize,
-    reg_offset: u32,
-    fields: &[FieldDesc],
-    base: &SmmuMmio,
-    ilvl: usize,
-) {
-    let indent = ilvl * 2;
-    let paddr = SmmuEnv::periph_vaddr_to_paddr(base.base()).wrapping_add(reg_offset as u64);
-    dprintf!(INFO, "{:indent$}{} : [{:#x}]\n", "", tag, paddr, indent = indent);
-
-    let mut max_name_width = "raw".len();
-    for f in fields {
-        if !f.name.is_empty() && !f.name.starts_with("__res") {
-            max_name_width = max_name_width.max(f.name.len());
-        }
-    }
-
-    let msb = ((byte_width * 8) - 1) as u32;
-    if byte_width == 8 {
-        dprintf!(
-            INFO,
-            "{:indent$}[{:2}:{:2}] : {:>width$} : {:#018x} ({})\n",
-            "",
-            msb,
-            0,
-            "raw",
-            raw_val,
-            raw_val,
-            indent = indent,
-            width = max_name_width
-        );
-    } else {
-        dprintf!(
-            INFO,
-            "{:indent$}[{:2}:{:2}] : {:>width$} : {:#010x} ({})\n",
-            "",
-            msb,
-            0,
-            "raw",
-            raw_val as u32,
-            raw_val as u32,
-            indent = indent,
-            width = max_name_width
-        );
-    }
-
-    for f in fields {
-        if !f.name.is_empty() && !f.name.starts_with("__res") {
-            let val = f.extract(raw_val);
-            if byte_width == 8 {
-                dprintf!(
-                    INFO,
-                    "{:indent$}[{:2}:{:2}] : {:>width$} : {:#018x} ({})\n",
-                    "",
-                    f.msb,
-                    f.lsb,
-                    f.name,
-                    val,
-                    val,
-                    indent = indent,
-                    width = max_name_width
-                );
-            } else {
-                dprintf!(
-                    INFO,
-                    "{:indent$}[{:2}:{:2}] : {:>width$} : {:#010x} ({})\n",
-                    "",
-                    f.msb,
-                    f.lsb,
-                    f.name,
-                    val as u32,
-                    val as u32,
-                    indent = indent,
-                    width = max_name_width
-                );
-            }
-        }
-    }
-    dprintf!(INFO, "\n");
-}
-
-impl Smmu {
-    /// Dumps raw register information for this SMMU (`smmu dumpregs`).
-    pub fn cmd_dump_regs(&self) {
-        ksync::lock!(let guard = self.lock_lock());
-
-        let gr0_base = self.gr0_base();
-        let gr1_base = self.gr1_base();
-        let st = self.init_state();
-
-        dprintf!(INFO, "Dumping configuration for {}\n", self.name());
-        dprintf!(INFO, "Version    : {}.{}\n", st.idr7.major(), st.idr7.minor());
-        dprintf!(INFO, "User-Bound : {}\n", if *guard.user_mode_bound() { "Yes" } else { "No" });
-
-        let idr0 = Idr0::read_from(&gr0_base);
-        dump_reg("IDR0", idr0.reg_value() as u64, 4, Idr0::OFFSET, Idr0::FIELDS, &gr0_base, 0);
-        dump_reg(
-            "IDR1",
-            Idr1::read_from(&gr0_base).reg_value() as u64,
-            4,
-            Idr1::OFFSET,
-            Idr1::FIELDS,
-            &gr0_base,
-            0,
-        );
-        dump_reg(
-            "IDR2",
-            Idr2::read_from(&gr0_base).reg_value() as u64,
-            4,
-            Idr2::OFFSET,
-            Idr2::FIELDS,
-            &gr0_base,
-            0,
-        );
-        dump_reg(
-            "IDR7",
-            Idr7::read_from(&gr0_base).reg_value() as u64,
-            4,
-            Idr7::OFFSET,
-            Idr7::FIELDS,
-            &gr0_base,
-            0,
-        );
-        dump_reg(
-            "CR0",
-            Cr0::read_from(&gr0_base).reg_value() as u64,
-            4,
-            Cr0::OFFSET,
-            Cr0::FIELDS,
-            &gr0_base,
-            0,
-        );
-        dump_reg(
-            "CR2",
-            Cr2::read_from(&gr0_base).reg_value() as u64,
-            4,
-            Cr2::OFFSET,
-            Cr2::FIELDS,
-            &gr0_base,
-            0,
-        );
-
-        let mut tag = TagBuf::new();
-        macro_rules! fmt_tag {
-            ($($arg:tt)*) => {{
-                tag.clear();
-                let _ = core::write!(&mut tag, $($arg)*);
-                tag.as_str()
-            }};
-        }
-
-        // If this unit supports stream matching, dump the state of the available
-        // stream matching register groups. If a stream matching group is in
-        // translation mode, and has a valid context bank ID configured, make a note
-        // of it so we can come back later and dump the status of the in-use context
-        // banks.
-        let mut in_use_cbs = Bitmask128::new();
-        if idr0.sms() != 0 {
-            for i in 0..idr0.numsmrg() {
-                let smr = Smr::read_at(&gr0_base, i);
-                if smr.valid() != 0 {
-                    dump_reg(
-                        fmt_tag!("SMR{}", i),
-                        smr.reg_value() as u64,
-                        4,
-                        Smr::offset(i),
-                        Smr::FIELDS,
-                        &gr0_base,
-                        0,
-                    );
-                    // The format of S2CR registers depends on the type value currently programmed
-                    // into the register.
-                    let s2cr = S2cr::read_at(&gr0_base, i);
-                    let s2cr_tag =
-                        fmt_tag!("S2CR{} ({})", i, arm_s2cr_type_to_string(s2cr.s2cr_type()));
-                    match s2cr.s2cr_type() {
-                        S2crType::Translation => {
-                            let s2cr_trans = S2crTranslation::from_value(s2cr.reg_value());
-                            dump_reg(
-                                s2cr_tag,
-                                s2cr.reg_value() as u64,
-                                4,
-                                S2cr::offset(i),
-                                S2crTranslation::FIELDS,
-                                &gr0_base,
-                                0,
-                            );
-                            if s2cr_trans.cbndx() >= self.num_cbs() {
-                                dprintf!(INFO, "Invalid Context Bank ID {}\n", s2cr_trans.cbndx());
-                            } else {
-                                in_use_cbs.set_bit(s2cr_trans.cbndx());
-                            }
-                        }
-                        S2crType::Bypass => {
-                            dump_reg(
-                                s2cr_tag,
-                                s2cr.reg_value() as u64,
-                                4,
-                                S2cr::offset(i),
-                                S2crBypass::FIELDS,
-                                &gr0_base,
-                                0,
-                            );
-                        }
-                        S2crType::Fault => {
-                            dump_reg(
-                                s2cr_tag,
-                                s2cr.reg_value() as u64,
-                                4,
-                                S2cr::offset(i),
-                                S2crFault::FIELDS,
-                                &gr0_base,
-                                0,
-                            );
-                        }
-                        S2crType::Invalid => {
-                            dump_reg(
-                                s2cr_tag,
-                                s2cr.reg_value() as u64,
-                                4,
-                                S2cr::offset(i),
-                                S2cr::FIELDS,
-                                &gr0_base,
-                                0,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Now dump details about any in-use context banks.
-        for i in 0..self.num_cbs() {
-            if !in_use_cbs.test_bit(i) {
-                continue;
-            }
-
-            dprintf!(INFO, "Context Bank {}:\n", i);
-            let cbar = Cbar::read_at(&gr1_base, i);
-            let cbar_fields = match cbar.cbar_type() {
-                CbarType::S2Translation => CbarS2Translation::FIELDS,
-                CbarType::S1TS2Bypass => CbarS1TS2Bypass::FIELDS,
-                CbarType::S1TS2Fault => CbarS1TS2Fault::FIELDS,
-                CbarType::S1TS2Translate => CbarS1TS2Translate::FIELDS,
-            };
-            dump_reg(
-                fmt_tag!("CBAR{} ({})", i, arm_cbar_type_to_string(cbar.cbar_type())),
-                cbar.reg_value() as u64,
-                4,
-                Cbar::offset(i),
-                cbar_fields,
-                &gr1_base,
-                0,
-            );
-
-            let cba2r = Cba2r::read_at(&gr1_base, i);
-            dump_reg(
-                fmt_tag!("CBA2R{}", i),
-                cba2r.reg_value() as u64,
-                4,
-                Cba2r::offset(i),
-                Cba2r::FIELDS,
-                &gr1_base,
-                0,
-            );
-
-            let cbfrsynra = Cbfrsynra::read_at(&gr1_base, i);
-            dump_reg(
-                fmt_tag!("CBFRSYNRA{}", i),
-                cbfrsynra.reg_value() as u64,
-                4,
-                Cbfrsynra::offset(i),
-                Cbfrsynra::FIELDS,
-                &gr1_base,
-                0,
-            );
-
-            let cb_base = self.get_cb_base(i);
-            if cbar.cbar_type() != CbarType::S2Translation {
-                dump_reg(
-                    fmt_tag!("SCTLR({})", i),
-                    Sctlr::read_from(&cb_base).reg_value() as u64,
-                    4,
-                    Sctlr::OFFSET,
-                    Sctlr::FIELDS,
-                    &cb_base,
-                    0,
-                );
-                let tcr = Tcr::read_from(&cb_base);
-                let addr_mode = if cba2r.va64() == Cba2rVa64::Va64 {
-                    AddrMode::Mode64Bit
-                } else if tcr.eae() != 0 {
-                    AddrMode::Ext32Bit
-                } else {
-                    AddrMode::Mode32Bit
-                };
-                match addr_mode {
-                    AddrMode::Mode32Bit => {
-                        dump_reg(
-                            fmt_tag!("TCR({}) (CBA2R.VA64 == 0, EAE == 0)", i),
-                            tcr.reg_value() as u64,
-                            4,
-                            Tcr32Bit::OFFSET,
-                            Tcr32Bit::FIELDS,
-                            &cb_base,
-                            0,
-                        );
-                        dump_reg(
-                            fmt_tag!("TTBR0({})", i),
-                            Ttbr0_32Bit::read_from(&cb_base).reg_value() as u64,
-                            4,
-                            Ttbr0_32Bit::OFFSET,
-                            Ttbr0_32Bit::FIELDS,
-                            &cb_base,
-                            0,
-                        );
-                        dump_reg(
-                            fmt_tag!("TTBR1({})", i),
-                            Ttbr1_32Bit::read_from(&cb_base).reg_value() as u64,
-                            4,
-                            Ttbr1_32Bit::OFFSET,
-                            Ttbr1_32Bit::FIELDS,
-                            &cb_base,
-                            0,
-                        );
-                    }
-                    AddrMode::Ext32Bit => {
-                        dump_reg(
-                            fmt_tag!("TCR({}) (CBA2R.VA64 == 0, EAE == 1)", i),
-                            tcr.reg_value() as u64,
-                            4,
-                            TcrExt32Bit::OFFSET,
-                            TcrExt32Bit::FIELDS,
-                            &cb_base,
-                            0,
-                        );
-                        dump_reg(
-                            fmt_tag!("TTBR0({})", i),
-                            Ttbr0Ext32Bit::read_from(&cb_base).reg_value(),
-                            8,
-                            Ttbr0Ext32Bit::OFFSET,
-                            Ttbr0Ext32Bit::FIELDS,
-                            &cb_base,
-                            0,
-                        );
-                        dump_reg(
-                            fmt_tag!("TTBR1({})", i),
-                            Ttbr1Ext32Bit::read_from(&cb_base).reg_value(),
-                            8,
-                            Ttbr1Ext32Bit::OFFSET,
-                            Ttbr1Ext32Bit::FIELDS,
-                            &cb_base,
-                            0,
-                        );
-                    }
-                    AddrMode::Mode64Bit => {
-                        dump_reg(
-                            fmt_tag!("TCR({}) (CBA2R.VA64 == 1)", i),
-                            tcr.reg_value() as u64,
-                            4,
-                            Tcr64Bit::OFFSET,
-                            Tcr64Bit::FIELDS,
-                            &cb_base,
-                            0,
-                        );
-                        dump_reg(
-                            fmt_tag!("TTBR0({})", i),
-                            Ttbr0_64Bit::read_from(&cb_base).reg_value(),
-                            8,
-                            Ttbr0_64Bit::OFFSET,
-                            Ttbr0_64Bit::FIELDS,
-                            &cb_base,
-                            0,
-                        );
-                        dump_reg(
-                            fmt_tag!("TTBR1({})", i),
-                            Ttbr1_64Bit::read_from(&cb_base).reg_value(),
-                            8,
-                            Ttbr1_64Bit::OFFSET,
-                            Ttbr1_64Bit::FIELDS,
-                            &cb_base,
-                            0,
-                        );
-                    }
-                    AddrMode::Invalid => {
-                        dump_reg(
-                            fmt_tag!("TCR({}) (Bad AddrMode {})", i, addr_mode as u32),
-                            tcr.reg_value() as u64,
-                            4,
-                            Tcr::OFFSET,
-                            Tcr::FIELDS,
-                            &cb_base,
-                            0,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// Prints the high-level status of this SMMU and its BTIs (`smmu show all`).
-    pub fn cmd_show_all(&self, show_pmts: bool, verbose: bool) {
-        ksync::lock!(let guard = self.lock_lock());
-        self.cmd_show_all_locked(&guard, show_pmts, verbose);
-    }
-
-    fn cmd_show_all_locked(&self, guard: &SmmuLockGuard<'_>, show_pmts: bool, verbose: bool) {
-        let st = self.init_state();
-
-        dprintf!(INFO, "Dumping configuration for {}\n", self.name());
-        dprintf!(INFO, "Version    : {}.{}\n", st.idr7.major(), st.idr7.minor());
-        dprintf!(INFO, "User-Bound : {}\n", if *guard.user_mode_bound() { "Yes" } else { "No" });
-        dprintf!(INFO, "OpMode     : {}\n", arm_smmu_mode_to_string(st.op_mode));
-        dprintf!(INFO, "BTI Count  : {}\n", guard.bti_list().len());
-
-        for (i, bti) in guard.bti_list().iter().enumerate() {
-            let mut bti_name_buf = [0u8; ZX_MAX_NAME_LEN];
-            bti.get_name(&mut bti_name_buf);
-            let bti_name = SmmuBti::name_display(&bti_name_buf);
-            dprintf!(INFO, "\nBTI #{} (\"{}\")\n", i, bti_name);
-            bti.cmd_show(1, show_pmts, verbose);
-        }
-    }
-
-    fn find_cmd_target_locked(
-        &self,
-        guard: &SmmuLockGuard<'_>,
-        args: &[ConsoleArg<'_>],
-        out_ndx: Option<&mut u32>,
-    ) -> Result<Option<RefPtr<SmmuBti>>, Status> {
-        let mut local_ndx = 0u32;
-        let ndx_ref = match out_ndx {
-            Some(r) => {
-                *r = 0;
-                r
-            }
-            None => &mut local_ndx,
-        };
-
-        let Some(first) = args.first() else {
-            dprintf!(INFO, "No target specified.  One of (all|bti <N>|sid <Id>) is required.\n");
-            return Err(Status::INVALID_ARGS);
-        };
-
-        let tgt_type = first.str_val;
-        if tgt_type == "all" {
-            return Ok(None);
-        }
-
-        let is_bti = tgt_type == "bti";
-        if !is_bti && tgt_type != "sid" {
-            dprintf!(INFO, "Invalid target \"{}\"\n", tgt_type);
-            return Err(Status::INVALID_ARGS);
-        }
-
-        if args.len() < 2 {
-            dprintf!(INFO, "Insufficient arguments for \"{}\" target\n", tgt_type);
-            return Err(Status::INVALID_ARGS);
-        }
-
-        let tgt_val = args[1].u.min(u32::MAX as u64) as u32;
-        if !is_bti && (tgt_val & !self.valid_stream_id_mask()) != 0 {
-            dprintf!(INFO, "Invalid SID {:#x}\n", tgt_val);
-            return Err(Status::INVALID_ARGS);
-        }
-
-        for bti in guard.bti_list().iter() {
-            if is_bti {
-                if *ndx_ref == tgt_val {
-                    return Ok(Some(RefPtr::from_ref(bti)));
-                }
-            } else if bti.smr_intersects(SmrValue::from_raw(tgt_val, self.valid_stream_id_mask())) {
-                return Ok(Some(RefPtr::from_ref(bti)));
-            }
-            *ndx_ref += 1;
-        }
-
-        dprintf!(INFO, "Failed to find {} target {:#x} in {}\n", tgt_type, tgt_val, self.name());
-        Err(Status::NOT_FOUND)
-    }
-
-    fn cmd_show(&self, args: &[ConsoleArg<'_>], cmd_ndx: usize) -> i32 {
-        ksync::lock!(let guard = self.lock_lock());
-
-        let arg_ndx = cmd_ndx + 1;
-        debug_assert!(arg_ndx <= args.len());
-
-        let tgt = match self.find_cmd_target_locked(&guard, &args[arg_ndx..], None) {
-            Ok(t) => t,
-            Err(status) => return status.into_raw(),
-        };
-
-        let verbose = find_optional_flag(args, "-v");
-        let show_pmts = find_optional_flag(args, "-pmts");
-        if let Some(tgt) = tgt {
-            tgt.cmd_show(0, show_pmts, verbose);
-        } else {
-            self.cmd_show_all_locked(&guard, show_pmts, verbose);
-        }
-
-        0
-    }
-
-    fn cmd_bti_op<F>(&self, args: &[ConsoleArg<'_>], cmd_ndx: usize, mut op: F) -> i32
-    where
-        F: FnMut(&Smmu, &SmmuBti, u32),
-    {
-        ksync::lock!(let guard = self.lock_lock());
-
-        debug_assert!(cmd_ndx < args.len());
-        let tgt_ndx = cmd_ndx + 1;
-
-        if tgt_ndx >= args.len() {
-            dprintf!(INFO, "Insufficient arguments for \"{}\" command\n", args[cmd_ndx].str_val);
-            return usage(Status::INVALID_ARGS.into_raw());
-        }
-
-        let mut found_ndx = 0u32;
-        let bti_tgt =
-            match self.find_cmd_target_locked(&guard, &args[tgt_ndx..], Some(&mut found_ndx)) {
-                Ok(t) => t,
-                Err(status) => return status.into_raw(),
-            };
-
-        if let Some(bti) = bti_tgt {
-            op(self, &bti, found_ndx);
-        } else {
-            for (ndx, bti) in guard.bti_list().iter().enumerate() {
-                op(self, bti, ndx as u32);
-            }
-        }
-
-        0
-    }
-
-    /// Dispatches the `smmu` kernel console command.
-    pub fn console_cmd(args: &[ConsoleArg<'_>], _flags: u32) -> i32 {
-        // We need at least two arguments to have a valid command.
-        if args.len() < 2 {
-            dprintf!(INFO, "Bad argument count ({}).\n\n", args.len());
-            return usage(Status::INVALID_ARGS.into_raw());
-        }
-
-        #[derive(Clone, Copy, PartialEq, Eq)]
-        enum Cmd {
-            Invalid,
-            Help,
-            List,
-            SetDefault,
-            Show,
-            DumpRegs,
-            Lock,
-            InvalidateSids,
-        }
-
-        const CMD_MAP: &[(&str, Cmd)] = &[
-            ("help", Cmd::Help),
-            ("list", Cmd::List),
-            ("set", Cmd::SetDefault),
-            ("show", Cmd::Show),
-            ("dumpregs", Cmd::DumpRegs),
-            ("lock", Cmd::Lock),
-            ("isids", Cmd::InvalidateSids),
-        ];
-
-        // Find command in the argument list, and remember its index so that the
-        // command handler can parse its positional arguments. The command is the
-        // first entry in the argument list which does not start with a "-".
-        let mut cmd_ndx = 0usize;
-        let mut cmd = Cmd::Invalid;
-        for (i, arg) in args.iter().enumerate().skip(1) {
-            if !arg.str_val.starts_with('-') {
-                cmd_ndx = i;
-                for &(name, val) in CMD_MAP {
-                    if arg.str_val == name {
-                        cmd = val;
-                    }
-                }
-                if cmd == Cmd::Invalid {
-                    dprintf!(INFO, "Invalid command \"{}\"\n", arg.str_val);
-                    return usage(Status::INVALID_ARGS.into_raw());
-                }
-                break;
-            }
-        }
-
-        if cmd_ndx == 0 {
-            dprintf!(INFO, "Missing command!\n");
-            return usage(Status::INVALID_ARGS.into_raw());
-        }
-
-        // If the command is anything but "help" or "list", then we are going to need
-        // to find an SMMU to operate on.
-        let mut chosen_smmu: Option<RefPtr<Smmu>> = None;
-        if cmd != Cmd::Help && cmd != Cmd::List {
-            let maybe_id = match find_optional_u32(args, "--id") {
-                Ok(id) => id,
-                Err(status) => return usage(status.into_raw()),
-            };
-
-            // If we are attempting to set a new default, then use a value explicitly
-            // passed via the `--id` option, if provided, or expect a positional
-            // argument otherwise.
-            let tgt_ndx = if cmd == Cmd::SetDefault {
-                if let Some(id) = maybe_id {
-                    id
-                } else {
-                    let id_ndx = cmd_ndx + 1;
-                    if id_ndx >= args.len() {
-                        dprintf!(INFO, "No default SMMU ID specified.\n");
-                        return usage(Status::INVALID_ARGS.into_raw());
-                    }
-                    args[id_ndx].u as u32
-                }
-            } else {
-                // `Relaxed` suffices: `DEFAULT_SMMU_NDX` is an advisory index hint for interactive
-                // console commands and does not synchronize any other state (`SmmuInstanceLock` guards
-                // `INSTANCES` lookup below).
-                maybe_id.unwrap_or_else(|| DEFAULT_SMMU_NDX.load(Ordering::Relaxed))
-            };
-
-            // Lock and try to find the target SMMU. Error out if we cannot.
-            {
-                ksync::lock!(let mut instance_guard = SmmuInstanceLock::lock());
-                let list = INSTANCES.get_mut(instance_guard.as_mut().token_mut());
-                for (ndx, smmu) in list.iter().enumerate() {
-                    if (ndx as u32) == tgt_ndx {
-                        chosen_smmu = Some(RefPtr::from_ref(smmu));
-                    }
-                }
-            }
-
-            let Some(ref smmu) = chosen_smmu else {
-                dprintf!(INFO, "Failed to find SMMU #{}\n", tgt_ndx);
-                return usage(Status::INVALID_ARGS.into_raw());
-            };
-
-            // We found our SMMU. If we are setting the default, update the global
-            // default value and get out. Otherwise, continue processing with our
-            // chosen SMMU.
-            if cmd == Cmd::SetDefault {
-                dprintf!(INFO, "Default SMMU is now \"{}\".\n", smmu.name());
-                // `Relaxed` suffices: `DEFAULT_SMMU_NDX` is a standalone console index hint and
-                // does not publish or synchronize any other memory.
-                DEFAULT_SMMU_NDX.store(tgt_ndx, Ordering::Relaxed);
-                return 0;
-            }
-        }
-
-        // Dispatch the command.
-        match cmd {
-            Cmd::Help => usage(0),
-            Cmd::List => {
-                ksync::lock!(let mut instance_guard = SmmuInstanceLock::lock());
-                let list = INSTANCES.get_mut(instance_guard.as_mut().token_mut());
-                dprintf!(INFO, "Discovered {} SMMU instances\n", list.len());
-                for (id, smmu) in list.iter().enumerate() {
-                    ksync::lock!(let guard = smmu.lock_lock());
-                    dprintf!(
-                        INFO,
-                        "[{}] - {} (mode {}, user-bound : {})\n",
-                        id,
-                        smmu.name(),
-                        arm_smmu_mode_to_string(smmu.op_mode()),
-                        if *guard.user_mode_bound() { "Yes" } else { "No" }
-                    );
-
-                    for (bti_ndx, bti) in guard.bti_list().iter().enumerate() {
-                        let mut sid_buf = [0u8; 128];
-                        let mut bti_name_buf = [0u8; ZX_MAX_NAME_LEN];
-                        bti.get_name(&mut bti_name_buf);
-                        let bti_name = SmmuBti::name_display(&bti_name_buf);
-
-                        ksync::lock!(let bti_pmt_guard = bti.lock_pmt_lock());
-                        ksync::lock!(let bti_guard = bti.lock_lock());
-                        let sid_str = SmmuBti::render_sid_list_locked(&bti_guard, &mut sid_buf);
-                        dprintf!(
-                            INFO,
-                            "    BTI[{}] - Mode {}{} StreamIDs [{}] Name \"{}\"\n",
-                            bti_ndx,
-                            bti_mode_to_string(*bti_guard.mode()),
-                            if *bti_pmt_guard.orphaned() { " (orphaned)" } else { "" },
-                            sid_str,
-                            bti_name
-                        );
-                    }
-                }
-                0
-            }
-            Cmd::SetDefault => {
-                // Set default should have been handled earlier.
-                usage(Status::INVALID_ARGS.into_raw())
-            }
-            Cmd::Show => {
-                // "show" takes an optional BTI ID or target selector.
-                let smmu = chosen_smmu.expect("chosen_smmu must be set for Show");
-                smmu.cmd_show(args, cmd_ndx)
-            }
-            Cmd::DumpRegs => {
-                // "dumpregs" takes no extra arguments.
-                let smmu = chosen_smmu.expect("chosen_smmu must be set for DumpRegs");
-                smmu.cmd_dump_regs();
-                0
-            }
-            Cmd::Lock => {
-                let smmu = chosen_smmu.expect("chosen_smmu must be set for Lock");
-                smmu.cmd_bti_op(args, cmd_ndx, |_smmu, bti, ndx| {
-                    bti.cmd_lock(ndx);
-                })
-            }
-            Cmd::InvalidateSids => {
-                let smmu = chosen_smmu.expect("chosen_smmu must be set for InvalidateSids");
-                smmu.cmd_bti_op(args, cmd_ndx, |smmu, bti, ndx| {
-                    let mut bti_name_buf = [0u8; ZX_MAX_NAME_LEN];
-                    bti.get_name(&mut bti_name_buf);
-                    let bti_name = SmmuBti::name_display(&bti_name_buf);
-                    match bti.invalidate_sids() {
-                        Ok(()) => {
-                            dprintf!(
-                                INFO,
-                                "{}: Stream IDs for BTI index #{} (\"{}\") have been \
-                                 invalidated.\n",
-                                smmu.name(),
-                                ndx,
-                                bti_name
-                            );
-                        }
-                        Err(status) => {
-                            dprintf!(
-                                INFO,
-                                "{}: Failed to invalidate Stream IDs for BTI index #{} (\"{}\") \
-                                 (err {}).\n",
-                                smmu.name(),
-                                ndx,
-                                bti_name,
-                                status.into_raw()
-                            );
-                        }
-                    }
-                })
-            }
-            Cmd::Invalid => {
-                // It should be impossible to have anything but a valid command at this
-                // point.
-                unreachable!()
-            }
-        }
     }
 }

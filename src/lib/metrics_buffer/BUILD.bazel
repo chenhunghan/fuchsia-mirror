@@ -2,32 +2,62 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+test_suite(
+    name = "tests",
+    tests = [":metrics_buffer_tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_library(
     name = "metrics_buffer",
     srcs = [
-        "log.h",
         "metrics_buffer.cc",
-        "metrics_buffer.h",
         "metrics_impl.cc",
+    ],
+    hdrs = [
+        "log.h",
+        "metrics_buffer.h",
         "metrics_impl.h",
     ],
+    # Uses Fuchsia-only FIDL, async-loop, and component incoming APIs.
+    target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = [
-        "//src/lib:__subpackages__",
-        "//src/media/drivers/amlogic_decoder:__subpackages__",
-        "//src/media/lib/codec_impl:__subpackages__",
-        "//src/sysmem/server:__subpackages__",
+        "//src/media/drivers/amlogic_decoder:__pkg__",
+        "//src/media/lib/codec_impl:__pkg__",
+        "//src/sysmem/server:__pkg__",
     ],
     deps = [
-        "@fuchsia_sdk//fidl/fuchsia.io:fuchsia.io_cpp",
-        "@fuchsia_sdk//fidl/fuchsia.metrics:fuchsia.metrics_cpp",
-        "@fuchsia_sdk//pkg/async-loop-cpp",
-        "@fuchsia_sdk//pkg/async-loop-default",
-        "@fuchsia_sdk//pkg/component_incoming_cpp",
-        "@fuchsia_sdk//pkg/driver_logging_cpp",
-        "@fuchsia_sdk//pkg/sys_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/driver/logging/cpp",
     ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "metrics_buffer_unittests",
+    srcs = ["metrics_buffer_unittests.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":metrics_buffer",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "metrics_buffer_tests",
+    unit_tests = [":metrics_buffer_unittests"],
 )

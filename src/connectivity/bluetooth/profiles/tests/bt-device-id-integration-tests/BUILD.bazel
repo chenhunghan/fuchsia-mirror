@@ -1,0 +1,95 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":bt-device-id-integration-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
+rustc_test(
+    name = "tests_bin",
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth.bredr:fuchsia.bluetooth.bredr_rust",
+        "//sdk/fidl/fuchsia.bluetooth.deviceid:fuchsia.bluetooth.deviceid_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/connectivity/bluetooth/testing/mock-piconet-server:lib",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test",
+        "//src/sys/lib/cm_rust",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "tests_bin_packaged_bin",
+    testonly = True,
+    binary = ":tests_bin",
+    binary_name = "bt_device_id_integration_tests",
+)
+
+fx_component_manifest(
+    name = "bt_device_id_integration_tests-manifest",
+    testonly = True,
+    component_name = "bt_device_id_integration_tests",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/bt-device-id-integration-tests.cml",
+)
+
+fx_test_component(
+    name = "bt_device_id_integration_tests",
+    compiled_manifest = ":bt_device_id_integration_tests-manifest",
+    deps = [":tests_bin_packaged_bin"],
+)
+
+fx_package(
+    name = "bt-device-id-integration-tests-package",
+    package_name = "bt-device-id-integration-tests",
+    components = [
+        # The Device ID component.
+        "//src/connectivity/bluetooth/profiles/bt-device-id:component",
+
+        # Mock Piconet Server component.
+        "//src/connectivity/bluetooth/testing/mock-piconet-server:component",
+
+        # In GN, the Realm Builder server component came in transitively
+        # through //src/lib/fuchsia-component-test.
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":bt_device_id_integration_tests"],
+)
+
+fx_test(
+    name = "bt-device-id-integration-tests",
+    package = ":bt-device-id-integration-tests-package",
+    # The profile integration tests tend to flake if tests are run in parallel.
+    parallel = 1,
+)

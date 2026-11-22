@@ -57,7 +57,7 @@ class UsbConfigTest(unittest.TestCase):
     def test_notify_intentional_disconnect_notifies_all_transports(
         self,
     ) -> None:
-        """Verifies the wrapper notifies fuchsia_controller then ffx."""
+        """Verifies the wrapper notifies usb.before_disconnect."""
         dut = mock.MagicMock()
 
         # pylint: disable-next=protected-access
@@ -66,8 +66,7 @@ class UsbConfigTest(unittest.TestCase):
         self.assertEqual(
             [c[0] for c in dut.mock_calls],
             [
-                "fuchsia_controller.before_usb_disconnect",
-                "ffx.notify_intentional_disconnect",
+                "usb.before_disconnect",
             ],
         )
 
@@ -78,13 +77,12 @@ class UsbConfigTest(unittest.TestCase):
 
         usb_config.set_usb_config(dut, "sourcesink")
 
-        # Both hooks run, in order, before the config command goes out over
+        # usb.before_disconnect runs before the config command goes out over
         # serial.
         self.assertEqual(
             [c[0] for c in dut.mock_calls],
             [
-                "fuchsia_controller.before_usb_disconnect",
-                "ffx.notify_intentional_disconnect",
+                "usb.before_disconnect",
                 "serial.send_and_recv",
             ],
         )

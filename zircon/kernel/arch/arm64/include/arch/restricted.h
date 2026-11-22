@@ -7,8 +7,7 @@
 #ifndef ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_RESTRICTED_H_
 #define ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_RESTRICTED_H_
 
-#include <debug.h>
-#include <zircon/errors.h>
+#include <stdint.h>
 
 struct ArchSavedNormalState {
   // Restricted Mode EL0 has its own TPIDR so we must save/restore Normal Mode's.

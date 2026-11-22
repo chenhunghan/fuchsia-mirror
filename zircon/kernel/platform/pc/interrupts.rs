@@ -66,7 +66,6 @@ static GSI_RANGE: LazyInit<GsiRange> = LazyInit::uninit();
 unsafe extern "C" {
     fn apic_vm_init();
     fn apic_local_init();
-    fn apic_issue_eoi();
     fn cpp_arch_ints_disabled() -> bool;
     fn apic_bsp_id() -> u8;
 }
@@ -208,14 +207,19 @@ fn platform_init_apic(_level: init::LkInitLevel) {
 /// Handles a platform interrupt from an interrupt vector.
 ///
 /// # Safety
-/// This function is called directly from the assembly interrupt entry point.
-/// `frame` must be a valid pointer to the interrupt frame containing the CPU registers,
-/// and interrupts must be disabled on the current CPU when this is called.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn platform_irq(frame: *const crate::arch_rs::x86::Iframe) {
+///
+/// The caller must ensure that:
+/// - CPL is 0, interrupts are disabled on the calling CPU in an active platform IRQ handler, and
+///   `%gs.base`, `PerCpu`, and the local APIC (`apic_vm_init` / `apic_local_init`) are initialized.
+/// - `INTERRUPT_MANAGER`'s spinlock is not held on the calling CPU.
+/// - `frame` is non-null, aligned, and points to a valid, initialized
+///   [`crate::arch_rs::x86::Iframe`] with no conflicting mutable references for the duration of the
+///   call.
+pub unsafe fn platform_irq(frame: *const crate::arch_rs::x86::Iframe) {
     crate::kernel::stats::inc_interrupts();
 
-    // SAFETY: `frame` is a valid pointer to an interrupt register state frame.
+    // SAFETY: Caller guarantees `frame` is non-null, aligned, and points to a valid, initialized
+    // `Iframe` with no conflicting mutable references.
     let x86_vector = unsafe { (*frame).vector };
     debug_assert!(
         x86_vector >= X86_INT_PLATFORM_BASE.0 as u64 && x86_vector <= X86_INT_PLATFORM_MAX.0 as u64
@@ -223,11 +227,9 @@ pub unsafe extern "C" fn platform_irq(frame: *const crate::arch_rs::x86::Iframe)
 
     INTERRUPT_MANAGER.invoke_x86_vector(x86_vector as u8);
 
-    // SAFETY: Issuing an EOI is required to acknowledge the interrupt at the APIC level
-    // and is safe to call inside the interrupt handler.
-    unsafe {
-        apic_issue_eoi();
-    }
+    // SAFETY: Caller guarantees CPL == 0, interrupts are disabled in an active platform IRQ
+    // context, and `%gs.base` and the local APIC are initialized.
+    unsafe { crate::arch_rs::x86::lapic::apic_issue_eoi() };
 }
 
 /// Registers the handler for the specified vector.

@@ -36,13 +36,7 @@ fuchsia_test_package("goldfish-test-pkg") {
   test_components = [ ":goldfish_test_cmp" ]
   package_name = "goldfish_test"
   test_specs = {
-    environments = [
-      {
-        dimensions = {
-          device_type = "AEMU"
-        }
-      },
-    ]
+    environments = [ aemu_env ]
   }
 }
 

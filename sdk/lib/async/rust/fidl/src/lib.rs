@@ -173,8 +173,8 @@ impl<D: OnDispatcher> Transport for AsyncChannel<D> {
                 ZX_ERR_PEER_CLOSED => return Poll::Ready(Err(None)),
                 ZX_ERR_BUFFER_TOO_SMALL => {
                     let min_chunks = (actual_bytes as usize).div_ceil(CHUNK_SIZE);
-                    buffer.chunks.reserve(min_chunks - buffer.chunks.capacity());
-                    buffer.handles.reserve(actual_handles as usize - buffer.handles.capacity());
+                    buffer.chunks.reserve(min_chunks);
+                    buffer.handles.reserve(actual_handles as usize);
                 }
                 ZX_ERR_SHOULD_WAIT => {
                     exclusive.wait_readable(cx)?;

@@ -99,7 +99,7 @@ impl Driver for %s {
         Ok(%s { _node: node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
     }
 }
 """ % (
@@ -199,10 +199,6 @@ impl Driver for %s {
             f'driver_components = [ ":{args.name}-rust-component" ]',
         )
         gn_content = gn_content.replace('":bind"', f'"{args.bind_target}"')
-        gn_content = gn_content.replace(
-            'info = "meta/{{snake_case PROJECT_NAME}}_info.json"',
-            f'info = "meta/{args.name}-info.json"',
-        )
         gn_content = gn_content.replace(
             'fuchsia_unittest_package("{{snake_case PROJECT_NAME}}-unit-test-pkg")',
             f'fuchsia_unittest_package("{args.name}-rust-test-pkg")',
@@ -516,23 +512,6 @@ group("drivers") {
             print(
                 f"Info: Parent {parent_build_gn} does not have a drivers group. You may need to add it manually."
             )
-
-    # 6. Append to all_drivers_list.txt
-    all_drivers_path = os.path.join(
-        fuchsia_root, "build/drivers/all_drivers_list.txt"
-    )
-    if os.path.exists(all_drivers_path):
-        label = f"//{args.dir}:{args.name}-rust-lib\n"
-        with open(all_drivers_path, "r") as f:
-            lines = f.readlines()
-        if label not in lines:
-            with open(all_drivers_path, "a") as f:
-                f.write(label)
-            print(f"Added {label.strip()} to {all_drivers_path}")
-        else:
-            print(f"Label {label.strip()} already in {all_drivers_path}")
-    else:
-        print(f"Warning: {all_drivers_path} not found. Could not add label.")
 
     # 7. Format files
     print("Formatting files...")

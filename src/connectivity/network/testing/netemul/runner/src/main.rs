@@ -59,7 +59,7 @@ async fn test_setup(
     let svc_dir = namespace
         .into_iter()
         .find_map(|frunner::ComponentNamespaceEntry { path, directory, .. }| {
-            (path.map(|path| path == "/svc").unwrap_or(false)).then(|| directory)
+            (path.map(|path| path == "/svc").unwrap_or(false)).then_some(directory)
         })
         .context("/svc directory not in namespace")?
         .context("directory field not set for /svc namespace entry")?

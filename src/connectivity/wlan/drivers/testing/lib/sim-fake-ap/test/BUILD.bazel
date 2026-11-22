@@ -43,8 +43,7 @@ fx_cc_test_binary(
         "//src/connectivity/wlan/drivers/testing/lib/sim-env",
         "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap",
         "//src/lib/fxl/test:gtest_main",
-        # Bazel's gtest target bundles gmock; GN's :gmock publicly depends on :gtest.
-        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -71,8 +70,7 @@ fx_cc_test_binary(
         "//src/connectivity/wlan/drivers/testing/lib/sim-env",
         "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap",
         "//src/lib/fxl/test:gtest_main",
-        # Bazel's gtest target bundles gmock; GN's :gmock publicly depends on :gtest.
-        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+        "@com_google_googletest//:gtest",
     ],
 )
 

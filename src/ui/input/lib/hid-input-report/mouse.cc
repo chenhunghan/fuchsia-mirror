@@ -83,23 +83,23 @@ ParseResult Mouse::CreateDescriptor(fidl::AnyArena& allocator,
   fuchsia_input_report::wire::MouseInputDescriptor mouse_input(allocator);
 
   if (movement_x_) {
-    mouse_input.set_movement_x(allocator, LlcppAxisFromAttribute(*movement_x_));
+    mouse_input.set_movement_x(allocator, WireAxisFromAttribute(*movement_x_));
   }
 
   if (movement_y_) {
-    mouse_input.set_movement_y(allocator, LlcppAxisFromAttribute(*movement_y_));
+    mouse_input.set_movement_y(allocator, WireAxisFromAttribute(*movement_y_));
   }
 
   if (position_x_) {
-    mouse_input.set_position_x(allocator, LlcppAxisFromAttribute(*position_x_));
+    mouse_input.set_position_x(allocator, WireAxisFromAttribute(*position_x_));
   }
 
   if (position_y_) {
-    mouse_input.set_position_y(allocator, LlcppAxisFromAttribute(*position_y_));
+    mouse_input.set_position_y(allocator, WireAxisFromAttribute(*position_y_));
   }
 
   if (scroll_v_) {
-    mouse_input.set_scroll_v(allocator, LlcppAxisFromAttribute(*scroll_v_));
+    mouse_input.set_scroll_v(allocator, WireAxisFromAttribute(*scroll_v_));
   }
 
   // Set the buttons array.

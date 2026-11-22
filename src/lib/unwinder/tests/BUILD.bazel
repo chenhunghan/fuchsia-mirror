@@ -26,6 +26,13 @@ fx_cc_library(
         "unwind_local.cc",
         "unwind_local.h",
     ],
+    # GN enables //build/config:default_frame_pointers by default, which the
+    # stack-unwinding tests rely on for frame-pointer and hybrid unwinding.
+    # @bazel2gn:skip
+    copts = [
+        "-fno-omit-frame-pointer",
+        "-momit-leaf-frame-pointer",
+    ],
     implementation_deps = [
         ":cfi_only",
         ":fp_only",

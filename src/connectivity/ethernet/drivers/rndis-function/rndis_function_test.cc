@@ -488,34 +488,6 @@ class RndisFunctionTest : public ::testing::Test {
   fidl::SyncClient<ffunction::UsbFunctionInterface> function_interface_client_;
 };
 
-TEST_F(RndisFunctionTest, Configure) {
-  RunInFunctionContext([](auto& function) {
-    EXPECT_EQ(function.ConfigEpCalls(), 0u);
-    EXPECT_EQ(function.DisableEpCalls(), 0u);
-  });
-  fidl::Result result = function_interface_client_->SetConfigured({{
-      .configured = true,
-      .speed = fdescriptor::UsbSpeed::kFull,
-  }});
-  ASSERT_OK(result);
-
-  RunInFunctionContext([](auto& function) {
-    EXPECT_EQ(function.ConfigEpCalls(), 3u);
-    EXPECT_EQ(function.DisableEpCalls(), 0u);
-  });
-
-  result = function_interface_client_->SetConfigured({{
-      .configured = false,
-      .speed = fdescriptor::UsbSpeed::kFull,
-  }});
-  ASSERT_OK(result);
-
-  RunInFunctionContext([](auto& function) {
-    EXPECT_EQ(function.ConfigEpCalls(), 3u);
-    EXPECT_EQ(function.DisableEpCalls(), 3u);
-  });
-}
-
 TEST_F(RndisFunctionTest, NetworkDeviceGetInfo) {
   fdf::Arena arena(kArenaTag);
   fdf::WireUnownedResult result = net_impl_client_.buffer(arena)->GetInfo();
@@ -1276,22 +1248,6 @@ TEST_F(RndisFunctionTest, SetMessageBoundaryChecks) {
   EXPECT_EQ(response.status, static_cast<uint32_t>(RNDIS_STATUS_SUCCESS));
 }
 
-TEST_F(RndisFunctionTest, UnrecognizedControlTransfer) {
-  fidl::Result result = function_interface_client_->Control({{
-      .setup = fdescriptor::UsbSetup{{
-          .bm_request_type = 0,
-          .b_request = 0,
-          .w_value = 0,
-          .w_index = 0,
-          .w_length = 0,
-      }},
-      .write = {},
-  }});
-  ASSERT_TRUE(result.is_error());
-  ASSERT_TRUE(result.error_value().is_domain_error());
-  EXPECT_STATUS(result.error_value().domain_error(), ZX_ERR_NOT_SUPPORTED);
-}
-
 TEST_F(RndisFunctionTest, LinkSpeedAllSpeeds) {
   struct SpeedCase {
     fdescriptor::UsbSpeed usb_speed;
@@ -1543,39 +1499,6 @@ TEST_F(RndisFunctionTest, RxCompletionInvalidVmo) {
 
   QueryOid(OID_GEN_XMIT_OK, &receive_ok, sizeof(receive_ok), &actual);
   EXPECT_EQ(receive_ok, 1u);
-}
-
-TEST_F(RndisFunctionTest, HaltDisableEndpointFailure) {
-  RunInFunctionContext(
-      [](FakeFunction& function) { function.set_disable_endpoint_status(ZX_ERR_IO); });
-
-  fidl::Result result = function_interface_client_->SetConfigured({{
-      .configured = false,
-      .speed = fdescriptor::UsbSpeed::kFull,
-  }});
-  ASSERT_TRUE(result.is_error());
-  ASSERT_TRUE(result.error_value().is_domain_error());
-  EXPECT_STATUS(result.error_value().domain_error(), ZX_ERR_IO);
-
-  RunInFunctionContext([](FakeFunction& function) {
-    EXPECT_EQ(function.DisableEpCalls(), 3u);
-    function.set_disable_endpoint_status(ZX_OK);
-  });
-}
-
-TEST_F(RndisFunctionTest, SetConfiguredConfigureEndpointFailure) {
-  RunInFunctionContext(
-      [](FakeFunction& function) { function.set_config_endpoint_status(ZX_ERR_NO_RESOURCES); });
-
-  fidl::Result result = function_interface_client_->SetConfigured({{
-      .configured = true,
-      .speed = fdescriptor::UsbSpeed::kFull,
-  }});
-  ASSERT_TRUE(result.is_error());
-  ASSERT_TRUE(result.error_value().is_domain_error());
-  EXPECT_STATUS(result.error_value().domain_error(), ZX_ERR_NO_RESOURCES);
-
-  RunInFunctionContext([](FakeFunction& function) { function.set_config_endpoint_status(ZX_OK); });
 }
 
 TEST_F(RndisFunctionTest, RxCompletionIoNotPresent) {

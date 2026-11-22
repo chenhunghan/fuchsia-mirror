@@ -500,5 +500,51 @@ TEST_F(PciConfigBaseTests, FindCapability) {
   EXPECT_EQ(FindCapability(*cfg, Capability::Id::kPciPowerManagement), std::nullopt);
 }
 
+TEST_F(PciConfigExtendedTests, FindExtCapability) {
+  auto cfg = ecam().CreateMmioConfig(kDefaultBdf1);
+  auto write_ext_cap = [&](uint16_t offset, ExtCapability::Id id, uint16_t next) {
+    ExtCapabilityIdReg::Get(offset)
+        .FromValue(0)
+        .set_id(std::to_underlying(id))
+        .set_version(1)
+        .set_offset(next)
+        .WriteTo(cfg.get());
+  };
+
+  // An all-zero header at 0x100 indicates no extended capabilities are implemented.
+  ExtCapabilityIdReg::Get(kPcieExtCapBasePtr).FromValue(0).WriteTo(cfg.get());
+  EXPECT_EQ(FindExtCapability(*cfg, ExtCapability::Id::kAdvancedErrorReporting), std::nullopt);
+  EXPECT_EQ(FindExtCapability(*cfg, ExtCapability::Id::kNull), std::nullopt);
+
+  // An all-ones header (0xffff id) is also rejected.
+  ExtCapabilityIdReg::Get(kPcieExtCapBasePtr).FromValue(0xffffffff).WriteTo(cfg.get());
+  EXPECT_EQ(FindExtCapability(*cfg, ExtCapability::Id::kAdvancedErrorReporting), std::nullopt);
+
+  // Reserved low bits in the next capability offset must be masked off.
+  write_ext_cap(kPcieExtCapBasePtr, ExtCapability::Id::kAdvancedErrorReporting,
+                0x150u | static_cast<uint16_t>(~kExtCapabilityPtrMask & 0xfffu));
+  write_ext_cap(0x150, ExtCapability::Id::kL1PMSubstates, 0);
+
+  EXPECT_EQ(FindExtCapability(*cfg, ExtCapability::Id::kAdvancedErrorReporting),
+            kPcieExtCapBasePtr);
+  EXPECT_EQ(FindExtCapability(*cfg, ExtCapability::Id::kL1PMSubstates), 0x150u);
+  EXPECT_EQ(FindExtCapability(*cfg, ExtCapability::Id::kPrecisionTimeMeasurement), std::nullopt);
+
+  // A next pointer into standard config space (below kPcieExtCapPtrMinValid) must be rejected.
+  write_ext_cap(0x80, ExtCapability::Id::kPrecisionTimeMeasurement, 0);
+  write_ext_cap(0x150, ExtCapability::Id::kL1PMSubstates, 0x80);
+  EXPECT_EQ(FindExtCapability(*cfg, ExtCapability::Id::kPrecisionTimeMeasurement), std::nullopt);
+
+  // Offset kPcieExtCapPtrMaxValid is rejected by the last-DWORD guard.
+  EXPECT_FALSE(ReadExtCapability(*cfg, kPcieExtCapPtrMaxValid).has_value());
+  write_ext_cap(0x150, ExtCapability::Id::kL1PMSubstates, kPcieExtCapPtrMaxValid);
+  EXPECT_EQ(FindExtCapability(*cfg, ExtCapability::Id::kPrecisionTimeMeasurement), std::nullopt);
+
+  // A cyclic extended capability chain must terminate via the loop guard.
+  write_ext_cap(kPcieExtCapBasePtr, ExtCapability::Id::kAdvancedErrorReporting, 0x150);
+  write_ext_cap(0x150, ExtCapability::Id::kL1PMSubstates, kPcieExtCapBasePtr);
+  EXPECT_EQ(FindExtCapability(*cfg, ExtCapability::Id::kPrecisionTimeMeasurement), std::nullopt);
+}
+
 }  // namespace
 }  // namespace pci

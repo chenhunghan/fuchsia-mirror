@@ -12,7 +12,6 @@ kernel_rust_mod("intel_rng-rs") {
   sources = [ "intel_rng.rs" ]
   deps = [
     "//sdk/rust/zx-status",
-    "//src/lib/zr",
     "//zircon/kernel/lib/init:init_rust",
   ]
 }

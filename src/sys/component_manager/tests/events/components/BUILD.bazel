@@ -71,7 +71,7 @@ rustc_binary(
     visibility = ["//src/sys/component_manager/tests/events:__pkg__"],
     deps = [
         "//src/lib/fuchsia",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test:lib
+        "//src/lib/fuchsia-component-test:lib",
         "//src/sys/lib/component-events",
     ],
 )

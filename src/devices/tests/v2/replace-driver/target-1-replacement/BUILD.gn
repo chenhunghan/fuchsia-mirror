@@ -34,5 +34,4 @@ fuchsia_driver_component("component") {
   manifest = "meta/target_1.cml"
   component_name = "target_1_replacement"
   deps = [ ":driver" ]
-  info = "meta/info.json"
 }

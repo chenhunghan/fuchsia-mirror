@@ -11,6 +11,12 @@ load(
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":erofs-tests"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
 rustc_library(
     name = "erofs",
     srcs = [
@@ -54,7 +60,6 @@ rustc_test(
     ],
 )
 
-# @bazel2gn:skip
 fx_unittest_package(
     name = "erofs-tests",
     resources = [

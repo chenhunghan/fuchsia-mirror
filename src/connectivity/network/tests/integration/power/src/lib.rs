@@ -45,9 +45,8 @@ use packet::{
     InnerPacketBuilder as _, NestableSerializer as _, NoOpSerializationContext,
     ParsablePacket as _, Serializer as _,
 };
-use packet_formats::ip::{IpPacket, IpProto, Ipv6Proto};
+use packet_formats::ip::{IpPacket, IpProto};
 use packet_formats::ipv4::{Ipv4Packet, Ipv4PacketBuilder};
-use packet_formats::ipv6::Ipv6Packet;
 use packet_formats::udp::{UdpPacket, UdpPacketBuilder, UdpParseArgs};
 use sockaddr::IntoSockAddr as _;
 use test_case::test_case;
@@ -212,6 +211,7 @@ async fn create_power_realm<'a>(
         uses: Some(fnetemul::ChildUses::Capabilities(vec![fnetemul::Capability::LogSink(
             fnetemul::Empty {},
         )])),
+        exposes: Some(vec![fpower_broker::TopologyMarker::PROTOCOL_NAME.to_string()]),
         ..Default::default()
     };
 
@@ -309,15 +309,36 @@ async fn set_up_tun_interface(realm: &netemul::TestRealm<'_>) -> TunInterface {
     }
 }
 
-fn extract_udp_frame_in_ipv6_packet(ipv6_frame: &[u8]) -> Option<&[u8]> {
-    let mut buffer = ipv6_frame;
-    let ipv6 = Ipv6Packet::parse(&mut buffer, ()).expect("failed to parse IPv6");
-    if ipv6.proto() != Ipv6Proto::Proto(IpProto::Udp) {
+fn extract_udp_payload<I: packet_formats::ip::IpExt>(ip_frame: &[u8]) -> Option<&[u8]> {
+    let mut buffer = ip_frame;
+    let ip = I::Packet::parse(&mut buffer, ()).expect("failed to parse IP packet");
+    if ip.proto() != IpProto::Udp.into() {
         return None;
     }
-    let udp = UdpPacket::parse(&mut buffer, UdpParseArgs::new(ipv6.src_ip(), ipv6.dst_ip()))
+    let udp = UdpPacket::parse(&mut buffer, UdpParseArgs::new(ip.src_ip(), ip.dst_ip()))
         .expect("failed to parse UDP");
     Some(udp.into_body())
+}
+
+fn udp_frame_stream(
+    tun_device: &fnet_tun::DeviceProxy,
+) -> impl Stream<Item = Vec<u8>> + FusedStream + '_ {
+    futures::stream::unfold((), move |()| async move {
+        loop {
+            let fnet_tun::Frame { data, frame_type, .. } =
+                tun_device.read_frame().await.expect("FIDL error").expect("read frame error");
+            let data = data.unwrap();
+            let udp_frame = match frame_type.unwrap() {
+                fhardware_network::FrameType::Ipv4 => extract_udp_payload::<Ipv4>(&data),
+                fhardware_network::FrameType::Ipv6 => extract_udp_payload::<Ipv6>(&data),
+                _ => None,
+            };
+            if let Some(udp_frame) = udp_frame {
+                break Some((udp_frame.to_vec(), ()));
+            }
+        }
+    })
+    .fuse()
 }
 
 fn execution_state_level_stream(
@@ -368,23 +389,7 @@ async fn tx_suspension(name: &str, netstack_suspend_enabled: bool) {
     .await;
     tun_port.set_online(true).await.expect("set online");
 
-    let mut udp_frame_stream = pin!(
-        futures::stream::unfold((), |()| async {
-            loop {
-                let fnet_tun::Frame { data, frame_type, .. } =
-                    tun_device.read_frame().await.expect("FIDL error").expect("read frame error");
-                let data = data.unwrap();
-                let frame_type = frame_type.unwrap();
-                if frame_type != fhardware_network::FrameType::Ipv6 {
-                    continue;
-                }
-                if let Some(udp_frame) = extract_udp_frame_in_ipv6_packet(&data) {
-                    break Some((udp_frame.to_vec(), ()));
-                }
-            }
-        })
-        .fuse()
-    );
+    let mut udp_frame_stream = pin!(udp_frame_stream(&tun_device));
 
     let device_control = netstack_testing_common::devices::install_device(&realm, device);
     let interface_control = finterfaces_ext::admin::Control::new(
@@ -519,6 +524,388 @@ async fn tx_suspension(name: &str, netstack_suspend_enabled: bool) {
         // suspension.
         assert_eq!(udp_frame_stream.next().await.unwrap(), payload);
     }
+}
+
+const OFF: fpower_broker::PowerLevel = fpower_broker::BinaryPowerLevel::Off.into_primitive();
+const ON: fpower_broker::PowerLevel = fpower_broker::BinaryPowerLevel::On.into_primitive();
+
+struct TestPowerElement {
+    _control: fpower_broker::ElementControlProxy,
+    runner: fpower_broker::ElementRunnerRequestStream,
+}
+
+impl TestPowerElement {
+    async fn add(
+        realm: &netemul::TestRealm<'_>,
+        name: &str,
+    ) -> (Self, fpower_broker::DependencyToken) {
+        let topology = realm
+            .connect_to_protocol::<fpower_broker::TopologyMarker>()
+            .expect("connect to Power Broker Topology");
+        let (control, control_server) =
+            fidl::endpoints::create_proxy::<fpower_broker::ElementControlMarker>();
+        let (runner_client, runner) =
+            fidl::endpoints::create_request_stream::<fpower_broker::ElementRunnerMarker>();
+        topology
+            .add_element(fpower_broker::ElementSchema {
+                element_name: Some(name.to_string()),
+                initial_current_level: Some(OFF),
+                valid_levels: Some(vec![OFF, ON]),
+                element_control: Some(control_server),
+                element_runner: Some(runner_client),
+                ..Default::default()
+            })
+            .await
+            .expect("add_element FIDL")
+            .expect("add_element");
+        let dependency_token = fpower_broker::DependencyToken::create();
+        let dup = dependency_token
+            .duplicate_handle(zx::Rights::SAME_RIGHTS)
+            .expect("duplicate dependency token");
+        control
+            .register_dependency_token(dup)
+            .await
+            .expect("register_dependency_token FIDL")
+            .expect("register_dependency_token");
+        let mut element = Self { _control: control, runner };
+        element.wait_for_level(OFF).await.send().expect("ack initial SetLevel(OFF)");
+        (element, dependency_token)
+    }
+
+    /// Asserts that the next `ElementRunner` request is `SetLevel(expected)`
+    /// and returns its responder unreplied: Power Broker only completes the
+    /// transition, and thus satisfies leases requiring `expected`, once the
+    /// caller replies.
+    async fn wait_for_level(
+        &mut self,
+        expected: fpower_broker::PowerLevel,
+    ) -> fpower_broker::ElementRunnerSetLevelResponder {
+        match self
+            .runner
+            .next()
+            .await
+            .expect("ElementRunner stream ended")
+            .expect("ElementRunner FIDL")
+        {
+            fpower_broker::ElementRunnerRequest::SetLevel { level, responder } => {
+                assert_eq!(level, expected);
+                responder
+            }
+            req @ fpower_broker::ElementRunnerRequest::_UnknownMethod { .. } => {
+                panic!("unexpected ElementRunner request: {req:?}");
+            }
+        }
+    }
+}
+
+#[netstack_test]
+async fn driver_power_element(name: &str) {
+    let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
+    let realm = create_power_realm(&sandbox, name, true).await;
+
+    let suspend_device = &realm
+        .connect_to_protocol::<ftest_suspendcontrol::DeviceMarker>()
+        .expect("Couldn't connect to suspend device");
+    set_up_default_suspender(suspend_device).await;
+    let resume_suspender = || async move {
+        suspend_device
+            .resume(&ftest_suspendcontrol::DeviceResumeRequest::Result(
+                ftest_suspendcontrol::SuspendResult { ..Default::default() },
+            ))
+            .await
+            .expect("fake-suspend resume")
+            .expect("fake-suspend resume");
+    };
+
+    let sagctl =
+        &realm.connect_to_protocol::<fsagcontrol::StateMarker>().expect("connect to SAG ctl");
+    let set_sag = |active: bool| async move {
+        let (execution_state_level, application_activity_level) = if active {
+            (
+                fpower_system::ExecutionStateLevel::Active,
+                fpower_system::ApplicationActivityLevel::Active,
+            )
+        } else {
+            (
+                fpower_system::ExecutionStateLevel::Inactive,
+                fpower_system::ApplicationActivityLevel::Inactive,
+            )
+        };
+        sagctl
+            .set(&fsagcontrol::SystemActivityGovernorState {
+                execution_state_level: Some(execution_state_level),
+                application_activity_level: Some(application_activity_level),
+                ..Default::default()
+            })
+            .await
+            .expect("SAG set")
+            .expect("SAG set");
+    };
+    let mut sag_state = pin!(execution_state_level_stream(sagctl));
+    assert_eq!(sag_state.next().await, Some(fpower_system::ExecutionStateLevel::Active));
+
+    let (mut element, dep_token) = TestPowerElement::add(&realm, "tun-port").await;
+
+    let (tun_device, device) =
+        netstack_testing_common::devices::create_tun_device_with(fnet_tun::DeviceConfig {
+            blocking: Some(true),
+            ..Default::default()
+        });
+    let (tun_port, port) = netstack_testing_common::devices::create_tun_port_with(
+        &tun_device,
+        netstack_testing_common::devices::TUN_DEFAULT_PORT_ID,
+        [fhardware_network::FrameType::Ipv4, fhardware_network::FrameType::Ipv6],
+        [fhardware_network::FrameType::Ipv4, fhardware_network::FrameType::Ipv6],
+        None,
+        Some(dep_token),
+    )
+    .await;
+    tun_port.set_online(true).await.expect("set online");
+
+    let mut udp_frame_stream = pin!(udp_frame_stream(&tun_device));
+
+    let device_control = netstack_testing_common::devices::install_device(&realm, device);
+    let interface_control = finterfaces_ext::admin::Control::new(
+        netstack_testing_common::devices::add_pure_ip_interface(&port, &device_control, "tun")
+            .await,
+    );
+    let if_id = interface_control.get_id().await.expect("get id");
+    // Disable Router Solicitations so periodic RS timers cannot race with the
+    // pre-suspend READABLE barrier below.
+    let _: fnet_interfaces_admin::Configuration = interface_control
+        .set_configuration(&fnet_interfaces_admin::Configuration {
+            ipv6: Some(fnet_interfaces_admin::Ipv6Configuration {
+                ndp: Some(fnet_interfaces_admin::NdpConfiguration {
+                    router_solicitations: Some(
+                        fnet_interfaces_admin::RouterSolicitationConfiguration {
+                            max: Some(0),
+                            ..Default::default()
+                        },
+                    ),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("set_configuration FIDL")
+        .expect("set_configuration");
+    assert_matches!(interface_control.enable().await, Ok(Ok(true)));
+
+    let src = fidl_subnet!("fe80::1/64");
+    let mut dst = std_socket_addr_v6!("[fe80::2]:1010");
+    dst.set_scope_id(if_id.try_into().unwrap());
+
+    let _asp = netstack_testing_common::interfaces::add_address_wait_assigned(
+        &interface_control,
+        src,
+        Default::default(),
+    )
+    .await
+    .expect("add addr");
+    let sock = realm
+        .datagram_socket(fposix_socket::Domain::Ipv6, fposix_socket::DatagramSocketProtocol::Udp)
+        .await
+        .expect("create socket");
+
+    let payload = &[1, 2, 3][..];
+    let on_responder = element.wait_for_level(ON).await;
+    assert_eq!(sock.send_to(payload, &dst.into()).expect("sendto"), payload.len());
+    assert_eq!(
+        udp_frame_stream.next().on_timeout(ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, || None).await,
+        None,
+    );
+    on_responder.send().expect("ack SetLevel(ON)");
+    assert_eq!(udp_frame_stream.next().await.unwrap(), payload);
+
+    // Drain any lingering messages before we get started.
+    let tun_signals = tun_device.get_signals().await.expect("get tun signals");
+    let readable = zx::Signals::from_bits(fnet_tun::Signals::READABLE.bits()).unwrap();
+    while tun_signals.wait_one(readable, zx::MonotonicInstant::INFINITE_PAST).is_ok() {
+        // tun raises READABLE after releasing its TX lock, so READABLE can be
+        // stale with no frame queued; fail instead of blocking forever.
+        let _: fnet_tun::Frame = tun_device
+            .read_frame()
+            .on_timeout(netstack_testing_common::ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT, || {
+                panic!("tun READABLE with no frame to drain")
+            })
+            .await
+            .expect("FIDL error")
+            .expect("read frame error");
+        // tun replies to ReadFrame before clearing READABLE; round-trip to its
+        // dispatcher so the next probe observes the cleared signal.
+        let _: zx::EventPair = tun_device.get_signals().await.expect("get tun signals");
+    }
+    let payload = &[4, 5, 6][..];
+    assert_eq!(sock.send_to(payload, &dst.into()).expect("sendto"), payload.len());
+    let _: zx::Signals =
+        fasync::OnSignals::new(&tun_signals, readable).await.expect("waiting readable");
+
+    set_sag(false).await;
+
+    futures::select! {
+        _ = element.wait_for_level(OFF).fuse() => {
+            panic!("driver lease dropped before TX drained")
+        }
+        s = sag_state.next() => panic!("system suspended before TX drained: {s:?}"),
+        () = fasync::Timer::new(ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT).fuse() => {}
+    }
+
+    assert_eq!(udp_frame_stream.next().await.unwrap(), payload);
+
+    let off_responder = futures::select! {
+        r = element.wait_for_level(OFF).fuse() => r,
+        v = udp_frame_stream.next() => panic!("unexpected extra UDP frame {v:?}"),
+    };
+    off_responder.send().expect("ack SetLevel(OFF)");
+
+    let system_state = futures::select! {
+        s = sag_state.next() => s,
+        v = udp_frame_stream.next() => panic!("unexpected extra UDP frame {v:?}"),
+    };
+    assert_eq!(system_state, Some(fpower_system::ExecutionStateLevel::Inactive));
+    assert_eq!(suspend_device.await_suspend().await.unwrap().unwrap().state_index, Some(0));
+
+    let payload = &[7, 8, 9][..];
+    assert_eq!(sock.send_to(payload, &dst.into()).expect("sendto"), payload.len());
+
+    resume_suspender().await;
+    set_sag(true).await;
+    assert_eq!(sag_state.next().await, Some(fpower_system::ExecutionStateLevel::Active));
+
+    let on_responder = element.wait_for_level(ON).await;
+    assert_eq!(
+        udp_frame_stream.next().on_timeout(ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, || None).await,
+        None,
+    );
+
+    // Interrupt resume with a new suspension before the driver lease is
+    // satisfied: netstack must cancel the pending lease and release its
+    // suspension guard without deadlocking on `on_responder`.
+    set_sag(false).await;
+    let system_state = futures::select! {
+        s = sag_state.next() => s,
+        v = udp_frame_stream.next() => panic!("unexpected extra UDP frame {v:?}"),
+    };
+    assert_eq!(system_state, Some(fpower_system::ExecutionStateLevel::Inactive));
+    assert_eq!(suspend_device.await_suspend().await.unwrap().unwrap().state_index, Some(0));
+
+    on_responder.send().expect("ack SetLevel(ON)");
+    let off_responder = futures::select! {
+        r = element.wait_for_level(OFF).fuse() => r,
+        v = udp_frame_stream.next() => panic!("unexpected extra UDP frame {v:?}"),
+    };
+    off_responder.send().expect("ack SetLevel(OFF)");
+
+    resume_suspender().await;
+    set_sag(true).await;
+    assert_eq!(sag_state.next().await, Some(fpower_system::ExecutionStateLevel::Active));
+
+    element.wait_for_level(ON).await.send().expect("ack SetLevel(ON)");
+    assert_eq!(udp_frame_stream.next().await.unwrap(), payload);
+
+    interface_control
+        .remove()
+        .await
+        .expect("send remove interface request")
+        .expect("remove interface");
+    element.wait_for_level(OFF).await.send().expect("ack SetLevel(OFF)");
+    assert_matches!(
+        interface_control.wait_termination().await,
+        finterfaces_ext::admin::TerminalError::Terminal(
+            fnet_interfaces_admin::InterfaceRemovedReason::User
+        )
+    );
+    assert_matches!(element.runner.next().now_or_never(), None);
+}
+
+/// A port whose power dependency token lacks `ZX_RIGHT_DUPLICATE` violates
+/// `Port.GetPowerDependencyToken`'s contract, but `Installer.InstallDevice`
+/// accepts any `Device`, so netstack must reject the port.
+#[netstack_test]
+async fn driver_power_element_non_duplicable_token(name: &str) {
+    let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
+    let realm = create_power_realm(&sandbox, name, true).await;
+
+    let (tun_device, tun_netdevice) = netstack_testing_common::devices::create_tun_device();
+    let (_tun_port, port) = netstack_testing_common::devices::create_ip_tun_port(
+        &tun_device,
+        netstack_testing_common::devices::TUN_DEFAULT_PORT_ID,
+    )
+    .await;
+
+    // tun refuses tokens lacking ZX_RIGHT_DUPLICATE, so interpose on the
+    // device to hand netstack such a token.
+    let tun_netdevice = &tun_netdevice.into_proxy();
+    let port = &port;
+    let (device, device_requests) =
+        fidl::endpoints::create_request_stream::<fhardware_network::DeviceMarker>();
+    let serve_device = device_requests.for_each_concurrent(None, |request| async move {
+        match request.expect("Device request") {
+            fhardware_network::DeviceRequest::GetInfo { responder } => {
+                let info = tun_netdevice.get_info().await.expect("get device info");
+                responder.send(&info).expect("send device info");
+            }
+            fhardware_network::DeviceRequest::OpenSession {
+                session_name,
+                session_info,
+                responder,
+            } => {
+                let result = tun_netdevice
+                    .open_session(&session_name, session_info)
+                    .await
+                    .expect("open session");
+                responder.send(result).expect("send session");
+            }
+            fhardware_network::DeviceRequest::GetPort {
+                id: _,
+                port: server_end,
+                control_handle: _,
+            } => {
+                server_end
+                    .into_stream()
+                    .for_each(|request| async move {
+                        match request.expect("Port request") {
+                            fhardware_network::PortRequest::GetInfo { responder } => {
+                                let info = port.get_info().await.expect("get port info");
+                                responder.send(&info).expect("send port info");
+                            }
+                            fhardware_network::PortRequest::GetIdentity { responder } => {
+                                let identity = port.get_identity().await.expect("get identity");
+                                responder.send(identity).expect("send identity");
+                            }
+                            fhardware_network::PortRequest::GetPowerDependencyToken {
+                                responder,
+                            } => {
+                                let token = zx::Event::create()
+                                    .replace_handle(zx::Rights::TRANSFER | zx::Rights::WAIT)
+                                    .expect("replace handle");
+                                responder.send(Some(token)).expect("send token");
+                            }
+                            request => panic!("unexpected Port request: {request:?}"),
+                        }
+                    })
+                    .await
+            }
+            request => panic!("unexpected Device request: {request:?}"),
+        }
+    });
+
+    let device_control = netstack_testing_common::devices::install_device(&realm, device);
+    let interface_control = finterfaces_ext::admin::Control::new(
+        netstack_testing_common::devices::add_pure_ip_interface(port, &device_control, "tun").await,
+    );
+    let reason = futures::select! {
+        reason = interface_control.wait_termination().fuse() => reason,
+        () = serve_device.fuse() => panic!("netstack closed the device"),
+    };
+    assert_matches!(
+        reason,
+        finterfaces_ext::admin::TerminalError::Terminal(
+            fnet_interfaces_admin::InterfaceRemovedReason::BadPort
+        )
+    );
 }
 
 #[netstack_test]

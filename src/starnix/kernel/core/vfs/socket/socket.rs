@@ -21,10 +21,11 @@ use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::as_any::AsAny;
 use starnix_uapi::auth::{CAP_NET_ADMIN, CAP_NET_RAW};
 use starnix_uapi::errors::{ENOTTY, Errno};
-use starnix_uapi::user_address::MappingMultiArchUserRef;
+use starnix_uapi::user_address::{MappingMultiArchUserRef, UserAddress};
 use starnix_uapi::vfs::FdEvents;
 use starnix_uapi::{
-    SO_DOMAIN, SO_PROTOCOL, SO_RCVTIMEO, SO_SNDTIMEO, SO_TYPE, SOL_SOCKET, errno, error, uapi,
+    SO_DOMAIN, SO_PROTOCOL, SO_RCVTIMEO, SO_SNDTIMEO, SO_TYPE, SOL_SOCKET, errno, error, socklen_t,
+    uapi,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -327,6 +328,8 @@ fn create_socket_ops(
     }
 }
 
+/// Socket option value passed to or from a socket option handler, backed either by an in-kernel
+/// byte buffer or an uncopied user-space buffer.
 #[derive(Debug)]
 pub enum SockOptValue {
     Value(Vec<u8>),
@@ -346,6 +349,16 @@ impl From<UserBuffer> for SockOptValue {
 }
 
 impl SockOptValue {
+    /// Constructs a user-backed [`SockOptValue`] from `address` and `optlen`, returning `EINVAL`
+    /// if `optlen` is negative when interpreted as a signed 32-bit integer.
+    pub fn from_user(address: UserAddress, optlen: socklen_t) -> Result<Self, Errno> {
+        if (optlen as i32) < 0 {
+            return error!(EINVAL);
+        }
+        Ok(Self::User(UserBuffer { address, length: optlen as usize }))
+    }
+
+    /// Returns the total byte length of the option buffer.
     pub fn len(&self) -> usize {
         match self {
             Self::Value(buffer) => buffer.len(),
@@ -353,6 +366,13 @@ impl SockOptValue {
         }
     }
 
+    /// Returns whether the option buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Reads an instance of `T` from the prefix of the option buffer, returning `EINVAL` if the
+    /// buffer is smaller than `size_of::<T>()`.
     pub fn read<T: FromBytes>(&self, current_task: &CurrentTask) -> Result<T, Errno> {
         match self {
             Self::Value(buffer) => {
@@ -364,6 +384,7 @@ impl SockOptValue {
         }
     }
 
+    /// Reads up to `max_bytes` from the option buffer into a `Vec<u8>`.
     pub fn read_bytes(
         &self,
         current_task: &CurrentTask,
@@ -379,13 +400,6 @@ impl SockOptValue {
                 current_task
                     .read_buffer(&UserBuffer { address: user_buffer.address, length: bytes })
             }
-        }
-    }
-
-    pub fn to_vec(self, current_task: &CurrentTask) -> Result<Vec<u8>, Errno> {
-        match self {
-            Self::Value(buffer) => Ok(buffer),
-            Self::User(user_buffer) => current_task.read_buffer(&user_buffer),
         }
     }
 }

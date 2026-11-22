@@ -2,7 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@fuchsia_rules_common//packages:resources.bzl", "resource")
 load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
@@ -14,12 +13,10 @@ load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
 )
+load("//build/bazel/rules/packages:resources.bzl", "resource_group")
 
 package(default_applicable_licenses = ["//:license"])
 
-# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
-# targets, so GN keeps resource_group("http_server_data") in data_deps.
-# @bazel2gn:raw_attribute:data_deps = [ ":http_server_data" ]
 fx_cc_binary(
     name = "http_server_bin",
     srcs = [
@@ -29,6 +26,7 @@ fx_cc_binary(
         # @bazel2gn:skip
         "//src/ui:tests/integration_graphics_tests/web-pixel-tests/constants.h",
     ],
+    data = [":http_server_data"],
     tags = ["manual"],
     deps = [
         "//sdk/lib/stdcompat",
@@ -38,40 +36,26 @@ fx_cc_binary(
     ],
 )
 
-# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
-# targets; GN uses resource_group("http_server_data") above the sentinel.
-# @bazel2gn:skip
-resource(
-    name = "static_html",
-    src = "data/static.html",
-    dest = "data/static.html",
-)
-
-# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
-# targets; GN uses resource_group("http_server_data") above the sentinel.
-# @bazel2gn:skip
-resource(
-    name = "dynamic_html",
-    src = "data/dynamic.html",
-    dest = "data/dynamic.html",
-)
-
-# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
-# targets; GN uses resource_group("http_server_data") above the sentinel.
-# @bazel2gn:skip
-resource(
-    name = "video_html",
-    src = "data/video.html",
-    dest = "data/video.html",
-)
-
-# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
-# targets; GN uses resource_group("http_server_data") above the sentinel.
-# @bazel2gn:skip
-resource(
-    name = "four_colors_webm",
-    src = "data/four-colors.webm",
-    dest = "data/four-colors.webm",
+resource_group(
+    name = "http_server_data",
+    files = [
+        {
+            "source": "data/static.html",
+            "dest": "data/static.html",
+        },
+        {
+            "source": "data/dynamic.html",
+            "dest": "data/dynamic.html",
+        },
+        {
+            "source": "data/video.html",
+            "dest": "data/video.html",
+        },
+        {
+            "source": "data/four-colors.webm",
+            "dest": "data/four-colors.webm",
+        },
+    ],
 )
 
 fx_packaged_binary(
@@ -92,26 +76,10 @@ fx_component(
     name = "http_server_component",
     testonly = True,
     compiled_manifest = ":http_server_manifest",
-    # Preserve unrestricted visibility from the original BUILD.gn target.
-    visibility = ["//:__subpackages__"],
+    visibility = ["//src/ui/tests/integration_graphics_tests/web-pixel-tests:__pkg__"],
     deps = [
         ":http_server_bin_packaged",
-        # TODO(https://fxbug.dev/570694755): In GN, these resources are
-        # packaged via data_deps = [ ":http_server_data" ] on :http_server_bin.
-        # @bazel2gn:skip
-        ":dynamic_html",
-        # TODO(https://fxbug.dev/570694755): In GN, these resources are
-        # packaged via data_deps = [ ":http_server_data" ] on :http_server_bin.
-        # @bazel2gn:skip
-        ":four_colors_webm",
-        # TODO(https://fxbug.dev/570694755): In GN, these resources are
-        # packaged via data_deps = [ ":http_server_data" ] on :http_server_bin.
-        # @bazel2gn:skip
-        ":static_html",
-        # TODO(https://fxbug.dev/570694755): In GN, these resources are
-        # packaged via data_deps = [ ":http_server_data" ] on :http_server_bin.
-        # @bazel2gn:skip
-        ":video_html",
+        ":http_server_data",
     ],
 )
 

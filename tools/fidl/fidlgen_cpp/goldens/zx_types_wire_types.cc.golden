@@ -508,7 +508,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusUnion, Constra
     return;
   }
 
-  *position.As<fidl_xunion_tag_t>() = u->tag;
+  *position.As<fidl_union_tag_t>() = u->tag;
 
   size_t encode_inline_size;
   switch (u->tag) {
@@ -540,7 +540,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusUnion, Constra
       encode_fn = nullptr;
       break;
   }
-  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_union_tag_t), inner_depth);
 
 }
 
@@ -554,7 +554,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusUnion, Constra
       decoder->SetError(::fidl::internal::kCodingErrorInvalidUnionTag);
       return;
     }
-    if (*(position + sizeof(fidl_xunion_tag_t)).As<uint64_t>() != 0) {
+    if (*(position + sizeof(fidl_union_tag_t)).As<uint64_t>() != 0) {
       decoder->SetError(::fidl::internal::kCodingErrorZeroTagButNonZeroEnvelope);
     }
     return;
@@ -595,7 +595,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusUnion, Constra
       decode_fn = nullptr;
       break;
   }
-  ::fidl::internal::WireDecodeFlexibleEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  ::fidl::internal::WireDecodeFlexibleEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_union_tag_t), inner_depth);
 }
 
 template struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusUnion, ::fidl::internal::WireCodingConstraintUnion<false>, true>;
@@ -696,7 +696,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusUnionAlias, Co
     return;
   }
 
-  *position.As<fidl_xunion_tag_t>() = u->tag;
+  *position.As<fidl_union_tag_t>() = u->tag;
 
   size_t encode_inline_size;
   switch (u->tag) {
@@ -728,7 +728,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusUnionAlias, Co
       encode_fn = nullptr;
       break;
   }
-  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_union_tag_t), inner_depth);
 
 }
 
@@ -742,7 +742,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusUnionAlias, Co
       decoder->SetError(::fidl::internal::kCodingErrorInvalidUnionTag);
       return;
     }
-    if (*(position + sizeof(fidl_xunion_tag_t)).As<uint64_t>() != 0) {
+    if (*(position + sizeof(fidl_union_tag_t)).As<uint64_t>() != 0) {
       decoder->SetError(::fidl::internal::kCodingErrorZeroTagButNonZeroEnvelope);
     }
     return;
@@ -783,7 +783,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusUnionAlias, Co
       decode_fn = nullptr;
       break;
   }
-  ::fidl::internal::WireDecodeFlexibleEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  ::fidl::internal::WireDecodeFlexibleEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_union_tag_t), inner_depth);
 }
 
 template struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusUnionAlias, ::fidl::internal::WireCodingConstraintUnion<false>, true>;
@@ -877,7 +877,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolAResul
     return;
   }
 
-  *position.As<fidl_xunion_tag_t>() = u->tag;
+  *position.As<fidl_union_tag_t>() = u->tag;
 
   size_t encode_inline_size;
   switch (u->tag) {
@@ -909,7 +909,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolAResul
       encode_fn = nullptr;
       break;
   }
-  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_union_tag_t), inner_depth);
 
 }
 
@@ -923,7 +923,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolAResul
       decoder->SetError(::fidl::internal::kCodingErrorInvalidUnionTag);
       return;
     }
-    if (*(position + sizeof(fidl_xunion_tag_t)).As<uint64_t>() != 0) {
+    if (*(position + sizeof(fidl_union_tag_t)).As<uint64_t>() != 0) {
       decoder->SetError(::fidl::internal::kCodingErrorZeroTagButNonZeroEnvelope);
     }
     return;
@@ -964,7 +964,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolAResul
       decode_fn = nullptr;
       break;
   }
-  ::fidl::internal::WireDecodeStrictEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  ::fidl::internal::WireDecodeStrictEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_union_tag_t), inner_depth);
 }
 
 template struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolAResult, ::fidl::internal::WireCodingConstraintUnion<false>, true>;
@@ -1058,7 +1058,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolBResul
     return;
   }
 
-  *position.As<fidl_xunion_tag_t>() = u->tag;
+  *position.As<fidl_union_tag_t>() = u->tag;
 
   size_t encode_inline_size;
   switch (u->tag) {
@@ -1090,7 +1090,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolBResul
       encode_fn = nullptr;
       break;
   }
-  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_union_tag_t), inner_depth);
 
 }
 
@@ -1104,7 +1104,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolBResul
       decoder->SetError(::fidl::internal::kCodingErrorInvalidUnionTag);
       return;
     }
-    if (*(position + sizeof(fidl_xunion_tag_t)).As<uint64_t>() != 0) {
+    if (*(position + sizeof(fidl_union_tag_t)).As<uint64_t>() != 0) {
       decoder->SetError(::fidl::internal::kCodingErrorZeroTagButNonZeroEnvelope);
     }
     return;
@@ -1145,7 +1145,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolBResul
       decode_fn = nullptr;
       break;
   }
-  ::fidl::internal::WireDecodeStrictEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  ::fidl::internal::WireDecodeStrictEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_union_tag_t), inner_depth);
 }
 
 template struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::StatusProtocolBResult, ::fidl::internal::WireCodingConstraintUnion<false>, true>;
@@ -1246,7 +1246,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnion, Constra
     return;
   }
 
-  *position.As<fidl_xunion_tag_t>() = u->tag;
+  *position.As<fidl_union_tag_t>() = u->tag;
 
   size_t encode_inline_size;
   switch (u->tag) {
@@ -1278,7 +1278,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnion, Constra
       encode_fn = nullptr;
       break;
   }
-  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_union_tag_t), inner_depth);
 
 }
 
@@ -1292,7 +1292,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnion, Constra
       decoder->SetError(::fidl::internal::kCodingErrorInvalidUnionTag);
       return;
     }
-    if (*(position + sizeof(fidl_xunion_tag_t)).As<uint64_t>() != 0) {
+    if (*(position + sizeof(fidl_union_tag_t)).As<uint64_t>() != 0) {
       decoder->SetError(::fidl::internal::kCodingErrorZeroTagButNonZeroEnvelope);
     }
     return;
@@ -1333,7 +1333,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnion, Constra
       decode_fn = nullptr;
       break;
   }
-  ::fidl::internal::WireDecodeFlexibleEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  ::fidl::internal::WireDecodeFlexibleEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_union_tag_t), inner_depth);
 }
 
 template struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnion, ::fidl::internal::WireCodingConstraintUnion<false>, true>;
@@ -1434,7 +1434,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnionAlias, Co
     return;
   }
 
-  *position.As<fidl_xunion_tag_t>() = u->tag;
+  *position.As<fidl_union_tag_t>() = u->tag;
 
   size_t encode_inline_size;
   switch (u->tag) {
@@ -1466,7 +1466,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnionAlias, Co
       encode_fn = nullptr;
       break;
   }
-  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_union_tag_t), inner_depth);
 
 }
 
@@ -1480,7 +1480,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnionAlias, Co
       decoder->SetError(::fidl::internal::kCodingErrorInvalidUnionTag);
       return;
     }
-    if (*(position + sizeof(fidl_xunion_tag_t)).As<uint64_t>() != 0) {
+    if (*(position + sizeof(fidl_union_tag_t)).As<uint64_t>() != 0) {
       decoder->SetError(::fidl::internal::kCodingErrorZeroTagButNonZeroEnvelope);
     }
     return;
@@ -1521,7 +1521,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnionAlias, Co
       decode_fn = nullptr;
       break;
   }
-  ::fidl::internal::WireDecodeFlexibleEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  ::fidl::internal::WireDecodeFlexibleEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_union_tag_t), inner_depth);
 }
 
 template struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultUnionAlias, ::fidl::internal::WireCodingConstraintUnion<false>, true>;
@@ -1615,7 +1615,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolAResul
     return;
   }
 
-  *position.As<fidl_xunion_tag_t>() = u->tag;
+  *position.As<fidl_union_tag_t>() = u->tag;
 
   size_t encode_inline_size;
   switch (u->tag) {
@@ -1647,7 +1647,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolAResul
       encode_fn = nullptr;
       break;
   }
-  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_union_tag_t), inner_depth);
 
 }
 
@@ -1661,7 +1661,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolAResul
       decoder->SetError(::fidl::internal::kCodingErrorInvalidUnionTag);
       return;
     }
-    if (*(position + sizeof(fidl_xunion_tag_t)).As<uint64_t>() != 0) {
+    if (*(position + sizeof(fidl_union_tag_t)).As<uint64_t>() != 0) {
       decoder->SetError(::fidl::internal::kCodingErrorZeroTagButNonZeroEnvelope);
     }
     return;
@@ -1702,7 +1702,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolAResul
       decode_fn = nullptr;
       break;
   }
-  ::fidl::internal::WireDecodeStrictEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  ::fidl::internal::WireDecodeStrictEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_union_tag_t), inner_depth);
 }
 
 template struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolAResult, ::fidl::internal::WireCodingConstraintUnion<false>, true>;
@@ -1796,7 +1796,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolBResul
     return;
   }
 
-  *position.As<fidl_xunion_tag_t>() = u->tag;
+  *position.As<fidl_union_tag_t>() = u->tag;
 
   size_t encode_inline_size;
   switch (u->tag) {
@@ -1828,7 +1828,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolBResul
       encode_fn = nullptr;
       break;
   }
-  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_union_tag_t), inner_depth);
 
 }
 
@@ -1842,7 +1842,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolBResul
       decoder->SetError(::fidl::internal::kCodingErrorInvalidUnionTag);
       return;
     }
-    if (*(position + sizeof(fidl_xunion_tag_t)).As<uint64_t>() != 0) {
+    if (*(position + sizeof(fidl_union_tag_t)).As<uint64_t>() != 0) {
       decoder->SetError(::fidl::internal::kCodingErrorZeroTagButNonZeroEnvelope);
     }
     return;
@@ -1883,7 +1883,7 @@ void fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolBResul
       decode_fn = nullptr;
       break;
   }
-  ::fidl::internal::WireDecodeStrictEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  ::fidl::internal::WireDecodeStrictEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_union_tag_t), inner_depth);
 }
 
 template struct ::fidl::internal::WireCodingTraits<::test_zxtypes::wire::ResultProtocolBResult, ::fidl::internal::WireCodingConstraintUnion<false>, true>;

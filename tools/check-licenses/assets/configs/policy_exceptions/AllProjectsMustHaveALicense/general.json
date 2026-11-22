@@ -2,15 +2,13 @@
     "policy_exceptions": {
         "AllProjectsMustHaveALicense": [
             {
-                "bug": "TODO: b/missing",
-                "description": "Secondary build stubs and ICU wrappers with external license references",
+                "bug": "b/585200385",
+                "description": "Secondary build stubs and parent wrapper directories whose licenses live in child or primary repositories",
                 "paths": [
                     "build/secondary/third_party/alacritty",
                     "build/secondary/third_party/gflags",
                     "build/secondary/third_party/ogg",
-                    "src/lib/fxl/third_party/icu",
                     "third_party",
-                    "third_party/github.com/jd/tenacity",
                     "third_party/network-conformance/vendor"
                 ]
             }

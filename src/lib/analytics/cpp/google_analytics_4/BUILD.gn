@@ -2,28 +2,20 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/test.gni")
+import("//build/testing/host_test.gni")
 
-test("unittests") {
-  output_name = "analytics_cpp_google_analytics_4_unittests"
-  sources = [
-    "batch_unittest.cc",
-    "client_unittest.cc",
-  ]
-  deps = [
-    ":google_analytics_4",
-    "//src/lib/fxl",
-    "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gmock",
-    "//third_party/googletest:gtest",
-    "//third_party/rapidjson",
-  ]
+if (is_host) {
+  host_test("unittests_host_test") {
+    binary_path = "$root_out_dir/analytics_cpp_google_analytics_4_unittests"
+    deps = [ ":unittests" ]
+    target = get_label_info(":unittests", "label_with_toolchain")
+  }
 }
 
 group("tests") {
   testonly = true
 
-  deps = [ ":unittests" ]
+  deps = [ ":unittests_host_test($host_toolchain)" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -75,4 +67,21 @@ static_library("google_analytics_4") {
     "//src/lib/fxl",
     "//third_party/rapidjson",
   ]
+}
+
+cc_test_executable("unittests") {
+  sources = [
+    "batch_unittest.cc",
+    "client_unittest.cc",
+  ]
+  output_name = "analytics_cpp_google_analytics_4_unittests"
+  deps = [
+    ":google_analytics_4",
+    "//src/lib/fxl",
+    "//src/lib/fxl/test:gtest_main",
+    "//third_party/googletest:gtest",
+    "//third_party/rapidjson",
+  ]
+  testonly = true
+  emit_tool_path = false
 }

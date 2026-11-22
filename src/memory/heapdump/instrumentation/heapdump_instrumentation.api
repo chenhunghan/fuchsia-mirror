@@ -1,0 +1,5 @@
+{
+  "pkg/heapdump_instrumentation/include/heapdump/bind.h": "142f2060a992d63a240969409aaa434d",
+  "pkg/heapdump_instrumentation/include/heapdump/snapshot.h": "2963ac8e0b352b59994460188673e865",
+  "pkg/heapdump_instrumentation/include/heapdump/stats.h": "50824f3d4b259d85472d4934e3d58420"
+}

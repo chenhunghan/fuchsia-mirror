@@ -39,7 +39,6 @@ fidl("fuchsia.memory.attribution") {
     "//src/devices/bin/driver_manager/*",
     "//src/devices/bin/driver_manager_rust/*",
     "//src/memory/*",
-    "//src/performance/memory/*",
     "//src/starnix/*",
     "//src/storage/fxfs/*",
     "//src/sys/component_manager/*",
@@ -54,6 +53,6 @@ measure_tape("measure_tape_for_attribution") {
   target_types = [ "fuchsia.memory.attribution/AttributionUpdate" ]
   visibility = [
     ":*",
-    "//src/performance/memory/attribution/server:*",
+    "//src/memory/attribution/server:*",
   ]
 }

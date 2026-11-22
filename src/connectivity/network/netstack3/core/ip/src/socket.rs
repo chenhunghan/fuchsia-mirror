@@ -1194,11 +1194,12 @@ where
 
             // The loopback packet will hit the egress hook. LOCAL_EGRESS hook
             // is not called again.
+            let mut loopback_packet = loopback_packet;
             IpSocketContext::send_ip_packet(
                 core_ctx,
                 bindings_ctx,
                 meta,
-                loopback_packet,
+                DynTransportSerializer::new(&mut loopback_packet),
                 packet_metadata,
             )
             .unwrap_or_else(|IpSendFrameError { serializer: _, error }| {
@@ -1673,6 +1674,7 @@ pub(crate) mod testutil {
     use crate::internal::base::{
         BaseTransportIpContext, DEFAULT_HOP_LIMITS, HopLimits, MulticastMembershipHandler,
     };
+    use crate::internal::path_mtu::{PmtuDstAddr, PmtuHandler, PmtuSrcAddr};
     use crate::internal::routing::testutil::FakeIpRoutingCtx;
     use crate::internal::routing::{self, RoutingTable};
     use crate::internal::types::{Destination, Entry, Metric, RawMetric};
@@ -1686,6 +1688,7 @@ pub(crate) mod testutil {
         pub(crate) table: RoutingTable<I, D>,
         forwarding: FakeIpRoutingCtx<D>,
         devices: HashMap<D, FakeDeviceState<I>>,
+        pmtu_cache: HashMap<(PmtuSrcAddr<I::Addr>, PmtuDstAddr<I::Addr>), I::Mtu>,
     }
 
     /// A trait enabling [`FakeIpSockeCtx`]'s implementations for
@@ -1857,6 +1860,42 @@ pub(crate) mod testutil {
         }
     }
 
+    impl<I: Ip, D, BC> PmtuHandler<I, BC> for FakeIpSocketCtx<I, D> {
+        fn update_pmtu_if_less(
+            &mut self,
+            _bindings_ctx: &mut BC,
+            src_ip: PmtuSrcAddr<I::Addr>,
+            dst_ip: PmtuDstAddr<I::Addr>,
+            new_mtu: I::Mtu,
+        ) -> I::Mtu {
+            let entry = self.pmtu_cache.entry((src_ip, dst_ip)).or_insert(new_mtu);
+            if new_mtu < *entry {
+                *entry = new_mtu;
+            }
+            *entry
+        }
+    }
+
+    impl<I: Ip, BC, D: FakeStrongDeviceId, State: InnerFakeIpSocketCtx<I, D>, Meta>
+        PmtuHandler<I, BC> for FakeCoreCtx<State, Meta, D>
+    {
+        fn update_pmtu_if_less(
+            &mut self,
+            bindings_ctx: &mut BC,
+            src_ip: PmtuSrcAddr<I::Addr>,
+            dst_ip: PmtuDstAddr<I::Addr>,
+            new_mtu: I::Mtu,
+        ) -> I::Mtu {
+            PmtuHandler::<I, BC>::update_pmtu_if_less(
+                self.state.fake_ip_socket_ctx_mut(),
+                bindings_ctx,
+                src_ip,
+                dst_ip,
+                new_mtu,
+            )
+        }
+    }
+
     /// A fake context providing [`IpSocketHandler`] for tests.
     #[derive(Derivative)]
     #[derivative(Default(bound = ""))]
@@ -1953,6 +1992,15 @@ pub(crate) mod testutil {
         ) -> HashMap<(D, MulticastAddr<I::Addr>), NonZeroUsize> {
             self.inner::<I>().multicast_memberships()
         }
+
+        /// Returns the cached PMTU between `src_ip` and `dst_ip`, if any.
+        pub fn get_pmtu<I: Ip>(
+            &self,
+            src_ip: PmtuSrcAddr<I::Addr>,
+            dst_ip: PmtuDstAddr<I::Addr>,
+        ) -> Option<I::Mtu> {
+            self.inner::<I>().get_pmtu(src_ip, dst_ip)
+        }
     }
 
     impl<I: IpExt, S: InnerFakeIpSocketCtx<I, D>, Meta, D: FakeStrongDeviceId, BC>
@@ -2042,6 +2090,17 @@ pub(crate) mod testutil {
         }
     }
 
+    impl<I: Ip, D> FakeIpSocketCtx<I, D> {
+        /// Returns the cached PMTU between `src_ip` and `dst_ip`, if any.
+        pub fn get_pmtu(
+            &self,
+            src_ip: PmtuSrcAddr<I::Addr>,
+            dst_ip: PmtuDstAddr<I::Addr>,
+        ) -> Option<I::Mtu> {
+            self.pmtu_cache.get(&(src_ip, dst_ip)).copied()
+        }
+    }
+
     impl<I: IpExt, D: FakeStrongDeviceId> FakeIpSocketCtx<I, D> {
         /// Creates a new `FakeIpSocketCtx` with the given device
         /// configs.
@@ -2065,7 +2124,7 @@ pub(crate) mod testutil {
                 );
             }
 
-            Self { table, devices, forwarding: Default::default() }
+            Self { table, devices, forwarding: Default::default(), pmtu_cache: Default::default() }
         }
 
         /// Returns an immutable reference to the fake device state.
@@ -2117,7 +2176,7 @@ pub(crate) mod testutil {
             addr: RoutableIpAddr<I::Addr>,
             transparent: bool,
         ) -> Result<ResolvedRoute<I, D>, ResolveRouteError> {
-            let Self { table, devices, forwarding } = self;
+            let Self { table, devices, forwarding, pmtu_cache: _ } = self;
             let (destination, ()) = table
                 .lookup_filter_map(forwarding, device, addr.addr(), |_, d| match &local_ip {
                     None => Some(()),

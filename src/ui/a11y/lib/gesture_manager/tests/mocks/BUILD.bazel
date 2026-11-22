@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "mocks",
+    testonly = True,
+    srcs = [
+        "mock_gesture_handler.cc",
+        "mock_gesture_listener.cc",
+    ],
+    hdrs = [
+        "mock_gesture_handler.h",
+        "mock_gesture_listener.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+    ],
+    visibility = [
+        "//src/ui/a11y/lib/gesture_manager/tests:__pkg__",
+        "//src/ui/a11y/lib/magnifier/tests:__pkg__",
+        "//src/ui/a11y/lib/screen_reader/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.accessibility.gesture:fuchsia.accessibility.gesture_hlcpp",
+        "//src/ui/a11y/lib/gesture_manager",
+    ],
+    alwayslink = True,
+)

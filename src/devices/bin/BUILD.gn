@@ -22,7 +22,6 @@ group("tests") {
     "driver_debug:tests",
     "driver_manager/tests",
     "driver_manager_rust:tests",
-    "driver_playground:tests",
     "driver_runtime:tests",
     "driver_tools:tests",
   ]

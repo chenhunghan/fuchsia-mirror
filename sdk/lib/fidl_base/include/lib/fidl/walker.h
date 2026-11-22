@@ -76,7 +76,7 @@ constexpr uint32_t TypeSize(const fidl_type_t* type) {
       return type->coded_struct().size_v2;
     case kFidlTypeTable:
       return sizeof(fidl_vector_t);
-    case kFidlTypeXUnion:
+    case kFidlTypeUnion:
       return sizeof(fidl_union_t);
     case kFidlTypeString:
       return sizeof(fidl_string_t);
@@ -183,7 +183,7 @@ class Walker final {
   Result WalkEnvelope(Position envelope_position, const fidl_type_t* payload_type,
                       OutOfLineDepth depth, FidlIsResource is_resource);
   Result WalkTable(const FidlCodedTable* coded_table, Position position, OutOfLineDepth depth);
-  Result WalkXUnion(const FidlCodedXUnion* coded_table, Position position, OutOfLineDepth depth);
+  Result WalkUnion(const FidlCodedUnion* coded_union, Position position, OutOfLineDepth depth);
   Result WalkArray(const FidlCodedArray* coded_array, Position position, OutOfLineDepth depth);
   Result WalkString(const FidlCodedString* coded_string, Position position, OutOfLineDepth depth);
   Result WalkVector(const FidlCodedVector* coded_vector, Position position, OutOfLineDepth depth);
@@ -213,8 +213,8 @@ Result Walker<VisitorImpl, WireFormatVersion>::WalkInternal(
       return WalkStructPointer(&type->coded_struct_pointer(), position, depth);
     case kFidlTypeTable:
       return WalkTable(&type->coded_table(), position, depth);
-    case kFidlTypeXUnion:
-      return WalkXUnion(&type->coded_union(), position, depth);
+    case kFidlTypeUnion:
+      return WalkUnion(&type->coded_union(), position, depth);
     case kFidlTypeArray:
       return WalkArray(&type->coded_array(), position, depth);
     case kFidlTypeString:
@@ -572,22 +572,22 @@ Result Walker<VisitorImpl, WireFormatVersion>::WalkTable(
 }
 
 template <typename VisitorImpl, FidlWireFormatVersion WireFormatVersion>
-Result Walker<VisitorImpl, WireFormatVersion>::WalkXUnion(
-    const FidlCodedXUnion* coded_xunion, Walker<VisitorImpl, WireFormatVersion>::Position position,
+Result Walker<VisitorImpl, WireFormatVersion>::WalkUnion(
+    const FidlCodedUnion* coded_union, Walker<VisitorImpl, WireFormatVersion>::Position position,
     OutOfLineDepth depth) {
-  auto xunion = PtrTo<fidl_union_t>(position);
+  auto fidl_union = PtrTo<fidl_union_t>(position);
   const auto envelope_pos = position + offsetof(fidl_union_t, envelope);
-  auto envelope_ptr = &xunion->envelope;
+  auto envelope_ptr = &fidl_union->envelope;
 
   // Validate zero-ordinal invariants
-  if (xunion->tag == 0) {
+  if (fidl_union->tag == 0) {
     if (unlikely(envelope_ptr->num_bytes != 0 || envelope_ptr->num_handles != 0 ||
                  envelope_ptr->flags != 0)) {
-      visitor_->OnError("xunion with zero as ordinal must be empty");
+      visitor_->OnError("union with zero as ordinal must be empty");
       FIDL_STATUS_GUARD(Status::kConstraintViolationError);
     }
-    if (unlikely(!coded_xunion->nullable)) {
-      visitor_->OnError("non-nullable xunion is absent");
+    if (unlikely(!coded_union->nullable)) {
+      visitor_->OnError("non-nullable union is absent");
       FIDL_STATUS_GUARD(Status::kConstraintViolationError);
     }
     return Result::kContinue;
@@ -597,20 +597,20 @@ Result Walker<VisitorImpl, WireFormatVersion>::WalkXUnion(
     // all of its bits.
   } else if (unlikely(VisitorImpl::kValidateEnvelopeInlineBit &&
                       FidlIsZeroEnvelope(envelope_ptr))) {
-    visitor_->OnError("empty xunion must have zero as ordinal");
+    visitor_->OnError("empty union must have zero as ordinal");
     FIDL_STATUS_GUARD(Status::kConstraintViolationError);
   }
 
   const fidl_type_t* payload_type = nullptr;
-  if (xunion->tag <= coded_xunion->field_count) {
-    payload_type = coded_xunion->fields[xunion->tag - 1].type;
+  if (fidl_union->tag <= coded_union->field_count) {
+    payload_type = coded_union->fields[fidl_union->tag - 1].type;
   }
-  if (unlikely(payload_type == nullptr && coded_xunion->strictness == kFidlStrictness_Strict)) {
-    visitor_->OnError("strict xunion has unknown ordinal");
+  if (unlikely(payload_type == nullptr && coded_union->strictness == kFidlStrictness_Strict)) {
+    visitor_->OnError("strict union has unknown ordinal");
     FIDL_STATUS_GUARD(Status::kConstraintViolationError);
   }
 
-  return WalkEnvelope(envelope_pos, payload_type, depth, coded_xunion->is_resource);
+  return WalkEnvelope(envelope_pos, payload_type, depth, coded_union->is_resource);
 }
 
 template <typename VisitorImpl, FidlWireFormatVersion WireFormatVersion>
@@ -777,7 +777,7 @@ zx_status_t PrimaryObjectSize(const fidl_type_t* type, uint32_t buffer_size,
     primary_size = type->coded_struct().size_v2;
   } else if (likely(type->type_tag() == kFidlTypeTable)) {
     primary_size = sizeof(fidl_table_t);
-  } else if (likely(type->type_tag() == kFidlTypeXUnion)) {
+  } else if (likely(type->type_tag() == kFidlTypeUnion)) {
     primary_size = sizeof(fidl_union_t);
   } else {
     set_error("Message must be a struct, table, or union");

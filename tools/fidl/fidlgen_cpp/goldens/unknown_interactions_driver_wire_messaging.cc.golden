@@ -1966,7 +1966,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayFields>::TransactionalResponse(int32_t some_field)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayFields>(some_field)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFields_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayFields>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFields_DynamicFlags);
@@ -2031,7 +2031,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayUnion>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayUnion>(UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnion_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayUnion>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnion_DynamicFlags);
@@ -2096,7 +2096,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayTable>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayTableResponse UnknownInteractionsDriverProtocolStrictTwoWayTableResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayTable>(UnknownInteractionsDriverProtocolStrictTwoWayTableResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTable_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayTable>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTable_DynamicFlags);
@@ -2161,7 +2161,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayErrResult UnknownInteractionsDriverProtocolStrictTwoWayErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayErr>(UnknownInteractionsDriverProtocolStrictTwoWayErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayErr_DynamicFlags);
@@ -2226,7 +2226,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayFieldsErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayFieldsErrResult UnknownInteractionsDriverProtocolStrictTwoWayFieldsErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayFieldsErr>(UnknownInteractionsDriverProtocolStrictTwoWayFieldsErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFieldsErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFieldsErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayFieldsErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayFieldsErr_DynamicFlags);
@@ -2291,7 +2291,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayUnionErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResult UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayUnionErr>(UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnionErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnionErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayUnionErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayUnionErr_DynamicFlags);
@@ -2356,7 +2356,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayTableErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayTableErrResult UnknownInteractionsDriverProtocolStrictTwoWayTableErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayTableErr>(UnknownInteractionsDriverProtocolStrictTwoWayTableErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTableErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTableErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::StrictTwoWayTableErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_StrictTwoWayTableErr_DynamicFlags);
@@ -2421,7 +2421,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWay>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayResult UnknownInteractionsDriverProtocolFlexibleTwoWayResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWay>(UnknownInteractionsDriverProtocolFlexibleTwoWayResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWay_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWay_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWay_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWay_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWay>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWay_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWay_DynamicFlags);
@@ -2486,7 +2486,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayFields>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsResult UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayFields>(UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFields_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayFields>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFields_DynamicFlags);
@@ -2551,7 +2551,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayUnion>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResult UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayUnion>(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnion_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayUnion>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnion_DynamicFlags);
@@ -2616,7 +2616,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayTable>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayTableResult UnknownInteractionsDriverProtocolFlexibleTwoWayTableResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayTable>(UnknownInteractionsDriverProtocolFlexibleTwoWayTableResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTable_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayTable>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTable_DynamicFlags);
@@ -2681,7 +2681,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayErrResult UnknownInteractionsDriverProtocolFlexibleTwoWayErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayErr>(UnknownInteractionsDriverProtocolFlexibleTwoWayErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayErr_DynamicFlags);
@@ -2746,7 +2746,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayFieldsErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsErrResult UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayFieldsErr>(UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFieldsErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFieldsErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayFieldsErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayFieldsErr_DynamicFlags);
@@ -2811,7 +2811,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayUnionErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResult UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayUnionErr>(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnionErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnionErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayUnionErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayUnionErr_DynamicFlags);
@@ -2876,7 +2876,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsDriverProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayTableErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayTableErrResult UnknownInteractionsDriverProtocolFlexibleTwoWayTableErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayTableErr>(UnknownInteractionsDriverProtocolFlexibleTwoWayTableErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTableErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTableErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsDriverProtocol::FlexibleTwoWayTableErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsDriverProtocol_FlexibleTwoWayTableErr_DynamicFlags);
@@ -4043,7 +4043,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarDriver
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayFields>::TransactionalResponse(int32_t some_field)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayFields>(some_field)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFields_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayFields>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFields_DynamicFlags);
@@ -4108,7 +4108,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarDriver
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayUnion>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayUnion>(UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnion_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayUnion>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnion_DynamicFlags);
@@ -4173,7 +4173,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarDriver
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayTable>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayTableResponse UnknownInteractionsAjarDriverProtocolStrictTwoWayTableResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayTable>(UnknownInteractionsAjarDriverProtocolStrictTwoWayTableResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTable_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayTable>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTable_DynamicFlags);
@@ -4238,7 +4238,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarDriver
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayErrResult UnknownInteractionsAjarDriverProtocolStrictTwoWayErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayErr>(UnknownInteractionsAjarDriverProtocolStrictTwoWayErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayErr_DynamicFlags);
@@ -4303,7 +4303,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarDriver
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayFieldsErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayFieldsErrResult UnknownInteractionsAjarDriverProtocolStrictTwoWayFieldsErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayFieldsErr>(UnknownInteractionsAjarDriverProtocolStrictTwoWayFieldsErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFieldsErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFieldsErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayFieldsErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayFieldsErr_DynamicFlags);
@@ -4368,7 +4368,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarDriver
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayUnionErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResult UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayUnionErr>(UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnionErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnionErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayUnionErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayUnionErr_DynamicFlags);
@@ -4433,7 +4433,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarDriver
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayTableErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayTableErrResult UnknownInteractionsAjarDriverProtocolStrictTwoWayTableErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayTableErr>(UnknownInteractionsAjarDriverProtocolStrictTwoWayTableErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTableErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTableErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarDriverProtocol::StrictTwoWayTableErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarDriverProtocol_StrictTwoWayTableErr_DynamicFlags);
@@ -5474,7 +5474,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedDriv
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayFields>::TransactionalResponse(int32_t some_field)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayFields>(some_field)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFields_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayFields>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFields_DynamicFlags);
@@ -5539,7 +5539,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedDriv
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayUnion>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayUnion>(UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnion_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayUnion>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnion_DynamicFlags);
@@ -5604,7 +5604,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedDriv
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayTable>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayTableResponse UnknownInteractionsClosedDriverProtocolStrictTwoWayTableResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayTable>(UnknownInteractionsClosedDriverProtocolStrictTwoWayTableResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTable_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayTable>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTable_DynamicFlags);
@@ -5669,7 +5669,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedDriv
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayErrResult UnknownInteractionsClosedDriverProtocolStrictTwoWayErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayErr>(UnknownInteractionsClosedDriverProtocolStrictTwoWayErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayErr_DynamicFlags);
@@ -5734,7 +5734,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedDriv
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayFieldsErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayFieldsErrResult UnknownInteractionsClosedDriverProtocolStrictTwoWayFieldsErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayFieldsErr>(UnknownInteractionsClosedDriverProtocolStrictTwoWayFieldsErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFieldsErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFieldsErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayFieldsErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayFieldsErr_DynamicFlags);
@@ -5799,7 +5799,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedDriv
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayUnionErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResult UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayUnionErr>(UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnionErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnionErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayUnionErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayUnionErr_DynamicFlags);
@@ -5864,7 +5864,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedDriv
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayTableErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayTableErrResult UnknownInteractionsClosedDriverProtocolStrictTwoWayTableErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayTableErr>(UnknownInteractionsClosedDriverProtocolStrictTwoWayTableErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTableErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTableErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedDriverProtocol::StrictTwoWayTableErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedDriverProtocol_StrictTwoWayTableErr_DynamicFlags);

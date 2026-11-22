@@ -24,7 +24,7 @@ use fidl_fuchsia_component as fcomponent;
 use fidl_fuchsia_io as fio;
 use futures::FutureExt;
 use moniker::{ChildName, Moniker};
-use runtime_capabilities::{Dictionary, DirConnector, Router};
+use runtime_capabilities::{Capability, Dictionary, DirConnector, Router};
 use std::path::PathBuf;
 use std::sync::Arc;
 use vfs::ToObjectRequest;
@@ -487,7 +487,8 @@ pub(crate) fn generate_instance_id_based_storage_path(instance_id: &InstanceId) 
 }
 
 /// Builds a dictionary where each key is the name of a storage capability declared in this
-/// component, and the value is a router for a storage admin protocol from that storage capability.
+/// component, and the value is a dictionary mapping the storage admin protocol names to their
+/// router.
 pub fn build_storage_admin_dictionary(
     component: &Arc<ComponentInstance>,
     decl: &cm_rust::ComponentDecl,
@@ -501,29 +502,30 @@ pub fn build_storage_admin_dictionary(
             source_capability: ComponentCapability::Storage(storage_decl.clone()),
             moniker: component.moniker.clone(),
         });
-        let storage_decl = storage_decl;
         let weak_component = WeakComponentInstance::new(component);
-        storage_admin_dictionary.insert(
-            storage_decl.name.clone(),
-            LaunchTaskOnReceive::new(
-                capability_source,
-                component.execution_scope.as_weak(),
-                "storage admin protocol",
-                Some(component.context.policy().clone()),
-                Arc::new(move |channel, _target, _, _| {
-                    let storage_decl = storage_decl.clone();
-                    let weak_component = weak_component.clone();
-                    let stream =
-                        ServerEnd::<fcomponent::StorageAdminMarker>::new(channel).into_stream();
-                    async move {
-                        StorageAdmin::new(storage_decl, weak_component).await?.serve(stream).await
-                    }
-                    .boxed()
-                }),
-            )
-            .into_router()
-            .into(),
-        );
+        let inner_dict = Dictionary::new();
+        let storage_decl_clone = storage_decl.clone();
+        let router: Capability = LaunchTaskOnReceive::new(
+            capability_source,
+            component.execution_scope.as_weak(),
+            "storage admin protocol",
+            Some(component.context.policy().clone()),
+            Arc::new(move |channel, _target, _, _| {
+                let storage_decl = storage_decl_clone.clone();
+                let weak_component = weak_component.clone();
+                let stream =
+                    ServerEnd::<fcomponent::StorageAdminMarker>::new(channel).into_stream();
+                async move {
+                    StorageAdmin::new(storage_decl, weak_component).await?.serve(stream).await
+                }
+                .boxed()
+            }),
+        )
+        .into_router()
+        .into();
+        inner_dict.insert("fuchsia.component.StorageAdmin".parse().unwrap(), router.clone());
+        inner_dict.insert("fuchsia.sys2.StorageAdmin".parse().unwrap(), router);
+        storage_admin_dictionary.insert(storage_decl.name, Capability::Dictionary(inner_dict));
     }
     storage_admin_dictionary
 }

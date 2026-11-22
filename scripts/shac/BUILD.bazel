@@ -4,6 +4,19 @@
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    [
+        "commit_msg_checker.py",
+        "json_format.py",
+    ],
+    visibility = ["//tools/agents:__pkg__"],
+)
+
+exports_files(
+    ["common.star"],
+    visibility = ["//:__subpackages__"],
+)
+
 # host_shac_test() runs `shac test` in a minimal checkout containing only the
 # test's declared data, so tests depend on this to be able to load the check
 # implementations they test.

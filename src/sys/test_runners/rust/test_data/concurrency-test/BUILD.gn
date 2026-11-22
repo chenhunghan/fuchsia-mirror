@@ -2,15 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-group("concurrency-test") {
-  testonly = true
-  public_deps = [
-    ":concurrency_test_component",
-    ":concurrency_test_driver_component",
-    "//src/sys/test_runners:echo_server_for_concurrency_test",
-  ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -57,6 +48,10 @@ fuchsia_component_manifest("concurrency_test_driver_component-manifest") {
 fuchsia_component("concurrency_test_driver_component") {
   testonly = true
   cm_label = ":concurrency_test_driver_component-manifest"
+  visibility = [
+    ":*",
+    "//src/sys/test_runners/rust/test_data:*",
+  ]
   deps = [ ":concurrency_test_driver_bin" ]
 }
 
@@ -69,4 +64,22 @@ fuchsia_component_manifest("concurrency_test_component-manifest") {
 fuchsia_component("concurrency_test_component") {
   testonly = true
   cm_label = ":concurrency_test_component-manifest"
+  visibility = [
+    ":*",
+    "//src/sys/test_runners/rust/test_data:*",
+  ]
+}
+
+group("concurrency-test") {
+  testonly = true
+  visibility = [
+    ":*",
+    "//:*",
+    "//src/sys/test_runners/rust/test_data:*",
+  ]
+  deps = [
+    ":concurrency_test_component",
+    ":concurrency_test_driver_component",
+    "//src/sys/test_runners:echo_server_for_concurrency_test",
+  ]
 }

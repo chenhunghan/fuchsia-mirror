@@ -8,6 +8,13 @@ load("//tools/fidl/lib/fidlgentest:fidlgentest_go_test.bzl", "fidlgentest_go_tes
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":fidlgen_cpp_ir_test"],
+    visibility = ["//tools:__pkg__"],
+)
+
 go_library(
     name = "fidlgen_cpp",
     srcs = [

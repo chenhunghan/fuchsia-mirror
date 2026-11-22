@@ -249,19 +249,19 @@ Add the following build rules to your `BUILD.gn` file to build and package the i
 component along with the echo server dependencies:
 
 {% set gn_rust_binary %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/rust/BUILD.gn" region_tag="executable" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/rust/BUILD.bazel" region_tag="executable" adjust_indentation="auto" %}
 {% endset %}
 
 {% set gn_rust_component %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/rust/BUILD.gn" region_tag="component" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/rust/BUILD.bazel" region_tag="component" adjust_indentation="auto" %}
 {% endset %}
 
 {% set gn_cpp_binary %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/cpp/BUILD.gn" region_tag="executable" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/cpp/BUILD.bazel" region_tag="executable" adjust_indentation="auto" %}
 {% endset %}
 
 {% set gn_cpp_component %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/cpp/BUILD.gn" region_tag="component" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/cpp/BUILD.bazel" region_tag="component" adjust_indentation="auto" %}
 {% endset %}
 
 * {Rust}
@@ -269,7 +269,7 @@ component along with the echo server dependencies:
   `echo-integration/BUILD.gn`:
 
   ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/rust/BUILD.gn" region_tag="imports" adjust_indentation="auto" %}
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/rust/BUILD.bazel" region_tag="imports" adjust_indentation="auto" %}
 
   {{ gn_rust_binary|replace("echo_integration_test_rust","echo-integration-test")|replace("//examples/components/routing/fidl","//vendor/fuchsia-codelab/echo-fidl")|trim() }}
 
@@ -288,7 +288,7 @@ component along with the echo server dependencies:
   `echo-integration/BUILD.gn`:
 
   ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/cpp/BUILD.gn" region_tag="imports" adjust_indentation="auto" %}
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/integration_tests/cpp/BUILD.bazel" region_tag="imports" adjust_indentation="auto" %}
 
   {{ gn_cpp_binary|replace("echo_integration_test_cpp","echo-integration-test")|replace("//examples/components/routing/fidl","//vendor/fuchsia-codelab/echo-fidl")|trim() }}
 

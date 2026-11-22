@@ -227,6 +227,7 @@ pub struct Fxfs {
     pub inline_crypto_enabled: bool,
     pub barriers_enabled: bool,
     pub allow_type3_blobs: bool,
+    pub fsck_before_start: bool,
 }
 
 impl Default for Fxfs {
@@ -239,6 +240,7 @@ impl Default for Fxfs {
             inline_crypto_enabled: false,
             barriers_enabled: false,
             allow_type3_blobs: false,
+            fsck_before_start: false,
         }
     }
 }
@@ -273,6 +275,7 @@ impl FSConfig for Fxfs {
                 inline_crypto_enabled: Some(self.inline_crypto_enabled),
                 barriers_enabled: Some(self.barriers_enabled),
                 allow_type3_blobs: Some(self.allow_type3_blobs),
+                fsck_before_start: Some(self.fsck_before_start),
                 ..Default::default()
             },
             component_type: self.component_type.clone(),
@@ -489,6 +492,7 @@ mod tests {
         fxfs.inline_crypto_enabled = true;
         fxfs.barriers_enabled = true;
         fxfs.allow_type3_blobs = true;
+        fxfs.fsck_before_start = true;
         let fxfs_opts = fxfs.options();
         assert_eq!(fxfs_opts.component_name, "fxfs");
         assert!(fxfs_opts.reuse_component_after_serving);
@@ -496,6 +500,7 @@ mod tests {
         assert_eq!(fxfs_opts.start_options.inline_crypto_enabled, Some(true));
         assert_eq!(fxfs_opts.start_options.barriers_enabled, Some(true));
         assert_eq!(fxfs_opts.start_options.allow_type3_blobs, Some(true));
+        assert_eq!(fxfs_opts.start_options.fsck_before_start, Some(true));
         assert!(fxfs.is_multi_volume());
         assert_eq!(fxfs.disk_format(), format::DiskFormat::Fxfs);
 

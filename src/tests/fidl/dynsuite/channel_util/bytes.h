@@ -121,12 +121,12 @@ inline Bytes handle_absent() { return repeat(0x00).times(4); }
 inline Bytes pointer_present() { return repeat(0xff).times(8); }
 inline Bytes pointer_absent() { return repeat(0x00).times(8); }
 
-inline Bytes union_ordinal(fidl_xunion_tag_t ordinal) { return uint64(ordinal); }
+inline Bytes union_ordinal(fidl_union_tag_t ordinal) { return uint64(ordinal); }
 inline Bytes table_max_ordinal(uint64_t ordinal) { return uint64(ordinal); }
 
-const fidl_xunion_tag_t kResultUnionSuccess = 1;
-const fidl_xunion_tag_t kResultUnionDomainError = 2;
-const fidl_xunion_tag_t kResultUnionFrameworkError = 3;
+const fidl_union_tag_t kResultUnionSuccess = 1;
+const fidl_union_tag_t kResultUnionDomainError = 2;
+const fidl_union_tag_t kResultUnionFrameworkError = 3;
 
 inline Bytes string_length(uint64_t length) { return uint64(length); }
 inline Bytes vector_length(uint64_t length) { return uint64(length); }

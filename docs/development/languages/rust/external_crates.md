@@ -15,9 +15,9 @@ Generally, adding or updating an external crate involves the following:
    review.
 
 -  Requesting Open Source Review Board (OSRB) approval.
-   - For more information, see either the [Adding an external crate](#adding_an_external_crate)
-   or [Updating an external crate](#updating_an_external_crate) section of this
-   document.
+   - For more information, see either the [Adding an external
+     crate](#adding-an-external-crate) or [Updating an external
+     crate](#updating-an-external-crate) section of this document.
 
 -  Waiting to be granted OSRB approval.
 
@@ -27,7 +27,7 @@ Generally, adding or updating an external crate involves the following:
 
 -  Uploading the change for [code review](external_crates/review.md).
 
-## Adding an external crate
+## Adding an external crate {:#adding-an-external-crate}
 
 If you don't find an existing crate that you want to use,
 you may want to add an external crate to Fuchsia.
@@ -107,7 +107,8 @@ To add an external crate, do the following:
 
       Note: As part of the OSRB review, you may be asked to import only a subset
       of the files in an external crate. See
-      [Importing a subset of files in a crate](#importing_a_subset_of_files_in_a_crate)
+      [Importing a subset of files in a
+      crate](#importing-a-subset-of-files-in-a-crate)
       for more information.
 
    1. If you receive OSRB approval, upload the change to Gerrit for review.
@@ -132,7 +133,7 @@ To add an external crate, do the following:
       For more information about the associated actions for each contributor
       role, see [Role matrix](/docs/contribute/community/contributor-roles.md).
 
-## Updating an external crate
+## Updating an external crate {:#updating-an-external-crate}
 
 Warning: If updating an external crate changes the license or pulls in a new crate as a dependency,
 you must receive approval from the OSRB _before_ uploading a CL (e.g. work in progress) to Gerrit.
@@ -196,11 +197,12 @@ To update an external crate, do the following:
 
       Note: As part of the OSRB review, you may be asked to import only a subset
       of the files in an external crate. See
-      [Importing a subset of files in a crate](#importing_a_subset_of_files_in_a_crate)
+      [Importing a subset of files in a
+      crate](#importing-a-subset-of-files-in-a-crate)
       for more information.
 
    1. Update OWNERS files for modified crates. See the
-      [OWNERS files](#owners_files) section for more information on updating
+      [OWNERS files](#owners-files) section for more information on updating
       OWNERS files.
 
    1. If/when you receive OSRB approval, upload the change for review to
@@ -227,7 +229,7 @@ default flow and should be approached with caution.
 1. Add a patch section for the crate to the workspace.
 1. Run the update script.
 
-## Importing a subset of files in a crate
+## Importing a subset of files in a crate {:#importing-a-subset-of-files-in-a-crate}
 
 In some cases, you may want to import only a subset of files in a crate. For
 example, there may be an optional license in the
@@ -237,7 +239,8 @@ OSRB review in which this happened.
 
 To do this, you'll need to add the crate's files to `/third_party/rust_crates/forks`.
 
-1. Follow the [instructions for adding an external crate](#adding_an_external_crate).
+1. Follow the [instructions for adding an external
+   crate](#adding-an-external-crate).
 1. After running `fx update-rustc-third-party`, move the downloaded copy of your
    crate from `/third_party/rust_crates/vendor/<my_crate>` to
    `/third_party/rust_crates/forks/<my_crate>`.
@@ -296,7 +299,7 @@ UNIC crates have distinct advantages over other crates:
   succeeds, our dependencies on unrelated Unicode crates should be
   reduced over time.
 
-## OWNERS files
+## OWNERS files {:#owners-files}
 
 `OWNERS` files are maintained for all of the external Rust crates to
 indicate who is responsible for their reviews and updates. These files are

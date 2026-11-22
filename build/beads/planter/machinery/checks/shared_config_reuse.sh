@@ -336,11 +336,11 @@ if exported:
     )
 else:
     dup_fix = (
-        f"The defaults are private dicts in //{LINTS_PKG}/BUILD.bazel. Export them in this change: move "
-        f"them verbatim (with their LINT.IfChange/ThenChange markers) into a .bzl in //{LINTS_PKG} under "
-        "public names, load() them in that BUILD.bazel keeping every rust_lint_config target with the same "
-        f"name and contents, point the LINT.ThenChange lines of //{LINTS_PKG}/BUILD.gn at the .bzl, then "
-        "load the constants here and keep only the area-specific entries as literals."
+        f"The defaults are private dicts in //{LINTS_PKG}/BUILD.bazel, and Planter is not allowed to "
+        f"modify files under '//build/'. Abort the migration by reverting workspace edits "
+        "(`modified_files: []`) and setting `macro_change_needed: true` and `macro_handoff_markdown` "
+        f"in `CoderReport` explaining that `{LINTS_PKG}` needs to export its default lint dicts in a "
+        "separate prerequisite CL."
     )
 
 for rel in sorted(changed):
@@ -656,25 +656,23 @@ exported_gn_args = parse_exported_gn_args()
 
 
 def gn_arg_remediation(aname, decl_rel, rhs, pkg):
+    if aname in exported_gn_args:
+        return (
+            f"Delete any duplicate `.bzl` file or Starlark assignment for `{aname}`, and load "
+            f"`{aname}` in `{pkg}/BUILD.bazel` via `load(\"@fuchsia_build_info//:args.bzl\", \"{aname}\")` "
+            f"before running `fx bazel2gn -d {pkg}`."
+        )
     arg_type = infer_gn_arg_type(rhs)
     gni_rel = decl_rel if decl_rel.endswith(".gni") else f"{pkg}/build/args.gni"
-    move_note = (
-        f"Move `declare_args()` for `{aname}` out of '{decl_rel}' into `//{gni_rel}` and add "
-        f"`import(\"//{gni_rel}\")` above `## BAZEL2GN SENTINEL` in '{decl_rel}' "
-        "(`//build/bazel:gn_build_variables_for_bazel` can only `import()` a `.gni` file, not `BUILD.gn`). "
-        if decl_rel.endswith("BUILD.gn")
-        else f"Keep `declare_args()` in '{gni_rel}' (imported above `## BAZEL2GN SENTINEL` in `{pkg}/BUILD.gn`). "
-    )
     return (
-        move_note
-        + f"Wrap `{aname} = ...` in '{gni_rel}' with `# LINT.IfChange` and `# LINT.ThenChange(//build/bazel/BUILD.gn:{aname})` "
-        "(a scoped, named label: 'build/bazel/BUILD.gn' holds much unrelated content), "
-        f"export `{aname}` in `generated_file(\"gn_build_variables_for_bazel\")` in 'build/bazel/BUILD.gn' "
-        f"(`# LINT.IfChange({aname})`, `declaration = \"//{gni_rel}\"`, `import(declaration)`, "
-        f"`contents += [ {{ name = \"{aname}\" value = {aname} type = \"{arg_type}\" location = declaration }} ]`, "
-        f"`# LINT.ThenChange(//{gni_rel})`), delete any duplicate `.bzl` file or Starlark assignment, "
-        f"and load `{aname}` in `{pkg}/BUILD.bazel` via `load(\"@fuchsia_build_info//:args.bzl\", \"{aname}\")` "
-        f"before running `fx bazel2gn -d {pkg}`."
+        f"GN build argument `{aname}` (declared in '{decl_rel}') is not yet exported in "
+        "`generated_file(\"gn_build_variables_for_bazel\")` in 'build/bazel/BUILD.gn', and Planter "
+        "is not allowed to modify '//build/' or `.gni` files. Abort this migration by reverting "
+        "all workspace changes (`modified_files: []`) and setting `macro_change_needed: true` and "
+        "`macro_handoff_markdown` in `CoderReport` explaining that a prerequisite non-migration CL "
+        f"must export `{aname}` (type `{arg_type}`, declaration `//{gni_rel}`) in "
+        "`//build/bazel:gn_build_variables_for_bazel` with `# LINT.IfChange({aname})` / "
+        f"`# LINT.ThenChange(//build/bazel/BUILD.gn:{aname})` before `//{pkg}` can be migrated."
     )
 
 

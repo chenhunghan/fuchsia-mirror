@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/rust:rustc_bindgen.bzl", "rustc_bindgen_golden")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
@@ -15,6 +16,7 @@ rustc_library(
         "src/lib.rs",
     ],
     edition = "2024",
+    validations = [":fdf_sys_bindgen_golden"],
     visibility = [
         "//sdk/lib/driver:__subpackages__",
         "//src/devices/bin/driver-host:__subpackages__",
@@ -24,6 +26,57 @@ rustc_library(
     deps = [
         "//sdk/lib/async/rust/sys",
         "//sdk/rust/zx-types",
+    ],
+)
+
+# Checks that src/bindings.rs matches the output of bindgen on the driver
+# runtime headers whenever `:fdf_sys` is built.
+rustc_bindgen_golden(
+    name = "fdf_sys_bindgen_golden",
+    checked_in_source = "src/bindings.rs",
+    expect_lints = ["non_camel_case_types"],
+
+    # Match bindgen.sh defaults.
+    explicit_padding = False,
+    fuchsia_api_level = "HEAD",
+    function_allowlist = ["fdf_.*|Driver.*|FDF_.*|DRIVER_.*"],
+    headers = [
+        "//sdk/lib/driver/runtime/include/lib/fdf/arena.h",
+        "//sdk/lib/driver/runtime/include/lib/fdf/channel.h",
+        "//sdk/lib/driver/runtime/include/lib/fdf/channel_read.h",
+        "//sdk/lib/driver/runtime/include/lib/fdf/dispatcher.h",
+        "//sdk/lib/driver/runtime/include/lib/fdf/env.h",
+        "//sdk/lib/driver/runtime/include/lib/fdf/handle.h",
+        "//sdk/lib/driver/runtime/include/lib/fdf/testing.h",
+        "//sdk/lib/driver/runtime/include/lib/fdf/token.h",
+        "//sdk/lib/driver/runtime/include/lib/fdf/types.h",
+        "//sdk/lib/driver/symbols/symbols.h",
+    ],
+    layout_tests = True,
+    notice_year = 2024,
+    raw_lines = [
+        "use libasync_sys::*;",
+        "use zx_types::*;",
+    ],
+    std_derives = ["default"],
+    std_impls = ["debug"],
+    type_allowlist = ["fdf_.*|Driver.*|FDF_.*|DRIVER_.*"],
+    type_blocklist = [
+        "zx_.*",
+        "async_.*",
+    ],
+    var_allowlist = ["fdf_.*|Driver.*|FDF_.*|DRIVER_.*"],
+    deps = [
+        "//sdk/lib/driver/runtime:driver_runtime",
+        "//sdk/lib/driver/runtime:driver_runtime_env",
+        "//sdk/lib/driver/runtime:driver_runtime_testing",
+        "//sdk/lib/driver/symbols",
+
+        # The headers include <zircon/types.h> and <zircon/availability.h>.
+        # Bindgen runs for the host, where GN's zx_library() adds this
+        # dependency automatically but the Bazel macros do not yet
+        # (https://fxbug.dev/429377203).
+        "//zircon/system/public",
     ],
 )
 

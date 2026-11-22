@@ -5,12 +5,13 @@
 import("//build/components/fuchsia_test_component.gni")
 import("//build/python/python_action.gni")
 import("//build/python/python_mobly_test.gni")
+import("//build/testing/environments.gni")
 import("//build/testing/host_test_data.gni")
 
 performance_testing_environments = [
   astro_env,
+  iris_env,
   nelson_env,
-  nuc7_env,
   nuc11_env,
   sherlock_env,
   sorrel_env,
@@ -22,6 +23,9 @@ performance_testing_environments = [
 # host-side logic. If your test consists of a Fuchsia component that generates a
 # fuchsiaperf file and that requires no test-specific host-side logic, you can
 # use fuchsia_component_perf_test instead.
+#
+# If expected_metric_names_filepaths is non-empty, the test is marked with
+# `produces_perf_results = true` in tests.json. See test_spec().
 #
 # Parameters
 #   main_source (required)
@@ -157,6 +161,11 @@ template("python_perf_test") {
       }
       if (invoker.expected_metric_names_filepaths != []) {
         deps += [ ":${_runtime_deps_target}" ]
+
+        # Mark the test in tests.json as producing performance results, so
+        # that infrastructure can identify it. Tests with no expected metric
+        # names don't publish performance results, so they are not marked.
+        produces_perf_results = true
       }
 
       # Enabling on internal builders is primarily controlled by GN groups and

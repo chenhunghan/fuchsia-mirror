@@ -12,6 +12,7 @@
 #include <lib/zbitl/view.h>
 #include <zircon/hw/gpt.h>
 
+#include <functional>
 #include <numeric>
 #include <vector>
 
@@ -167,6 +168,16 @@ class MockStubService : public efi::StubBootServices {
   efi_status CloseEvent(efi_event event) override;
   efi_status CheckEvent(efi_event event) override;
 
+  efi_status Stall(size_t microseconds) override {
+    if (on_stall_) {
+      on_stall_(microseconds);
+    }
+    // Return immediately for simplicity; tests should use `on_stall_` to
+    // advance their own time if needed
+    return EFI_SUCCESS;
+  }
+  void SetOnStall(std::function<void(size_t)> on_stall) { on_stall_ = std::move(on_stall); }
+
   void AddDevice(Device* device) { devices_.push_back(device); }
 
   void SetMemoryMap(const std::vector<efi_memory_descriptor>& memory_map, size_t mkey = 0) {
@@ -186,6 +197,7 @@ class MockStubService : public efi::StubBootServices {
   std::vector<efi_memory_descriptor> memory_map_;
 
   efi_status timer_retval_ = EFI_SUCCESS;
+  std::function<void(size_t)> on_stall_;
   // Next available value for an event handle.
   // This precludes efficient key reuse, but it's simple,
   // and it's extremely unlikely any one test is going to create that many timers.

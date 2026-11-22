@@ -10,13 +10,13 @@
 #include <src/tests/fidl/compatibility/helpers.h>
 #include <src/tests/fidl/compatibility/hlcpp_client_app.h>
 
-using fidl::test::compatibility::AllTypesXunion;
-using fidl::test::compatibility::Echo_EchoXunionsWithError_Result;
+using fidl::test::compatibility::AllTypesFlexibleUnion;
+using fidl::test::compatibility::Echo_EchoFlexibleUnionsWithError_Result;
 using fidl::test::compatibility::RespondWith;
+using fidl::test::compatibility::this_is_a_flexible_union;
 using fidl::test::compatibility::this_is_a_struct;
 using fidl::test::compatibility::this_is_a_table;
 using fidl::test::compatibility::this_is_a_union;
-using fidl::test::compatibility::this_is_a_xunion;
 
 using fidl_test_compatibility_helpers::DataGenerator;
 using fidl_test_compatibility_helpers::ExtractShortName;
@@ -31,9 +31,10 @@ using fidl_test_compatibility_helpers::Summary;
 
 namespace {
 
-void InitializeAllTypesXunions(std::vector<AllTypesXunion>* value, DataGenerator& gen) {
+void InitializeAllTypesFlexibleUnions(std::vector<AllTypesFlexibleUnion>* value,
+                                      DataGenerator& gen) {
   for (size_t i = 1; true; i++) {
-    AllTypesXunion xu{};
+    AllTypesFlexibleUnion xu{};
     switch (i) {
       case 1:
         xu.set_bool_member(gen.next<bool>());
@@ -96,8 +97,8 @@ void InitializeAllTypesXunions(std::vector<AllTypesXunion>* value, DataGenerator
   }
 }
 
-void ExpectAllTypesXunionsEq(const std::vector<AllTypesXunion>& a,
-                             const std::vector<AllTypesXunion>& b) {
+void ExpectAllTypesFlexibleUnionsEq(const std::vector<AllTypesFlexibleUnion>& a,
+                                    const std::vector<AllTypesFlexibleUnion>& b) {
   EXPECT_EQ(a.size(), b.size());
   for (size_t i = 0; i < a.size(); i++) {
     if (a[i].is_handle_member()) {
@@ -129,32 +130,33 @@ Summary summary;
 TEST(Union, EchoUnions) {
   ForAllImpls(impls, [](async::Loop& loop, fidl::test::compatibility::EchoPtr& proxy,
                         const std::string& server_url, const std::string& proxy_url) {
-    summary[ExtractShortName(proxy_url) + " <-> " + ExtractShortName(server_url) + " (xunion)"] =
-        false;
+    summary[ExtractShortName(proxy_url) + " <-> " + ExtractShortName(server_url) +
+            " (flexible union)"] = false;
     // Using randomness to avoid having to come up with varied values by
     // hand. Seed deterministically so that this function's outputs are
     // predictable.
     DataGenerator generator(0x1234);
 
-    std::vector<AllTypesXunion> sent;
-    InitializeAllTypesXunions(&sent, generator);
+    std::vector<AllTypesFlexibleUnion> sent;
+    InitializeAllTypesFlexibleUnions(&sent, generator);
 
-    std::vector<AllTypesXunion> sent_clone;
+    std::vector<AllTypesFlexibleUnion> sent_clone;
     fidl::Clone(sent, &sent_clone);
-    std::vector<AllTypesXunion> resp_clone;
+    std::vector<AllTypesFlexibleUnion> resp_clone;
     bool called_back = false;
-    proxy->EchoXunions(std::move(sent), server_url,
-                       [&loop, &resp_clone, &called_back](std::vector<AllTypesXunion> resp) {
-                         ASSERT_EQ(ZX_OK, fidl::Clone(resp, &resp_clone));
-                         called_back = true;
-                         loop.Quit();
-                       });
+    proxy->EchoFlexibleUnions(
+        std::move(sent), server_url,
+        [&loop, &resp_clone, &called_back](std::vector<AllTypesFlexibleUnion> resp) {
+          ASSERT_EQ(ZX_OK, fidl::Clone(resp, &resp_clone));
+          called_back = true;
+          loop.Quit();
+        });
 
     loop.Run();
     ASSERT_TRUE(called_back);
-    ExpectAllTypesXunionsEq(sent_clone, resp_clone);
-    summary[ExtractShortName(proxy_url) + " <-> " + ExtractShortName(server_url) + " (xunion)"] =
-        true;
+    ExpectAllTypesFlexibleUnionsEq(sent_clone, resp_clone);
+    summary[ExtractShortName(proxy_url) + " <-> " + ExtractShortName(server_url) +
+            " (flexible union)"] = true;
   });
 }
 
@@ -162,23 +164,23 @@ TEST(Union, EchoUnionsWithErrorSuccessCase) {
   ForAllImpls(impls, [](async::Loop& loop, fidl::test::compatibility::EchoPtr& proxy,
                         const std::string& server_url, const std::string& proxy_url) {
     summary[ExtractShortName(proxy_url) + " <-> " + ExtractShortName(server_url) +
-            " (xunion result success)"] = false;
+            " (flexible union result success)"] = false;
     // Using randomness to avoid having to come up with varied values by
     // hand. Seed deterministically so that this function's outputs are
     // predictable.
     DataGenerator generator(0x1234);
 
-    std::vector<AllTypesXunion> sent;
-    InitializeAllTypesXunions(&sent, generator);
+    std::vector<AllTypesFlexibleUnion> sent;
+    InitializeAllTypesFlexibleUnions(&sent, generator);
     auto err = fidl::test::compatibility::default_enum::kOne;
 
-    std::vector<AllTypesXunion> sent_clone;
+    std::vector<AllTypesFlexibleUnion> sent_clone;
     fidl::Clone(sent, &sent_clone);
-    std::vector<AllTypesXunion> resp_clone;
+    std::vector<AllTypesFlexibleUnion> resp_clone;
     bool called_back = false;
-    proxy->EchoXunionsWithError(
+    proxy->EchoFlexibleUnionsWithError(
         std::move(sent), err, server_url, RespondWith::SUCCESS,
-        [&loop, &resp_clone, &called_back](Echo_EchoXunionsWithError_Result resp) {
+        [&loop, &resp_clone, &called_back](Echo_EchoFlexibleUnionsWithError_Result resp) {
           ASSERT_TRUE(resp.is_response());
           ASSERT_EQ(ZX_OK, fidl::Clone(resp.response().value, &resp_clone));
           called_back = true;
@@ -187,9 +189,9 @@ TEST(Union, EchoUnionsWithErrorSuccessCase) {
 
     loop.Run();
     ASSERT_TRUE(called_back);
-    ExpectAllTypesXunionsEq(sent_clone, resp_clone);
+    ExpectAllTypesFlexibleUnionsEq(sent_clone, resp_clone);
     summary[ExtractShortName(proxy_url) + " <-> " + ExtractShortName(server_url) +
-            " (xunion result success)"] = true;
+            " (flexible union result success)"] = true;
   });
 }
 
@@ -197,29 +199,30 @@ TEST(Union, EchoUnionsWithErrorErrorCase) {
   ForAllImpls(impls, [](async::Loop& loop, fidl::test::compatibility::EchoPtr& proxy,
                         const std::string& server_url, const std::string& proxy_url) {
     summary[ExtractShortName(proxy_url) + " <-> " + ExtractShortName(server_url) +
-            " (xunion result error)"] = false;
+            " (flexible union result error)"] = false;
     // Using randomness to avoid having to come up with varied values by
     // hand. Seed deterministically so that this function's outputs are
     // predictable.
     DataGenerator generator(0xF1D7);
 
-    std::vector<AllTypesXunion> sent;
-    InitializeAllTypesXunions(&sent, generator);
+    std::vector<AllTypesFlexibleUnion> sent;
+    InitializeAllTypesFlexibleUnions(&sent, generator);
     auto err = fidl::test::compatibility::default_enum::kOne;
 
     bool called_back = false;
-    proxy->EchoXunionsWithError(std::move(sent), err, server_url, RespondWith::ERR,
-                                [&loop, &err, &called_back](Echo_EchoXunionsWithError_Result resp) {
-                                  ASSERT_TRUE(resp.is_err());
-                                  ASSERT_EQ(err, resp.err());
-                                  called_back = true;
-                                  loop.Quit();
-                                });
+    proxy->EchoFlexibleUnionsWithError(
+        std::move(sent), err, server_url, RespondWith::ERR,
+        [&loop, &err, &called_back](Echo_EchoFlexibleUnionsWithError_Result resp) {
+          ASSERT_TRUE(resp.is_err());
+          ASSERT_EQ(err, resp.err());
+          called_back = true;
+          loop.Quit();
+        });
 
     loop.Run();
     ASSERT_TRUE(called_back);
     summary[ExtractShortName(proxy_url) + " <-> " + ExtractShortName(server_url) +
-            " (xunion result error)"] = true;
+            " (flexible union result error)"] = true;
   });
 }
 

@@ -57,7 +57,7 @@ action("foo") {
 
 ### Doing a task
 
-#### Reproducing the issue
+#### Reproducing the issue {:#reproducing-the-issue}
 
 In order to understand why an action is non-hermetic, you need to build it with
 the action tracer tool enabled. This tool runs all build actions while tracing
@@ -116,4 +116,4 @@ Reach out for questions or for status updates:
 *   <shayba@google.com>
 
 [hermetic-build-actions]: /docs/development/build/hermetic_actions.md
-[common-issues]: /docs/development/build/hermetic_actions.md#common_issues_and_how_to_fix_them
+[common-issues]: /docs/development/build/hermetic_actions.md#common-issues-and-how-to-fix-them

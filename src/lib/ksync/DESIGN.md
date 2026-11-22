@@ -70,18 +70,18 @@ mixing.
     (`KMutex`, `BrwLockPi`, `KCell`, ...), the macros, and the userspace raw
     locks used for host builds and tests.
 *   The kernel's raw locks (`TrackedMutex`, `TrackedCriticalMutex`,
-    `TrackedSpinlock`, `TrackedMonitoredSpinlock`, `RawBrwLockPi`,
-    `RawBrwLockNoPi`), their policies, the `KSpinlock` / `KMonitoredSpinlock`
-    aliases, and the `declare_singleton_mutex!`,
-    `declare_singleton_critical_mutex!`, `declare_singleton_spinlock!` and
+    `TrackedSpinlock`, `TrackedMonitoredSpinlock`, `TrackedBrwLockPi`,
+    `TrackedBrwLockNoPi`), their policies, the `KSpinlock` /
+    `KMonitoredSpinlock` aliases, and the `declare_singleton_spinlock!` and
     `declare_singleton_monitored_spinlock!` macros live in
     `//zircon/kernel/lib/ksync`. This is a `kernel_rust_mod` that is compiled
     directly into the kernel crate and mounted at `crate::ksync_kernel`. The
     mutexes are implemented directly on the Rust kernel `Mutex` in
-    `//zircon/kernel/kernel/mutex.rs`, and the spinlocks on the Rust kernel
+    `//zircon/kernel/kernel/mutex.rs`, the spinlocks on the Rust kernel
     `SpinLock` and `MonitoredSpinLock` in `//zircon/kernel/kernel/spinlock.rs`,
-    and re-exported from `crate::ksync_kernel`; `RawBrwLockPi` and
-    `RawBrwLockNoPi` wrap the C++ kernel `BrwLockPi` and `BrwLockNoPi`.
+    and the reader-writer locks on the Rust kernel `BrwLockPi` and
+    `BrwLockNoPi` in `//zircon/kernel/kernel/brwlock.rs`, and re-exported from
+    `crate::ksync_kernel`.
 
 As a result, neither the `ksync` crate nor any other non-kernel crate (such as
 `fbl` or `region_alloc`) can name the kernel's raw locks. Generic code is
@@ -89,7 +89,7 @@ instead parameterized over its raw lock type (`M: RawLock`), and the final
 usage site in the kernel crate supplies the concrete raw lock (e.g.
 `crate::ksync_kernel::TrackedMutex`). For the same reason there is no default
 raw lock type: `KMutex` and `BrwLockPi` fields in a `#[guarded]` struct (e.g.
-`KMutex<TrackedSpinlock>` or `BrwLockPi<RawBrwLockPi>`) and
+`KMutex<TrackedSpinlock>` or `BrwLockPi<TrackedBrwLockPi>`) and
 `declare_singleton_lock!` must always name their raw lock type explicitly.
 
 ## 2. Safe Exclusive Access
@@ -119,7 +119,7 @@ pub struct MyStruct {
     pub mu: KMutex<TrackedMutex>,
 
     #[brwlock]
-    pub lock: BrwLockPi<RawBrwLockPi>,
+    pub lock: BrwLockPi<TrackedBrwLockPi>,
 
     #[guarded_by(mu)]
     pub data1: u32,
@@ -139,31 +139,28 @@ pub struct MyStructLockClass;
 // 2. Struct fields rewritten to KMutex/BrwLockPi and KCell
 pub struct MyStruct {
     pub mu: ::ksync::KMutex<MyStructMuClass, TrackedMutex>,
-    pub lock: ::ksync::BrwLockPi<MyStructLockClass, RawBrwLockPi>,
+    pub lock: ::ksync::BrwLockPi<MyStructLockClass, TrackedBrwLockPi>,
     pub data1: ::ksync::KCell<u32, MyStructMuClass>,
     pub data2: ::ksync::KCell<i32, MyStructLockClass>,
 }
 
 // 3. Custom projection guard structures (stack-pinned)
-#[pin_data(PinnedDrop)]
 pub struct MyStructMuGuard<'a> {
     parent: &'a MyStruct,
-    #[pin]
     inner: ::ksync::KMutexGuard<'a, MyStructMuClass, TrackedMutex>,
+    _pin: ::core::marker::PhantomPinned,
 }
 
-#[pin_data(PinnedDrop)]
 pub struct MyStructLockReadGuard<'a> {
     parent: &'a MyStruct,
-    #[pin]
-    inner: ::ksync::BrwLockPiReadGuard<'a, MyStructLockClass, RawBrwLockPi>,
+    inner: ::ksync::BrwLockPiReadGuard<'a, MyStructLockClass, TrackedBrwLockPi>,
+    _pin: ::core::marker::PhantomPinned,
 }
 
-#[pin_data(PinnedDrop)]
 pub struct MyStructLockWriteGuard<'a> {
     parent: &'a MyStruct,
-    #[pin]
-    inner: ::ksync::BrwLockPiWriteGuard<'a, MyStructLockClass, RawBrwLockPi>,
+    inner: ::ksync::BrwLockPiWriteGuard<'a, MyStructLockClass, TrackedBrwLockPi>,
+    _pin: ::core::marker::PhantomPinned,
 }
 
 // 4. Safe projection accessors and field projection structs
@@ -204,28 +201,19 @@ impl<'a> MyStructLockWriteGuard<'a> {
 
 // 5. Lock methods implemented on the parent struct returning PinInit blocks
 impl MyStruct {
-    #[inline]
+    #[inline(always)]
     pub fn lock_mu(&self) -> impl pin_init::PinInit<MyStructMuGuard<'_>, ::core::convert::Infallible> {
-        pin_init::pin_init!(MyStructMuGuard {
-            parent: self,
-            inner <- ::ksync::KMutexGuard::new(&self.mu),
-        })
+        MyStructMuGuard::__new(self, ::ksync::KMutexGuard::new(&self.mu))
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn read_lock(&self) -> impl pin_init::PinInit<MyStructLockReadGuard<'_>, ::core::convert::Infallible> {
-        pin_init::pin_init!(MyStructLockReadGuard {
-            parent: self,
-            inner <- ::ksync::BrwLockPiReadGuard::new(&self.lock),
-        })
+        MyStructLockReadGuard::__new(self, ::ksync::BrwLockPiReadGuard::new(&self.lock))
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn write_lock(&self) -> impl pin_init::PinInit<MyStructLockWriteGuard<'_>, ::core::convert::Infallible> {
-        pin_init::pin_init!(MyStructLockWriteGuard {
-            parent: self,
-            inner <- ::ksync::BrwLockPiWriteGuard::new(&self.lock),
-        })
+        MyStructLockWriteGuard::__new(self, ::ksync::BrwLockPiWriteGuard::new(&self.lock))
     }
 }
 ```

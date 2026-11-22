@@ -11,6 +11,7 @@ import unittest
 import unittest.mock as mock
 from pathlib import Path
 
+import build_dir
 import package_server
 from async_utils.command import AsyncCommandError, CommandOutput
 
@@ -83,31 +84,37 @@ class TestPackageServer(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    @mock.patch("package_server.lib.build_dir.get_build_directory")
-    @mock.patch("package_server.lib.FfxCmd")
+    @mock.patch.object(build_dir, "get_build_directory", autospec=True)
+    @mock.patch.object(package_server.lib, "FfxCmd", autospec=True)
     async def test_get_arguments(
         self, mock_ffx_cmd: mock.Mock, mock_get_build_dir: mock.Mock
     ) -> None:
-        cmd_mock = mock.Mock()
-        process_mock = mock.Mock()
-        process_mock.stdout = "8084\n"
-        cmd_mock.run_to_completion = mock.AsyncMock(return_value=process_mock)
-        mock_ffx_cmd.return_value.start = mock.AsyncMock(return_value=cmd_mock)
-
         mock_get_build_dir.return_value = Path("/some/out/dir")
+        default_name = package_server.ephemeral_repository_name()
 
         args = await package_server.get_arguments()
-        self.assertIn("server", args)
-        self.assertIn("start", args)
-        self.assertIn("[::]:8084", args)
-        self.assertIn(package_server.ephemeral_repository_name(), args)
-        self.assertNotIn("fx", args)
-        self.assertNotIn("ffx", args)
-        mock_ffx_cmd.return_value.start.assert_called_with(
-            "config",
-            "get",
-            "repository.server.default_port",
+        self.assertSequenceEqual(
+            args,
+            (
+                "repository",
+                "server",
+                "start",
+                "--foreground",
+                "--address",
+                "[::]:0",
+                "--repository",
+                default_name,
+                "--repo-path",
+                "/some/out/dir/amber-files",
+                "--trusted-root",
+                "/some/out/dir/amber-files/repository/9.root.json",
+                "--alias",
+                "fuchsia.com",
+                "--alias",
+                "chromium.org",
+            ),
         )
+        mock_ffx_cmd.assert_not_called()
 
     @mock.patch("package_server.lib.build_dir.get_build_directory")
     def test_ephemeral_repository_name(
@@ -140,38 +147,42 @@ class TestPackageServer(unittest.IsolatedAsyncioTestCase):
                 package_server.ephemeral_repository_name("fxtest", link_out),
             )
 
-    @mock.patch("package_server.lib.build_dir.get_build_directory")
-    @mock.patch("package_server.lib.FfxCmd")
-    async def test_get_arguments_with_name(
-        self, mock_ffx_cmd: mock.Mock, mock_get_build_dir: mock.Mock
+    @mock.patch.object(build_dir, "get_build_directory", autospec=True)
+    async def test_get_arguments_explicit_port_and_background(
+        self, mock_get_build_dir: mock.Mock
     ) -> None:
-        cmd_mock = mock.Mock()
-        process_mock = mock.Mock()
-        process_mock.stdout = "8083\n"
-        cmd_mock.run_to_completion = mock.AsyncMock(return_value=process_mock)
-        mock_ffx_cmd.return_value.start = mock.AsyncMock(return_value=cmd_mock)
-
         mock_get_build_dir.return_value = Path("/some/out/dir")
 
-        args = await package_server.get_arguments(name="my-repo")
-        self.assertIn("my-repo", args)
-
-    @mock.patch("package_server.lib.build_dir.get_build_directory")
-    @mock.patch("package_server.lib.FfxCmd")
-    async def test_get_arguments_ffx_config_failure(
-        self, mock_ffx_cmd: mock.Mock, mock_get_build_dir: mock.Mock
-    ) -> None:
-        cmd_mock = mock.Mock()
-        process_mock = mock.Mock()
-        process_mock.stdout = "invalid\n"
-        cmd_mock.run_to_completion = mock.AsyncMock(return_value=process_mock)
-        mock_ffx_cmd.return_value.start = mock.AsyncMock(return_value=cmd_mock)
-
-        mock_get_build_dir.return_value = Path("/some/out/dir")
-
-        args = await package_server.get_arguments()
-        # Should fallback to default port 8083
-        self.assertIn("[::]:8083", args)
+        cases = (
+            ("custom_name_default_port", "my-repo", 0, False, "--foreground"),
+            ("explicit_port_background", "my-repo", 8084, True, "--background"),
+        )
+        for case_name, repo_name, port, background, mode_flag in cases:
+            with self.subTest(case=case_name):
+                args = await package_server.get_arguments(
+                    name=repo_name, port=port, background=background
+                )
+                self.assertSequenceEqual(
+                    args,
+                    (
+                        "repository",
+                        "server",
+                        "start",
+                        mode_flag,
+                        "--address",
+                        f"[::]:{port}",
+                        "--repository",
+                        repo_name,
+                        "--repo-path",
+                        "/some/out/dir/amber-files",
+                        "--trusted-root",
+                        "/some/out/dir/amber-files/repository/9.root.json",
+                        "--alias",
+                        "fuchsia.com",
+                        "--alias",
+                        "chromium.org",
+                    ),
+                )
 
     @mock.patch("package_server.lib.build_dir.get_build_directory")
     def test_is_package_repository_built(
@@ -187,16 +198,22 @@ class TestPackageServer(unittest.IsolatedAsyncioTestCase):
         repo_json.is_file.return_value = False
         self.assertFalse(package_server.is_package_repository_built())
 
-    @mock.patch(
-        "package_server.lib.build_dir.get_build_directory",
+    @mock.patch.object(
+        build_dir,
+        "get_build_directory",
+        autospec=True,
         return_value=Path("/some/out/dir"),
     )
-    @mock.patch("package_server.lib.is_package_repository_built")
-    @mock.patch("package_server.lib.wait_for_package_server")
-    @mock.patch("package_server.lib.get_arguments")
-    @mock.patch("package_server.lib.FfxCmd")
-    @mock.patch("package_server.lib.FxCmd")
-    @mock.patch("asyncio.create_subprocess_exec")
+    @mock.patch.object(
+        package_server.lib, "is_package_repository_built", autospec=True
+    )
+    @mock.patch.object(
+        package_server.lib, "wait_for_package_server", autospec=True
+    )
+    @mock.patch.object(package_server.lib, "get_arguments", autospec=True)
+    @mock.patch.object(package_server.lib, "FfxCmd", autospec=True)
+    @mock.patch.object(package_server.lib, "FxCmd", autospec=True)
+    @mock.patch.object(asyncio, "create_subprocess_exec", autospec=True)
     async def test_start_success(
         self,
         mock_exec: mock.Mock,
@@ -216,30 +233,37 @@ class TestPackageServer(unittest.IsolatedAsyncioTestCase):
         mock_fx_cmd.return_value.command_line.side_effect = (
             lambda *args: ("fx",) + args
         )
-
-        # Mock for package server process
         server_process_mock = mock.Mock()
         mock_exec.return_value = server_process_mock
 
-        self.assertEqual(await package_server.start(), server_process_mock)
-        mock_get_arguments.assert_called_once_with(
-            package_server.ephemeral_repository_name()
-        )
-        mock_ffx_cmd.return_value.command_line.assert_called_with(
-            "arg1", "arg2"
-        )
-        mock_fx_cmd.return_value.command_line.assert_called_with(
-            "ffx", "arg1", "arg2"
-        )
-        mock_exec.assert_called_with(
-            "fx",
-            "ffx",
-            "arg1",
-            "arg2",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        mock_wait.assert_called_with(server_process_mock, 30, 0.2)
+        with self.subTest(case="default_name"):
+            self.assertEqual(await package_server.start(), server_process_mock)
+            mock_get_arguments.assert_called_once_with(
+                package_server.ephemeral_repository_name()
+            )
+            mock_ffx_cmd.return_value.command_line.assert_called_with(
+                "arg1", "arg2"
+            )
+            mock_fx_cmd.return_value.command_line.assert_called_with(
+                "ffx", "arg1", "arg2"
+            )
+            mock_exec.assert_called_with(
+                "fx",
+                "ffx",
+                "arg1",
+                "arg2",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            mock_wait.assert_called_with(server_process_mock, 30, 0.2)
+
+        mock_get_arguments.reset_mock()
+        with self.subTest(case="explicit_name"):
+            self.assertEqual(
+                await package_server.start(name="custom"),
+                server_process_mock,
+            )
+            mock_get_arguments.assert_called_once_with("custom")
 
     @mock.patch("package_server.lib.is_package_repository_built")
     async def test_start_fails_when_repo_not_built(
@@ -700,3 +724,489 @@ class TestPackageServer(unittest.IsolatedAsyncioTestCase):
         )
         runner = package_server.lib._default_command_runner()
         self.assertIsNone(await runner("is-package-server-running"))
+
+    async def test_get_running_server_names_matches_canonical_path(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            real_out = os.path.join(td, "real_out")
+            amber_dir = os.path.join(real_out, "amber-files")
+            os.makedirs(amber_dir)
+            link_out = os.path.join(td, "link_out")
+            os.symlink(real_out, link_out)
+            other_amber = os.path.join(td, "other_out", "amber-files")
+            os.makedirs(other_amber)
+
+            payload = json.dumps(
+                {
+                    "ok": {
+                        "data": [
+                            {
+                                "name": "devhost",
+                                "repo_path": {"file": f"{amber_dir}/"},
+                            },
+                            {
+                                "name": "zxdb-1234",
+                                "repo_path": {
+                                    "file": os.path.join(
+                                        link_out, "amber-files"
+                                    )
+                                },
+                            },
+                            {
+                                "name": "other-server",
+                                "repo_path": {"file": other_amber},
+                            },
+                            {"name": "", "repo_path": {"file": amber_dir}},
+                            {"name": "missing-path"},
+                            "unexpected-string-entry",
+                        ]
+                    }
+                }
+            )
+            runner = mock.AsyncMock(
+                return_value=CommandOutput(payload, "", 0, 0.1, None)
+            )
+
+            names = await package_server.get_running_server_names(
+                build_directory=link_out, run_command=runner
+            )
+
+        self.assertEqual(names, frozenset({"devhost", "zxdb-1234"}))
+        runner.assert_awaited_once_with(
+            "ffx",
+            "--machine",
+            "json",
+            "repository",
+            "server",
+            "list",
+            timeout=15.0,
+            quiet_mode=True,
+        )
+
+    @mock.patch.object(
+        build_dir,
+        "get_build_directory",
+        autospec=True,
+        return_value=Path("/some/out/dir"),
+    )
+    async def test_get_running_server_names_handles_errors(
+        self, _mock_get_build_dir: mock.Mock
+    ) -> None:
+        cases = (
+            ("none_output", None, "Failed to list running package servers"),
+            (
+                "timeout",
+                CommandOutput("", "", -1, 15.0, None, was_timeout=True),
+                "Timed out listing running package servers",
+            ),
+            (
+                "nonzero_exit",
+                CommandOutput("", "err", 1, 0.1, None),
+                r"Failed to list running package servers \(exit code 1\): err",
+            ),
+            (
+                "bad_json",
+                CommandOutput("{invalid", "", 0, 0.1, None),
+                "Invalid JSON from ffx repository server list",
+            ),
+            (
+                "error_envelope",
+                CommandOutput(
+                    json.dumps({"user_error": {"message": "boom"}}),
+                    "",
+                    0,
+                    0.1,
+                    None,
+                ),
+                "Unexpected JSON envelope from ffx repository server list",
+            ),
+            (
+                "non_list_data",
+                CommandOutput(
+                    json.dumps({"ok": {"data": "oops"}}), "", 0, 0.1, None
+                ),
+                "Unexpected JSON envelope from ffx repository server list",
+            ),
+        )
+        for case_name, output, expected_msg in cases:
+            with self.subTest(case=case_name):
+                runner = mock.AsyncMock(return_value=output)
+                with self.assertRaisesRegex(
+                    package_server.PackageServingException, expected_msg
+                ):
+                    await package_server.get_running_server_names(
+                        run_command=runner
+                    )
+
+    @mock.patch.object(
+        package_server.lib,
+        "_default_command_runner",
+        autospec=True,
+    )
+    @mock.patch.object(
+        build_dir,
+        "get_build_directory",
+        autospec=True,
+        return_value=Path("/default/out/dir"),
+    )
+    async def test_get_running_server_names_passes_default_out_dir_to_runner(
+        self,
+        _mock_get_build_dir: mock.Mock,
+        mock_default_runner: mock.Mock,
+    ) -> None:
+        runner = mock.AsyncMock(
+            return_value=CommandOutput(
+                json.dumps({"ok": {"data": []}}), "", 0, 0.1, None
+            )
+        )
+        mock_default_runner.return_value = runner
+        self.assertEqual(
+            await package_server.get_running_server_names(), frozenset()
+        )
+        mock_default_runner.assert_called_once_with(
+            build_directory=Path("/default/out/dir")
+        )
+
+    @mock.patch.object(
+        package_server.lib,
+        "is_package_repository_built",
+        autospec=True,
+        return_value=False,
+    )
+    async def test_start_background_returns_false_when_not_built(
+        self, mock_is_built: mock.Mock
+    ) -> None:
+        runner = mock.AsyncMock()
+        self.assertFalse(
+            await package_server.start_background(
+                "zxdb-1234", run_command=runner
+            )
+        )
+        mock_is_built.assert_called_once_with()
+        runner.assert_not_called()
+
+    @mock.patch.object(
+        build_dir,
+        "get_build_directory",
+        autospec=True,
+        return_value=Path("/some/out/dir"),
+    )
+    @mock.patch.object(
+        package_server.lib,
+        "is_package_repository_built",
+        autospec=True,
+        return_value=True,
+    )
+    async def test_start_background_returns_true_when_already_running_port_zero(
+        self,
+        _mock_is_built: mock.Mock,
+        _mock_get_build_dir: mock.Mock,
+    ) -> None:
+        list_payload = json.dumps(
+            {
+                "ok": {
+                    "data": [
+                        {
+                            "name": "zxdb-1234",
+                            "repo_path": {"file": "/some/out/dir/amber-files"},
+                        }
+                    ]
+                }
+            }
+        )
+        runner = mock.AsyncMock(
+            return_value=CommandOutput(list_payload, "", 0, 0.1, None)
+        )
+        self.assertTrue(
+            await package_server.start_background(
+                "zxdb-1234", port=0, run_command=runner
+            )
+        )
+        runner.assert_awaited_once_with(
+            "ffx",
+            "--machine",
+            "json",
+            "repository",
+            "server",
+            "list",
+            timeout=60,
+            quiet_mode=True,
+        )
+
+    @mock.patch.object(
+        build_dir,
+        "get_build_directory",
+        autospec=True,
+        return_value=Path("/some/out/dir"),
+    )
+    @mock.patch.object(
+        package_server.lib,
+        "is_package_repository_built",
+        autospec=True,
+        return_value=True,
+    )
+    async def test_start_background_success(
+        self,
+        _mock_is_built: mock.Mock,
+        _mock_get_build_dir: mock.Mock,
+    ) -> None:
+        default_name = package_server.ephemeral_repository_name()
+        empty_list = json.dumps({"ok": {"data": []}})
+        cases = (
+            ("explicit_name", "zxdb-1234", 0, 0, False),
+            ("default_name_explicit_port", None, 8084, 0, False),
+            (
+                "explicit_port_already_running_same_port",
+                "zxdb-1234",
+                8084,
+                0,
+                True,
+            ),
+            ("name_conflict_already_running", "zxdb-1234", 0, 1, False),
+        )
+        for (
+            case_name,
+            repo_arg,
+            port,
+            start_rc,
+            pre_running,
+        ) in cases:
+            with self.subTest(case=case_name):
+                expected_name = repo_arg or default_name
+                list_payload = json.dumps(
+                    {
+                        "ok": {
+                            "data": [
+                                {
+                                    "name": expected_name,
+                                    "repo_path": {
+                                        "file": "/some/out/dir/amber-files"
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                )
+                pre_payload = list_payload if pre_running else empty_list
+                runner = mock.AsyncMock(
+                    side_effect=(
+                        CommandOutput(pre_payload, "", 0, 0.1, None),
+                        CommandOutput(
+                            "",
+                            "NameConflict" if start_rc else "",
+                            start_rc,
+                            0.1,
+                            None,
+                        ),
+                        CommandOutput(list_payload, "", 0, 0.1, None),
+                    )
+                )
+                started = await package_server.start_background(
+                    repo_arg, port=port, run_command=runner
+                )
+
+                self.assertTrue(started)
+                self.assertEqual(runner.await_count, 3)
+                pre_list_call = runner.await_args_list[0]
+                self.assertEqual(pre_list_call.kwargs["timeout"], 60)
+                start_call = runner.await_args_list[1]
+                self.assertEqual(start_call.kwargs["timeout"], 60)
+                start_args = start_call.args
+                self.assertEqual(start_args[0], "ffx")
+                self.assertIn("--background", start_args)
+                self.assertNotIn("--foreground", start_args)
+                self.assertIn(f"[::]:{port}", start_args)
+                self.assertIn(expected_name, start_args)
+                list_call = runner.await_args_list[2]
+                self.assertEqual(list_call.kwargs["timeout"], 60)
+
+    @mock.patch.object(
+        build_dir,
+        "get_build_directory",
+        autospec=True,
+        return_value=Path("/some/out/dir"),
+    )
+    @mock.patch.object(
+        package_server.lib,
+        "is_package_repository_built",
+        autospec=True,
+        return_value=True,
+    )
+    async def test_start_background_raises_on_failure(
+        self,
+        _mock_is_built: mock.Mock,
+        _mock_get_build_dir: mock.Mock,
+    ) -> None:
+        empty_list = json.dumps({"ok": {"data": []}})
+        this_dir_list = json.dumps(
+            {
+                "ok": {
+                    "data": [
+                        {
+                            "name": "zxdb-1234",
+                            "repo_path": {"file": "/some/out/dir/amber-files"},
+                        }
+                    ]
+                }
+            }
+        )
+        other_dir_list = json.dumps(
+            {
+                "ok": {
+                    "data": [
+                        {
+                            "name": "zxdb-1234",
+                            "repo_path": {"file": "/other/out/dir/amber-files"},
+                        }
+                    ]
+                }
+            }
+        )
+        cases = (
+            (
+                "pre_list_probe_fails",
+                0,
+                (CommandOutput("", "pre list err", 1, 0.1, None),),
+                r"Failed to list running package servers \(exit code 1\): pre list err",
+                1,
+            ),
+            (
+                "none_output",
+                0,
+                (CommandOutput(empty_list, "", 0, 0.1, None), None),
+                "Failed to start package server",
+                2,
+            ),
+            (
+                "timeout_not_started",
+                0,
+                (
+                    CommandOutput(empty_list, "", 0, 0.1, None),
+                    CommandOutput("", "", -1, 60.0, None, was_timeout=True),
+                    CommandOutput(empty_list, "", 0, 0.1, None),
+                ),
+                "didn't start within",
+                3,
+            ),
+            (
+                "timeout_newly_appeared_stops_server",
+                0,
+                (
+                    CommandOutput(empty_list, "", 0, 0.1, None),
+                    CommandOutput("", "", -1, 60.0, None, was_timeout=True),
+                    CommandOutput(this_dir_list, "", 0, 0.1, None),
+                    CommandOutput("", "", 0, 0.1, None),
+                ),
+                "didn't start within",
+                4,
+            ),
+            (
+                "timeout_already_running_explicit_port_does_not_stop",
+                8084,
+                (
+                    CommandOutput(this_dir_list, "", 0, 0.1, None),
+                    CommandOutput("", "", -1, 60.0, None, was_timeout=True),
+                    CommandOutput(this_dir_list, "", 0, 0.1, None),
+                ),
+                "didn't start within",
+                3,
+            ),
+            (
+                "timeout_other_build_dir_does_not_stop",
+                0,
+                (
+                    CommandOutput(other_dir_list, "", 0, 0.1, None),
+                    CommandOutput("", "", -1, 60.0, None, was_timeout=True),
+                    CommandOutput(other_dir_list, "", 0, 0.1, None),
+                ),
+                "didn't start within",
+                3,
+            ),
+            (
+                "timeout_post_list_fails_does_not_stop",
+                0,
+                (
+                    CommandOutput(empty_list, "", 0, 0.1, None),
+                    CommandOutput("", "", -1, 60.0, None, was_timeout=True),
+                    CommandOutput("", "list err", 1, 0.1, None),
+                ),
+                "didn't start within",
+                3,
+            ),
+            (
+                "nonzero_exit",
+                0,
+                (
+                    CommandOutput(empty_list, "", 0, 0.1, None),
+                    CommandOutput("", "bind failed", 1, 0.1, None),
+                    CommandOutput(empty_list, "", 0, 0.1, None),
+                ),
+                "exited with code 1: bind failed",
+                3,
+            ),
+            (
+                "nonzero_exit_other_build_dir_conflict",
+                0,
+                (
+                    CommandOutput(other_dir_list, "", 0, 0.1, None),
+                    CommandOutput("", "NameConflict", 1, 0.1, None),
+                    CommandOutput(other_dir_list, "", 0, 0.1, None),
+                ),
+                "exited with code 1: NameConflict",
+                3,
+            ),
+            (
+                "nonzero_exit_explicit_port_conflict",
+                8084,
+                (
+                    CommandOutput(this_dir_list, "", 0, 0.1, None),
+                    CommandOutput("", "NameConflict", 1, 0.1, None),
+                ),
+                "exited with code 1: NameConflict",
+                2,
+            ),
+            (
+                "not_listed",
+                0,
+                (
+                    CommandOutput(empty_list, "", 0, 0.1, None),
+                    CommandOutput("", "", 0, 0.1, None),
+                    CommandOutput(empty_list, "", 0, 0.1, None),
+                ),
+                "is not running after startup",
+                3,
+            ),
+            (
+                "list_probe_fails",
+                0,
+                (
+                    CommandOutput(empty_list, "", 0, 0.1, None),
+                    CommandOutput("", "", 0, 0.1, None),
+                    CommandOutput("", "list err", 1, 0.1, None),
+                ),
+                r"Failed to list running package servers \(exit code 1\): list err",
+                3,
+            ),
+        )
+        for (
+            case_name,
+            port,
+            side_effect,
+            expected_msg,
+            expected_calls,
+        ) in cases:
+            with self.subTest(case=case_name):
+                runner = mock.AsyncMock(side_effect=side_effect)
+                with self.assertRaisesRegex(
+                    package_server.PackageServingException, expected_msg
+                ):
+                    await package_server.start_background(
+                        "zxdb-1234", port=port, run_command=runner
+                    )
+                self.assertEqual(runner.await_count, expected_calls)
+                if case_name == "timeout_newly_appeared_stops_server":
+                    self.assertSequenceEqual(
+                        runner.await_args_list[3].args,
+                        ("ffx", "repository", "server", "stop", "zxdb-1234"),
+                    )

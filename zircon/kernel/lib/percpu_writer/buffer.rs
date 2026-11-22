@@ -169,18 +169,12 @@ impl Buffer {
     const MAX_STORAGE_SIZE: u32 = 1 << 31;
 
     /// Allocates and initializes a new `Buffer` with backing storage of `size` bytes.
-    pub fn new(
-        size: u32,
-        buffer_name: &[u8],
-        process_koid: u64,
-        thread_koid: u64,
-    ) -> Result<Self, Status> {
+    pub fn new(size: u32, process_koid: u64, thread_koid: u64) -> Result<Self, Status> {
         if size > Self::MAX_STORAGE_SIZE || !size.is_power_of_two() {
             return Err(Status::INVALID_ARGS);
         }
 
-        let storage =
-            KernelAspaceAllocator::allocate(size, buffer_name).ok_or(Status::NO_MEMORY)?;
+        let storage = KernelAspaceAllocator::allocate(size).ok_or(Status::NO_MEMORY)?;
         // SAFETY: `storage` is non-null and points to a valid, zero-initialized kernel mapping of
         // at least `size` bytes, where `size > 0`, `size <= MAX_STORAGE_SIZE`, and
         // `size.is_power_of_two()`, and `Self` exclusively owns the backing mapping for the
@@ -371,7 +365,7 @@ mod tests {
     /// Verifies dropped record tracking and `DroppedRecordDurationEvent` emission on `Buffer`.
     #[test]
     fn test_drop_stats() {
-        let buffer = Buffer::new(128, b"test-buffer", 0xAA, 0xBB).unwrap();
+        let buffer = Buffer::new(128, 0xAA, 0xBB).unwrap();
 
         // Fill up the buffer.
         {

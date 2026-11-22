@@ -686,7 +686,10 @@ async fn connected_state(
             event = options.connect_txn_stream.next() => match event {
                 Some(Ok(event)) => {
                     let is_sme_idle = match event {
-                        fidl_sme::ConnectTransactionEvent::OnDisconnect { info: fidl_info } => {
+                        fidl_sme::ConnectTransactionEvent::OnDisconnect {
+                            info: fidl_info,
+                            ..
+                        } => {
                             if fidl_info.is_sme_reconnecting {
                                 options.pause_signal_report_polling();
                             }
@@ -698,7 +701,7 @@ async fn connected_state(
 
                             !fidl_info.is_sme_reconnecting
                         }
-                        fidl_sme::ConnectTransactionEvent::OnConnectResult { result } => {
+                        fidl_sme::ConnectTransactionEvent::OnConnectResult { result, .. } => {
                             let connected = result.code == fidl_ieee80211::StatusCode::Success;
                             if connected {
                                 // This OnConnectResult should be for SME reconnecting to the same
@@ -711,7 +714,7 @@ async fn connected_state(
                             notify_when_reconnect_detected(&common_options, &options, result);
                             !connected
                         }
-                        fidl_sme::ConnectTransactionEvent::OnRoamResult { result } => {
+                        fidl_sme::ConnectTransactionEvent::OnRoamResult { result, .. } => {
                             if let Err(error) = handle_roam_result(&mut common_options, &mut options, &result).await {
                                 error!("Error handling roam result: {:?}. Cannot proceed with connection.", error);
                                 true
@@ -1445,7 +1448,7 @@ mod tests {
             }
         );
         connect_txn_handle
-            .send_on_connect_result(&fake_successful_connect_result())
+            .send_on_connect_result(&fake_successful_connect_result(), None)
             .expect("failed to send connection completion");
 
         // Check for a connecting update
@@ -1629,7 +1632,7 @@ mod tests {
             }
         );
         connect_txn_handle
-            .send_on_connect_result(&fake_successful_connect_result())
+            .send_on_connect_result(&fake_successful_connect_result(), None)
             .expect("failed to send connection completion");
 
         // Check for a connecting update
@@ -1705,7 +1708,7 @@ mod tests {
         let is_sme_reconnecting = false;
         let fidl_disconnect_info = generate_disconnect_info(is_sme_reconnecting);
         connect_txn_handle
-            .send_on_disconnect(&fidl_disconnect_info)
+            .send_on_disconnect(&fidl_disconnect_info, None)
             .expect("failed to send disconnection event");
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
@@ -1774,7 +1777,7 @@ mod tests {
             ..fake_successful_connect_result()
         };
         connect_txn_handle
-            .send_on_connect_result(&connect_result)
+            .send_on_connect_result(&connect_result, None)
             .expect("failed to send connection completion");
 
         // Check for a connecting update
@@ -1837,7 +1840,7 @@ mod tests {
         );
         let connect_result = fake_successful_connect_result();
         connect_txn_handle
-            .send_on_connect_result(&connect_result)
+            .send_on_connect_result(&connect_result, None)
             .expect("failed to send connection completion");
 
         // Progress the state machine
@@ -1936,7 +1939,7 @@ mod tests {
                     ..fake_successful_connect_result()
                 };
                 ctrl
-                    .send_on_connect_result(&connect_result)
+                    .send_on_connect_result(&connect_result, None)
                     .expect("failed to send connection completion");
             }
         );
@@ -2032,7 +2035,7 @@ mod tests {
                     ..fake_successful_connect_result()
                 };
                 ctrl
-                    .send_on_connect_result(&connect_result)
+                    .send_on_connect_result(&connect_result, None)
                     .expect("failed to send connection completion");
             }
         );
@@ -2142,7 +2145,7 @@ mod tests {
             }
         );
         connect_txn_handle
-            .send_on_connect_result(&fake_successful_connect_result())
+            .send_on_connect_result(&fake_successful_connect_result(), None)
             .expect("failed to send connection completion");
 
         // Progress the state machine
@@ -2390,7 +2393,7 @@ mod tests {
         // SME notifies Policy of disconnection
         let fidl_disconnect_info = generate_disconnect_info(false);
         connect_txn_handle
-            .send_on_disconnect(&fidl_disconnect_info)
+            .send_on_disconnect(&fidl_disconnect_info, None)
             .expect("failed to send disconnection event");
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
@@ -2501,7 +2504,7 @@ mod tests {
         let is_sme_reconnecting = true;
         let fidl_disconnect_info = generate_disconnect_info(is_sme_reconnecting);
         connect_txn_handle
-            .send_on_disconnect(&fidl_disconnect_info)
+            .send_on_disconnect(&fidl_disconnect_info, None)
             .expect("failed to send disconnection event");
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
@@ -2517,7 +2520,7 @@ mod tests {
         let connect_result =
             fidl_sme::ConnectResult { is_reconnect: true, ..fake_successful_connect_result() };
         connect_txn_handle
-            .send_on_connect_result(&connect_result)
+            .send_on_connect_result(&connect_result, None)
             .expect("failed to send connect result event");
 
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
@@ -2528,7 +2531,7 @@ mod tests {
         let is_sme_reconnecting = false;
         let fidl_disconnect_info = generate_disconnect_info(is_sme_reconnecting);
         connect_txn_handle
-            .send_on_disconnect(&fidl_disconnect_info)
+            .send_on_disconnect(&fidl_disconnect_info, None)
             .expect("failed to send disconnection event");
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
@@ -2589,7 +2592,7 @@ mod tests {
             }
         );
         connect_txn_handle
-            .send_on_connect_result(&fake_successful_connect_result())
+            .send_on_connect_result(&fake_successful_connect_result(), None)
             .expect("failed to send connection completion");
         assert_matches!(exec.run_until_stalled(&mut state_fut), Poll::Pending);
 
@@ -2598,7 +2601,7 @@ mod tests {
         exec.set_fake_time(disconnect_time);
         let is_sme_reconnecting = false;
         connect_txn_handle
-            .send_on_disconnect(&generate_disconnect_info(is_sme_reconnecting))
+            .send_on_disconnect(&generate_disconnect_info(is_sme_reconnecting), None)
             .expect("failed to send disconnection event");
         assert_matches!(exec.run_until_stalled(&mut state_fut), Poll::Pending);
 
@@ -2776,7 +2779,7 @@ mod tests {
             }
         );
         connect_txn_handle
-            .send_on_connect_result(&fake_successful_connect_result())
+            .send_on_connect_result(&fake_successful_connect_result(), None)
             .expect("failed to send connection completion");
         // Progress the state machine
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
@@ -2920,7 +2923,7 @@ mod tests {
         // SME notifies Policy of disconnection.
         let is_sme_reconnecting = false;
         connect_txn_handle
-            .send_on_disconnect(&generate_disconnect_info(is_sme_reconnecting))
+            .send_on_disconnect(&generate_disconnect_info(is_sme_reconnecting), None)
             .expect("failed to send disconnection event");
 
         // Run the state machine
@@ -2972,7 +2975,7 @@ mod tests {
         // SME notifies Policy of disconnection
         let is_sme_reconnecting = true;
         connect_txn_handle
-            .send_on_disconnect(&generate_disconnect_info(is_sme_reconnecting))
+            .send_on_disconnect(&generate_disconnect_info(is_sme_reconnecting), None)
             .expect("failed to send disconnection event");
 
         // Run the state machine
@@ -2982,7 +2985,7 @@ mod tests {
         let connect_result =
             fidl_sme::ConnectResult { is_reconnect: true, ..fake_successful_connect_result() };
         connect_txn_handle
-            .send_on_connect_result(&connect_result)
+            .send_on_connect_result(&connect_result, None)
             .expect("failed to send reconnection result");
 
         // Run the state machine
@@ -3042,7 +3045,7 @@ mod tests {
         // SME notifies Policy of disconnection
         let is_sme_reconnecting = true;
         connect_txn_handle
-            .send_on_disconnect(&generate_disconnect_info(is_sme_reconnecting))
+            .send_on_disconnect(&generate_disconnect_info(is_sme_reconnecting), None)
             .expect("failed to send disconnection event");
 
         // Run the state machine
@@ -3055,7 +3058,7 @@ mod tests {
             ..fake_successful_connect_result()
         };
         connect_txn_handle
-            .send_on_connect_result(&connect_result)
+            .send_on_connect_result(&connect_result, None)
             .expect("failed to send reconnection result");
 
         // Run the state machine
@@ -3321,7 +3324,7 @@ mod tests {
 
         // Pause signal report polling while SME is reconnecting.
         connect_txn_handle
-            .send_on_disconnect(&generate_disconnect_info(true))
+            .send_on_disconnect(&generate_disconnect_info(true), None)
             .expect("failed to send disconnect");
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
@@ -3334,11 +3337,14 @@ mod tests {
 
         // Resume signal report polling once SME finishes reconnecting.
         connect_txn_handle
-            .send_on_connect_result(&fidl_sme::ConnectResult {
-                code: fidl_ieee80211::StatusCode::Success,
-                is_credential_rejected: false,
-                is_reconnect: true,
-            })
+            .send_on_connect_result(
+                &fidl_sme::ConnectResult {
+                    code: fidl_ieee80211::StatusCode::Success,
+                    is_credential_rejected: false,
+                    is_reconnect: true,
+                },
+                None,
+            )
             .expect("failed to send connect result");
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
@@ -3431,7 +3437,7 @@ mod tests {
         let is_sme_reconnecting = false;
         let fidl_disconnect_info = generate_disconnect_info(is_sme_reconnecting);
         connect_txn_handle
-            .send_on_disconnect(&fidl_disconnect_info)
+            .send_on_disconnect(&fidl_disconnect_info, None)
             .expect("failed to send disconnection event");
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
@@ -3570,7 +3576,9 @@ mod tests {
             disconnect_info: None,
             is_credential_rejected: false,
         };
-        connect_txn_handle.send_on_roam_result(&roam_result).expect("failed to send roam result");
+        connect_txn_handle
+            .send_on_roam_result(&roam_result, None)
+            .expect("failed to send roam result");
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify the roam monitor was re-initialized with the new BSS
@@ -3679,7 +3687,9 @@ mod tests {
             disconnect_info: None,
             is_credential_rejected: false,
         };
-        connect_txn_handle.send_on_roam_result(&roam_result).expect("failed to send roam result");
+        connect_txn_handle
+            .send_on_roam_result(&roam_result, None)
+            .expect("failed to send roam result");
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify the failed connect result was logged to saved networks manager
@@ -3789,7 +3799,9 @@ mod tests {
             disconnect_info: Some(Box::new(disconnect_info)),
             is_credential_rejected: false,
         };
-        connect_txn_handle.send_on_roam_result(&roam_result).expect("failed to send roam result");
+        connect_txn_handle
+            .send_on_roam_result(&roam_result, None)
+            .expect("failed to send roam result");
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
         // Verify the failed connect result was logged to saved networks manager
@@ -3908,7 +3920,9 @@ mod tests {
             disconnect_info: None,
             is_credential_rejected: false,
         };
-        connect_txn_handle.send_on_roam_result(&roam_result).expect("failed to send roam result");
+        connect_txn_handle
+            .send_on_roam_result(&roam_result, None)
+            .expect("failed to send roam result");
 
         // Run forward the state machine.
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
@@ -4013,7 +4027,9 @@ mod tests {
             disconnect_info: None,
             is_credential_rejected: false,
         };
-        connect_txn_handle.send_on_roam_result(&roam_result).expect("failed to send roam result");
+        connect_txn_handle
+            .send_on_roam_result(&roam_result, None)
+            .expect("failed to send roam result");
 
         // Ensure the state machine exits.
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(()));
@@ -4288,7 +4304,7 @@ mod tests {
                 let (_stream, ctrl) = txn.expect("connect txn unused")
                     .into_stream_and_control_handle();
                 ctrl
-                    .send_on_connect_result(&fake_successful_connect_result())
+                    .send_on_connect_result(&fake_successful_connect_result(), None)
                     .expect("failed to send connection completion");
             }
         );
@@ -4480,7 +4496,7 @@ mod tests {
             }
         );
         connect_txn_handle
-            .send_on_connect_result(&fake_successful_connect_result())
+            .send_on_connect_result(&fake_successful_connect_result(), None)
             .expect("failed to send connection completion");
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 

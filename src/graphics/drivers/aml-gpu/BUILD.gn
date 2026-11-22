@@ -85,7 +85,6 @@ fuchsia_cc_driver("aml-gpu-driver") {
 fuchsia_driver_component("aml-gpu") {
   component_name = "aml-gpu"
   deps = [ ":aml-gpu-driver" ]
-  info = "meta/aml-gpu-info.json"
   dml_label = ":aml-gpu-dml"
 }
 

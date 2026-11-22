@@ -81,9 +81,13 @@ pub struct ImageAssemblyConfig {
     /// The partitions that this assembly can be flashed to.
     pub partitions_config: Option<Utf8PathBuf>,
 
-    /// Optionally-provided data to pass to the board's Board Driver via a ZBI
-    /// item.
-    pub board_driver_arguments: Option<BoardDriverArguments>,
+    /// Optionally-provided platform identity (`ZBI_TYPE_PLATFORM_ID` payload)
+    /// to include in the ZBI.
+    pub platform_id: Option<PlatformId>,
+
+    /// Optionally-provided board information (`ZBI_TYPE_DRV_BOARD_INFO`
+    /// payload) to pass to the board driver via the ZBI.
+    pub driver_board_info: Option<DriverBoardInfo>,
 
     /// ZBI non bootable image containing extra items to add to the ZBI.
     pub zbi_extra_items: Option<Utf8PathBuf>,
@@ -105,6 +109,10 @@ pub struct ImageAssemblyConfig {
 
     /// The platform build type being assembled for.
     pub build_type: BuildType,
+
+    /// The delivery blob type to generate when publishing packages for this system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_blob_type: Option<u32>,
 }
 
 impl ImageAssemblyConfig {
@@ -126,13 +134,15 @@ impl ImageAssemblyConfig {
             qemu_kernel: "path/to/qemu/kernel".into(),
             images_config: ImagesConfig::default(),
             board_name: "my_board".into(),
-            board_driver_arguments: None,
+            platform_id: None,
+            driver_board_info: None,
             zbi_extra_items: Some("path/to/zbi_extra_items/image".into()),
             devicetree: Some("path/to/devicetree/binary".into()),
             devicetree_overlay: Some("path/to/devicetree/binary/overlay".into()),
             image_mode: Default::default(),
             system_release_info: SystemReleaseInfo::new_for_testing(),
             build_type: BuildType::Eng,
+            delivery_blob_type: None,
         }
     }
 }
@@ -149,19 +159,26 @@ pub struct KernelConfig {
     pub args: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+/// Payload content for a `ZBI_TYPE_PLATFORM_ID` ZBI item.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct BoardDriverArguments {
-    /// The vendor id to add to a PLATFORM_ID ZBI Item.
+pub struct PlatformId {
+    /// The vendor ID (`vid`) to set in the `ZBI_TYPE_PLATFORM_ID` item.
     pub vendor_id: u32,
 
-    /// The product id to add to a PLATFORM_ID ZBI Item.
+    /// The product ID (`pid`) to set in the `ZBI_TYPE_PLATFORM_ID` item.
     pub product_id: u32,
 
-    /// The board name to add to a PLATFORM_ID ZBI Item.
+    /// The board name (`board_name`) to set in the `ZBI_TYPE_PLATFORM_ID` item.
     pub name: String,
+}
 
-    /// The board revision to add to a BOARD_INFO ZBI Item.
+/// Payload content for a `ZBI_TYPE_DRV_BOARD_INFO` ZBI item.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DriverBoardInfo {
+    /// The board revision (`revision`) to set in the `ZBI_TYPE_DRV_BOARD_INFO`
+    /// item.
     pub revision: u32,
 }
 
@@ -254,6 +271,36 @@ mod tests {
                 args: vec!["arg1".into(), "arg2".into()],
             }
         );
+    }
+
+    #[test]
+    fn product_with_platform_id_and_driver_board_info() {
+        let json = r#"
+            {
+              "kernel": {
+                "path": "path/to/kernel",
+                "args": []
+              },
+              "qemu_kernel": "path/to/qemu/kernel",
+              "board_name": "my_board",
+              "platform_id": {
+                "vendor_id": 1,
+                "product_id": 2,
+                "name": "my_platform"
+              },
+              "driver_board_info": {
+                "revision": 3
+              },
+              "build_type": "eng"
+            }
+        "#;
+
+        let config: ImageAssemblyConfig = from_json_str(json).unwrap();
+        assert_eq!(
+            config.platform_id,
+            Some(PlatformId { vendor_id: 1, product_id: 2, name: "my_platform".into() })
+        );
+        assert_eq!(config.driver_board_info, Some(DriverBoardInfo { revision: 3 }));
     }
 
     #[test]

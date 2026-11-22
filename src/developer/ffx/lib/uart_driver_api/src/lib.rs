@@ -543,12 +543,12 @@ mod tests {
     fn test_parse_target_endpoint_emulator() {
         let temp = tempdir().unwrap();
         let env = ffx_config::test_env()
-            .runtime_config(ffx_config::keys::EMU_INSTANCE_ROOT_DIR, temp.path().to_str().unwrap())
+            .runtime_config("shared_data", temp.path().to_str().unwrap())
             .build()
             .expect("test env");
 
         let emu_name = "test-emu-uart";
-        let emu_dir = temp.path().join(emu_name);
+        let emu_dir = temp.path().join("emu/instances").join(emu_name);
         std::fs::create_dir_all(&emu_dir).unwrap();
 
         let expected_sock = temp.path().join("femu_s_abcd");

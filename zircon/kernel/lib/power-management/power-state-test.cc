@@ -1,4 +1,3 @@
-
 // Copyright 2024 The Fuchsia Authors
 //
 // Use of this source code is governed by a MIT-style
@@ -8,10 +7,6 @@
 #include "lib/power-management/power-state.h"
 
 #include <lib/power-management/energy-model.h>
-// TODO(https://fxbug.dev/415033686): Stop using `syscalls-next.h` on host.
-#define FUCHSIA_UNSUPPORTED_ALLOW_SYSCALLS_NEXT_ON_HOST
-#include <zircon/syscalls-next.h>
-#undef FUCHSIA_UNSUPPORTED_ALLOW_SYSCALLS_NEXT_ON_HOST
 
 #include <cstdint>
 
@@ -21,16 +16,12 @@
 
 namespace {
 
-using power_management::ControlInterface;
-using power_management::PowerDomain;
-
 using power_management::PowerDomainSet;
-using power_management::PowerLevelUpdateRequest;
 using power_management::PowerState;
 using power_management::Utilization;
 
 constexpr uint32_t kModelId = 123;
-constexpr uint32_t kTotalPowerLevels = 8;
+constexpr uint8_t kActiveLevels = 5;
 
 constexpr Utilization kZeroUtilization{0};
 constexpr Utilization kOneHalfUtilization = ffl::FromRatio(1, 2);
@@ -39,13 +30,14 @@ constexpr Utilization kOneQuarterUtilization = ffl::FromRatio(1, 4);
 TEST(PowerStateTest, Default) {
   PowerState state;
   EXPECT_EQ(state.domain(), nullptr);
+  EXPECT_FALSE(state.is_enabled());
+  EXPECT_FALSE(state.domain_id());
   EXPECT_FALSE(state.is_serving());
   EXPECT_FALSE(state.active_power_level());
   EXPECT_FALSE(state.desired_active_power_level());
   EXPECT_EQ(0u, state.active_power_coefficient_nw());
-  EXPECT_FALSE(state.max_idle_power_level());
-  EXPECT_EQ(0u, state.max_idle_power_coefficient_nw());
-  EXPECT_FALSE(state.max_idle_power_level_interface());
+  EXPECT_EQ(0u, state.idle_power_nw());
+  EXPECT_EQ(ZX_ERR_BAD_STATE, state.UpdateActivePowerLevel(0).status_value());
   EXPECT_EQ(kZeroUtilization, state.normalized_utilization());
 }
 
@@ -56,12 +48,36 @@ TEST(PowerStateTest, UpdateDomainSetsModel) {
   state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
 
   EXPECT_EQ(state.domain(), domain);
+  EXPECT_EQ(state.domain_id(), kModelId);
   EXPECT_FALSE(state.active_power_level());
   EXPECT_FALSE(state.desired_active_power_level());
   EXPECT_EQ(0u, state.active_power_coefficient_nw());
-  EXPECT_EQ(kMaxIdlePowerLevel, state.max_idle_power_level());
-  EXPECT_EQ(kMaxIdlePowerLevel + 1u, state.max_idle_power_coefficient_nw());
-  EXPECT_EQ(ControlInterface::kArmWfi, state.max_idle_power_level_interface());
+  // Clock-gated WFI without a known active OPP reports 0 nW.
+  EXPECT_EQ(0u, state.idle_power_nw());
+}
+
+TEST(PowerStateTest, IdlePowerTracksActiveStaticPowerAndEmptyIdleStates) {
+  auto energy_model = MakeFakeEnergyModel(kActiveLevels, 3);
+  auto domain = MakePowerDomainHelper(kModelId, energy_model, 0, 1);
+
+  PowerState state;
+  state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
+
+  // State 0 is ClockGated WFI: idle_power_nw() tracks the active OPP's static_power_nw.
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(0).status_value());
+  EXPECT_EQ(ActivePowerNwForLevel(0), state.active_power_coefficient_nw());
+  EXPECT_EQ(StaticPowerNwForLevel(0), state.idle_power_nw());
+
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(3).status_value());
+  EXPECT_EQ(ActivePowerNwForLevel(3), state.active_power_coefficient_nw());
+  EXPECT_EQ(StaticPowerNwForLevel(3), state.idle_power_nw());
+
+  // Domains with no configured idle states report 0 nW.
+  auto empty_idle_model = MakeFakeEnergyModel(kActiveLevels, 0);
+  auto empty_idle_domain = MakePowerDomainHelper(kModelId + 1, empty_idle_model, 0, 1);
+  state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(empty_idle_domain), 0);
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(3).status_value());
+  EXPECT_EQ(0u, state.idle_power_nw());
 }
 
 TEST(PowerStateTest, UpdateDomainKeepsPowerLevelWhenSameModelId) {
@@ -71,15 +87,14 @@ TEST(PowerStateTest, UpdateDomainKeepsPowerLevelWhenSameModelId) {
   PowerState state;
   state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
   ASSERT_EQ(state.domain(), domain);
-  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(kMinActivePowerLevel + 1).status_value());
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(1).status_value());
 
-  static_cast<FakePowerLevelController*>(domain2->controller().get())->current_power_level =
-      kMinActivePowerLevel;
+  static_cast<FakePowerLevelController*>(domain2->controller().get())->current_power_level = 0;
 
   state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain2), 0);
   EXPECT_EQ(state.domain(), domain2);
-  EXPECT_EQ(state.active_power_level(), kMinActivePowerLevel);
-  EXPECT_EQ(state.desired_active_power_level(), kMinActivePowerLevel);
+  EXPECT_EQ(state.active_power_level(), 0u);
+  EXPECT_EQ(state.desired_active_power_level(), 0u);
 }
 
 TEST(PowerStateTest, UpdateDomainClearsPowerLevelWhenDifferentModelId) {
@@ -89,100 +104,93 @@ TEST(PowerStateTest, UpdateDomainClearsPowerLevelWhenDifferentModelId) {
   PowerState state;
   state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
   ASSERT_EQ(state.domain(), domain);
-  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(kMinActivePowerLevel + 1).status_value());
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(2).status_value());
 
-  static_cast<FakePowerLevelController*>(domain2->controller().get())->current_power_level =
-      kMinActivePowerLevel;
+  static_cast<FakePowerLevelController*>(domain2->controller().get())->current_power_level = 1;
 
   state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain2), 0);
   EXPECT_EQ(state.domain(), domain2);
-  EXPECT_EQ(state.active_power_level(), kMinActivePowerLevel);
-  EXPECT_EQ(state.desired_active_power_level(), kMinActivePowerLevel);
+  EXPECT_EQ(state.active_power_level(), 1u);
+  EXPECT_EQ(state.desired_active_power_level(), 1u);
 }
 
 TEST(PowerStateTest, TransitionWhenModelIsUnknown) {
   PowerState state;
-  EXPECT_FALSE(state.RequestTransition(1, 8));
+  EXPECT_FALSE(state.RequestTransition(1, 0));
 }
 
 TEST(PowerStateTest, TransitionWhenPowerLevelIsUnknown) {
-  auto energy_model = MakeFakeEnergyModel(kTotalPowerLevels);
+  auto energy_model = MakeFakeEnergyModel(kActiveLevels);
   auto domain = MakePowerDomainHelper(kModelId, energy_model, 0, 1, 2, 3, 4, 5);
 
   PowerState state;
   state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
   ASSERT_EQ(state.domain(), domain);
 
-  EXPECT_FALSE(state.RequestTransition(1, kMinActivePowerLevel + 1));
+  EXPECT_FALSE(state.RequestTransition(1, 1));
 }
 
 TEST(PowerStateTest, TransitionWhenPowerLevelIsDesiredPowerLevel) {
-  auto energy_model = MakeFakeEnergyModel(kTotalPowerLevels);
+  auto energy_model = MakeFakeEnergyModel(kActiveLevels);
   auto domain = MakePowerDomainHelper(kModelId, energy_model, 0, 1, 2, 3, 4, 5);
 
   PowerState state;
   state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
   ASSERT_EQ(state.domain(), domain);
-  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(kMinActivePowerLevel).status_value());
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(0).status_value());
 
-  EXPECT_FALSE(state.RequestTransition(1, kMinActivePowerLevel));
+  EXPECT_FALSE(state.RequestTransition(1, 0));
 }
 
 TEST(PowerStateTest, TransitionWhenPowerLevelIsAlreadyInFlight) {
-  auto energy_model = MakeFakeEnergyModel(kTotalPowerLevels);
+  auto energy_model = MakeFakeEnergyModel(kActiveLevels);
   auto domain = MakePowerDomainHelper(kModelId, energy_model, 0, 1, 2, 3, 4, 5);
 
   PowerState state;
   state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
   ASSERT_EQ(state.domain(), domain);
-  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(kMinActivePowerLevel).status_value());
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(0).status_value());
 
   // First request for a higher level succeeds and enters in-flight state.
-  EXPECT_TRUE(state.RequestTransition(1, kMinActivePowerLevel + 1));
-  EXPECT_EQ(state.desired_active_power_level(), kMinActivePowerLevel + 1);
+  EXPECT_TRUE(state.RequestTransition(1, 1));
+  EXPECT_EQ(state.desired_active_power_level(), 1u);
 
   // Subsequent request for the same level is suppressed.
-  EXPECT_FALSE(state.RequestTransition(1, kMinActivePowerLevel + 1));
+  EXPECT_FALSE(state.RequestTransition(1, 1));
 
   // Request for an even higher level updates the desired level and succeeds.
-  EXPECT_TRUE(state.RequestTransition(1, kMinActivePowerLevel + 2));
-  EXPECT_EQ(state.desired_active_power_level(), kMinActivePowerLevel + 2);
+  EXPECT_TRUE(state.RequestTransition(1, 2));
+  EXPECT_EQ(state.desired_active_power_level(), 2u);
 
   // Acknowledging the transition updates active and desired levels.
-  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(kMinActivePowerLevel + 2).status_value());
-  EXPECT_EQ(state.active_power_level(), kMinActivePowerLevel + 2);
-  EXPECT_EQ(state.desired_active_power_level(), kMinActivePowerLevel + 2);
-  EXPECT_FALSE(state.RequestTransition(1, kMinActivePowerLevel + 2));
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(2).status_value());
+  EXPECT_EQ(state.active_power_level(), 2u);
+  EXPECT_EQ(state.desired_active_power_level(), 2u);
+  EXPECT_FALSE(state.RequestTransition(1, 2));
 }
 
-TEST(PowerStateTest, TransitionWhenPowerLevelIsTooHigh) {
-  auto energy_model = MakeFakeEnergyModel(kTotalPowerLevels);
+TEST(PowerStateTest, TransitionAndUpdateOutOfRange) {
+  auto energy_model = MakeFakeEnergyModel(kActiveLevels);
   auto domain = MakePowerDomainHelper(kModelId, energy_model, 0, 1, 2, 3, 4, 5);
 
   PowerState state;
   state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
   ASSERT_EQ(state.domain(), domain);
-  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(kMinActivePowerLevel).status_value());
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(0).status_value());
 
-  EXPECT_DEATH(state.RequestTransition(1, kTotalPowerLevels), "ASSERT FAILED");
-}
+  EXPECT_TRUE(state.IsValidActivePowerLevel(0));
+  EXPECT_TRUE(state.IsValidActivePowerLevel(kActiveLevels - 1));
+  EXPECT_FALSE(state.IsValidActivePowerLevel(kActiveLevels));
+  EXPECT_EQ(ZX_ERR_OUT_OF_RANGE, state.UpdateActivePowerLevel(kActiveLevels).status_value());
 
-TEST(PowerStateTest, TransitionWhenPowerLevelIsTooLow) {
-  auto energy_model = MakeFakeEnergyModel(kTotalPowerLevels);
-  auto domain = MakePowerDomainHelper(kModelId, energy_model, 0, 1, 2, 3, 4, 5);
-
-  PowerState state;
-  state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
-  ASSERT_EQ(state.domain(), domain);
-  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(kMinActivePowerLevel).status_value());
-
-  EXPECT_DEATH(state.RequestTransition(1, kMaxIdlePowerLevel), "ASSERT FAILED");
+  EXPECT_DEATH(state.RequestTransition(1, kActiveLevels), "ASSERT FAILED");
 }
 
 TEST(PowerStateTest, UpdateUtilizationReflectsOnDomain) {
-  auto energy_model = MakeFakeEnergyModel(kTotalPowerLevels);
+  auto energy_model = MakeFakeEnergyModel(kActiveLevels);
+  auto energy_model2 = MakeFakeEnergyModel(kActiveLevels);
   auto domain = MakePowerDomainHelper(kModelId, energy_model, 0, 1, 2, 3, 4, 5);
-  auto domain2 = MakePowerDomainHelper(kModelId + 1, energy_model, 0, 1, 2, 3, 4, 5);
+  auto domain2 = MakePowerDomainHelper(kModelId + 1, energy_model2, 0, 1, 2, 3, 4, 5);
 
   PowerState state;
 
@@ -220,23 +228,37 @@ TEST(PowerStateTest, UpdateUtilizationReflectsOnDomain) {
   EXPECT_EQ(kOneQuarterUtilization, domain2->total_normalized_utilization());
 }
 
-TEST(PowerStateTest, PrecedingTargetPowerLevel) {
-  auto energy_model = MakeFakeEnergyModel(kTotalPowerLevels);
+TEST(PowerStateTest, PrecedingTargetAndActivePowerLevel) {
+  auto energy_model = MakeFakeEnergyModel(kActiveLevels);
   auto domain = MakePowerDomainHelper(kModelId, energy_model, 0, 1, 2, 3, 4, 5);
 
   PowerState state;
   state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
   ASSERT_EQ(state.domain(), domain);
-  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(kMinActivePowerLevel).status_value());
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(0).status_value());
 
-  // At the minimum active power level, there is no preceding active level.
+  // At active index 0, there is no preceding active level.
+  const auto level0_rate = state.active_processing_rate();
+  EXPECT_GT(level0_rate, power_management::ProcessingRate{0});
   EXPECT_FALSE(state.has_preceding_target_power_level());
   EXPECT_EQ(power_management::ProcessingRate{0}, state.preceding_target_processing_rate());
+  EXPECT_EQ(power_management::ProcessingRate{0}, state.preceding_active_processing_rate());
 
-  // At higher active power levels, there is a preceding active level.
-  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(kMinActivePowerLevel + 1).status_value());
+  // At active index 1, the preceding active level is index 0.
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(1).status_value());
   EXPECT_TRUE(state.has_preceding_target_power_level());
-  EXPECT_GT(state.preceding_target_processing_rate(), power_management::ProcessingRate{0});
+  EXPECT_EQ(level0_rate, state.preceding_target_processing_rate());
+  EXPECT_EQ(level0_rate, state.preceding_active_processing_rate());
+
+  // While a transition from index 1 to index 3 is in flight, target precedes index 3 (level 2)
+  // whereas active still precedes index 1 (level 0).
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(2).status_value());
+  const auto level2_rate = state.active_processing_rate();
+  ASSERT_EQ(ZX_OK, state.UpdateActivePowerLevel(1).status_value());
+  ASSERT_TRUE(state.RequestTransition(1, 3));
+  EXPECT_TRUE(state.has_preceding_target_power_level());
+  EXPECT_EQ(level2_rate, state.preceding_target_processing_rate());
+  EXPECT_EQ(level0_rate, state.preceding_active_processing_rate());
 }
 
 TEST(PowerStateTest, SchedulerControlEnabled) {
@@ -253,6 +275,32 @@ TEST(PowerStateTest, SchedulerControlEnabled) {
 
   domain->SetSchedulerControlEnabled(false);
   EXPECT_FALSE(state.scheduler_control_enabled());
+}
+
+TEST(PowerStateTest, UpdateDomainWithUnknownControlArgumentLeavesLevelUnset) {
+  auto domain = MakePowerDomainHelper(kModelId, 0, 1);
+  static_cast<FakePowerLevelController*>(domain->controller().get())->current_power_level = 99;
+
+  PowerState state;
+  state.UpdatePowerDomainSet(PowerDomainSet::CreateForTest(domain), 0);
+  EXPECT_FALSE(state.active_power_level());
+  EXPECT_FALSE(state.desired_active_power_level());
+  EXPECT_EQ(0u, state.idle_power_nw());
+  EXPECT_FALSE(state.RequestTransition(0, 0));
+}
+
+TEST(EnergyModelWrapperTest, FindActivePowerLevelAndDomainLookups) {
+  auto model = power_management::EnergyModel::CreateForTest(/*idle_states=*/2, /*active_levels=*/3);
+  EXPECT_EQ(model.FindActivePowerLevelForRate(power_management::ProcessingRate{0}), 0u);
+  EXPECT_EQ(model.FindActivePowerLevel(power_management::ControlInterface::kCpuDriver, 2), 2u);
+  EXPECT_FALSE(model.FindActivePowerLevel(power_management::ControlInterface::kCpuDriver, 99));
+  EXPECT_FALSE(model.FindActivePowerLevel(static_cast<power_management::ControlInterface>(495), 0));
+
+  auto domain = MakePowerDomainHelper(kModelId, 0, 1);
+  auto domain_set = PowerDomainSet::CreateForTest(domain);
+  EXPECT_EQ(domain_set.count(), 1u);
+  EXPECT_EQ(domain_set.FindByDomainId(kModelId), domain.get());
+  EXPECT_EQ(domain_set.FindByDomainId(kModelId + 1), nullptr);
 }
 
 }  // namespace

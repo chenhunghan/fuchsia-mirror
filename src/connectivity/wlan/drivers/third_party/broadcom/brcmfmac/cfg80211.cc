@@ -4811,7 +4811,10 @@ static void brcmf_update_ht_cap(struct brcmf_if* ifp,
 
   // Rx STBC
   uint32_t rx_stbc = 0;
-  (void)brcmf_fil_iovar_int_get(ifp, "stbc_rx", &rx_stbc, nullptr);
+  if (zx_status_t status = brcmf_fil_iovar_int_get(ifp, "stbc_rx", &rx_stbc, nullptr);
+      status != ZX_OK) {
+    BRCMF_DBG(FIL, "Failed to get iovar stbc_rx: %s", zx_status_get_string(status));
+  }
   ht_caps->ht_cap_info.set_rx_stbc(rx_stbc & 0x3);
 
   // Tx STBC
@@ -4889,12 +4892,20 @@ static void brcmf_update_vht_cap(struct brcmf_if* ifp,
   zx_status_t status;
   status = brcmf_fil_iovar_int_get(ifp, "txbf_bfe_cap_hw", &txbf_bfe_cap, nullptr);
   if (status != ZX_OK) {
-    (void)brcmf_fil_iovar_int_get(ifp, "txbf_bfe_cap", &txbf_bfe_cap, nullptr);
+    status = brcmf_fil_iovar_int_get(ifp, "txbf_bfe_cap", &txbf_bfe_cap, nullptr);
+    if (status != ZX_OK) {
+      BRCMF_DBG(FIL, "Failed to get fallback iovar txbf_bfe_cap: %s",
+                zx_status_get_string(status));
+    }
   }
   status = brcmf_fil_iovar_int_get(ifp, "txbf_bfr_cap_hw", &txbf_bfr_cap, nullptr);
   if (status != ZX_OK) {
     BRCMF_DBG(FIL, "Failed to get iovar txbf_bfr_cap_hw. Falling back to txbf_bfr_cap.");
-    (void)brcmf_fil_iovar_int_get(ifp, "txbf_bfr_cap", &txbf_bfr_cap, nullptr);
+    status = brcmf_fil_iovar_int_get(ifp, "txbf_bfr_cap", &txbf_bfr_cap, nullptr);
+    if (status != ZX_OK) {
+      BRCMF_DBG(FIL, "Failed to get fallback iovar txbf_bfr_cap: %s",
+                zx_status_get_string(status));
+    }
   }
 
   if (txbf_bfe_cap & BRCMF_TXBF_SU_BFE_CAP) {
@@ -4915,7 +4926,10 @@ static void brcmf_update_vht_cap(struct brcmf_if* ifp,
   // provides capability info regardless of current operating state.
   status = brcmf_fil_iovar_int_get(ifp, "txstreams_cap", &txstreams, nullptr);
   if (status != ZX_OK) {
-    (void)brcmf_fil_iovar_int_get(ifp, "txstreams", &txstreams, nullptr);
+    status = brcmf_fil_iovar_int_get(ifp, "txstreams", &txstreams, nullptr);
+    if (status != ZX_OK) {
+      BRCMF_DBG(FIL, "Failed to get fallback iovar txstreams: %s", zx_status_get_string(status));
+    }
   }
   // The num_sounding VHT capability (the maximum number of spatial streams during beamforming) is
   // represented by 3 bits, therefore it's limited to values 0 through 7. The value is the number of
@@ -5187,7 +5201,10 @@ void brcmf_if_query(net_device* ndev, fuchsia_wlan_fullmac::WlanFullmacImplQuery
   vhtmode = 0;
   rxchain = 0;
   nchain = 0;
-  (void)brcmf_fil_iovar_int_get(ifp, "vhtmode", &vhtmode, nullptr);
+  status = brcmf_fil_iovar_int_get(ifp, "vhtmode", &vhtmode, nullptr);
+  if (status != ZX_OK) {
+    BRCMF_DBG(FIL, "Failed to get iovar vhtmode: %s", zx_status_get_string(status));
+  }
   status = brcmf_fil_iovar_int_get(ifp, "nmode", &nmode, &fw_err);
   if (status != ZX_OK) {
     BRCMF_ERR("nmode error: %s, fw err %s. Assuming both HT mode and VHT mode are not available.",
@@ -5203,7 +5220,10 @@ void brcmf_if_query(net_device* ndev, fuchsia_wlan_fullmac::WlanFullmacImplQuery
 
   // LDPC support, applies to both HT and VHT
   ldpc_cap = 0;
-  (void)brcmf_fil_iovar_int_get(ifp, "ldpc_cap", &ldpc_cap, nullptr);
+  status = brcmf_fil_iovar_int_get(ifp, "ldpc_cap", &ldpc_cap, nullptr);
+  if (status != ZX_OK) {
+    BRCMF_DBG(FIL, "Failed to get iovar ldpc_cap: %s", zx_status_get_string(status));
+  }
 
   // Max AMPDU length
   max_ampdu_len_exp = 0;
@@ -6756,6 +6776,14 @@ static zx_status_t brcmf_notify_ap_started(struct brcmf_if* ifp, const struct br
 
 static zx_status_t brcmf_notify_start_auth(struct brcmf_if* ifp, const struct brcmf_event_msg* e,
                                            void* data) {
+  // Only the bssid is read from the event data, so require at least enough data to cover it.
+  constexpr size_t kMinExtAuthLen = offsetof(brcmf_ext_auth, bssid) + sizeof(brcmf_ext_auth::bssid);
+  if (data == nullptr || e->datalen < kMinExtAuthLen) {
+    BRCMF_ERR("JOIN_START event datalen %u too small, expected at least %zu", e->datalen,
+              kMinExtAuthLen);
+    return ZX_ERR_INVALID_ARGS;
+  }
+
   struct net_device* ndev = ifp->ndev;
   std::shared_lock<std::shared_mutex> guard(ndev->if_proto_lock);
   if (!ndev->if_proto.is_valid()) {
@@ -6816,6 +6844,12 @@ static zx_status_t brcmf_notify_start_auth(struct brcmf_if* ifp, const struct br
 }
 
 static zx_status_t brcmf_rx_auth_frame(struct brcmf_if* ifp, const uint32_t datalen, void* data) {
+  if (data == nullptr || datalen < sizeof(wlan::Authentication)) {
+    BRCMF_ERR("SAE auth frame datalen %u too small, expected at least %zu", datalen,
+              sizeof(wlan::Authentication));
+    return ZX_ERR_INVALID_ARGS;
+  }
+
   struct net_device* ndev = ifp->ndev;
   std::shared_lock<std::shared_mutex> guard(ndev->if_proto_lock);
   if (!ndev->if_proto.is_valid()) {
@@ -7405,9 +7439,6 @@ static zx_status_t brcmf_indicate_client_disconnect(struct brcmf_if* ifp,
   // Start of disconnect process. Reset disconnect_done.
   sync_completion_reset(&ifp->disconnect_done);
 
-  // TODO(https://fxbug.dev/42139586): Remove once this verbose logging is no longer needed in
-  // brcmf_indicate_client_disconnect(). This log should be moved to CONN
-  // for production code.
   BRCMF_INFO("client disconnect indicated. state %s, rssi, %d snr, %d",
              brcmf_get_client_connect_state_string(ifp), ndev->last_known_rssi_dbm,
              ndev->last_known_snr_db);
@@ -7874,18 +7905,46 @@ static zx_status_t brcmf_notify_roaming_status(struct brcmf_if* ifp,
 
 static zx_status_t brcmf_notify_mic_status(struct brcmf_if* ifp, const struct brcmf_event_msg* e,
                                            void* data) {
-  uint16_t flags = e->flags;
-  enum nl80211_key_type key_type;
-
   BRCMF_DBG_EVENT(ifp, e, "%d", [](uint32_t reason) { return reason; });
 
-  if (flags & BRCMF_EVENT_MSG_GROUP) {
-    key_type = NL80211_KEYTYPE_GROUP;
-  } else {
-    key_type = NL80211_KEYTYPE_PAIRWISE;
+  if (ifp->vif == nullptr || brcmf_is_apmode(ifp->vif) ||
+      !brcmf_test_bit(brcmf_vif_status_bit_t::CONNECTED, &ifp->vif->sme_state)) {
+    BRCMF_DBG(CONN, "Ignoring MIC error: not connected as client");
+    return ZX_OK;
   }
 
-  cfg80211_michael_mic_failure(ifp->ndev, (uint8_t*)&e->addr, key_type, -1, nullptr);
+  struct net_device* ndev = ifp->ndev;
+  std::shared_lock<std::shared_mutex> guard(ndev->if_proto_lock);
+  if (!ndev->if_proto.is_valid()) {
+    BRCMF_IFDBG(WLANIF, ndev, "interface stopped -- skipping Michael MIC failure callback");
+    return ZX_OK;
+  }
+
+  const bool is_group = (e->flags & BRCMF_EVENT_MSG_GROUP) != 0;
+  const fuchsia_wlan_ieee80211::wire::KeyType key_type =
+      is_group ? fuchsia_wlan_ieee80211::wire::KeyType::kGroup
+               : fuchsia_wlan_ieee80211::wire::KeyType::kPairwise;
+
+  // Report the connected BSSID: the firmware event's address can be the frame's source rather than
+  // the AP. SME runs the TKIP countermeasures (IEEE 802.11-2020 12.5.2.4).
+  fidl::Array<uint8_t, ETH_ALEN> peer_sta_address;
+  memcpy(peer_sta_address.data(), ifp->vif->profile.bssid, ETH_ALEN);
+
+  BRCMF_WARN_THROTTLE("Michael MIC failure on %s key, reporting to SME",
+                      is_group ? "group" : "pairwise");
+
+  fdf::Arena arena('BRCM');
+
+  auto req =
+      fuchsia_wlan_fullmac::wire::WlanFullmacImplIfcOnMichaelMicFailureRequest::Builder(arena)
+          .peer_sta_address(peer_sta_address)
+          .key_type(key_type)
+          .Build();
+
+  if (auto result = ndev->if_proto.buffer(arena)->OnMichaelMicFailure(req); !result.ok()) {
+    BRCMF_ERR("Failed to send Michael MIC failure ind: %s", result.status_string());
+    return result.status();
+  }
 
   return ZX_OK;
 }
@@ -7899,6 +7958,11 @@ static zx_status_t brcmf_notify_vif_event(struct brcmf_if* ifp, const struct brc
   struct brcmf_if_event* ifevent = (struct brcmf_if_event*)data;
   struct brcmf_cfg80211_vif_event* event = &cfg->vif_event;
   struct brcmf_cfg80211_vif* vif;
+
+  if (data == nullptr || e->datalen < sizeof(*ifevent)) {
+    BRCMF_ERR("IF event datalen %u too small, expected %zu", e->datalen, sizeof(*ifevent));
+    return ZX_ERR_INVALID_ARGS;
+  }
 
   BRCMF_DBG_EVENT(ifp, e, "%d", [](uint32_t reason) { return reason; });
   BRCMF_DBG(EVENT, "IF event: action %u flags %u ifidx %u bsscfgidx %u", ifevent->action,

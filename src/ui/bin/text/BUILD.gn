@@ -3,9 +3,6 @@
 # found in the LICENSE file.
 
 import("//build/components.gni")
-import("//build/rust/rustc_binary.gni")
-import("//build/rust/rustc_library.gni")
-import("//build/rust/rustc_test.gni")
 
 group("text") {
   testonly = true
@@ -20,178 +17,23 @@ group("tests") {
 
   deps = [
     ":keyboard_test",
-    ":keyboard_test_parallel",
+    ":keyboard_test_parallel_pkg",
     ":text_manager",
-    ":text_manager_test",
+    ":text_manager_test_pkg",
   ]
 }
 
-rustc_binary("bin") {
-  name = "text_manager"
-  with_unit_tests = true
-  edition = "2024"
-
-  deps = [
-    "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
-    "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
-    "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
-    "//sdk/fidl/fuchsia.ui.keyboard.focus:fuchsia.ui.keyboard.focus_rust",
-    "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component",
-    "//src/lib/ui/fuchsia-scenic",
-    "//src/lib/ui/keymaps",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:log",
-    "//third_party/rust_crates:unicode-normalization",
-    "//third_party/rust_crates:unicode-segmentation",
-  ]
-
-  test_deps = [
-    ":test_helpers",
-    "//third_party/rust_crates:maplit",
-  ]
-
-  sources = [
-    "src/fidl_helpers.rs",
-    "src/index_convert.rs",
-    "src/keyboard/events.rs",
-    "src/keyboard/keyboard3.rs",
-    "src/keyboard/mod.rs",
-    "src/keyboard/service.rs",
-    "src/legacy_ime/handler.rs",
-    "src/legacy_ime/mod.rs",
-    "src/legacy_ime/position.rs",
-    "src/legacy_ime/state.rs",
-    "src/main.rs",
-    "src/text_manager.rs",
-  ]
-}
-
-fuchsia_component("text_manager_comp") {
-  component_name = "text_manager"
-  manifest = "meta/text_manager.cml"
-  deps = [ ":bin" ]
-}
-
+# Kept in GN because non-assembly GN targets (//src/ui/bin:bin,
+# //src/chromium/web_runner_tests/generate_web_runner_tests.gni, and
+# //src/ui/tests/integration_input_tests/web-touch-input:tests) depend on
+# `:text_manager`, and `:bin` transitively links the dual-built `rustc_dylib`
+# `//src/storage/lib/vfs/rust:vfs` via `//src/lib/fuchsia-component`.
 fuchsia_package("text_manager") {
   deps = [ ":text_manager_comp" ]
 }
 
-fuchsia_component("text_manager_bin_test") {
-  testonly = true
-  component_name = "text_manager_bin_test"
-  manifest = "meta/text_manager_bin_test.cml"
-  deps = [ ":bin_test" ]
-}
-
-fuchsia_test_package("text_manager_test") {
-  test_components = [ ":text_manager_bin_test" ]
-}
-
-rustc_test("keyboard3_integration_test_bin") {
-  output_name = "keyboard3_integration_test"
-  edition = "2024"
-
-  deps = [
-    ":bin",
-    ":test_helpers",
-    "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
-    "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
-    "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
-    "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
-    "//sdk/fidl/fuchsia.ui.keyboard.focus:fuchsia.ui.keyboard.focus_rust",
-    "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component-test",
-    "//src/lib/ui/fuchsia-scenic",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:assert_matches",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:log",
-    "//third_party/rust_crates:test-case",
-  ]
-  source_root = "tests/keyboard3.rs"
-
-  sources = [ "tests/keyboard3.rs" ]
-}
-
-rustc_test("text_manager_integration_test_bin") {
-  output_name = "text_manager_integration_test"
-  edition = "2024"
-
-  deps = [
-    ":bin",
-    ":test_helpers",
-    "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
-    "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
-    "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component",
-    "//src/lib/ui/keymaps",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:futures",
-  ]
-  source_root = "tests/text_manager.rs"
-
-  sources = [ "tests/text_manager.rs" ]
-}
-
-rustc_test("legacy_ime_integration_test_bin") {
-  output_name = "legacy_ime_integration_test"
-  edition = "2024"
-
-  deps = [
-    ":bin",
-    ":test_helpers",
-    "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
-    "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-component",
-    "//third_party/rust_crates:anyhow",
-  ]
-  source_root = "tests/legacy_ime.rs"
-
-  sources = [ "tests/legacy_ime.rs" ]
-}
-
-rustc_library("test_helpers") {
-  testonly = true
-  edition = "2024"
-
-  source_root = "tests/test_helpers.rs"
-  sources = [ "tests/test_helpers.rs" ]
-
-  deps = [
-    "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
-    "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
-    "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:async-trait",
-    "//third_party/rust_crates:futures",
-  ]
-}
-
-fuchsia_component("keyboard3_integration_test") {
-  testonly = true
-  deps = [
-    ":keyboard3_integration_test_bin",
-    ":text_manager_comp",
-  ]
-  manifest = "meta/keyboard3_integration_test.cml"
-}
-
+# Kept above the sentinel because `bazel2gn` does not support `parallel = 1`
+# on `fx_test()`.
 fuchsia_component("text_manager_integration_test") {
   testonly = true
   deps = [
@@ -211,6 +53,7 @@ fuchsia_component("legacy_ime_integration_test") {
 }
 
 fuchsia_test_package("keyboard_test") {
+  package_name = "keyboard_test-gn"
   test_components = [
     ":text_manager_integration_test",
     ":legacy_ime_integration_test",
@@ -223,6 +66,245 @@ fuchsia_test_package("keyboard_test") {
   }
 }
 
-fuchsia_test_package("keyboard_test_parallel") {
+## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
+#
+#  ________  _________  ________  ________
+# |\   ____\|\___   ___\\   __  \|\   __  \
+# \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+#  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+#   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+#     ____\_\  \   \ \__\ \ \_______\ \__\
+#    |\_________\   \|__|  \|_______|\|__|
+#    \|_________|
+#
+#
+# AUTO-GENERATED - DO NOT EDIT
+#
+# The targets below are auto-generated based on the targets defined in the
+# BUILD.bazel file from the same directory. If you made changes to targets in
+# Bazel, instead of editing this file manually, run:
+#
+#   > fx bazel2gn
+#
+# Please do NOT edit this file directly. Instead, edit the BUILD.bazel file and
+# rerun bazel2gn.
+
+import("//build/tools/bazel2gn/bazel_migration.gni")
+
+if (is_fuchsia) {
+  rustc_binary("bin") {
+    sources = [
+      "src/fidl_helpers.rs",
+      "src/index_convert.rs",
+      "src/keyboard/events.rs",
+      "src/keyboard/keyboard3.rs",
+      "src/keyboard/mod.rs",
+      "src/keyboard/service.rs",
+      "src/legacy_ime/handler.rs",
+      "src/legacy_ime/mod.rs",
+      "src/legacy_ime/position.rs",
+      "src/legacy_ime/state.rs",
+      "src/main.rs",
+      "src/text_manager.rs",
+    ]
+    output_name = "text_manager"
+    edition = "2024"
+    deps = [
+      "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+      "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+      "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+      "//sdk/fidl/fuchsia.ui.keyboard.focus:fuchsia.ui.keyboard.focus_rust",
+      "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust",
+      "//sdk/rust/zx",
+      "//src/lib/fidl/rust/fidl",
+      "//src/lib/fuchsia",
+      "//src/lib/fuchsia-async",
+      "//src/lib/fuchsia-component",
+      "//src/lib/ui/fuchsia-scenic",
+      "//src/lib/ui/keymaps",
+      "//third_party/rust_crates:anyhow",
+      "//third_party/rust_crates:futures",
+      "//third_party/rust_crates:log",
+      "//third_party/rust_crates:unicode-normalization",
+      "//third_party/rust_crates:unicode-segmentation",
+    ]
+  }
+}
+
+fuchsia_component_manifest("text_manager_manifest") {
+  component_name = "text_manager"
+  manifest = "meta/text_manager.cml"
+}
+
+fuchsia_component("text_manager_comp") {
+  cm_label = ":text_manager_manifest"
+  visibility = [
+    ":*",
+    "//src/ui/testing/ui_test_realm:*",
+    "//src/ui/tests/*",
+  ]
+  deps = [ ":bin" ]
+}
+if (is_fuchsia) {
+  rustc_test("bin_test") {
+    sources = [
+      "src/fidl_helpers.rs",
+      "src/index_convert.rs",
+      "src/keyboard/events.rs",
+      "src/keyboard/keyboard3.rs",
+      "src/keyboard/mod.rs",
+      "src/keyboard/service.rs",
+      "src/legacy_ime/handler.rs",
+      "src/legacy_ime/mod.rs",
+      "src/legacy_ime/position.rs",
+      "src/legacy_ime/state.rs",
+      "src/main.rs",
+      "src/text_manager.rs",
+    ]
+    edition = "2024"
+    deps =
+        [
+          "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+          "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+          "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+          "//sdk/fidl/fuchsia.ui.keyboard.focus:fuchsia.ui.keyboard.focus_rust",
+          "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust",
+          "//sdk/rust/zx",
+          "//src/lib/fidl/rust/fidl",
+          "//src/lib/fuchsia",
+          "//src/lib/fuchsia-async",
+          "//src/lib/fuchsia-component",
+          "//src/lib/ui/fuchsia-scenic",
+          "//src/lib/ui/keymaps",
+          "//third_party/rust_crates:anyhow",
+          "//third_party/rust_crates:futures",
+          "//third_party/rust_crates:log",
+          "//third_party/rust_crates:unicode-normalization",
+          "//third_party/rust_crates:unicode-segmentation",
+        ] +
+        [
+          ":test_helpers",
+          "//third_party/rust_crates:maplit",
+        ]
+    source_root = "src/main.rs"
+    output_name = "text_manager_bin_test"
+  }
+}
+
+fuchsia_component_manifest("text_manager_bin_test_manifest") {
+  testonly = true
+  component_name = "text_manager_bin_test"
+  manifest = "meta/text_manager_bin_test.cml"
+}
+
+fuchsia_test_component("text_manager_bin_test") {
+  cm_label = ":text_manager_bin_test_manifest"
+  deps = [ ":bin_test" ]
+}
+
+fuchsia_test_package("text_manager_test_pkg") {
+  package_name = "text_manager_test-gn"
+  test_components = [ ":text_manager_bin_test" ]
+}
+if (is_fuchsia) {
+  rustc_test("keyboard3_integration_test_bin") {
+    sources = [ "tests/keyboard3.rs" ]
+    output_name = "keyboard3_integration_test"
+    source_root = "tests/keyboard3.rs"
+    edition = "2024"
+    deps = [
+      ":test_helpers",
+      "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+      "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+      "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+      "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+      "//sdk/fidl/fuchsia.ui.keyboard.focus:fuchsia.ui.keyboard.focus_rust",
+      "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust",
+      "//sdk/rust/zx",
+      "//src/lib/fidl/rust/fidl",
+      "//src/lib/fuchsia",
+      "//src/lib/fuchsia-async",
+      "//src/lib/fuchsia-component-test",
+      "//src/lib/ui/fuchsia-scenic",
+      "//third_party/rust_crates:anyhow",
+      "//third_party/rust_crates:assert_matches",
+      "//third_party/rust_crates:futures",
+      "//third_party/rust_crates:log",
+      "//third_party/rust_crates:test-case",
+    ]
+  }
+}
+if (is_fuchsia) {
+  rustc_test("text_manager_integration_test_bin") {
+    sources = [ "tests/text_manager.rs" ]
+    output_name = "text_manager_integration_test"
+    source_root = "tests/text_manager.rs"
+    edition = "2024"
+    deps = [
+      ":test_helpers",
+      "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+      "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+      "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+      "//sdk/rust/zx",
+      "//src/lib/fuchsia",
+      "//src/lib/fuchsia-async",
+      "//src/lib/fuchsia-component",
+      "//src/lib/ui/keymaps",
+      "//third_party/rust_crates:anyhow",
+      "//third_party/rust_crates:futures",
+    ]
+  }
+}
+if (is_fuchsia) {
+  rustc_test("legacy_ime_integration_test_bin") {
+    sources = [ "tests/legacy_ime.rs" ]
+    output_name = "legacy_ime_integration_test"
+    source_root = "tests/legacy_ime.rs"
+    edition = "2024"
+    deps = [
+      ":test_helpers",
+      "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+      "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+      "//src/lib/fuchsia",
+      "//src/lib/fuchsia-component",
+      "//third_party/rust_crates:anyhow",
+    ]
+  }
+}
+
+rustc_library("test_helpers") {
+  testonly = true
+  sources = [ "tests/test_helpers.rs" ]
+  source_root = "tests/test_helpers.rs"
+  edition = "2024"
+  proc_macro_deps = [ "//third_party/rust_crates:async-trait" ]
+  deps = [
+    "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+    "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+    "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+    "//sdk/rust/zx",
+    "//src/lib/fidl/rust/fidl",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:futures",
+  ]
+}
+
+fuchsia_component_manifest("keyboard3_integration_test_manifest") {
+  testonly = true
+  component_name = "keyboard3_integration_test"
+  manifest = "meta/keyboard3_integration_test.cml"
+}
+
+fuchsia_test_component("keyboard3_integration_test") {
+  cm_label = ":keyboard3_integration_test_manifest"
+  deps = [ ":keyboard3_integration_test_bin" ]
+}
+
+fuchsia_test_package("keyboard_test_parallel_pkg") {
+  package_name = "keyboard_test_parallel-gn"
   test_components = [ ":keyboard3_integration_test" ]
+  deps = [
+    ":text_manager_comp",
+    "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+  ]
 }

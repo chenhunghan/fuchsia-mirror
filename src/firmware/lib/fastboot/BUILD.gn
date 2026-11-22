@@ -39,12 +39,14 @@ source_set("lib") {
     "//zircon/system/ulib/zx",
   ]
   deps = [
+    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
     "//sdk/lib/async-default",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fxl",
+    "//src/storage/lib/block_client/cpp",
     "//src/storage/lib/sparse/c:sparse",
     "//zircon/system/ulib/zx",
   ]

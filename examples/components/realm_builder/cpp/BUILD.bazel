@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["meta/sample_realm.cml"],
+    visibility = ["//examples/components/realm_builder:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "bin",
+    srcs = ["sample.cc"],
+    # Required for angled workspace-root `#include <src/lib/testing/loop_fixture/real_loop_fixture.h>`.
+    copts = ["-I."],
+    visibility = ["//examples/components/realm_builder:__pkg__"],
+    # [START realm_builder_dep_cpp]
+    deps = [
+        "//sdk/lib/sys/component/cpp/testing:cpp_library",
+
+        # [START_EXCLUDE]
+        "//examples/components/routing/fidl:echo_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+
+        # [END_EXCLUDE]
+    ],
+    # [END realm_builder_dep_cpp]
+)

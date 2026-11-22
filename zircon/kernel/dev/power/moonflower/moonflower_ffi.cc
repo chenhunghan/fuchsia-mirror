@@ -5,7 +5,6 @@
 // https://opensource.org/licenses/MIT
 
 #include <lib/ddk/platform-defs.h>
-#include <lib/power-management/energy-model.h>
 #include <lib/power-management/pdev-power-level-controller.h>
 #include <zircon/errors.h>
 #include <zircon/types.h>
@@ -13,7 +12,6 @@
 #include <arch/arm64/smccc.h>
 #include <dev/power/moonflower/init.h>
 #include <dev/power/moonflower/moonflower_ffi.h>
-#include <dev/psci.h>
 #include <fbl/ref_ptr.h>
 #include <kernel/ffi.h>
 #include <kernel/scheduler.h>

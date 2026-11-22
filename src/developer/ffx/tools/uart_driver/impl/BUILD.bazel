@@ -1,0 +1,57 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Provides the core execution engine and framing adapters for the background
+# ffx-uart-driver host daemon.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":uart_driver_impl_lib_test"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/adapters.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "uart_driver_impl",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx/tools/uart_driver:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain",
+        "//src/developer/ffx/lib/safe_string:lib",
+        "//src/developer/ffx/lib/uart_driver_api:lib",
+        "//src/developer/ffx/tools/uart:lib",
+        "//src/developer/lib/uart_fpl",
+        "//src/lib/fdomain/client",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:tokio",
+    ],
+)
+
+host_rustc_test(
+    name = "uart_driver_impl_lib_test",
+    crate = ":lib",
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

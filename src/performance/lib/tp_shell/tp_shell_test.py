@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import importlib
 import importlib.resources
 import os
 import tempfile
@@ -10,6 +11,7 @@ import unittest
 import unittest.mock
 from typing import Any
 
+from google.protobuf.internal import api_implementation
 from perfetto.trace_processor.api import TraceProcessor as PerfettoTP
 from tp_shell import (
     FuchsiaPlatformDelegate,
@@ -204,6 +206,32 @@ class TraceProcessorServerTest(unittest.TestCase):
 
 
 class TpShellTest(unittest.TestCase):
+    def test_protobuf_uses_upb_backend(self) -> None:
+        """Verifies that google.protobuf uses the compiled C upb extension.
+
+        google.protobuf silently falls back to its pure-Python backend when
+        `google._upb._message` fails to import, which makes large query
+        results an order of magnitude slower to decode. Import the extension
+        directly first so a failure reports the underlying ImportError rather
+        than just the resulting backend name.
+        """
+        try:
+            importlib.import_module("google._upb._message")
+        except ImportError as e:
+            self.fail(
+                "The google._upb._message C extension built by "
+                "//src/performance/lib/tp_shell:_upb_message failed to load, "
+                f"so google.protobuf would fall back to pure Python: {e!r}"
+            )
+        self.assertEqual(
+            api_implementation.Type(),
+            "upb",
+            "google.protobuf did not select the upb backend even though "
+            "google._upb._message imports; check that the extension is "
+            "packaged under google/_upb_bin and PROTOCOL_BUFFERS_PYTHON_"
+            "IMPLEMENTATION is unset.",
+        )
+
     def test_single_query_and_cleanup(self) -> None:
         """Tests that a single query works and the processor is unusable after close."""
         source = importlib.resources.files("test_data").joinpath(
@@ -304,6 +332,22 @@ class TpShellTest(unittest.TestCase):
                 self.assertIsInstance(first_row[1], float)
                 self.assertIsInstance(first_row[2], str)
                 self.assertIsNone(first_row[3])
+
+    def test_query_rows_matches_run_query_for_many_rows(self) -> None:
+        """Tests that query_rows yields the same rows, in order, as run_query."""
+        source = importlib.resources.files("test_data").joinpath(
+            "perfetto_golden.fxt"
+        )
+        sql = "SELECT id, ts, dur, name, parent_id FROM slice ORDER BY id"
+        with importlib.resources.as_file(source) as trace_path:
+            with PerfettoTraceProcessor(str(trace_path)) as tp:
+                cols, rows = tp.query_rows(sql)
+                expected = [
+                    tuple(r[col] for col in cols) for r in tp.run_query(sql)
+                ]
+                self.assertGreater(len(expected), 1)
+                self.assertEqual(list(rows), expected)
+                self.assertEqual(list(tp.query_rows(f"{sql} LIMIT 0")[1]), [])
 
     @unittest.mock.patch("urllib.request.urlopen")
     def test_http_uri_resolver_timeout(

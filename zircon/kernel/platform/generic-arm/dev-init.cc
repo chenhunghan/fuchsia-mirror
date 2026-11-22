@@ -4,10 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-#include <lib/boot-options/boot-options.h>
-
-#include <dev/arm_smmu/smmu.h>
-#include <dev/arm_smmu/smmu_mode.h>
+#include <dev/arm_smmu/init.h>
 #include <dev/hdcp/amlogic_s912/init.h>
 #include <dev/hw_rng/amlogic_rng/init.h>
 #include <dev/hw_rng/qcom_rng/init.h>
@@ -91,26 +88,11 @@ void PlatformDriverHandoffLate(const ArchPhysHandoff& arch_handoff) {
   // boot because we currently use the heap in the driver.  Consider moving to
   // static allocation so we can init early instead.
   if (arch_handoff.generic_timer_mmio_driver) {
-    Armv7MmioTimer::Init(*arch_handoff.generic_timer_mmio_driver.to_std());
+    Armv7MmioTimerInit(*arch_handoff.generic_timer_mmio_driver.to_std());
   }
 
-  // If we have any SMMU descriptions in the ZBI, check the kernel.arm-smmu-mode
-  // boot option for any parse errors and print a warning if we see any.  The
-  // SMMU driver will tolerate these errors, falling back on default values for
-  // the operational mode, but we should print a warning.
-  if (const char* const mode_string = BootOptions::Get()->arm_smmu_mode.data();
-      (arch_handoff.arm_smmu_drivers.size() > 0) &&
-      !::arm_smmu::ValidateSmmuModeString(mode_string)) {
-    dprintf(INFO, "WARNING - Parse errors present in kernel.arm-smmu-mode string \"%s\"\n",
-            mode_string);
-  }
-
-  for (const zbi_dcfg_arm_smmu_driver_t& config : arch_handoff.arm_smmu_drivers.get()) {
-    zx::result<fbl::RefPtr<iommu::Iommu>> result = ArmSmmu::Create(config);
-    if (result.is_error()) {
-      dprintf(INFO, "WARNING - Failed to construct ARM SMMU @ 0x%08lx result %d\n",
-              config.mmio_phys, result.error_value());
-    }
+  if (!arch_handoff.arm_smmu_drivers.empty()) {
+    rust_arm_smmu_init(arch_handoff.arm_smmu_drivers.data(), arch_handoff.arm_smmu_drivers.size());
   }
 
   if (arch_handoff.amlogic_hdcp_driver) {

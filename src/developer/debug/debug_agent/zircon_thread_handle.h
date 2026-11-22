@@ -27,6 +27,7 @@ class ZirconThreadHandle final : public ThreadHandle {
   debug_ipc::ThreadRecord GetThreadRecord(zx_koid_t process_koid) const override;
   std::unique_ptr<SuspendHandle> Suspend() override;
   bool WaitForSuspension(TickTimePoint deadline) const override;
+  bool WaitForSuspensionSignal(TickTimePoint deadline) const override;
   std::optional<GeneralRegisters> GetGeneralRegisters() const override;
   void SetGeneralRegisters(const GeneralRegisters& regs) override;
   std::optional<DebugRegisters> GetDebugRegisters() const override;

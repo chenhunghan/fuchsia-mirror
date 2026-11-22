@@ -1,0 +1,137 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Probes the guest network of emulators, with and without opt-in emulator
+# internet access, to check the isolation provided by botanist's emulator
+# network proxy. See src/lib.rs.
+test_suite(
+    name = "tests",
+    tests = [
+        ":emulator-internet-probe-test",
+        ":emulator-no-internet-probe-test",
+    ],
+    visibility = ["//src/tests:__pkg__"],
+)
+
+_ALLOWLIST = "//tools/botanist:targets/emu_net_allowlist/allowlist.txt"
+
+rustc_test(
+    name = "internet_probe_bin",
+    srcs = ["src/lib.rs"],
+    compile_data = [_ALLOWLIST],
+    crate_features = ["internet"],
+    edition = "2024",
+    rustc_flags = [
+        '--check-cfg=cfg(feature, values("internet"))',
+        "--check-cfg=cfg(test)",
+    ],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+rustc_test(
+    name = "no_internet_probe_bin",
+    srcs = ["src/lib.rs"],
+    compile_data = [_ALLOWLIST],
+    edition = "2024",
+    rustc_flags = [
+        '--check-cfg=cfg(feature, values("internet"))',
+        "--check-cfg=cfg(test)",
+    ],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_packaged_binary(
+    name = "internet_probe_bin_packaged",
+    testonly = True,
+    binary = ":internet_probe_bin",
+    binary_name = "emulator_internet_probe_test",
+)
+
+fx_packaged_binary(
+    name = "no_internet_probe_bin_packaged",
+    testonly = True,
+    binary = ":no_internet_probe_bin",
+    binary_name = "emulator_no_internet_probe_test",
+)
+
+fx_component_manifest(
+    name = "emulator_internet_probe_test_manifest",
+    testonly = True,
+    component_name = "emulator_internet_probe_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default",
+    ],
+    manifest = "meta/emulator_internet_probe_test.cml",
+)
+
+fx_component_manifest(
+    name = "emulator_no_internet_probe_test_manifest",
+    testonly = True,
+    component_name = "emulator_no_internet_probe_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default",
+    ],
+    manifest = "meta/emulator_no_internet_probe_test.cml",
+)
+
+# Needs the system's network stack.
+fx_test_component(
+    name = "emulator_internet_probe_test",
+    compiled_manifest = ":emulator_internet_probe_test_manifest",
+    test_type = "system",
+    deps = [":internet_probe_bin_packaged"],
+)
+
+# Needs the system's network stack.
+fx_test_component(
+    name = "emulator_no_internet_probe_test",
+    compiled_manifest = ":emulator_no_internet_probe_test_manifest",
+    test_type = "system",
+    deps = [":no_internet_probe_bin_packaged"],
+)
+
+fx_package(
+    name = "emulator-internet-probe-test_package",
+    package_name = "emulator-internet-probe-test",
+    testonly = True,
+    test_components = [":emulator_internet_probe_test"],
+)
+
+fx_package(
+    name = "emulator-no-internet-probe-test_package",
+    package_name = "emulator-no-internet-probe-test",
+    testonly = True,
+    test_components = [":emulator_no_internet_probe_test"],
+)
+
+fx_test(
+    name = "emulator-internet-probe-test",
+    environments = ["//build/testing/environments:aemu_internet_env"],
+    package = ":emulator-internet-probe-test_package",
+)
+
+fx_test(
+    name = "emulator-no-internet-probe-test",
+    environments = ["//build/testing/environments:aemu_env"],
+    package = ":emulator-no-internet-probe-test_package",
+)

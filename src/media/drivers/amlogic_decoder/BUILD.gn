@@ -58,10 +58,7 @@ if (target_cpu == "arm64") {
     }
   }
 
-  test_list += [
-    "tests/runner:amlogic_decoder_integration_tests",
-    "tests/unit_tests:amlogic-decoder-unittest",
-  ]
+  test_list += [ "tests/unit_tests:amlogic-decoder-unittest" ]
 
   fuchsia_cc_driver("amlogic_video_decoder-driver") {
     legacy = true
@@ -77,7 +74,6 @@ if (target_cpu == "arm64") {
   fuchsia_driver_component("amlogic_video_decoder-component") {
     component_name = "amlogic_video_decoder"
     deps = [ ":amlogic_video_decoder-driver" ]
-    info = "meta/amlogic_video_decoder-info.json"
     dml_label = ":amlogic_video_decoder-dml"
   }
 
@@ -150,6 +146,10 @@ if (target_cpu == "arm64") {
       "//sdk/fidl/fuchsia.hardware.mediacodec:fuchsia.hardware.mediacodec_cpp",
       "//sdk/fidl/fuchsia.hardware.sysmem:fuchsia.hardware.sysmem_cpp",
       "//sdk/fidl/fuchsia.hardware.tee:fuchsia.hardware.tee_cpp",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+      "//sdk/fidl/fuchsia.media:fuchsia.media_cpp",
+      "//sdk/fidl/fuchsia.mediacodec:fuchsia.mediacodec_cpp",
+      "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
       "//sdk/fidl/fuchsia.tee:fuchsia.tee_hlcpp",
       "//sdk/lib/async:async-cpp",
       "//sdk/lib/async-loop:async-loop-cpp",
@@ -164,6 +164,7 @@ if (target_cpu == "arm64") {
       "//src/devices/lib/driver",
       "//src/lib/ddk",
       "//src/lib/ddktl",
+      "//src/media/lib/codec_impl",
       "//src/media/lib/extend_bits",
       "//src/media/lib/internal_buffer",
       "//src/media/third_party/chromium_media",
@@ -181,14 +182,12 @@ if (target_cpu == "arm64") {
     deps = [
       "third_party/libvpx",
       "third_party/vp9_adapt_probs",
-      "//sdk/fidl/fuchsia.mediacodec:fuchsia.mediacodec_hlcpp",
       "//sdk/lib/driver/platform-device/cpp",
       "//sdk/lib/fdio",
       "//src/devices/bind/fuchsia:fuchsia_cpp",
       "//src/devices/bind/fuchsia.platform:fuchsia.platform_cpp",
       "//src/lib/ddktl",
       "//src/lib/metrics_buffer",
-      "//src/media/lib/codec_impl",
     ]
     public_configs = [ ":sources_include_config" ]
     cflags = []

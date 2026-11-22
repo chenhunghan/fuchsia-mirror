@@ -10,18 +10,27 @@
         runner: "elf",
         binary: "bin/trace_thread_stress",
     },
-    config: {
-        thread_count: {
+    use: [
+        {
+            config: "fuchsia.performance.trace_thread_stress.ThreadCount",
+            key: "thread_count",
             type: "uint32",
-            mutability: [ "parent" ],
+            availability: "transitional",
+            default: 100,
         },
-        duration_ms: {
+        {
+            config: "fuchsia.performance.trace_thread_stress.DurationMs",
+            key: "duration_ms",
             type: "uint64",
-            mutability: [ "parent" ],
+            availability: "transitional",
+            default: 10000,
         },
-        interval_ms: {
+        {
+            config: "fuchsia.performance.trace_thread_stress.IntervalMs",
+            key: "interval_ms",
             type: "uint64",
-            mutability: [ "parent" ],
+            availability: "transitional",
+            default: 10,
         },
-    },
+    ],
 }

@@ -6,6 +6,11 @@ load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    ["session.h"],
+    visibility = ["//zircon/system/ulib/trace-provider/test:__pkg__"],
+)
+
 # The default version for the normal case.
 fx_cc_library(
     name = "trace-provider",

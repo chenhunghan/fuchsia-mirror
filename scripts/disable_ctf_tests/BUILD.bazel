@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+load("//build/bazel/rules/python:py_zipapp_binary.bzl", "py_zipapp_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":disable_ctf_tests_test"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# Main executable target.
+py_zipapp_binary(
+    name = "disable_ctf_tests",
+    srcs = [
+        "cli.py",
+        "command_runner.py",
+        "data_structure.py",
+        "gui.py",
+        "main.py",
+        "util.py",
+    ],
+    main = "main.py",
+    # Unbuffer so output can be piped to other programs nicely.
+    unbuffered_output = True,
+    visibility = ["//tools/devshell:__pkg__"],
+    deps = ["//scripts/lib/json_get"],
+)
+
+host_py_test(
+    name = "disable_ctf_tests_test",
+    srcs = ["tests/all_tests.py"],
+    main = "tests/all_tests.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_args = ["-v"],
+    test_data = [
+        ":disable_ctf_tests",  # Include this to MyPy everything
+    ],
+    deps = ["//scripts/lib/json_get"],
+)

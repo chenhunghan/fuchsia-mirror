@@ -37,7 +37,7 @@ type Has2OptionalFieldStruct = struct {
 
 type Empty = struct {};
 
-type XUnionContainingEmptyStruct = flexible union {
+type UnionContainingEmptyStruct = flexible union {
     1: empty Empty;
 };
 
@@ -76,35 +76,35 @@ type NewerSimpleTable = table {
 
 type ComplexTable = table {
     1: simple SimpleTable;
-    2: u SampleXUnion;
+    2: u SampleUnion;
     3: strings vector<string>;
 };
 
-type SampleXUnion = flexible union {
+type SampleUnion = flexible union {
     1: i int32;
     2: su SimpleUnion;
     3: st SimpleTable;
 };
 
-type SampleXUnionInStruct = struct {
-    xu SampleXUnion;
+type SampleUnionInStruct = struct {
+    xu SampleUnion;
 };
 
-type InlineXUnionInStruct = struct {
+type InlineUnionInStruct = struct {
     before string;
-    xu SampleXUnion;
+    xu SampleUnion;
     after string;
 };
 
-type OptionalXUnionInStruct = struct {
+type OptionalUnionInStruct = struct {
     before string;
-    xu SampleXUnion:optional;
+    xu SampleUnion:optional;
     after string;
 };
 
-type XUnionInTable = table {
+type UnionInTable = table {
     1: before string;
-    2: xu SampleXUnion;
+    2: xu SampleUnion;
     3: after string;
 };
 

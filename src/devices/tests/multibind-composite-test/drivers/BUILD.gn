@@ -56,7 +56,6 @@ fuchsia_cc_driver("root-driver") {
 fuchsia_driver_component("root") {
   component_name = "root-driver"
   deps = [ ":root-driver" ]
-  info = "meta/root-driver-info.json"
   manifest = "meta/root.cml"
 }
 
@@ -85,7 +84,6 @@ fuchsia_driver_component("spec-composite-1") {
   dml_label = ":spec-composite-1-dml"
   component_name = "spec-composite-1-driver"
   deps = [ ":spec-composite-1-driver" ]
-  info = "meta/composite-info.json"
 }
 
 driver_bind_rules("spec-composite-2-bind") {
@@ -113,5 +111,4 @@ fuchsia_driver_component("spec-composite-2") {
   dml_label = ":spec-composite-2-dml"
   component_name = "spec-composite-2"
   deps = [ ":spec-composite-2-driver" ]
-  info = "meta/composite-info.json"
 }

@@ -33,9 +33,7 @@ class TunTapTestBase : public ::testing::TestWithParam<T> {
         "tmpfs", "/dev", "tmpfs", MS_NOEXEC | MS_NOSUID | MS_STRICTATIME,
         "fscontext=system_u:object_r:devfs_t:s0"));
 
-    ASSERT_THAT(mkdir("/dev/net", 0755), SyscallSucceeds());
-    ASSERT_THAT(mknod(kTunPath, S_IFCHR | 0666, makedev(10, 200)), SyscallSucceeds());
-    ASSERT_THAT(chmod(kTunPath, 0666), SyscallSucceeds());
+    ASSERT_THAT(EnsureDeviceNode(kTunPath, S_IFCHR | 0666, makedev(10, 200)), SyscallResultIsOk());
   }
 };
 
@@ -69,11 +67,9 @@ TEST_P(TunTapCreateTest, CheckCreateAccess) {
     ifr.ifr_flags = test_case.tun_or_tap | IFF_NO_PI;
 
     int result = ioctl(fd.get(), TUNSETIFF, &ifr);
+    EXPECT_THAT(result, SyscallMatchesResult(test_case.expected_result));
     if (test_case.expected_result.is_ok()) {
-      EXPECT_THAT(result, SyscallSucceeds());
       EXPECT_THAT(GetLinkLabel(fd.get()), SyscallResultIsOk(std::string(test_case.label).c_str()));
-    } else {
-      EXPECT_THAT(result, SyscallFailsWithErrno(test_case.expected_result.error_value()));
     }
   }));
 }
@@ -157,12 +153,8 @@ TEST_P(TunTapAttachTest, AttachQueue) {
     memset(&ifr, 0, sizeof(ifr));
     ifr.ifr_flags = IFF_ATTACH_QUEUE;
     // Trigger an `attach_queue` event.
-    result = ioctl(fd.get(), TUNSETQUEUE, &ifr);
-    if (test_case.expected_result.is_ok()) {
-      EXPECT_THAT(result, SyscallSucceeds());
-    } else {
-      EXPECT_THAT(result, SyscallFailsWithErrno(test_case.expected_result.error_value()));
-    }
+    EXPECT_THAT(ioctl(fd.get(), TUNSETQUEUE, &ifr),
+                SyscallMatchesResult(test_case.expected_result));
   }));
 }
 
@@ -208,15 +200,10 @@ TEST_P(TunTapRelabelTest, Relabel) {
     ifr.ifr_flags = test_case.tun_or_tap | IFF_MULTI_QUEUE;
     // Use the initial tun name to test relabeling.
     strcpy(ifr.ifr_name, tun_name);
-    int result = ioctl(fd2.get(), TUNSETIFF, &ifr);
-    if (test_case.expected_result.is_ok()) {
-      EXPECT_THAT(result, SyscallSucceeds());
-    } else {
-      EXPECT_THAT(result, SyscallFailsWithErrno(test_case.expected_result.error_value()));
-    }
+    EXPECT_THAT(ioctl(fd2.get(), TUNSETIFF, &ifr), SyscallMatchesResult(test_case.expected_result));
   }));
 }
 
 }  // namespace
 
-extern std::string DoPrePolicyLoadWork() { return "tun_policy"; }
+extern std::string GetTestPolicyName() { return "tun_policy"; }

@@ -155,7 +155,8 @@ std::shared_ptr<driver_manager::Node> BindManagerTestBase::CreateNode(const std:
 
 void BindManagerTestBase::AddAndBindNode(
     std::string name, bool enable_multibind,
-    std::shared_ptr<driver_manager::BindResultTracker> tracker) {
+    std::shared_ptr<driver_manager::BindResultTracker> tracker,
+    std::vector<fuchsia_driver_framework::NodeProperty2> extra_properties) {
   // This function should only be called for a new node.
   ASSERT_EQ(nodes_.find(name), nodes_.end());
 
@@ -163,6 +164,9 @@ void BindManagerTestBase::AddAndBindNode(
   auto instance_id = GetOrAddInstanceId(name);
   std::vector<fuchsia_driver_framework::NodeProperty2> node_properties = {
       fdf::MakeProperty2(bind_fuchsia::PLATFORM_DEV_INSTANCE_ID, instance_id)};
+  for (auto& prop : extra_properties) {
+    node_properties.push_back(std::move(prop));
+  }
   node->InitializeSelfResource(node_properties);
   nodes_.emplace(name, node);
   InvokeBind(name, std::move(tracker));
@@ -174,13 +178,14 @@ void BindManagerTestBase::AddAndBindNode(
 // should be added in the orphaned nodes.
 void BindManagerTestBase::AddAndOrphanNode(
     std::string name, bool enable_multibind,
-    std::shared_ptr<driver_manager::BindResultTracker> tracker) {
+    std::shared_ptr<driver_manager::BindResultTracker> tracker,
+    std::vector<fuchsia_driver_framework::NodeProperty2> extra_properties) {
   VerifyNoOngoingBind();
 
   size_t current_orphan_count = bind_manager_->NumOrphanedResources();
 
   // Invoke bind for a new node in the bind manager.
-  AddAndBindNode(name, enable_multibind, std::move(tracker));
+  AddAndBindNode(name, enable_multibind, std::move(tracker), std::move(extra_properties));
   ASSERT_TRUE(bind_manager_->IsBindOngoing());
   ASSERT_EQ(current_orphan_count, bind_manager_->NumOrphanedResources());
 

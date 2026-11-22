@@ -5,6 +5,13 @@
 import("//build/python/python_host_test.gni")
 
 if (is_host) {
+  python_host_test("architecture_test") {
+    main_source = "architecture_test.py"
+    libraries = [ "//src/testing/end_to_end/honeydew" ]
+    main_callable = "unittest.main"
+    extra_args = [ "-v" ]
+  }
+
   python_host_test("init_test") {
     main_source = "init_test.py"
     libraries = [
@@ -22,6 +29,7 @@ group("tests") {
 
   if (host_os != "mac") {
     public_deps += [
+      ":architecture_test($host_toolchain)",
       ":init_test($host_toolchain)",
       "typing_tests:tests",
       "utils_tests:tests",

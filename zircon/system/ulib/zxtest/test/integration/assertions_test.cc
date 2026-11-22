@@ -5,6 +5,13 @@
 #include <zircon/assert.h>
 #include <zircon/types.h>
 
+#include <cstdint>
+#include <span>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <vector>
+
 #include <zxtest/cpp/internal.h>
 #include <zxtest/zxtest.h>
 
@@ -283,6 +290,121 @@ TEST(ZxTestAssertionTest, AssertStrEqFatalFailure) {
   const char* str2 = "b";
 
   ASSERT_STREQ(str1, str2, "ASSERT_STREQ failed to identify equal strings.");
+  TEST_CHECKPOINT();
+}
+
+TEST(ZxTestAssertionTest, AssertStrEqStringlike) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS,
+                   "ASSERT/EXPECT_STREQ mishandled string conversion or length.");
+  static_assert(
+      ![]<typename T = int> { return requires(T x) { zxtest::internal::ToStringView(x); }; }());
+
+  constexpr std::string_view kAbcdef = "abcdef";
+
+  // Non-NUL-terminated std::string_view slices and contiguous char containers.
+  EXPECT_STREQ(kAbcdef.substr(0, 3), "abc");
+  EXPECT_STREQ(kAbcdef.substr(1, 3), "bcd");
+  EXPECT_STRNE(kAbcdef.substr(0, 3), "abcdef");
+  std::span<const char> span = kAbcdef.substr(0, 3);
+  EXPECT_STREQ(span, "abc");
+  EXPECT_STRNE(span, "abcdef");
+  std::vector<char> vec = {'a', 'b', 'c'};
+  EXPECT_STREQ(vec, "abc");
+  EXPECT_STREQ("abc", vec);
+
+  // Mutable and const char[N] buffers and non-const char* pointers.
+  char mutable_buf[8] = "abc";
+  const char const_buf[8] = "abc";
+  char* mutable_ptr = mutable_buf;
+  char* null_mutable_ptr = nullptr;
+  EXPECT_STREQ(mutable_buf, "abc");
+  EXPECT_STREQ(const_buf, "abc");
+  EXPECT_STREQ(mutable_ptr, "abc");
+  EXPECT_STREQ(mutable_ptr, mutable_buf);
+  EXPECT_STREQ(null_mutable_ptr, nullptr);
+  EXPECT_STRNE(null_mutable_ptr, mutable_ptr);
+
+  // Types convertible to C strings or std::string_view without std::size/std::data.
+  struct ConvertibleToCStr {
+    const char* p;
+    explicit(false) operator const char*() const { return p; }
+  };
+  struct ConvertibleToMutableCStr {
+    char* p;
+    explicit(false) operator char*() const { return p; }
+  };
+  struct ConvertibleToStringView {
+    std::string_view sv;
+    explicit(false) operator std::string_view() const { return sv; }
+  };
+  struct ExplicitlyConvertibleToStringView {
+    std::string_view sv;
+    explicit operator std::string_view() const { return sv; }
+  };
+  EXPECT_STREQ(ConvertibleToCStr{"abc"}, "abc");
+  EXPECT_STREQ(ConvertibleToCStr{nullptr}, nullptr);
+  EXPECT_STREQ(ConvertibleToMutableCStr{mutable_buf}, "abc");
+  EXPECT_STREQ(ConvertibleToMutableCStr{nullptr}, nullptr);
+  EXPECT_STREQ(ConvertibleToStringView{kAbcdef.substr(0, 3)}, "abc");
+  EXPECT_STREQ(ExplicitlyConvertibleToStringView{kAbcdef.substr(1, 3)}, "bcd");
+
+  // Non-NUL-terminated char[N] arrays and NUL-terminated std::string/containers
+  // truncate at the first NUL byte without reading out of bounds.
+  char non_nul_arr[3] = {'a', 'b', 'c'};
+  const char const_non_nul_arr[3] = {'a', 'b', 'c'};
+  EXPECT_STREQ(non_nul_arr, "abc");
+  EXPECT_STREQ(const_non_nul_arr, "abc");
+  std::string trailing_nul("hello\r\n\0", 8);
+  EXPECT_STREQ(trailing_nul, "hello\r\n");
+  std::string embedded_nul("ab\0c", 4), leading_nul("\0rest", 5);
+  EXPECT_STREQ(embedded_nul, "ab");
+  EXPECT_STREQ(leading_nul, "");
+  EXPECT_STRNE(embedded_nul, "abc");
+  ASSERT_STRNE(embedded_nul, leading_nul);
+  TEST_CHECKPOINT();
+}
+
+TEST(ZxTestAssertionTest, AssertExpectSubStrStringlike) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS,
+                   "ASSERT/EXPECT_SUBSTR mishandled string conversion or length.");
+  constexpr std::string_view kAbcdef = "abcdef";
+  char mutable_buf[8] = "bcd";
+  char* mutable_ptr = mutable_buf;
+
+  EXPECT_SUBSTR(kAbcdef.substr(0, 4), kAbcdef.substr(1, 2));
+  EXPECT_NOT_SUBSTR(kAbcdef.substr(0, 3), kAbcdef.substr(2, 2));
+  EXPECT_SUBSTR(kAbcdef.substr(0, 4), mutable_buf);
+  EXPECT_SUBSTR(kAbcdef.substr(0, 4), mutable_ptr);
+  ASSERT_NOT_SUBSTR(mutable_ptr, kAbcdef.substr(0, 4));
+  TEST_CHECKPOINT();
+}
+
+TEST(ZxTestAssertionTest, AssertUint64AndEmptyTuple) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS,
+                   "uint64_t or empty tuple assertion/printing failed.");
+  uint64_t u64 = UINT64_MAX;
+  const uint64_t const_u64 = UINT64_MAX;
+  EXPECT_EQ(u64, const_u64);
+  EXPECT_EQ(const_u64, uint64_t{UINT64_MAX});
+  EXPECT_STREQ(zxtest::PrintValue(u64), "18446744073709551615");
+  EXPECT_STREQ(zxtest::PrintValue(const_u64), "18446744073709551615");
+  EXPECT_STREQ(zxtest::PrintValue(uint64_t{UINT64_MAX}), "18446744073709551615");
+
+  std::tuple<> empty_a, empty_b;
+  EXPECT_EQ(empty_a, empty_b);
+  EXPECT_STREQ(zxtest::PrintValue(empty_a), "{ }");
+  EXPECT_STREQ(zxtest::PrintValue(std::tuple<>{}), "{ }");
+  TEST_CHECKPOINT();
+}
+
+TEST(ZxTestAssertionTest, AssertUint64AndEmptyTupleFailure) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, HAS_ERRORS,
+                   "Failure printing of uint64_t or empty tuple aborted unexpectedly.");
+  uint64_t u64 = 1;
+  const uint64_t const_u64 = 2;
+  EXPECT_EQ(u64, const_u64);
+  EXPECT_EQ(const_u64, uint64_t{3});
+  EXPECT_NE(std::tuple<>{}, std::tuple<>{});
   TEST_CHECKPOINT();
 }
 
@@ -633,6 +755,24 @@ TEST(ZxTestAssertionTest, AssertNoFatalFailureWithFailure) {
   TEST_CHECKPOINT();
 }
 
+void HelperFnSkip() { ZXTEST_SKIP("Skipped in helper."); }
+
+TEST(ZxTestAssertionTest, AssertNoFatalFailureWithSkip) {
+  TEST_EXPECTATION(CHECKPOINT_NOT_REACHED, NO_ERRORS | SKIPPED,
+                   "Failed to end test execution without a failure on helper skip.");
+  ASSERT_NO_FATAL_FAILURE(HelperFnSkip());
+  TEST_CHECKPOINT();
+}
+
+TEST(ZxTestAssertionTest, ExpectNoFatalFailureWithSkip) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS | SKIPPED, "Helper skip was a failure.");
+  EXPECT_NO_FATAL_FAILURE(HelperFnSkip());
+  ZX_ASSERT_MSG(!CURRENT_TEST_HAS_FATAL_FAILURE(), "Helper skip was a fatal failure.");
+  EXPECT_NO_FATAL_FAILURE(HelperFnSkip());
+  EXPECT_NO_FAILURES(HelperFnSkip());
+  TEST_CHECKPOINT();
+}
+
 TEST(ZxTestAssertionTest, AssertTrueCoerceTypeToBoolFailure) {
   TEST_EXPECTATION(CHECKPOINT_NOT_REACHED, HAS_ERRORS, "Failed to identify false.");
   int a = 0;
@@ -844,6 +984,7 @@ TEST(ZxTestAssertionTest, CoerceTypeToBoolExplicitNonMoveable) {
 }
 
 TEST(ZxTestAssertionTest, PromoteLiteralIntegersOnComp) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS, "Failed to compare mixed integer types.");
   int32_t a = -1;
   int64_t b = 2;
   int16_t c = -1;
@@ -855,11 +996,11 @@ TEST(ZxTestAssertionTest, PromoteLiteralIntegersOnComp) {
   uint16_t h = 1;
 
   // Signed to wider ints.
-  ASSERT_EQ(a, b);
+  ASSERT_NE(a, b);
   ASSERT_GE(b, a);
   ASSERT_LE(a, b);
   ASSERT_GT(b, c);
-  ASSERT_LT(b, a);
+  ASSERT_LT(a, b);
   ASSERT_GT(b, d);
 
   // Signed comparison with literals.
@@ -882,6 +1023,7 @@ TEST(ZxTestAssertionTest, PromoteLiteralIntegersOnComp) {
   ASSERT_LE(f, 2);
   ASSERT_GT(g, 2);
   ASSERT_GE(g, 3);
+  TEST_CHECKPOINT();
 }
 
 TEST(ZxTestAssertionTest, PrintfLikeDescs) {
@@ -1006,7 +1148,10 @@ TEST(ZxTestAssertionTest, AssertNoDeathWithCrashingStatement) {
 TEST(ZxTestAssertionTest, AssertBytesEqVla) {
   TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS, "Failed to check buffer eq.");
   volatile int len = 2;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wvla-cxx-extension"
   char a[len];
+#pragma GCC diagnostic pop
   const char* b = reinterpret_cast<const char*>(a);
 
   memset(a, 0, len);

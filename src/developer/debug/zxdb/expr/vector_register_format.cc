@@ -160,7 +160,8 @@ ExprValue VectorRegisterToValue(RegisterID id, VectorRegisterFormat fmt,
       break;
   }
 
-  auto item_type = fxl::MakeRefCounted<BaseType>(base_type, byte_size, type_name);
+  auto item_type =
+      fxl::MakeRefCounted<BaseType>(base_type, static_cast<uint32_t>(byte_size), type_name);
 
   size_t array_size = data.size() / byte_size;
   auto array_type = fxl::MakeRefCounted<ArrayType>(std::move(item_type), array_size);

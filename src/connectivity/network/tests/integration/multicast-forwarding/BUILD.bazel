@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "multicast-forwarding",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    # Sets the GN `output_name` to match `program.binary` in
+    # `../meta/netstack-multicast-forwarding-integration-test.cml`.
+    crate_name = "netstack_multicast_forwarding_integration_test",
+    edition = "2024",
+    proc_macro_deps = [
+        "//src/connectivity/network/tests/integration/macros:netstack_testing_macros",
+        "//third_party/rust_crates/vendor:derivative",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+        "//sdk/fidl/fuchsia.net.multicast.admin:fuchsia.net.multicast.admin_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/network/testing/netemul/rust:lib",
+        "//src/connectivity/network/tests/integration/common:netstack_testing_common",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+        "//src/lib/network/fidl_fuchsia_net_multicast_ext",
+        "//src/lib/test_util",
+        "//src/sys/lib/fuchsia_backoff",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)

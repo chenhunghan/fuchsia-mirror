@@ -371,6 +371,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let base_package =
             BasePackage { merkle: [0u8; 32].into(), manifest_path: Utf8PathBuf::default() };
@@ -409,6 +410,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let base_package =
             BasePackage { merkle: [0u8; 32].into(), manifest_path: Utf8PathBuf::default() };
@@ -465,6 +467,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let base_package =
             BasePackage { merkle: [0u8; 32].into(), manifest_path: Utf8PathBuf::default() };
@@ -578,6 +581,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
 
         let base_package_path = dir.join("base.far");
@@ -682,6 +686,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
 
         let base_package_path = dir.join("base.far");

@@ -164,7 +164,7 @@ position and orientation expressed in the parent View's coordinate
 system. Together, these determine the regions where graphical content is
 ultimately visible on-screen, and regions which are responsive to user input.
 
-#### Child Views
+#### Child views {#child-views}
 
 A View can embed additional graphical content from another View by creating an
 empty placeholder for it in its coordinate system; the placeholder is called a

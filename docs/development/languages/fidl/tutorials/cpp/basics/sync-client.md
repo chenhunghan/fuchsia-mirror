@@ -27,13 +27,13 @@ component and its containing package. For more information about building
 components, see [Build components][build-components].
 
 To get the client component up and running, there are three targets that are
-defined in `//examples/fidl/cpp/client_sync/BUILD.gn`:
+defined in `//examples/fidl/cpp/client_sync/BUILD.bazel`:
 
 1. The raw executable file for the client. This produces a binary with the
    specified output name that can run on Fuchsia:
 
-    ```gn
-    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client_sync/BUILD.gn" region_tag="bin" %}
+    ```bazel
+    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client_sync/BUILD.bazel" region_tag="bin" %}
     ```
 
 1. A component that is set up to run the client executable.
@@ -42,14 +42,14 @@ defined in `//examples/fidl/cpp/client_sync/BUILD.gn`:
    configures `echo-client` as an executable component which runs
    `fidl_echo_cpp_client_sync` in `:bin`.
 
-    ```gn
-    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client_sync/BUILD.gn" region_tag="component" %}
+    ```bazel
+    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client_sync/BUILD.bazel" region_tag="component" %}
     ```
 
     The server component manifest is located at
     `//examples/fidl/cpp/client_sync/meta/client.cml`. The binary name in the
     manifest must match the output name of the `executable` defined in
-    `BUILD.gn`.
+    `BUILD.bazel`.
 
     ```json5
     {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client_sync/meta/client.cml" region_tag="example_snippet" %}
@@ -60,8 +60,8 @@ defined in `//examples/fidl/cpp/client_sync/BUILD.gn`:
    a server component, and a [realm][glossary.realm] component to declare the
    appropriate capabilities and routes.
 
-    ```gn
-    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client_sync/BUILD.gn" region_tag="package" %}
+    ```bazel
+    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client_sync/BUILD.bazel" region_tag="package" %}
     ```
 
 ### Building the client {#build}
@@ -108,7 +108,7 @@ server implementation.
 
 An important point to note here is that this code assumes that the component's
 namespace already contains an instance of the `Echo` protocol. When
-[running the example](#run) at the end of the tutorial, a
+[running the example](#run-the-client) at the end of the tutorial, a
 [realm][glossary.realm] component is used to route the protocol from the server
 and offer it to the client component.
 
@@ -239,7 +239,7 @@ There are also differences in pointers vs references and argument structure:
   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client_sync/main.cc" region_tag="send-string-wire-first-line" adjust_indentation="auto" %}
   ```
 
-## Run the client
+## Run the client {#run-the-client}
 
 In order for the client and server to communicate using the `Echo` protocol,
 component framework must route the `fuchsia.examples.Echo` capability from the
@@ -347,6 +347,6 @@ checkout at [`//examples/fidl/cpp/client_sync/wire`][cpp-wire-client-src].
 [sync-client]: /docs/reference/fidl/bindings/cpp-bindings.md#sync-client
 [event-handlers]: /docs/reference/fidl/bindings/cpp-bindings.md#events
 [natural-types]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#using-natural
-[natural-structs]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#natural_structs
-[natural-tables]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#natural_tables
+[natural-structs]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#natural-structs
+[natural-tables]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#natural-tables
 [wire-types]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#using-wire

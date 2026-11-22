@@ -171,24 +171,24 @@ struct WireTypeForNaturalType<::test_bindingsdenylist::OnlyAppearsInImportingLib
 };
 
 template <>
-struct WireNaturalConversionTraits<::test_bindingsdenylist::wire::OnlyLlcpp, ::test_bindingsdenylist::OnlyLlcpp> {
-  static ::test_bindingsdenylist::OnlyLlcpp ToNatural(::test_bindingsdenylist::wire::OnlyLlcpp src);
-  static ::test_bindingsdenylist::wire::OnlyLlcpp ToWire(fidl::AnyArena& arena, ::test_bindingsdenylist::OnlyLlcpp src);
+struct WireNaturalConversionTraits<::test_bindingsdenylist::wire::OnlyCpp, ::test_bindingsdenylist::OnlyCpp> {
+  static ::test_bindingsdenylist::OnlyCpp ToNatural(::test_bindingsdenylist::wire::OnlyCpp src);
+  static ::test_bindingsdenylist::wire::OnlyCpp ToWire(fidl::AnyArena& arena, ::test_bindingsdenylist::OnlyCpp src);
 };
 
 template <>
-struct WireNaturalConversionTraits<::fidl::WireOptional<::test_bindingsdenylist::wire::OnlyLlcpp>, std::unique_ptr<::test_bindingsdenylist::OnlyLlcpp>> {
-  static std::unique_ptr<::test_bindingsdenylist::OnlyLlcpp> ToNatural(::fidl::WireOptional<::test_bindingsdenylist::wire::OnlyLlcpp> src);
-  static ::fidl::WireOptional<::test_bindingsdenylist::wire::OnlyLlcpp> ToWire(fidl::AnyArena& arena, std::unique_ptr<::test_bindingsdenylist::OnlyLlcpp> src);
+struct WireNaturalConversionTraits<::fidl::WireOptional<::test_bindingsdenylist::wire::OnlyCpp>, std::unique_ptr<::test_bindingsdenylist::OnlyCpp>> {
+  static std::unique_ptr<::test_bindingsdenylist::OnlyCpp> ToNatural(::fidl::WireOptional<::test_bindingsdenylist::wire::OnlyCpp> src);
+  static ::fidl::WireOptional<::test_bindingsdenylist::wire::OnlyCpp> ToWire(fidl::AnyArena& arena, std::unique_ptr<::test_bindingsdenylist::OnlyCpp> src);
 };
 
 template <>
-struct NaturalTypeForWireType<::test_bindingsdenylist::wire::OnlyLlcpp> {
-  using type = ::test_bindingsdenylist::OnlyLlcpp;
+struct NaturalTypeForWireType<::test_bindingsdenylist::wire::OnlyCpp> {
+  using type = ::test_bindingsdenylist::OnlyCpp;
 };
 template <>
-struct WireTypeForNaturalType<::test_bindingsdenylist::OnlyLlcpp> {
-  using type = ::test_bindingsdenylist::wire::OnlyLlcpp;
+struct WireTypeForNaturalType<::test_bindingsdenylist::OnlyCpp> {
+  using type = ::test_bindingsdenylist::wire::OnlyCpp;
 };
 
 template <>

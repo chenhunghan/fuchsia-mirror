@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//src/developer/ffx/build/ffx_tool.gni")
+
+if (is_host) {
+  # LINT.IfChange
+  bazel_ffx_tool("ffx_agent") {
+    output_name = "ffx-agent"
+  }
+  # LINT.ThenChange(BUILD.bazel)
+}
+
+group("agent") {
+  public_deps = [
+    ":ffx_agent($host_toolchain)",
+    ":ffx_agent_host_tool($host_toolchain)",
+  ]
+}
+
+group("bin") {
+  public_deps = [ ":ffx_agent_versioned($host_toolchain)" ]
+}

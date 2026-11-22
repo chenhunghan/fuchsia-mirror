@@ -24,14 +24,28 @@ bool TestAndSetNotAFdr(const std::string& not_a_fdr_file = kNotAFdrFile);
 // Moves the file to |to| from |from|.
 void MoveFile(const std::string& from, const std::string& to);
 
+// Moves the file at |from| to |to|, falling back to moving |legacy_from| if |from| does not exist.
+// Deletes |legacy_from| if |from| exists.
+void MoveFileWithFallback(const std::string& from, const std::string& legacy_from,
+                          const std::string& to);
+
 // Feedback data
 //
 // Decompress and concatenate the logs from the previous boot in |dir| and store them at
 // |write_path|. Also logs metrics about the previous boot logs to |cobalt|.
-void CreatePreviousLogsFile(cobalt::Logger* cobalt, StorageSize max_decompressed_size,
-                            std::optional<zx::duration> last_boot_uptime,
-                            const std::string& dir = kCurrentLogsDir,
-                            const std::string& write_path = kPreviousLogsFilePath);
+//
+// Returns the timestamp of the last message in the previous boot logs, if any, even if writing
+// |write_path| fails.
+std::optional<zx::time_boot> CreatePreviousLogsFile(
+    cobalt::Logger* cobalt, StorageSize max_decompressed_size,
+    const std::string& dir = kCurrentLogsDir,
+    const std::string& write_path = kPreviousLogsFilePath);
+
+// Logs to |cobalt| the difference between |last_boot_uptime| and |last_log_timestamp|, the
+// timestamp of the last message in the previous boot logs.
+void LogPreviousBootLogLastTimestampDelta(cobalt::Logger* cobalt,
+                                          std::optional<zx::time_boot> last_log_timestamp,
+                                          std::optional<zx::duration> last_boot_uptime);
 
 // Move the boot id stored at |current_boot_id_path| to |previous_boot_id_path| and write a new
 // boot id to |current_boot_id_path|.

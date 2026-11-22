@@ -19,6 +19,8 @@ pub const TEST_DEPRECATED_ALLOWED_PACKAGES_FACET_KEY: &'static str =
 pub(crate) struct SuiteFacets {
     pub collection: &'static str,
     pub deprecated_allowed_packages: Option<Vec<String>>,
+    /// The runner declared by the test root, if any.
+    pub runner: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -73,7 +75,18 @@ fn parse_facet(decl: &fdecl::Component) -> Result<SuiteFacets, FacetError> {
             }
         }
     }
-    Ok(SuiteFacets { collection, deprecated_allowed_packages })
+    Ok(SuiteFacets { collection, deprecated_allowed_packages, runner: parse_runner(decl) })
+}
+
+/// Returns `program.runner`, or else the name of the runner in `uses`.
+fn parse_runner(decl: &fdecl::Component) -> Option<String> {
+    if let Some(runner) = decl.program.as_ref().and_then(|program| program.runner.as_ref()) {
+        return Some(runner.clone());
+    }
+    decl.uses.as_ref()?.iter().find_map(|use_| match use_ {
+        fdecl::Use::Runner(fdecl::UseRunner { source_name: Some(name), .. }) => Some(name.clone()),
+        _ => None,
+    })
 }
 
 fn parse_suite_collection(entry: &fdata::DictionaryEntry) -> Result<&'static str, FacetError> {
@@ -395,5 +408,42 @@ mod test {
             ..Default::default()
         });
         let _ = parse_facet(&decl).expect_err("this should have failed");
+    }
+
+    #[test]
+    fn parse_runner_works() {
+        // No runner.
+        let mut decl = fdecl::Component::default();
+        assert_eq!(parse_facet(&decl).unwrap().runner, None);
+
+        // `use` only.
+        decl.uses = Some(vec![
+            fdecl::Use::Protocol(fdecl::UseProtocol {
+                source_name: Some("fuchsia.logger.LogSink".into()),
+                ..Default::default()
+            }),
+            fdecl::Use::Runner(fdecl::UseRunner {
+                source_name: Some("rust_test_runner".into()),
+                ..Default::default()
+            }),
+        ]);
+        assert_eq!(parse_facet(&decl).unwrap().runner, Some("rust_test_runner".into()));
+
+        // Program without a runner falls back to `use`.
+        decl.program = Some(fdecl::Program::default());
+        assert_eq!(parse_facet(&decl).unwrap().runner, Some("rust_test_runner".into()));
+
+        // `program.runner` only.
+        decl.uses = None;
+        decl.program =
+            Some(fdecl::Program { runner: Some("gtest_runner".into()), ..Default::default() });
+        assert_eq!(parse_facet(&decl).unwrap().runner, Some("gtest_runner".into()));
+
+        // `program.runner` wins over `use`.
+        decl.uses = Some(vec![fdecl::Use::Runner(fdecl::UseRunner {
+            source_name: Some("rust_test_runner".into()),
+            ..Default::default()
+        })]);
+        assert_eq!(parse_facet(&decl).unwrap().runner, Some("gtest_runner".into()));
     }
 }

@@ -12,6 +12,10 @@ fuchsia_driver_dml("spi-dml") {
   driver_name = "spi"
 }
 
+fuchsia_driver_dml_cpp_parser("spi-metadata") {
+  dml_label = ":spi-dml"
+}
+
 driver_bind_rules("spi_bind") {
   dml_label = ":spi-dml"
   bind_output = "spi.bindbc"
@@ -44,6 +48,7 @@ source_set("common") {
     "spi.h",
   ]
   deps = [
+    ":spi-metadata",
     ":spi_bind",
     "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_cpp",
     "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_cpp",
@@ -83,7 +88,6 @@ fuchsia_driver_component("spi") {
     "//src/devices/bus/drivers/platform/test:*",
     "//src/devices/spi:drivers",
   ]
-  info = "meta/spi-info.json"
   component_name = "spi"
   dml_label = ":spi-dml"
   deps = [ ":spi-driver" ]
@@ -99,9 +103,11 @@ test("spi-test-bin") {
   sources = [ "spi-test.cc" ]
   deps = [
     ":common",
+    "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_cpp",
     "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_cpp",
     "//sdk/lib/driver/metadata/cpp",
     "//sdk/lib/driver/testing/cpp",
+    "//src/devices/bind/fuchsia:fuchsia_cpp",
     "//src/lib/ddk:ddk_metadata",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/predicates",

@@ -4,15 +4,67 @@
 
 #include "src/ui/lib/escher/vk/impl/descriptor_set_allocator.h"
 
+#include "src/ui/lib/escher/escher.h"
+#include "src/ui/lib/escher/impl/command_buffer_sequencer.h"
 #include "src/ui/lib/escher/impl/vulkan_utils.h"
+#include "src/ui/lib/escher/util/trace_macros.h"
 #include "src/ui/lib/escher/vk/vulkan_limits.h"
 
 namespace escher {
 namespace impl {
 
+namespace {
+constexpr uint64_t kCommandBufferWaitTimeoutNs = 1'000'000'000ULL;
+}  // namespace
+
 DescriptorSetAllocator::DescriptorSetAllocator(vk::Device device, DescriptorSetLayout layout,
+                                               EscherWeakPtr escher,
                                                const SamplerPtr& immutable_sampler)
-    : cache_(device, layout, immutable_sampler) {}
+    : cache_(device, layout, immutable_sampler), escher_(std::move(escher)) {}
+
+void DescriptorSetAllocator::ReclaimUnretiredSets() {
+  TRACE_DURATION("gfx", "escher::impl::DescriptorSetAllocator::ReclaimUnretiredSets");
+  if (!escher_) {
+    return;
+  }
+
+  const CommandBufferSequencer* sequencer = escher_->command_buffer_sequencer();
+
+  // Evict sets whose command buffers are already known to have finished; if
+  // that frees nothing, poll GPU fences without blocking and evict again.
+  cache_.EvictCompletedUnretiredItems(sequencer->last_finished_sequence_number());
+  if (cache_.object_pool().vacant_count() > 0) {
+    return;
+  }
+  escher_->CleanupCommandBufferPools();
+  cache_.EvictCompletedUnretiredItems(sequencer->last_finished_sequence_number());
+
+  // Below `kMaxPoolBlocksBeforeWait` blocks, let `ObjectPool` allocate a new
+  // block to absorb a transient GPU stall. At the cap, wait for the oldest
+  // pending command buffers instead of growing without bound. Each wait is
+  // bounded by `kCommandBufferWaitTimeoutNs`, and the loop stops as soon as a
+  // set is reclaimed or a wait makes no progress (timeout, unsubmitted command
+  // buffer, re-entrant call during that pool's `Cleanup()`, or device loss), in
+  // which case `ObjectPool` allocates a new block.
+  if (cache_.object_pool().num_blocks() < kMaxPoolBlocksBeforeWait) {
+    return;
+  }
+  while (cache_.object_pool().vacant_count() == 0 && cache_.HasUnretiredItems()) {
+    const uint64_t prev_finished = sequencer->last_finished_sequence_number();
+    if (!escher_->WaitOnOldestPendingCommandBuffer(kCommandBufferWaitTimeoutNs)) {
+      break;
+    }
+    escher_->CleanupCommandBufferPools();
+    cache_.EvictCompletedUnretiredItems(sequencer->last_finished_sequence_number());
+    // `last_finished_sequence_number()` can stay unchanged after
+    // `WaitOnOldestPendingCommandBuffer()` returns true, for example while an
+    // older sequence number held by a `CommandBufferPool` outside `Escher`'s
+    // pools (sharing the same `CommandBufferSequencer`) is still unfinished.
+    if (sequencer->last_finished_sequence_number() <= prev_finished) {
+      break;
+    }
+  }
+}
 
 DescriptorSetAllocator::PoolPolicy::PoolPolicy(vk::Device device, DescriptorSetLayout layout,
                                                const SamplerPtr& immutable_sampler)

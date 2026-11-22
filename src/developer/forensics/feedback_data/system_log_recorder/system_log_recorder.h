@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <queue>
 #include <string>
 #include <unordered_map>
@@ -40,6 +41,11 @@ class SystemLogRecorder : public fidl::Server<fuchsia_feedback_internal::SystemL
     zx::duration period;
     StorageSize max_write_size;
     std::string logs_dir;
+
+    // Set only when Feedback retains more than one previous boot, in which case those boots' logs
+    // share the budget with the current boot's logs. See SystemLogWriter.
+    std::optional<std::string> previous_logs_dir;
+
     size_t max_num_files;
     StorageSize total_log_size;
     StorageSize fallback_buffer_size;

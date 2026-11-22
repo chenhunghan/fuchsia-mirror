@@ -8,6 +8,7 @@ use fdomain_client::fidl::Proxy;
 use ffx_command_error::Result;
 use fho::{FhoEnvironment, TryFromEnv as _};
 
+mod fho_target_environment;
 mod from_toolbox;
 mod host_ssh_addr;
 mod nodename;
@@ -16,6 +17,7 @@ mod ssh_addr;
 mod target_info_query;
 mod with_moniker;
 
+pub use fho_target_environment::{FhoTargetEnvironment, target_interface};
 pub use from_toolbox::toolbox;
 pub use host_ssh_addr::HostAddrHolder;
 pub use nodename::NodenameHolder;

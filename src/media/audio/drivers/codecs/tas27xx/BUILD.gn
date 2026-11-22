@@ -49,7 +49,6 @@ fuchsia_cc_driver("tas27xx-driver") {
 fuchsia_driver_component("tas27xx") {
   component_name = "tas27xx"
   deps = [ ":tas27xx-driver" ]
-  info = "meta/tas27xx-info.json"
   manifest = "meta/tas27xx.cml"
 }
 

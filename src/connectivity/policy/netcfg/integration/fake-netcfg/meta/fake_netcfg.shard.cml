@@ -7,7 +7,7 @@
     children: [
         {
             name: "netcfg",
-            url: "#meta/fake_netcfg.cm",
+            url: "fake-netcfg#meta/fake_netcfg.cm",
         },
     ],
 }

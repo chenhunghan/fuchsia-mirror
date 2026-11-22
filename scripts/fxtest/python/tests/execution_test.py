@@ -417,10 +417,10 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(test.environment())
         self.assertTrue(test.should_symbolize())
 
-    async def test_test_execution_component_with_experimental_new_path(
+    async def test_test_execution_pure_device_test_with_path(
         self,
     ) -> None:
-        """Test the usage of the TestExecution wrapper on a component test while using test interface"""
+        """Test the usage of the TestExecution wrapper on a pure device test with path"""
 
         exec_env = _make_exec_env("/fuchsia", "/out/fuchsia")
 
@@ -430,8 +430,9 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
                     tests_json_file.TestSection(
                         "foo",
                         "//foo",
-                        "fuchsia",
-                        new_path="bin/test_component_wrapper.sh",
+                        "linux",
+                        package_url="fuchsia-pkg://fuchsia.com/foo#meta/foo_test.cm",
+                        path="bin/test_component_wrapper.sh",
                     )
                 ),
                 test_list_file.TestListEntry(
@@ -446,8 +447,13 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
             exec_env,
-            args.parse_args(["--use-test-pilot", "--", "--some_extra_arg"]),
+            args.parse_args(["--", "--some_extra_arg"]),
         )
+
+        self.assertTrue(test._is_pure_device_test())
+        self.assertFalse(test.is_host_test())
+        self.assertTrue(test._test.is_pure_device_test())
+        self.assertFalse(test._test.is_e2e_test())
 
         command_line = test.command_line()
         self.assertEqual(
@@ -470,15 +476,279 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
         }
         self.assertTrue(expected_env_subset.items() <= env.items())
 
-        # without --use-test-pilot flag
+    @parameterized.expand(
+        (
+            (
+                "pure_device_test_with_path",
+                tests_json_file.TestEntry(
+                    tests_json_file.TestSection(
+                        "foo",
+                        "//foo",
+                        "linux",
+                        package_url="fuchsia-pkg://fuchsia.com/foo#meta/foo_test.cm",
+                        path="foo_foo_test_test.sh",
+                    ),
+                    environments=[
+                        tests_json_file.EnvironmentEntry(
+                            dimensions=tests_json_file.DimensionsEntry(
+                                device_type="AEMU"
+                            )
+                        )
+                    ],
+                    expects_ssh=True,
+                ),
+                test_list_file.TestListExecutionEntry(
+                    "fuchsia-pkg://fuchsia.com/foo#meta/foo_test.cm",
+                ),
+                True,
+                True,
+            ),
+            (
+                "pure_device_test_without_path",
+                tests_json_file.TestEntry(
+                    tests_json_file.TestSection(
+                        "foo",
+                        "//foo",
+                        "fuchsia",
+                        package_url="fuchsia-pkg://fuchsia.com/foo#meta/foo_test.cm",
+                    ),
+                    environments=[
+                        tests_json_file.EnvironmentEntry(
+                            dimensions=tests_json_file.DimensionsEntry(
+                                device_type="AEMU"
+                            )
+                        )
+                    ],
+                ),
+                test_list_file.TestListExecutionEntry(
+                    "fuchsia-pkg://fuchsia.com/foo#meta/foo_test.cm",
+                ),
+                True,
+                False,
+            ),
+            (
+                "pure_device_test_with_empty_path",
+                tests_json_file.TestEntry(
+                    tests_json_file.TestSection(
+                        "foo",
+                        "//foo",
+                        "linux",
+                        package_url="fuchsia-pkg://fuchsia.com/foo#meta/foo_test.cm",
+                        path="",
+                    ),
+                ),
+                test_list_file.TestListExecutionEntry(
+                    "fuchsia-pkg://fuchsia.com/foo#meta/foo_test.cm",
+                ),
+                True,
+                False,
+            ),
+            (
+                "bootfs_component",
+                tests_json_file.TestEntry(
+                    tests_json_file.TestSection(
+                        "foo",
+                        "//foo",
+                        "fuchsia",
+                        package_url="fuchsia-boot:///foo#meta/foo_test.cm",
+                    ),
+                    expects_ssh=False,
+                ),
+                test_list_file.TestListExecutionEntry(
+                    "fuchsia-boot:///foo#meta/foo_test.cm",
+                ),
+                True,
+                False,
+            ),
+            (
+                "pure_host_test",
+                tests_json_file.TestEntry(
+                    tests_json_file.TestSection(
+                        "foo",
+                        "//foo",
+                        "linux",
+                        path="host_x64/foo",
+                    ),
+                ),
+                None,
+                False,
+                False,
+            ),
+            (
+                "e2e_test",
+                tests_json_file.TestEntry(
+                    tests_json_file.TestSection(
+                        "foo",
+                        "//foo",
+                        "linux",
+                        path="host_x64/foo_e2e",
+                    ),
+                    environments=[
+                        tests_json_file.EnvironmentEntry(
+                            dimensions=tests_json_file.DimensionsEntry(
+                                device_type="AEMU"
+                            )
+                        )
+                    ],
+                ),
+                None,
+                False,
+                False,
+            ),
+            (
+                "boot_test",
+                tests_json_file.TestEntry(
+                    tests_json_file.TestSection(
+                        "foo",
+                        "//foo",
+                        "linux",
+                        path="boot_test.sh",
+                    ),
+                    environments=[
+                        tests_json_file.EnvironmentEntry(
+                            dimensions=tests_json_file.DimensionsEntry(
+                                device_type="AEMU"
+                            )
+                        )
+                    ],
+                    is_boot_test=True,
+                ),
+                None,
+                False,
+                False,
+            ),
+            (
+                "bootfs_test",
+                tests_json_file.TestEntry(
+                    tests_json_file.TestSection(
+                        "foo",
+                        "//foo",
+                        "fuchsia",
+                        path="/boot/test/foo",
+                    ),
+                    expects_ssh=False,
+                ),
+                None,
+                False,
+                False,
+            ),
+        )
+    )
+    def test_pure_device_test_execution_classification(
+        self,
+        _name: str,
+        entry: tests_json_file.TestEntry,
+        execution_entry: test_list_file.TestListExecutionEntry | None,
+        expected_is_pure_device: bool,
+        expected_uses_pure_device_path: bool,
+    ) -> None:
+        """Test classification and path execution for pure device and other test types."""
+        exec_env = _make_exec_env("/fuchsia", "/out/fuchsia")
+        device_env = environment.DeviceEnvironment(
+            address="127.0.0.1",
+            port="39259",
+            name="fuchsia-target",
+            private_key_path="/path/to/fuchsia_ed25519",
+        )
+        test = execution.TestExecution(
+            test_list_file.Test(
+                entry,
+                test_list_file.TestListEntry(
+                    "foo", [], execution=execution_entry
+                ),
+            ),
+            exec_env,
+            args.parse_args(["--no-use-package-hash"]),
+            device_env=device_env,
+        )
+        self.assertEqual(test._is_pure_device_test(), expected_is_pure_device)
+        env = test.environment()
+        cmd = test.command_line()
+        if expected_uses_pure_device_path:
+            assert entry.test.path is not None
+            self.assertEqual(
+                cmd[0], os.path.join("/out/fuchsia", entry.test.path)
+            )
+            assert env is not None
+            self.assertEqual(env.get("FUCHSIA_HOST_TOOLS"), "./host_x64")
+            self.assertEqual(env.get("FUCHSIA_DEVICE_ADDR"), "127.0.0.1:39259")
+        else:
+            if expected_is_pure_device:
+                self.assertEqual(
+                    cmd[:5], ["fx", "--dir", "/out/fuchsia", "ffx", "test"]
+                )
+                self.assertIsNone(env)
+            else:
+                self.assertEqual(cmd, [entry.test.path])
+                assert env is not None
+                self.assertNotIn("FUCHSIA_HOST_TOOLS", env)
+
+    @parameterized.expand(
+        (
+            ("ipv4_with_port", "127.0.0.1", "39259", "127.0.0.1:39259"),
+            ("ipv4_without_port", "127.0.0.1", "", "127.0.0.1"),
+            (
+                "bracketed_ipv6_with_scope_and_port",
+                "[fe80::1%eth0]",
+                "8022",
+                "[fe80::1%eth0]:8022",
+            ),
+            (
+                "bracketed_ipv6_without_port",
+                "[fe80::1%eth0]",
+                "",
+                "[fe80::1%eth0]",
+            ),
+            (
+                "unbracketed_ipv6_with_port",
+                "fe80::1",
+                "8022",
+                "[fe80::1]:8022",
+            ),
+            (
+                "unbracketed_ipv6_with_scope_and_port",
+                "fe80::1%eth0",
+                "8022",
+                "[fe80::1%eth0]:8022",
+            ),
+            ("unbracketed_ipv6_without_port", "fe80::1", "", "fe80::1"),
+            (
+                "unbracketed_ipv6_with_scope_without_port",
+                "fe80::1%eth0",
+                "",
+                "fe80::1%eth0",
+            ),
+            ("hostname_with_port", "localhost", "8022", "localhost:8022"),
+            ("hostname_without_port", "localhost", "", "localhost"),
+            ("usb_cid", "usb:cid", "3", "usb:cid:3"),
+            ("usb_cid_22", "usb:cid", "22", "usb:cid:22"),
+            ("vsock_cid", "vsock:cid", "4", "vsock:cid:4"),
+        )
+    )
+    def test_pure_device_test_environment_device_addr(
+        self,
+        _name: str,
+        address: str,
+        port: str,
+        expected_target_addr: str,
+    ) -> None:
+        """Test that pure device tests with path set FUCHSIA_DEVICE_ADDR to a complete TargetAddr."""
+        exec_env = _make_exec_env("/fuchsia", "/out/fuchsia")
+        device_env = environment.DeviceEnvironment(
+            address=address,
+            port=port,
+            name="fuchsia-target",
+            private_key_path="/path/to/fuchsia_ed25519",
+        )
         test = execution.TestExecution(
             test_list_file.Test(
                 tests_json_file.TestEntry(
                     tests_json_file.TestSection(
                         "foo",
                         "//foo",
-                        "fuchsia",
-                        new_path="bin/test_component_wrapper.sh",
+                        "linux",
+                        package_url="fuchsia-pkg://fuchsia.com/foo#meta/foo_test.cm",
+                        path="bin/test_component_wrapper.sh",
                     )
                 ),
                 test_list_file.TestListEntry(
@@ -486,39 +756,78 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
                     [],
                     test_list_file.TestListExecutionEntry(
                         "fuchsia-pkg://fuchsia.com/foo#meta/foo_test.cm",
-                        realm="foo_tests",
-                        max_severity_logs="INFO",
-                        min_severity_logs="TRACE",
                     ),
                 ),
             ),
             exec_env,
-            args.parse_args(
-                ["--no-use-package-hash", "--", "--some_extra_arg"]
+            args.parse_args([]),
+            device_env=device_env,
+        )
+
+        self.assertTrue(test._is_pure_device_test())
+        self.assertFalse(test.is_host_test())
+        env = test.environment()
+        assert env is not None
+        self.assertDictEqual(
+            env,
+            {
+                "CWD": "/out/fuchsia",
+                "FUCHSIA_DEVICE_ADDR": expected_target_addr,
+                "FUCHSIA_SSH_KEY": "/path/to/fuchsia_ed25519",
+                "FUCHSIA_HOST_TOOLS": "./host_x64",
+            },
+        )
+
+    def test_e2e_environment_preserves_split_addr_and_port(
+        self,
+    ) -> None:
+        """Test that E2E tests are not treated as pure device tests and preserve split address and port env vars."""
+        exec_env = _make_exec_env("/fuchsia", "/out/fuchsia")
+        device_env = environment.DeviceEnvironment(
+            address="127.0.0.1",
+            port="39259",
+            name="fuchsia-emulator",
+            private_key_path="/path/to/fuchsia_ed25519",
+        )
+        test = execution.TestExecution(
+            test_list_file.Test(
+                tests_json_file.TestEntry(
+                    tests_json_file.TestSection(
+                        "foo",
+                        "//foo",
+                        "linux",
+                        path="host_x64/foo_e2e",
+                    ),
+                    environments=[
+                        tests_json_file.EnvironmentEntry(
+                            dimensions=tests_json_file.DimensionsEntry(
+                                device_type="AEMU"
+                            )
+                        )
+                    ],
+                ),
+                test_list_file.TestListEntry("foo", [], execution=None),
             ),
+            exec_env,
+            args.parse_args([]),
+            device_env=device_env,
         )
 
-        command_line = test.command_line()
-        self.assertContainsSublist(
-            [
-                "fx",
-                "--dir",
-                "/out/fuchsia",
-                "ffx",
-                "test",
-                "run",
-                "--realm",
-                "foo_tests",
-            ],
-            command_line,
+        self.assertFalse(test._is_pure_device_test())
+        self.assertTrue(test._test.is_e2e_test())
+        self.assertFalse(test.is_host_test())
+        env = test.environment()
+        assert env is not None
+        self.assertDictEqual(
+            env,
+            {
+                "CWD": "/out/fuchsia",
+                "FUCHSIA_DEVICE_ADDR": "127.0.0.1",
+                "FUCHSIA_SSH_PORT": "39259",
+                "FUCHSIA_SSH_KEY": "/path/to/fuchsia_ed25519",
+                "FUCHSIA_NODENAME": "fuchsia-emulator",
+            },
         )
-        self.assertContainsSublist(
-            ["fuchsia-pkg://fuchsia.com/foo#meta/foo_test.cm"], command_line
-        )
-
-        self.assertContainsSublist(["--", "--some_extra_arg"], command_line)
-
-        self.assertIsNone(test.environment())
 
     # TODO(b/444203259): Failing on debian 12 Linux. Re-enable once a fix is implemented.
     # async def test_test_execution_host(self) -> None:
@@ -1429,6 +1738,37 @@ class TestExecutionUtils(unittest.IsolatedAsyncioTestCase):
         ip, port = execution._parse_device_address(target_line)
         self.assertEqual(ip, expected_ip)
         self.assertEqual(port, expected_port)
+
+    @parameterized.expand(
+        (
+            ("slirp_ipv4", "127.0.0.1:39259", "127.0.0.1:39259"),
+            (
+                "bracketed_ipv6_with_scope_and_port",
+                "[fe80::1%eth0]:8022",
+                "[fe80::1%eth0]:8022",
+            ),
+            (
+                "unbracketed_ipv6_with_scope",
+                "fe80::1%eth0",
+                "[fe80::1%eth0]:22",
+            ),
+            ("unbracketed_ipv6", "fe80::1", "[fe80::1]:22"),
+            ("hostname_with_port", "localhost:8022", "localhost:8022"),
+            ("usb_cid", "usb:cid:3", "usb:cid:3"),
+            ("vsock_cid", "vsock:cid:4", "vsock:cid:4"),
+        )
+    )
+    def test_parse_and_format_target_address_roundtrip(
+        self,
+        _name: str,
+        target_line: str,
+        expected_formatted: str,
+    ) -> None:
+        """Test parsed device addresses format back into valid ffx target addresses."""
+        ip, port = execution._parse_device_address(target_line)
+        self.assertEqual(
+            execution._format_target_address(ip, port), expected_formatted
+        )
 
     @parameterized.expand(
         [

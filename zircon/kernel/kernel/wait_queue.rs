@@ -12,7 +12,7 @@ use crate::kconcurrent::{
 };
 use crate::kernel::deadline::Deadline;
 use crate::kernel::owned_wait_queue::{
-    OWNED_MAGIC, OwnedWaitQueue, REMOVE_SINGLE_EDGE_OP, ThreadUnblockList,
+    OWNED_MAGIC, OwnedWaitQueue, PiChainNodeRef, REMOVE_SINGLE_EDGE_OP, ThreadUnblockList,
 };
 use crate::kernel::scheduler::{self, SchedDuration, WaitQueueInheritedSchedulerState};
 use crate::kernel::scheduler_state::ThreadStateKind;
@@ -142,16 +142,11 @@ impl From<bindings::Interruptible> for Interruptible {
 }
 
 /// Whether to force base profile inheritance.
-#[repr(u8)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ForceInheritance {
     No,
     Yes,
 }
-static_assert!(ForceInheritance::No as u8 == bindings::ForceInheritance::No as u8);
-static_assert!(ForceInheritance::Yes as u8 == bindings::ForceInheritance::Yes as u8);
-static_assert!(size_of::<ForceInheritance>() == size_of::<bindings::ForceInheritance>());
-static_assert!(align_of::<ForceInheritance>() == align_of::<bindings::ForceInheritance>());
 
 /// Primary key used to sort threads in a [`WaitQueueCollection`].
 pub type PrimaryKey = InstantMono;
@@ -205,7 +200,8 @@ impl fbl::WavlTreeAugmentedInvariantObserverTraits for MinRelativeDeadlineTraits
     unsafe fn get_node_value(node: &Self::Target) -> Self::Value {
         // SAFETY: Per this hook's contract, `node` is either blocked in the queue being operated
         // on (whose lock is held) or its own thread lock is held; either excludes concurrent
-        // mutation of its scheduler state.
+        // mutation of its effective profile. The reference is only used with the
+        // `effective_profile_*` accessors and does not escape this function.
         let scheduler_state = unsafe { node.scheduler_state_unchecked() };
         if scheduler_state.effective_profile_is_deadline() {
             return scheduler_state.effective_profile_deadline_ns();
@@ -252,6 +248,7 @@ pub(crate) type BlockedThreadTree = fbl::WavlTree<
 
 /// Encapsulation of all the per-thread state for the [`WaitQueueCollection`] data structure,
 /// matching C++ `WaitQueueCollection::ThreadState`.
+#[pin_data(PinnedDrop)]
 #[repr(C)]
 pub struct ThreadState {
     /// If blocked, a pointer to the `WaitQueueBase` the `Thread` is on.
@@ -262,6 +259,7 @@ pub struct ThreadState {
     // `unsafe` `set_blocking_wait_queue`.
     blocking_wait_queue: KCell<Option<NonNull<WaitQueueBase>>, ThreadLockClass>,
     /// Node state for existing in `WaitQueueCollection::threads`.
+    #[pin]
     blocked_threads_tree_node: fbl::WavlTreeNode<Thread>,
     /// Primary key used for determining our position in the collection of blocked threads.
     /// Pre-computed during insert in order to save time during insert, rebalance, and search
@@ -289,6 +287,9 @@ pub struct ThreadState {
     // queue's lock (whether or not the queue currently uses it as its storage); otherwise it is
     // accessed only while holding the enclosing `Thread`'s lock.
     inherited_scheduler_state_storage: UnsafeCell<WaitQueueInheritedSchedulerState>,
+    /// Preserves `!Unpin` because `blocked_threads_tree_node` holds intrusive links to `self`.
+    #[pin]
+    _pin: PhantomData<PhantomPinned>,
 }
 
 /// Alias for [`ThreadState`].
@@ -333,6 +334,24 @@ static_assert!(
 );
 
 impl ThreadState {
+    /// Returns an in-place initializer for a default [`ThreadState`], matching C++
+    /// `WaitQueueCollection::ThreadState::ThreadState()`'s member initializers.
+    #[inline]
+    pub fn init() -> impl PinInit<Self, Infallible> {
+        pin_init::pin_init!(Self {
+            blocking_wait_queue: KCell::new(None),
+            blocked_threads_tree_node: fbl::WavlTreeNode::new(),
+            blocked_threads_tree_sort_key: UnsafeCell::new(PRIMARY_KEY_ZERO),
+            subtree_min_deadline: UnsafeCell::new(DurationMono::INFINITE),
+            blocked_status: KCell::new(zx_types::ZX_OK),
+            interruptible: KCell::new(Interruptible::No),
+            inherited_scheduler_state_storage: UnsafeCell::new(
+                WaitQueueInheritedSchedulerState::default(),
+            ),
+            _pin: PhantomData,
+        })
+    }
+
     /// Returns `true` if the thread is currently in a wait queue's tree.
     ///
     /// Deliberately deviates from C++ `InWaitQueue()`, which reads
@@ -343,6 +362,15 @@ impl ThreadState {
     #[inline]
     pub fn in_wait_queue(&self, token: &LockToken<'_, ThreadLockClass>) -> bool {
         self.blocking_wait_queue(token).is_some()
+    }
+
+    /// Debug-asserts that the thread is not blocked in any wait queue.
+    ///
+    /// Checking `blocking_wait_queue(token).is_none()` also establishes `!self.in_wait_queue(token)`
+    /// (see [`Self::in_wait_queue`]).
+    #[inline]
+    pub fn assert_not_blocked(&self, token: &LockToken<'_, ThreadLockClass>) {
+        debug_assert!(self.blocking_wait_queue(token).is_none());
     }
 
     /// Returns the return code if woken up abnormally from suspend, sleep, or block.
@@ -428,6 +456,78 @@ impl ThreadState {
         *unsafe { self.interruptible.get_mut(token) } = interruptible;
     }
 
+    /// Blocks `current_thread` in the scheduler after recording `status` and `interruptible` on
+    /// `self`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - `self` is `current_thread.owner()`'s `wait_queue_state`.
+    /// - `current_thread.owner()` is the currently executing [`Thread`] on the current CPU in a
+    ///   blocked or sleeping state (`Blocked`, `BlockedReadLock`, or `Sleeping`), and blocking is
+    ///   permitted in the current context (no spinlocks held and blocking not disallowed).
+    /// - The active transaction `clt_token` is finalized with `current_thread.owner().lock()` as
+    ///   the only held chain lock.
+    #[inline]
+    pub unsafe fn block(
+        &self,
+        current_thread: &mut ChainLockProof<'_, Thread>,
+        interruptible: Interruptible,
+        status: Result<(), Status>,
+        clt_token: &ChainLockTransactionToken,
+    ) {
+        self.set_blocked_status(status, current_thread.token_mut());
+        self.set_interruptible(interruptible, current_thread.token_mut());
+        // SAFETY: Forwarded from the caller: `current_thread.owner()` is the currently executing
+        // thread in a blocked or sleeping state, blocking is permitted, and `clt_token` is
+        // finalized with `current_thread.owner().lock()` as the only held chain lock.
+        unsafe { scheduler::block(current_thread, clt_token) };
+        self.set_interruptible(Interruptible::No, current_thread.token_mut());
+    }
+
+    /// Unsleeps `thread` with `status` and unblocks it in the scheduler
+    /// (`WaitQueueCollection::ThreadState::Unsleep`).
+    ///
+    /// Takes `thread: ThreadPtr` so that no `&Thread` or `&ThreadState` reference remains live
+    /// across [`scheduler::unblock`], which releases `thread`'s lock (after which a detached
+    /// thread may wake on another CPU, exit, and free `thread` before `unblock` returns).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - `thread` points to a live, non-idle [`Thread`] whose lock is held by the active,
+    ///   finalized transaction `clt_token`, with no `&mut Thread`, guard, or proof for it live,
+    ///   and no `&Thread` live unless the caller otherwise keeps the thread alive; this call takes
+    ///   over releasing `thread`'s lock.
+    /// - The thread is not running and is in no run queue or wait queue.
+    /// - `thread` is not dereferenced after this call unless the caller otherwise keeps the thread
+    ///   alive.
+    /// - Interrupts are disabled, and either local preemption is disabled (`!preempt_is_enabled()`)
+    ///   or `thread`'s lock is the sole `ChainLock` held by the active transaction.
+    #[inline]
+    pub unsafe fn unsleep(
+        thread: ThreadPtr,
+        status: Result<(), Status>,
+        clt_token: &ChainLockTransactionToken,
+    ) {
+        {
+            // SAFETY: The caller guarantees `thread` is valid and live while its lock is held, and
+            // `t_ref` and `t_proof` are scoped to this block so no reference or proof remains live
+            // across `scheduler::unblock`.
+            let t_ref: &Thread = unsafe { thread.as_ref() };
+            #[cfg(debug_assertions)]
+            t_ref.lock().assert_held(clt_token);
+            // SAFETY: Guaranteed by caller (and verified by `assert_held` above in debug builds).
+            let mut t_proof = unsafe { ChainLockProof::assume_held_unchecked(t_ref) };
+            t_proof.wait_queue_state().set_blocked_status(status, t_proof.token_mut());
+        }
+        // SAFETY: Forwarded from the caller: `thread` is a live, non-idle thread not in any run
+        // queue or wait queue, its lock is held by the active, finalized transaction with no
+        // conflicting reference, guard, or proof live (`t_ref` and `t_proof` ended above), and
+        // interrupts are disabled.
+        unsafe { scheduler::unblock(thread, clt_token) };
+    }
+
     /// Returns a pointer to the storage used by an `OwnedWaitQueue`, but held within this thread,
     /// while the thread is blocked in the wait queue.
     #[inline]
@@ -435,11 +535,35 @@ impl ThreadState {
         // SAFETY: `UnsafeCell::get` never returns a null pointer.
         unsafe { NonNull::new_unchecked(self.inherited_scheduler_state_storage.get()) }
     }
+
+    /// Reads `(blocking_wait_queue, blocked_status, interruptible)` via raw pointers without
+    /// requiring a [`LockToken`] or materializing an [`Interruptible`] enum (so an invalid
+    /// discriminant in a corrupted [`Thread`] during panic does not cause UB).
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to readable [`ThreadState`] storage (either under the enclosing
+    /// [`Thread`]'s lock or during a kernel panic dump).
+    #[inline]
+    pub unsafe fn dump_fields_raw(this: *const Self) -> (*const WaitQueueBase, zx_status_t, bool) {
+        // SAFETY: `KCell` is `#[repr(transparent)]` over `UnsafeCell<T>`; the caller guarantees
+        // `this` points to readable storage, and reading `interruptible` as a `u8` avoids enum
+        // discriminant UB if the struct is corrupted during panic.
+        unsafe {
+            let wq = (&raw const (*this).blocking_wait_queue).cast::<*const WaitQueueBase>().read();
+            let status = (&raw const (*this).blocked_status).cast::<zx_status_t>().read();
+            let intr = (&raw const (*this).interruptible).cast::<u8>().read();
+            (wq, status, intr == Interruptible::Yes as u8)
+        }
+    }
 }
 
-impl Drop for ThreadState {
-    fn drop(&mut self) {
-        debug_assert!(self.blocking_wait_queue.get_inner_mut().is_none());
+#[pinned_drop]
+impl PinnedDrop for ThreadState {
+    fn drop(self: Pin<&mut Self>) {
+        let this = self.project();
+        debug_assert!(this.blocking_wait_queue.get_inner_mut().is_none());
+        this.inherited_scheduler_state_storage.get_mut().assert_is_reset();
     }
 }
 
@@ -460,7 +584,7 @@ fn wq_trace_depth(collection: *const WaitQueueCollection, depth: u32) {
 
 /// The collection of threads currently blocked in a wait queue.
 // Safety invariant: Every `Thread` in `threads` remains valid and alive for the duration of
-// its membership in `threads`, and any `&WaitQueueCollection` or `&mut WaitQueueCollection`
+// its membership in `threads`, and any `&WaitQueueCollection` or `Pin<&mut WaitQueueCollection>`
 // reference only exists while the containing `WaitQueueBase`'s `ChainLock`
 // (`WaitQueueLockClass`) is held (or under exclusive access in unit tests).
 #[pin_data(PinnedDrop)]
@@ -566,13 +690,14 @@ impl WaitQueueCollection {
     ///   equal to `DurationMono::INFINITE` when `debug_assertions` are enabled), and remains valid
     ///   and alive until it is removed from this collection.
     #[inline]
-    pub(crate) unsafe fn insert(&mut self, thread: &mut ChainLockProof<'_, Thread>) {
-        wq_trace_depth(self, self.count() + 1);
+    pub(crate) unsafe fn insert(self: Pin<&mut Self>, thread: &mut ChainLockProof<'_, Thread>) {
+        wq_trace_depth(&*self, self.count() + 1);
 
         let wq_state = &thread.owner().wait_queue_state;
-        // SAFETY: The thread's lock is held via `thread` and the queue lock via `&mut self`; the
+        // SAFETY: The thread's lock is held via `thread` and the queue lock via `self`; the
         // thread is not yet in the tree, so nothing else touches its sort key or subtree
-        // deadline.
+        // deadline. A thread being inserted into a wait queue is in no scheduler run queue, as
+        // `SchedulerState::finish_time` requires.
         unsafe {
             debug_assert!(*wq_state.blocked_threads_tree_sort_key.get() == PRIMARY_KEY_ZERO);
             debug_assert!(*wq_state.subtree_min_deadline.get() == DurationMono::INFINITE);
@@ -582,7 +707,8 @@ impl WaitQueueCollection {
         // SAFETY: The thread is not in any wait queue, and remains valid and alive (caller's
         // contract).
         let inserted =
-            unsafe { self.threads.insert_or_find_raw(NonNull::from(thread.owner())) }.is_ok();
+            unsafe { self.project().threads.insert_or_find_raw(NonNull::from(thread.owner())) }
+                .is_ok();
         debug_assert!(inserted);
     }
 
@@ -597,12 +723,13 @@ impl WaitQueueCollection {
     /// - Every node currently in `self` points to a valid, live [`Thread`].
     /// - `thread.owner()` is currently a member of `self`.
     #[inline]
-    pub(crate) unsafe fn remove(&mut self, thread: &mut ChainLockProof<'_, Thread>) {
-        wq_trace_depth(self, self.count() - 1);
+    pub(crate) unsafe fn remove(self: Pin<&mut Self>, thread: &mut ChainLockProof<'_, Thread>) {
+        wq_trace_depth(&*self, self.count() - 1);
 
         // SAFETY: The caller guarantees `thread.owner()` is a member of this collection.
-        let erased =
-            unsafe { self.threads.erase_raw(core::ptr::from_ref(thread.owner()).cast_mut()) };
+        let erased = unsafe {
+            self.project().threads.erase_raw(core::ptr::from_ref(thread.owner()).cast_mut())
+        };
         debug_assert!(erased.is_some());
 
         // In a debug build, zero out the sort key now that we have left the
@@ -610,7 +737,7 @@ impl WaitQueueCollection {
         // value is zero during insertion, however it is not strictly needed in a
         // production build and can be skipped.
         if cfg!(debug_assertions) {
-            // SAFETY: The thread's lock is held via `thread` and the queue lock via `&mut self`;
+            // SAFETY: The thread's lock is held via `thread` and the queue lock via `self`;
             // the thread is no longer in the tree, so nothing else touches its sort key.
             unsafe {
                 *thread.owner().wait_queue_state.blocked_threads_tree_sort_key.get() =
@@ -772,11 +899,13 @@ impl ChainLockProof<'_, WaitQueueBase> {
     /// [`OwnedWaitQueue`](crate::kernel::owned_wait_queue::OwnedWaitQueue)
     /// (`self.owner().magic() == OWNED_MAGIC`), the caller must maintain the `OwnedWaitQueue`
     /// safety invariants between `collection` and `inherited_scheduler_state_storage`.
-    pub(crate) unsafe fn collection_mut(&mut self) -> &mut WaitQueueCollection {
+    pub(crate) unsafe fn collection_mut(&mut self) -> Pin<&mut WaitQueueCollection> {
         let (owner, token) = self.split_mut();
         // SAFETY: As in `collection`; the unique borrow of `self` ensures no other reference to
-        // `collection` is live.
-        unsafe { owner.collection.get_mut(token) }
+        // `collection` is live. `collection` is a `#[pin]` field of the `!Unpin`
+        // `WaitQueueBase`, which is only ever constructed in place (`init_with_magic`) and never
+        // moved, so the collection stays pinned.
+        unsafe { owner.collection.get_pinned_mut_locked(token) }
     }
 
     /// Returns `true` if no threads are currently blocked in this wait queue.
@@ -1063,13 +1192,12 @@ impl WaitQueueBase {
         // SAFETY: The caller guarantees exclusive teardown access to `collection`.
         let proof = unsafe { ChainLockProof::assume_held_unchecked(self) };
         let count = proof.count();
-        if count != 0 {
-            panic!(
-                "~WaitQueue() called on non-empty WaitQueue, count={}, magic={:#010x}",
-                count,
-                self.magic()
-            );
-        }
+        assert!(
+            count == 0,
+            "~WaitQueue() called on non-empty WaitQueue, count={}, magic={:#010x}",
+            count,
+            self.magic(),
+        );
 
         // SAFETY: The caller guarantees exclusive teardown access to `magic`.
         unsafe {
@@ -1092,8 +1220,7 @@ impl WaitQueueBase {
     /// Removes a specific thread out of the wait queue it's blocked on, and deals with any PI side
     /// effects. Note: when calling this function:
     ///
-    /// 1) The thread `t` must be actively blocked in the `WaitQueue` instance indicated by
-    ///    `guard`.
+    /// 1) The thread `t` must be actively blocked in the `WaitQueue` instance indicated by `wq`.
     /// 2) In addition to `t`'s lock, all of the `ChainLock`s downstream of `t` (starting from `t`
     ///    and ending at the target of `t`'s PI graph) must be held. Note that we are only able to
     ///    statically assert the first two of these locks; `t`'s lock, and the lock of the wait
@@ -1101,22 +1228,32 @@ impl WaitQueueBase {
     /// 3) During the call to `unblock_thread`, all of the locks identified in #2 (above) will be
     ///    released.
     ///
+    /// Takes `wq` and `t` by raw pointer so that no reference to either is live across the release
+    /// of their locks, after which `t` may resume on another CPU and destroy `wq` (e.g. a
+    /// stack-pinned `Event`) or exit and free `t` before this call returns.
+    ///
     /// # Safety
     ///
     /// The caller must ensure that:
-    /// - `t_guard.owner()` is actively blocked in `guard.owner()`.
-    /// - The active transaction is finalized, and all `ChainLock`s downstream of
-    ///   `t_guard.owner()` in its PI graph (in addition to `guard.owner().lock()` and
-    ///   `t_guard.owner().lock()`, which are consumed via `guard` and `t_guard`) are held by the
-    ///   active transaction and are not unlocked again by the caller after this call releases
-    ///   them.
-    /// - If `guard.owner().magic() == OWNED_MAGIC`, `guard.owner()` is the base subobject of a
-    ///   live [`OwnedWaitQueue`](crate::kernel::owned_wait_queue::OwnedWaitQueue) with provenance
-    ///   over the full `OwnedWaitQueue`.
-    #[inline(always)]
+    /// - `wq` points to a live `WaitQueueBase` and `t` points to a live, non-idle `Thread`
+    ///   actively blocked in `wq`, with both `wq`'s lock and `t`'s lock held by the active
+    ///   transaction; no `&mut WaitQueueBase`, `&mut OwnedWaitQueue`, `&mut Thread`, guard,
+    ///   proof, or borrow of `SchedulerState`, `inherited_scheduler_state_storage` `KCell`, or
+    ///   `WaitQueueInheritedSchedulerState` for `wq`, `t`, or any node in `t`'s downstream PI
+    ///   chain is live, and no `&WaitQueueBase`, `&OwnedWaitQueue`, or `&Thread` for `wq` or `t`
+    ///   is live unless the caller otherwise keeps that object alive across this call.
+    /// - The active transaction is finalized, interrupts are disabled, no scheduler `queue_lock_`
+    ///   is held on the current CPU, and all `ChainLock`s downstream of `t` in its acyclic PI
+    ///   graph (in addition to `wq`'s lock and `t`'s lock) are held by the active transaction;
+    ///   this call takes over releasing them.
+    /// - Neither `wq` nor `t` is dereferenced after this call unless the caller otherwise keeps
+    ///   that object alive.
+    /// - If `wq`'s magic is `OWNED_MAGIC`, `wq` is the `base` subobject of a live
+    ///   [`OwnedWaitQueue`](crate::kernel::owned_wait_queue::OwnedWaitQueue) and carries
+    ///   provenance over the enclosing `OwnedWaitQueue`.
     pub unsafe fn unblock_thread(
-        mut guard: OwnerGuard<'_, Self>,
-        mut t_guard: OwnerGuard<'_, Thread>,
+        wq: NonNull<Self>,
+        t: ThreadPtr,
         wait_queue_error: impl Into<Result<(), Status>>,
         clt_token: &ChainLockTransactionToken,
         preempt_disabled_token: &PreemptDisabledToken,
@@ -1124,8 +1261,18 @@ impl WaitQueueBase {
         assert_transaction_active(clt_token);
         preempt_disabled_token.assert_held();
         {
-            let mut wq_proof = guard.proof();
-            let mut t_proof = t_guard.proof();
+            // SAFETY: The caller guarantees `wq` and `t` point to a live `WaitQueueBase` and
+            // `Thread`. `wq_ref`, `t_ref`, `wq_proof`, and `t_proof` are scoped to this block so
+            // no reference to `wq` or `t` remains live across the lock releases below.
+            let wq_ref: &Self = unsafe { wq.as_ref() };
+            let t_ref: &Thread = unsafe { t.as_ref() };
+            wq_ref.lock().assert_held(clt_token);
+            t_ref.lock().assert_held(clt_token);
+            // SAFETY: The caller guarantees `wq_ref.lock()` and `t_ref.lock()` are held by the
+            // active transaction with no other guard or proof live (verified in debug builds
+            // above), and remain held for the lifetime of `wq_proof` and `t_proof`.
+            let mut wq_proof = unsafe { ChainLockProof::assume_held_unchecked(wq_ref) };
+            let mut t_proof = unsafe { ChainLockProof::assume_held_unchecked(t_ref) };
             wq_proof.owner().debug_assert_magic_check();
             t_proof.owner().assert_canary();
 
@@ -1144,11 +1291,13 @@ impl WaitQueueBase {
                 wq_proof.dequeue(&mut t_proof, wait_queue_error);
             }
 
-            // SAFETY: The caller guarantees that if `wq_proof.owner().magic() == OWNED_MAGIC`,
-            // `wq_proof.owner()` is the base subobject of a live `OwnedWaitQueue` with provenance
-            // over the full `OwnedWaitQueue`.
-            if let Some(owq) = unsafe { OwnedWaitQueue::downcast_to_owq(Some(wq_proof.owner())) } {
-                let mut owq_proof = wq_proof.retag(owq);
+            // SAFETY: `wq` points to a live `WaitQueueBase`, and the caller guarantees that if its
+            // magic is `OWNED_MAGIC`, `wq` is the `base` subobject of a live `OwnedWaitQueue` and
+            // carries provenance over the enclosing `OwnedWaitQueue`.
+            if let Some(owq) = unsafe { OwnedWaitQueue::downcast_ptr(wq) } {
+                // SAFETY: `owq` points to the live `OwnedWaitQueue` enclosing `wq`, whose lock is
+                // held for the duration of this block.
+                let mut owq_proof = wq_proof.retag(unsafe { owq.as_ref() });
                 // Get the effective profile of the owned wait queue before propagation,
                 // which will recompute the effective profile of the queue. This is
                 // necessary for the scheduler PI logic to determine how the wait queue's
@@ -1156,8 +1305,10 @@ impl WaitQueueBase {
                 let old_target_ep =
                     owq_proof.has_deadline_pressure().then(|| owq_proof.get_effective_profile());
                 // SAFETY: `t_proof.owner()` was just dequeued from `owq`, and the caller
-                // guarantees all downstream locks in the PI graph are held by the finalized
-                // transaction.
+                // guarantees that the acyclic downstream PI chain is locked by the finalized
+                // transaction without conflicting proofs, guards, or scheduler/storage borrows,
+                // and that interrupts and preemption (`preempt_disabled_token`) are disabled with
+                // no scheduler `queue_lock_` held on the current CPU.
                 unsafe {
                     OwnedWaitQueue::begin_propagate_thread_owq(
                         &mut t_proof,
@@ -1174,27 +1325,31 @@ impl WaitQueueBase {
             }
         }
 
-        let wait_queue = guard.into_unguarded();
-
         // Now that any required propagation is complete, we can release all of the PI
         // chain locks starting from this wait queue.
-        // SAFETY: `wait_queue`'s lock and all downstream PI chain locks are held by the active
-        // transaction and will not be unlocked again by the caller, and the caller guarantees that
-        // `wait_queue` carries provenance over the enclosing `OwnedWaitQueue` if its magic is
-        // `OWNED_MAGIC`.
+        // SAFETY: `wq` is live while its lock is held, `wq`'s lock and all downstream PI chain
+        // locks are held by the active transaction with no proofs or guards live, and the caller
+        // guarantees that `wq` carries provenance over the enclosing `OwnedWaitQueue` if its magic
+        // is `OWNED_MAGIC`.
         unsafe {
-            OwnedWaitQueue::unlock_pi_chain_common(wait_queue, core::ptr::null(), clt_token);
+            OwnedWaitQueue::unlock_pi_chain_from_node(
+                PiChainNodeRef::WaitQueue(wq),
+                core::ptr::null(),
+                clt_token,
+            );
         }
 
         // The PI consequences of the unblock (if any) have been applied, and all of
         // the (previously) downstream PI chain has been unlocked. Go ahead and
         // unblock the thread in the scheduler, which will drop the unblocking thread's
         // lock for us.
-        // SAFETY: `t_guard.owner()` is blocked and ready to be unblocked, its lock is held and
-        // consumed via `t_guard`, and the active transaction and preemption-disabled states are
-        // verified.
+        // SAFETY: `t` is non-idle (caller precondition) and was dequeued above with its lock held
+        // by the active, finalized transaction `clt_token` and no conflicting reference, guard, or
+        // proof live; interrupts are disabled (caller precondition) and local preemption is
+        // disabled by `preempt_disabled_token`; and `t` is not dereferenced after this call
+        // (unless independently kept alive by the caller).
         unsafe {
-            scheduler::unblock(t_guard, clt_token);
+            scheduler::unblock(t, clt_token);
         }
         Ok(())
     }
@@ -1240,13 +1395,13 @@ impl WaitQueueBase {
 
         // If the deadline is nonzero or noninfinite, set a callback to yank us out of the queue.
         if deadline.when() != InstantMono::INFINITE.into() {
-            // SAFETY: `rust_wait_queue_base_timeout_handler` is a valid timer callback for
+            // SAFETY: `wait_queue_base_timeout_handler` is a valid timer callback for
             // `current_thread`, `timer` is pinned on the stack, and if the timer is set,
             // `timer.cancel()` is called below before `timer` is dropped from the stack.
             unsafe {
                 timer.set_deadline(
                     deadline,
-                    rust_wait_queue_base_timeout_handler,
+                    wait_queue_base_timeout_handler,
                     current_thread.owner().as_raw().cast::<c_void>(),
                 );
             }
@@ -1275,14 +1430,21 @@ impl WaitQueueBase {
     /// # Safety
     ///
     /// The caller must ensure that `timer` points to a valid [`Timer`] in an active timer
-    /// callback context, `arg` points to the valid, live [`Thread`] associated with the wait
-    /// timeout, and no `ChainLockTransaction` is currently active on the current CPU.
+    /// callback context, `arg` is non-null and points to the valid, live [`Thread`] associated
+    /// with the wait timeout (which remains live until either `timer.trylock_or_cancel` observes
+    /// cancellation or `unblock_thread` releases `arg`'s lock), and no `ChainLockTransaction` is
+    /// currently active on the current CPU.
     pub unsafe fn timeout_handler(timer: *mut Timer, _now: InstantMono, arg: *mut c_void) {
         debug_assert!(!timer.is_null());
         debug_assert!(!arg.is_null());
-        // SAFETY: The caller guarantees `arg` points to a valid, live `Thread`.
-        let thread: &Thread = unsafe { &*arg.cast::<Thread>() };
-        thread.assert_canary();
+        // SAFETY: The caller guarantees `arg` is a valid, non-null (`unwrap_unchecked`) pointer to
+        // a live `Thread` (`ThreadPtr::from_raw`).
+        let thread_ptr = unsafe { ThreadPtr::from_raw(arg.cast::<Thread>()).unwrap_unchecked() };
+        // SAFETY: The caller guarantees `arg` points to a valid, live `Thread` that remains live
+        // until `trylock_or_cancel` or `unblock_thread` below. `assert_canary_ptr` projects only
+        // the `canary` field without forming a whole-struct `&Thread` while the thread is
+        // unlocked.
+        unsafe { Thread::assert_canary_ptr(thread_ptr.as_raw()) };
 
         // In order to wake the thread with a TIMED_OUT error, we need to hold the
         // entire PI chain starting from the thread, and ending at the target of the
@@ -1321,16 +1483,22 @@ impl WaitQueueBase {
             // SAFETY: `PREEMPT_DISABLE_AND_IRQ_SAVE_OPTION` disables preemption for the duration
             // of this transaction.
             let preempt_disabled = unsafe { PreemptDisabledToken::new() };
-            // SAFETY: `try_lock_or_cancel` calls `Timer::trylock_or_cancel(lock)` and returns
-            // `true` iff `lock` was acquired for the active transaction.
-            let Some(mut thread_guard) =
-                (unsafe { OwnerGuard::try_acquire_with(thread, token, try_lock_or_cancel) })
-            else {
-                return DONE.into();
-            };
-
             let wq_ptr = {
-                let t_proof = thread_guard.proof();
+                // SAFETY: The caller guarantees `arg` points to a valid, live `Thread` associated
+                // with `timer`; the thread cannot exit until either `try_lock_or_cancel` sees the
+                // timer was canceled or `unblock_thread` releases the thread's lock below.
+                // `thread` and `thread_guard` are scoped to this block so no `&Thread` remains
+                // live across `unblock_thread`.
+                let thread: &Thread = unsafe { thread_ptr.as_ref() };
+                // SAFETY: `try_lock_or_cancel` calls `Timer::trylock_or_cancel(lock)` and returns
+                // `true` iff `lock` was acquired for the active transaction.
+                let Some(mut thread_guard) =
+                    (unsafe { OwnerGuard::try_acquire_with(thread, token, try_lock_or_cancel) })
+                else {
+                    return DONE.into();
+                };
+
+                let mut t_proof = thread_guard.proof();
                 let Some(wq_ptr) = t_proof.wait_queue_state().blocking_wait_queue(t_proof.token())
                 else {
                     debug_assert!(t_proof.state() == ThreadStateKind::Ready);
@@ -1341,14 +1509,7 @@ impl WaitQueueBase {
                     t_proof.state() == ThreadStateKind::Blocked
                         || t_proof.state() == ThreadStateKind::BlockedReadLock
                 );
-                wq_ptr
-            };
 
-            // SAFETY: While `thread` is blocked on `wq_ptr` and `thread`'s lock is held, `wq_ptr`
-            // points to a valid, live `WaitQueueBase`.
-            let wq: &WaitQueueBase = unsafe { wq_ptr.as_ref() };
-            {
-                let mut t_proof = thread_guard.proof();
                 // SAFETY: The transaction is not yet finalized and no downstream locks in
                 // `thread`'s PI chain are held yet; if `Ok` is returned, `unblock_thread` below
                 // unlocks all downstream locks in the PI chain.
@@ -1358,20 +1519,26 @@ impl WaitQueueBase {
                     thread_guard.release();
                     return Action::Backoff.into();
                 }
-            }
-            wq.get_lock().assert_acquired(token);
-            // SAFETY: `lock_pi_chain_from_thread` succeeded and acquired `wq.lock()` (verified by
-            // `assert_acquired` above), and `wq_guard` takes ownership of releasing `wq.lock()`.
-            let wq_guard = unsafe { OwnerGuard::adopt(wq, token) };
+                // SAFETY: `lock_pi_chain_from_thread` succeeded and acquired `wq_ptr`'s lock, so
+                // `wq_ptr` points to a valid, live `WaitQueueBase`.
+                unsafe { wq_ptr.as_ref() }.get_lock().assert_acquired(token);
+                let _ = thread_guard.into_unguarded();
+                wq_ptr
+            };
 
             ChainLockTransaction::finalize(token);
-            // SAFETY: `thread` is blocked in `wq`, the transaction is finalized with `thread` and
-            // its entire downstream PI chain locked, and if `wq` is an `OwnedWaitQueue`, `wq_ptr`
-            // was stored from the `OwnedWaitQueue`'s base subobject.
+            // SAFETY: `thread_ptr` is a live, non-idle thread blocked in `wq_ptr`, the transaction
+            // is finalized with `thread_ptr` and its entire downstream PI chain (including
+            // `wq_ptr`) locked, no conflicting reference, guard, or proof for `wq_ptr`,
+            // `thread_ptr`, or any downstream node is live, interrupts are disabled by
+            // `PREEMPT_DISABLE_AND_IRQ_SAVE_OPTION`, neither `wq_ptr` nor `thread_ptr` is
+            // dereferenced after this call, and if `wq_ptr` is an `OwnedWaitQueue`, it carries
+            // provenance over the enclosing `OwnedWaitQueue` (`blocking_wait_queue` safety
+            // invariant).
             let _ = unsafe {
                 Self::unblock_thread(
-                    wq_guard,
-                    thread_guard,
+                    wq_ptr,
+                    thread_ptr,
                     Err(Status::TIMED_OUT),
                     token,
                     &preempt_disabled,
@@ -1460,11 +1627,13 @@ impl ChainLockProof<'_, WaitQueue> {
     }
 
     /// Returns the collection of blocked threads mutably.
-    pub(crate) fn collection_mut(&mut self) -> &mut WaitQueueCollection {
+    pub(crate) fn collection_mut(&mut self) -> Pin<&mut WaitQueueCollection> {
         let (queue, token) = self.split_mut();
         // SAFETY: As in `collection`; the unique borrow of `self` ensures no other reference to
-        // `base.collection` is live.
-        unsafe { queue.base.collection.get_mut(token) }
+        // `base.collection` is live. `base.collection` is a `#[pin]` field of the `!Unpin`
+        // `WaitQueueBase`, which is only ever constructed in place (`init_with_magic`) and never
+        // moved, so the collection stays pinned.
+        unsafe { queue.base.collection.get_pinned_mut_locked(token) }
     }
 
     /// Returns `true` if no threads are currently blocked in this wait queue.
@@ -1515,8 +1684,19 @@ impl ChainLockProof<'_, WaitQueue> {
     /// Either way, unlike the non-locked versions of these routines, the wait queue's lock is held
     /// for the duration of the operation, instead of being released as soon as possible (during
     /// the call to [`scheduler::unblock`]).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - The active [`ChainLockTransaction`](crate::kconcurrent::ChainLockTransaction) has not yet
+    ///   been finalized.
+    /// - No waiter thread in `self.owner()` has its lock held by the active transaction, no
+    ///   `&mut Thread`, [`OwnerGuard<'_, Thread>`], or [`ChainLockProof<'_, Thread>`] for any
+    ///   waiter in `self.owner()` is live across this call, and no `&Thread` for any waiter in
+    ///   `self.owner()` is live across this call unless the caller otherwise keeps that thread
+    ///   alive.
     #[inline]
-    pub fn wake_one_locked(
+    pub unsafe fn wake_one_locked(
         &mut self,
         wait_queue_error: impl Into<Result<(), Status>>,
         clt_token: &ChainLockTransactionToken,
@@ -1535,31 +1715,39 @@ impl ChainLockProof<'_, WaitQueue> {
 
         // Check to see if there is a thread we want to wake.
         if let Some(t_ptr) = self.peek_front() {
-            // SAFETY: `t_ptr` is currently blocked in `self.owner()` and cannot exit while
-            // `self.owner().lock()` is held.
-            let t: &Thread = unsafe { t_ptr.as_ref() };
-            // There is!  Try to lock it so we can actually wake it up.  If we can't, we
-            // will need to unwind to allow the caller to release our lock before trying
-            // again.
-            let mut t_guard = OwnerGuard::acquire_or_backoff(t, clt_token)?;
+            {
+                // SAFETY: `t_ptr` is currently blocked in `self.owner()` and cannot exit while
+                // `self.owner().lock()` is held, and no `&mut Thread` for it is live (per the
+                // caller). `t` and `t_guard` are scoped to this block so no `&Thread` from here
+                // remains live across `scheduler::unblock` below.
+                let t: &Thread = unsafe { t_ptr.as_ref() };
+                // There is!  Try to lock it so we can actually wake it up.  If we can't, we
+                // will need to unwind to allow the caller to release our lock before trying
+                // again.
+                let mut t_guard = OwnerGuard::acquire_or_backoff(t, clt_token)?;
 
-            // We now have all of the locks we need for the wake operation to proceed.
-            // Make sure we mark the active `ChainLockTransaction` as finalized.
-            ChainLockTransaction::finalize(clt_token);
+                // We now have all of the locks we need for the wake operation to proceed.
+                // Make sure we mark the active `ChainLockTransaction` as finalized.
+                ChainLockTransaction::finalize(clt_token);
 
-            // Remove the thread from the queue and unblock it.  We cannot drop the
-            // queue lock yet, our caller needs us to hold onto it.  The scheduler will
-            // take care of dropping the thread's lock for us after it has found a CPU
-            // for the thread and added it to the proper scheduler.
-            // SAFETY: `t` was obtained from `self.peek_front()`, so it is currently blocked in
-            // `self.owner()`, and both locks are held.
-            unsafe {
-                self.as_base().dequeue(&mut t_guard.proof(), wait_queue_error);
+                // Remove the thread from the queue and unblock it.  We cannot drop the
+                // queue lock yet, our caller needs us to hold onto it.  The scheduler will
+                // take care of dropping the thread's lock for us after it has found a CPU
+                // for the thread and added it to the proper scheduler.
+                // SAFETY: `t` was obtained from `self.peek_front()`, so it is currently blocked in
+                // `self.owner()`, and both locks are held.
+                unsafe {
+                    self.as_base().dequeue(&mut t_guard.proof(), wait_queue_error);
+                }
+                let _ = t_guard.into_unguarded();
             }
-            // SAFETY: `t` was dequeued from `self.owner()` and the active transaction is
-            // finalized.
+            // SAFETY: `t_ptr` is non-idle (it was blocked in `self.owner()`) and was dequeued from
+            // `self.owner()` with its lock held by the active, finalized transaction `clt_token`
+            // and no conflicting reference, guard, or proof live (per the caller); interrupts are
+            // disabled by the active transaction `clt_token` and local preemption is disabled by
+            // `preempt_disabled_token`; and `t_ptr` is not dereferenced after this call.
             unsafe {
-                scheduler::unblock(t_guard, clt_token);
+                scheduler::unblock(t_ptr, clt_token);
             }
             return Some(true);
         }
@@ -1591,8 +1779,19 @@ impl ChainLockProof<'_, WaitQueue> {
     /// Either way, unlike the non-locked versions of these routines, the wait queue's lock is held
     /// for the duration of the operation, instead of being released as soon as possible (during
     /// the call to [`scheduler::unblock_list`]).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - The active [`ChainLockTransaction`](crate::kconcurrent::ChainLockTransaction) has not yet
+    ///   been finalized.
+    /// - No waiter thread in `self.owner()` has its lock held by the active transaction, no
+    ///   `&mut Thread`, [`OwnerGuard<'_, Thread>`], or [`ChainLockProof<'_, Thread>`] for any
+    ///   waiter in `self.owner()` is live across this call, and no `&Thread` for any waiter in
+    ///   `self.owner()` is live across this call unless the caller otherwise keeps that thread
+    ///   alive.
     #[inline]
-    pub fn wake_all_locked(
+    pub unsafe fn wake_all_locked(
         &mut self,
         wait_queue_error: impl Into<Result<(), Status>>,
         clt_token: &ChainLockTransactionToken,
@@ -1697,12 +1896,12 @@ impl ChainLockProof<'_, WaitQueue> {
 
 /// Operations for locking threads in a [`WaitQueue`] for waking.
 ///
-/// The `ktl::optional<Thread::UnblockList>` results of the C++ API become a `bool` plus the
-/// `unblock_list` out-parameter (a [`ThreadUnblockList`] is pinned, so it cannot be returned by
-/// value): `unblock_list` must be empty on entry; on `true` it holds the threads to wake, each
-/// with its lock held by the active transaction and no guard or proof left for it, so the caller
-/// must eventually release those locks (normally via [`scheduler::unblock_list`]); on `false` (a
-/// backoff condition was encountered) it is left empty and no thread lock is held.
+/// Each operation takes a pinned `unblock_list` out-parameter (a [`ThreadUnblockList`] is `!Unpin`,
+/// so it cannot be returned by value) and returns a `bool`: `unblock_list` must be empty on entry;
+/// on `true` it holds the threads to wake, each with its lock held by the active transaction and no
+/// guard or proof left for it, so the caller must eventually release those locks (normally via
+/// [`scheduler::unblock_list`]); on `false` (a backoff condition was encountered) it is left empty
+/// and no thread lock is held.
 pub struct WaitQueueLockOps;
 
 impl WaitQueueLockOps {
@@ -1770,7 +1969,7 @@ impl WaitQueueLockOps {
     #[inline]
     pub unsafe fn lock_for_wake_all_in_place(
         queue: &mut ChainLockProof<'_, WaitQueue>,
-        unblock_list: Pin<&mut ThreadUnblockList>,
+        mut unblock_list: Pin<&mut ThreadUnblockList>,
         clt_token: &ChainLockTransactionToken,
     ) -> bool {
         assert_transaction_active(clt_token);
@@ -1787,11 +1986,11 @@ impl WaitQueueLockOps {
         //
         // TODO(https://fxbug.dev/473385363): The in-place operations prevent us from collapsing the
         // storage requirements of an UnblockList and WaitQueueCollection.
-        let mut list = unblock_list.as_list();
         for t in queue.collection().iter() {
             debug_assert!(t.lock().is_held(clt_token));
-            // SAFETY: `t` is blocked in `queue` (so live) and in no unblock list.
-            unsafe { list.as_mut().push_back_raw(NonNull::from(t)) };
+            // SAFETY: `t` is blocked in `queue` (so live and stays alive while its lock is held)
+            // and in no unblock list.
+            unsafe { unblock_list.as_mut().push_back(t) };
         }
 
         true
@@ -1827,7 +2026,7 @@ impl WaitQueueLockOps {
             // collapsing the storage requirements of an UnblockList and WaitQueueCollection.
             //
             // SAFETY: `t` is live (its lock is held) and in no unblock list.
-            unsafe { unblock_list.as_list().push_back_raw(NonNull::from(t)) };
+            unsafe { unblock_list.push_back(t) };
 
             return true;
         }
@@ -1837,7 +2036,7 @@ impl WaitQueueLockOps {
 }
 
 /// Operations for locking threads in a [`WaitQueue`] for a `BrwLock` wake.
-pub struct BrwLockOps;
+pub(super) struct BrwLockOps;
 
 impl BrwLockOps {
     /// Attempts to lock the set of threads needed for a `BrwLock` wake operation.  If
@@ -1854,9 +2053,9 @@ impl BrwLockOps {
     /// On failure, no list is returned, and all threads will be unlocked and
     /// waiting in the collection.
     ///
-    /// The `ktl::optional<LockForWakeResult>` of the C++ API becomes `Some(count)` plus the
-    /// `unblock_list` out-parameter, with the same conventions as [`WaitQueueLockOps`]. The active
-    /// transaction must not yet be finalized. `now` is unused, as in C++.
+    /// The result is `Some(count)`, the number of threads to wake, plus the `unblock_list`
+    /// out-parameter, with the same conventions as [`WaitQueueLockOps`]. The active transaction
+    /// must not yet be finalized.
     ///
     /// # Safety
     ///
@@ -1866,16 +2065,14 @@ impl BrwLockOps {
     ///   `unblock_list` to [`scheduler::unblock_list`] before ending the transaction (and must not
     ///   drop `unblock_list` while non-empty).
     #[must_use]
-    pub unsafe fn lock_for_wake(
+    pub(super) unsafe fn lock_for_wake(
         queue: &mut ChainLockProof<'_, WaitQueue>,
-        _now: InstantMono,
-        unblock_list: Pin<&mut ThreadUnblockList>,
+        mut unblock_list: Pin<&mut ThreadUnblockList>,
         clt_token: &ChainLockTransactionToken,
     ) -> Option<u32> {
         assert_transaction_active(clt_token);
         queue.owner().debug_assert_magic_and_not_owq();
         debug_assert!(unblock_list.is_empty());
-        let mut list = unblock_list.as_list();
         let mut count: u32 = 0;
 
         while let Some(t_ptr) = queue.peek_front() {
@@ -1903,9 +2100,9 @@ impl BrwLockOps {
                 // Put each of the threads back where they belong before returning
                 // nothing, unlocking them as we go.  Make sure to set the thread's
                 // blocking wait queue pointer back to ourselves.
-                while let Some(return_to_queue) = list.as_mut().pop_front() {
-                    // SAFETY: Every thread in `list` was dequeued from `queue` below with its
-                    // lock held, so it is live.
+                while let Some(return_to_queue) = unblock_list.as_mut().pop_front() {
+                    // SAFETY: Every thread in `unblock_list` was dequeued from `queue` below with
+                    // its lock held, so it is live.
                     let return_to_queue: &Thread = unsafe { return_to_queue.as_ref() };
                     debug_assert!(return_to_queue.lock().is_held(clt_token));
                     // SAFETY: `return_to_queue`'s lock was acquired below in this transaction
@@ -1948,8 +2145,8 @@ impl BrwLockOps {
             // SAFETY: `t` is blocked in `queue`, a plain `WaitQueue`.
             unsafe { queue.dequeue_thread(&mut t_proof, Ok(())) };
             drop(t_proof);
-            // SAFETY: `t` is live (its lock is held) and in no unblock list.
-            unsafe { list.as_mut().push_back_raw(NonNull::from(t)) };
+            // SAFETY: `t_ptr` is live (its lock is held) and in no unblock list.
+            unsafe { unblock_list.as_mut().push_back_ptr(t_ptr) };
             count += 1;
 
             // The lock stays held: releasing it is now the list consumer's job.
@@ -1964,156 +2161,6 @@ impl BrwLockOps {
 
         // Out of threads to lock.  Whatever we have so far is our result.
         Some(count)
-    }
-}
-
-// FFI entries for the C++ `WaitQueueLockOps` / `BrwLockOps` forwarders in `kernel/wait.cc`.
-//
-// Shared preconditions for every `rust_wait_queue_lock_ops_*` / `rust_brw_lock_ops_*` entry below:
-// - A `ChainLockTransaction` must be active on this CPU and not finalized (`assert_active` is
-//   debug-only; calling with no active transaction is UB in release).
-// - `queue` must be a valid `WaitQueue` whose lock is held by the active transaction's *current*
-//   token; this is checked only in debug builds (`debug_assert!`), so inside a reserved-token
-//   window the lock must have been `sync_token`ed. No Rust `ChainLockProof` for `queue` may be
-//   live.
-// - `unblock_list` must point to a valid, empty, pinned `Thread::UnblockList` (a nested type, so
-//   passed as `void*`) that is not otherwise accessed during the call. On success it receives the
-//   threads to wake, each with its lock held by the active transaction; the caller must
-//   eventually release those locks (normally via `Scheduler::Unblock`).
-
-/// Reborrows a C++-provided, empty `Thread::UnblockList` as a pinned [`ThreadUnblockList`].
-///
-/// # Safety
-///
-/// `list` must point to a valid, empty, properly constructed `Thread::UnblockList` that stays
-/// pinned and is not otherwise accessed for `'a`.
-unsafe fn unblock_list_out_param<'a>(list: *mut c_void) -> Pin<&'a mut ThreadUnblockList> {
-    // SAFETY: `ThreadUnblockList` is `repr(C)` over the opaque `Thread::UnblockList` storage, and
-    // the caller guarantees validity, emptiness, exclusivity and pinning.
-    let list = unsafe { Pin::new_unchecked(&mut *list.cast::<ThreadUnblockList>()) };
-    debug_assert!(list.is_empty());
-    list
-}
-
-/// Attempts to lock all threads in `queue` for waking and dequeues them with `wait_queue_error`;
-/// `false` on backoff.
-///
-/// # Safety
-///
-/// The shared preconditions above hold.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_lock_ops_lock_for_wake_all_in_queue(
-    queue: *const WaitQueue,
-    wait_queue_error: zx_status_t,
-    unblock_list: *mut c_void,
-) -> bool {
-    // SAFETY: A transaction is active by precondition.
-    let token = unsafe { ChainLockTransaction::assert_active() };
-    // SAFETY: The caller guarantees `queue` is a valid `WaitQueue`; only a shared reference is
-    // formed, all mutation goes through locked cells.
-    let queue = unsafe { &*queue };
-    debug_assert!(queue.lock().is_held(&token));
-    // SAFETY: The caller guarantees the active transaction holds `queue`'s lock for the call
-    // (checked above in debug builds) and that no live proof exists for it.
-    let mut proof = unsafe { ChainLockProof::assume_held_unchecked(queue) };
-    // SAFETY: `unblock_list` is a valid, empty, pinned `Thread::UnblockList` (precondition).
-    let unblock_list = unsafe { unblock_list_out_param(unblock_list) };
-    // SAFETY: `unblock_list` is empty, and the C++ caller takes over the locked threads.
-    unsafe {
-        WaitQueueLockOps::lock_for_wake_all_in_queue(
-            &mut proof,
-            Status::ok(wait_queue_error),
-            unblock_list,
-            &token,
-        )
-    }
-}
-
-/// Attempts to lock all threads in `queue` for waking without dequeuing them; `false` on backoff.
-///
-/// # Safety
-///
-/// The shared preconditions above hold.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_lock_ops_lock_for_wake_all_in_place(
-    queue: *const WaitQueue,
-    unblock_list: *mut c_void,
-) -> bool {
-    // SAFETY: A transaction is active by precondition.
-    let token = unsafe { ChainLockTransaction::assert_active() };
-    // SAFETY: The caller guarantees `queue` is a valid `WaitQueue`; only a shared reference is
-    // formed, all mutation goes through locked cells.
-    let queue = unsafe { &*queue };
-    debug_assert!(queue.lock().is_held(&token));
-    // SAFETY: The caller guarantees the active transaction holds `queue`'s lock for the call
-    // (checked above in debug builds) and that no live proof exists for it.
-    let mut proof = unsafe { ChainLockProof::assume_held_unchecked(queue) };
-    // SAFETY: `unblock_list` is a valid, empty, pinned `Thread::UnblockList` (precondition).
-    let unblock_list = unsafe { unblock_list_out_param(unblock_list) };
-    // SAFETY: `unblock_list` is empty, and the C++ caller takes over the locked threads.
-    unsafe { WaitQueueLockOps::lock_for_wake_all_in_place(&mut proof, unblock_list, &token) }
-}
-
-/// Attempts to lock the first thread in `queue` for waking without dequeuing it; `false` on
-/// backoff.
-///
-/// # Safety
-///
-/// The shared preconditions above hold.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_lock_ops_lock_for_wake_one_in_place(
-    queue: *const WaitQueue,
-    unblock_list: *mut c_void,
-) -> bool {
-    // SAFETY: A transaction is active by precondition.
-    let token = unsafe { ChainLockTransaction::assert_active() };
-    // SAFETY: The caller guarantees `queue` is a valid `WaitQueue`; only a shared reference is
-    // formed, all mutation goes through locked cells.
-    let queue = unsafe { &*queue };
-    debug_assert!(queue.lock().is_held(&token));
-    // SAFETY: The caller guarantees the active transaction holds `queue`'s lock for the call
-    // (checked above in debug builds) and that no live proof exists for it.
-    let mut proof = unsafe { ChainLockProof::assume_held_unchecked(queue) };
-    // SAFETY: `unblock_list` is a valid, empty, pinned `Thread::UnblockList` (precondition).
-    let unblock_list = unsafe { unblock_list_out_param(unblock_list) };
-    // SAFETY: `unblock_list` is empty, and the C++ caller takes over the locked threads.
-    unsafe { WaitQueueLockOps::lock_for_wake_one_in_place(&mut proof, unblock_list, &token) }
-}
-
-/// Attempts to lock the set of threads for a `BrwLock` wake; `false` on backoff, else `*count` is
-/// set.
-///
-/// # Safety
-///
-/// The shared preconditions above hold, and `count` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_brw_lock_ops_lock_for_wake(
-    queue: *const WaitQueue,
-    now: zx_instant_mono_t,
-    unblock_list: *mut c_void,
-    count: *mut u32,
-) -> bool {
-    // SAFETY: A transaction is active by precondition.
-    let token = unsafe { ChainLockTransaction::assert_active() };
-    // SAFETY: The caller guarantees `queue` is a valid `WaitQueue`; only a shared reference is
-    // formed, all mutation goes through locked cells.
-    let queue = unsafe { &*queue };
-    debug_assert!(queue.lock().is_held(&token));
-    // SAFETY: The caller guarantees the active transaction holds `queue`'s lock for the call
-    // (checked above in debug builds) and that no live proof exists for it.
-    let mut proof = unsafe { ChainLockProof::assume_held_unchecked(queue) };
-    // SAFETY: `unblock_list` is a valid, empty, pinned `Thread::UnblockList` (precondition).
-    let unblock_list = unsafe { unblock_list_out_param(unblock_list) };
-    // SAFETY: `unblock_list` is empty, and the C++ caller takes over the locked threads.
-    let res =
-        unsafe { BrwLockOps::lock_for_wake(&mut proof, InstantMono(now), unblock_list, &token) };
-    match res {
-        Some(c) => {
-            // SAFETY: `count` is valid (precondition).
-            unsafe { *count = c };
-            true
-        }
-        None => false,
     }
 }
 
@@ -2409,20 +2456,24 @@ impl WaitQueue {
             // lock.  Be prepared to drop all locks and retry the operation if we
             // fail.
             if let Some(t_ptr) = guard.proof().peek_front() {
-                // SAFETY: `t_ptr` is currently blocked in `self` and cannot exit while
-                // `self.lock()` is held.
-                let t: &Thread = unsafe { t_ptr.as_ref() };
-                let Some(mut t_guard) = OwnerGuard::acquire_or_backoff(t, token) else {
-                    return Action::Backoff.into();
-                };
-                ChainLockTransaction::finalize(token);
+                {
+                    // SAFETY: `t_ptr` is currently blocked in `self` and cannot exit while
+                    // `self.lock()` is held. `t` and `t_guard` are scoped to this block so no
+                    // `&Thread` remains live across `scheduler::unblock` below.
+                    let t: &Thread = unsafe { t_ptr.as_ref() };
+                    let Some(mut t_guard) = OwnerGuard::acquire_or_backoff(t, token) else {
+                        return Action::Backoff.into();
+                    };
+                    ChainLockTransaction::finalize(token);
 
-                // Remove the thread from the queue and drop the queue lock.  We no longer
-                // need to hold it once the thread has been removed.
-                // SAFETY: `t` was obtained from `guard.proof().peek_front()`, so it is currently
-                // blocked in `self`, and both locks are held.
-                unsafe {
-                    guard.proof().as_base().dequeue(&mut t_guard.proof(), wait_queue_error);
+                    // Remove the thread from the queue and drop the queue lock.  We no longer
+                    // need to hold it once the thread has been removed.
+                    // SAFETY: `t` was obtained from `guard.proof().peek_front()`, so it is
+                    // currently blocked in `self`, and both locks are held.
+                    unsafe {
+                        guard.proof().as_base().dequeue(&mut t_guard.proof(), wait_queue_error);
+                    }
+                    let _ = t_guard.into_unguarded();
                 }
                 guard.release();
 
@@ -2430,9 +2481,13 @@ impl WaitQueue {
                 // need to continue to hold the thread's lock while we do this, the
                 // scheduler will drop the lock for us once it has found a CPU for the
                 // thread and added it to the proper scheduler instance.
-                // SAFETY: `t` was dequeued from `self` and the active transaction is finalized.
+                // SAFETY: `t_ptr` is non-idle (it was blocked in `self`) and was dequeued from
+                // `self` with its lock held as the sole lock in the active, finalized transaction
+                // `token` and no conflicting reference, guard, or proof live; interrupts and local
+                // preemption are disabled by `PREEMPT_DISABLE_AND_IRQ_SAVE_OPTION`; and `t_ptr` is
+                // not dereferenced after this call.
                 unsafe {
-                    scheduler::unblock(t_guard, token);
+                    scheduler::unblock(t_ptr, token);
                 }
                 return TransactionResult::Value(true);
             }
@@ -2596,251 +2651,12 @@ pub unsafe extern "C" fn rust_wait_queue_base_destroy(wait_queue: *mut bindings:
     }
 }
 
-/// C++ FFI entry point for `WaitQueueBase::magic()`.
-///
-/// # Safety
-///
-/// `wait_queue` must be a valid non-null pointer to an initialized [`WaitQueueBase`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_base_magic(
-    wait_queue: *const bindings::WaitQueueBase,
-) -> u32 {
-    debug_assert!(!wait_queue.is_null());
-    // SAFETY: The caller guarantees `wait_queue` points to an initialized `WaitQueueBase`.
-    let wq: &WaitQueueBase = unsafe { &*wait_queue.cast::<WaitQueueBase>() };
-    wq.magic()
-}
-
-/// C++ FFI entry point for `WaitQueueBase::IsEmpty()`.
-///
-/// # Safety
-///
-/// `wait_queue` must be a valid non-null pointer to an initialized [`WaitQueueBase`], and its
-/// collection must be synchronized (either by holding `wait_queue`'s lock, holding the owning
-/// thread's lock, or when the queue is quiescent in a pool).
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_base_is_empty(
-    wait_queue: *const bindings::WaitQueueBase,
-) -> bool {
-    debug_assert!(!wait_queue.is_null());
-    // SAFETY: The caller guarantees `wait_queue` points to an initialized `WaitQueueBase` with
-    // synchronized access to its collection.
-    let wq: &WaitQueueBase = unsafe { &*wait_queue.cast::<WaitQueueBase>() };
-    // SAFETY: Synchronized access to `wq` is guaranteed by the caller (`TA_REQ_SHARED`,
-    // `TA_ASSERT_SHARED`, or `TA_NO_THREAD_SAFETY_ANALYSIS` in C++).
-    let proof = unsafe { ChainLockProof::assume_held_unchecked(wq) };
-    proof.is_empty()
-}
-
-/// C++ FFI entry point for `WaitQueueBase::Count()`.
-///
-/// # Safety
-///
-/// `wait_queue` must be a valid non-null pointer to an initialized [`WaitQueueBase`], and its
-/// collection must be synchronized (either by holding `wait_queue`'s lock, holding the owning
-/// thread's lock, or when the queue is quiescent in a pool).
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_base_count(
-    wait_queue: *const bindings::WaitQueueBase,
-) -> u32 {
-    debug_assert!(!wait_queue.is_null());
-    // SAFETY: The caller guarantees `wait_queue` points to an initialized `WaitQueueBase` with
-    // synchronized access to its collection.
-    let wq: &WaitQueueBase = unsafe { &*wait_queue.cast::<WaitQueueBase>() };
-    // SAFETY: Synchronized access to `wq` is guaranteed by the caller.
-    let proof = unsafe { ChainLockProof::assume_held_unchecked(wq) };
-    proof.count()
-}
-
-/// C++ FFI entry point for `WaitQueueBase::UnblockThread()`.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `wait_queue` and `t` are valid non-null pointers to a live [`WaitQueueBase`] and [`Thread`].
-/// - An active [`ChainLockTransaction`] is finalized on the current CPU with preemption disabled.
-/// - Both `wait_queue`'s lock and `t`'s lock (as well as any downstream `ChainLock`s in `t`'s PI
-///   graph) are held by the active transaction, and ownership of releasing them is transferred to
-///   this function.
-/// - All other preconditions of [`WaitQueueBase::unblock_thread`] are satisfied.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_base_unblock_thread(
-    wait_queue: *mut bindings::WaitQueueBase,
-    t: *mut bindings::Thread,
-    wait_queue_error: zx_status_t,
-) -> zx_status_t {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!t.is_null());
-    // SAFETY: The caller guarantees `wait_queue` and `t` are valid pointers to a live
-    // `WaitQueueBase` and `Thread`, an active `ChainLockTransaction` is finalized with preemption
-    // disabled, and both `wait_queue`'s lock and `t`'s lock (plus any downstream PI chain locks)
-    // are held and transferred to this function to release.
-    unsafe {
-        let wq: &WaitQueueBase = &*wait_queue.cast::<WaitQueueBase>();
-        let thread: &Thread = &*t.cast::<Thread>();
-        let token = ChainLockTransaction::mark_active();
-        let preempt_disabled = PreemptDisabledToken::new();
-        let wq_guard = OwnerGuard::adopt(wq, &token);
-        let t_guard = OwnerGuard::adopt(thread, &token);
-        Status::result_into_raw(WaitQueueBase::unblock_thread(
-            wq_guard,
-            t_guard,
-            Status::ok(wait_queue_error),
-            &token,
-            &preempt_disabled,
-        ))
-    }
-}
-
-/// C++ FFI entry point for `WaitQueueBase::BlockEtcPreamble()`.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `wait_queue`, `current_thread`, and `deadline` are valid non-null pointers to a live
-///   [`WaitQueueBase`], [`Thread`], and [`Deadline`].
-/// - Both `wait_queue`'s lock and `current_thread`'s lock are exclusively held by the caller.
-/// - All other preconditions of [`ChainLockProof::block_etc_preamble`] are satisfied.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_base_block_etc_preamble(
-    wait_queue: *mut bindings::WaitQueueBase,
-    current_thread: *mut bindings::Thread,
-    deadline: *const bindings::Deadline,
-    signal_mask: u32,
-    reason: bindings::ResourceOwnership,
-    interruptible: bindings::Interruptible,
-) -> zx_status_t {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!current_thread.is_null());
-    debug_assert!(!deadline.is_null());
-    // SAFETY: The caller guarantees `wait_queue`, `current_thread`, and `deadline` are valid,
-    // both `wait_queue`'s lock and `current_thread`'s lock are held, and the blocking preamble
-    // preconditions are satisfied.
-    unsafe {
-        let wq: &WaitQueueBase = &*wait_queue.cast::<WaitQueueBase>();
-        let thread: &Thread = &*current_thread.cast::<Thread>();
-        let dl: &Deadline = &*deadline.cast::<Deadline>();
-        let mut wq_proof = ChainLockProof::assume_held_unchecked(wq);
-        let mut t_proof = ChainLockProof::assume_held_unchecked(thread);
-        Status::result_into_raw(wq_proof.block_etc_preamble(
-            &mut t_proof,
-            dl,
-            signal_mask,
-            reason.into(),
-            interruptible.into(),
-        ))
-    }
-}
-
-/// C++ FFI entry point for `WaitQueueBase::BlockEtcPostamble()`.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `wait_queue`, `current_thread`, and `deadline` are valid non-null pointers to a
-///   [`WaitQueueBase`], [`Thread`], and [`Deadline`].
-/// - An active [`ChainLockTransaction`] is finalized on the current CPU with `current_thread`'s
-///   lock held as the only held chain lock and `wait_queue`'s lock not held.
-/// - All other preconditions of [`WaitQueueBase::block_etc_postamble`] are satisfied.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_base_block_etc_postamble(
-    wait_queue: *const bindings::WaitQueueBase,
-    current_thread: *mut bindings::Thread,
-    deadline: *const bindings::Deadline,
-) -> zx_status_t {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!current_thread.is_null());
-    debug_assert!(!deadline.is_null());
-    // SAFETY: The caller guarantees `wait_queue`, `current_thread`, and `deadline` are valid,
-    // an active transaction is finalized with `current_thread`'s lock held and `wait_queue`'s
-    // lock not held, and the blocking postamble preconditions are satisfied.
-    unsafe {
-        let thread: &Thread = &*current_thread.cast::<Thread>();
-        let dl: &Deadline = &*deadline.cast::<Deadline>();
-        let token = ChainLockTransaction::mark_active();
-        let t_proof = ChainLockProof::assume_held_unchecked(thread);
-        Status::result_into_raw(WaitQueueBase::block_etc_postamble(
-            wait_queue.cast::<WaitQueueBase>(),
-            t_proof,
-            dl,
-            &token,
-        ))
-    }
-}
-
-/// C++ FFI entry point for `WaitQueueBase::Dequeue()`.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `wait_queue` and `t` are valid non-null pointers to a live [`WaitQueueBase`] and [`Thread`].
-/// - Both `wait_queue`'s lock and `t`'s lock are exclusively held by the caller.
-/// - `t` is currently blocked in `wait_queue`, and if `wait_queue` is an [`OwnedWaitQueue`], the
-///   caller updates its `inherited_scheduler_state_storage` before releasing `wait_queue`'s lock.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_base_dequeue(
-    wait_queue: *mut bindings::WaitQueueBase,
-    t: *mut bindings::Thread,
-    wait_queue_error: zx_status_t,
-) {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!t.is_null());
-    // SAFETY: The caller guarantees `wait_queue` and `t` are valid, both locks are held, `t` is
-    // currently blocked in `wait_queue`, and the `OwnedWaitQueue`
-    // `inherited_scheduler_state_storage` invariant is maintained by the caller.
-    unsafe {
-        let wq: &WaitQueueBase = &*wait_queue.cast::<WaitQueueBase>();
-        let thread: &Thread = &*t.cast::<Thread>();
-        let mut wq_proof = ChainLockProof::assume_held_unchecked(wq);
-        let mut t_proof = ChainLockProof::assume_held_unchecked(thread);
-        wq_proof.dequeue(&mut t_proof, Status::ok(wait_queue_error));
-    }
-}
-
-/// C++ FFI entry point for `WaitQueueBase::ValidateQueue()`.
-///
-/// # Safety
-///
-/// `wait_queue` must be a valid non-null pointer to an initialized [`WaitQueueBase`] whose lock is
-/// held by the caller.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_base_validate_queue(
-    wait_queue: *const bindings::WaitQueueBase,
-) {
-    debug_assert!(!wait_queue.is_null());
-    // SAFETY: The caller guarantees `wait_queue` points to an initialized `WaitQueueBase` with its
-    // lock held.
-    let wq: &WaitQueueBase = unsafe { &*wait_queue.cast::<WaitQueueBase>() };
-    // SAFETY: The caller holds `wq.lock()`.
-    let proof = unsafe { ChainLockProof::assume_held_unchecked(wq) };
-    proof.validate_queue();
-}
-
-/// C++ FFI entry point for `WaitQueueBase::TimeoutHandler()`.
+/// Timer callback adapter for [`WaitQueueBase::timeout_handler`].
 ///
 /// # Safety
 ///
 /// The caller must uphold all preconditions of [`WaitQueueBase::timeout_handler`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_base_timeout_handler(
+unsafe extern "C" fn wait_queue_base_timeout_handler(
     timer: *mut Timer,
     now: zx_instant_mono_t,
     arg: *mut c_void,
@@ -2849,256 +2665,6 @@ pub unsafe extern "C" fn rust_wait_queue_base_timeout_handler(
     // `WaitQueueBase::timeout_handler` and no transaction is active.
     unsafe {
         WaitQueueBase::timeout_handler(timer, InstantMono(now), arg);
-    }
-}
-
-/// C++ FFI entry point for `WaitQueueBase::UpdateBlockedThreadEffectiveProfile()`.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `wait_queue` and `t` are valid non-null pointers to a live [`WaitQueueBase`] and [`Thread`].
-/// - Both `wait_queue`'s lock and `t`'s lock are exclusively held by the caller.
-/// - `t` is currently blocked in `wait_queue`.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_base_update_blocked_thread_effective_profile(
-    wait_queue: *mut bindings::WaitQueueBase,
-    t: *mut bindings::Thread,
-) {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!t.is_null());
-    // SAFETY: The caller guarantees `wait_queue` and `t` are valid, both locks are held, and `t`
-    // is currently blocked in `wait_queue`.
-    unsafe {
-        let wq: &WaitQueueBase = &*wait_queue.cast::<WaitQueueBase>();
-        let thread: &Thread = &*t.cast::<Thread>();
-        let mut wq_proof = ChainLockProof::assume_held_unchecked(wq);
-        let mut t_proof = ChainLockProof::assume_held_unchecked(thread);
-        wq_proof.update_blocked_thread_effective_profile(&mut t_proof);
-    }
-}
-
-/// C++ FFI entry point for `WaitQueue::BlockEtc()`.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `wait_queue`, `current_thread`, and `deadline` are valid non-null pointers to a live
-///   [`WaitQueue`] (valid while `current_thread` remains blocked in it), [`Thread`], and
-///   [`Deadline`].
-/// - An active [`ChainLockTransaction`] is finalized on the current CPU with `wait_queue`'s lock
-///   and `current_thread`'s lock as the only held chain locks (`wait_queue`'s lock is released by
-///   this call).
-/// - All other preconditions of [`WaitQueue::block_etc_preamble`] and
-///   [`WaitQueueBase::block_etc_postamble`] are satisfied.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_block_etc(
-    wait_queue: *mut bindings::WaitQueue,
-    current_thread: *mut bindings::Thread,
-    deadline: *const bindings::Deadline,
-    signal_mask: u32,
-    reason: bindings::ResourceOwnership,
-    interruptible: bindings::Interruptible,
-) -> zx_status_t {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!current_thread.is_null());
-    debug_assert!(!deadline.is_null());
-    // SAFETY:
-    // - `wait_queue`, `current_thread`, and `deadline` are valid pointers per caller contract.
-    //   `wq` and `wq_guard` are created and consumed entirely inside the preamble block with a
-    //   separate `preamble_token` so that no `&WaitQueue` borrow lives across
-    //   `WaitQueueBase::block_etc_postamble`.
-    // - An active transaction is finalized on the current CPU (`mark_active`) with `wait_queue`'s
-    //   lock (`OwnerGuard::adopt`) and `current_thread`'s lock (`assume_held_unchecked`) held.
-    // - All blocking preconditions of `WaitQueue::block_etc_preamble` and
-    //   `WaitQueueBase::block_etc_postamble` are upheld by the caller.
-    let res = unsafe {
-        let thread: &Thread = &*current_thread.cast::<Thread>();
-        let dl: &Deadline = &*deadline.cast::<Deadline>();
-        let mut t_proof = ChainLockProof::assume_held_unchecked(thread);
-        let this = {
-            let wq: &WaitQueue = &*wait_queue.cast::<WaitQueue>();
-            let preamble_token = ChainLockTransaction::mark_active();
-            let wq_guard = OwnerGuard::adopt(wq, &preamble_token);
-            WaitQueue::block_etc_preamble(
-                wq_guard,
-                &mut t_proof,
-                dl,
-                signal_mask,
-                reason.into(),
-                interruptible.into(),
-                &preamble_token,
-            )
-        };
-        let postamble_token = ChainLockTransaction::mark_active();
-        this.and_then(|this| {
-            WaitQueueBase::block_etc_postamble(this, t_proof, dl, &postamble_token)
-        })
-    };
-    Status::result_into_raw(res)
-}
-
-/// C++ FFI entry point for `WaitQueue::WakeOne()`.
-///
-/// # Safety
-///
-/// The caller must ensure that `wait_queue` is a valid non-null pointer to an initialized
-/// [`WaitQueue`], no [`ChainLockTransaction`] is active on the current CPU, and `wait_queue`'s
-/// lock is not held by the current CPU.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_wake_one(
-    wait_queue: *mut bindings::WaitQueue,
-    wait_queue_error: zx_status_t,
-) -> bool {
-    debug_assert!(!wait_queue.is_null());
-    // SAFETY: The caller guarantees `wait_queue` points to an initialized `WaitQueue`.
-    let wq: &WaitQueue = unsafe { &*wait_queue.cast::<WaitQueue>() };
-    wq.wake_one(Status::ok(wait_queue_error))
-}
-
-/// C++ FFI entry point for `WaitQueue::WakeAll()`.
-///
-/// # Safety
-///
-/// The caller must ensure that `wait_queue` is a valid non-null pointer to an initialized
-/// [`WaitQueue`], no [`ChainLockTransaction`] is active on the current CPU, and `wait_queue`'s
-/// lock is not held by the current CPU.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_wake_all(
-    wait_queue: *mut bindings::WaitQueue,
-    wait_queue_error: zx_status_t,
-) {
-    debug_assert!(!wait_queue.is_null());
-    // SAFETY: The caller guarantees `wait_queue` points to an initialized `WaitQueue`.
-    let wq: &WaitQueue = unsafe { &*wait_queue.cast::<WaitQueue>() };
-    wq.wake_all(Status::ok(wait_queue_error));
-}
-
-/// C++ FFI entry point for `WaitQueue::WakeOneLocked()`.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `wait_queue` is a valid non-null pointer to a live [`WaitQueue`].
-/// - `out_woken` is a valid non-null, properly aligned, unaliased pointer writable for a `bool`.
-/// - An active, unfinalized [`ChainLockTransaction`] is in progress on the current CPU with
-///   preemption disabled and `wait_queue`'s lock exclusively held (and no waiter thread's lock
-///   held).
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_wake_one_locked(
-    wait_queue: *mut bindings::WaitQueue,
-    wait_queue_error: zx_status_t,
-    out_woken: *mut bool,
-) -> bool {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!out_woken.is_null());
-    // SAFETY: The caller guarantees `wait_queue` is valid, an active unfinalized transaction is in
-    // progress with preemption disabled, and `wait_queue`'s lock is exclusively held.
-    let mut proof = unsafe {
-        let wq: &WaitQueue = &*wait_queue.cast::<WaitQueue>();
-        ChainLockProof::assume_held_unchecked(wq)
-    };
-    // SAFETY: The caller guarantees an active transaction is in progress with preemption disabled.
-    let (token, preempt_disabled) =
-        unsafe { (ChainLockTransaction::mark_active(), PreemptDisabledToken::new()) };
-    let Some(woken) =
-        proof.wake_one_locked(Status::ok(wait_queue_error), &token, &preempt_disabled)
-    else {
-        return false;
-    };
-    // SAFETY: The caller guarantees `out_woken` is valid for writes, properly aligned, and
-    // unaliased.
-    unsafe {
-        *out_woken = woken;
-    }
-    true
-}
-
-/// C++ FFI entry point for `WaitQueue::WakeAllLocked()`.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `wait_queue` is a valid non-null pointer to a live [`WaitQueue`].
-/// - `out_woken` is a valid non-null, properly aligned, unaliased pointer writable for a `u32`.
-/// - An active, unfinalized [`ChainLockTransaction`] is in progress on the current CPU with
-///   preemption disabled and `wait_queue`'s lock exclusively held (and no waiter thread's lock
-///   held).
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_wake_all_locked(
-    wait_queue: *mut bindings::WaitQueue,
-    wait_queue_error: zx_status_t,
-    out_woken: *mut u32,
-) -> bool {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!out_woken.is_null());
-    // SAFETY: The caller guarantees `wait_queue` is valid, an active unfinalized transaction is in
-    // progress with preemption disabled, and `wait_queue`'s lock is exclusively held.
-    let mut proof = unsafe {
-        let wq: &WaitQueue = &*wait_queue.cast::<WaitQueue>();
-        ChainLockProof::assume_held_unchecked(wq)
-    };
-    // SAFETY: The caller guarantees an active transaction is in progress with preemption disabled.
-    let (token, preempt_disabled) =
-        unsafe { (ChainLockTransaction::mark_active(), PreemptDisabledToken::new()) };
-    let Some(woken) =
-        proof.wake_all_locked(Status::ok(wait_queue_error), &token, &preempt_disabled)
-    else {
-        return false;
-    };
-    // SAFETY: The caller guarantees `out_woken` is valid for writes, properly aligned, and
-    // unaliased.
-    unsafe {
-        *out_woken = woken;
-    }
-    true
-}
-
-/// C++ FFI entry point for `WaitQueue::MoveThread()`.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `source`, `dest`, and `t` are valid non-null pointers to two distinct live [`WaitQueue`]s
-///   and a live [`Thread`].
-/// - `source`'s lock, `dest`'s lock, and `t`'s lock are all exclusively held by the caller.
-/// - `t` is currently blocked in `source`.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/wait.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_queue_move_thread(
-    source: *mut bindings::WaitQueue,
-    dest: *mut bindings::WaitQueue,
-    t: *mut bindings::Thread,
-) {
-    debug_assert!(!source.is_null());
-    debug_assert!(!dest.is_null());
-    debug_assert!(!t.is_null());
-    // SAFETY:
-    // - `source`, `dest`, and `t` are valid pointers to two distinct live `WaitQueue`s and a live
-    //   `Thread` per caller contract.
-    // - All three locks are exclusively held by the caller (`assume_held_unchecked`).
-    // - `t` is currently blocked in `source` (`move_thread`).
-    unsafe {
-        let src_wq: &WaitQueue = &*source.cast::<WaitQueue>();
-        let dst_wq: &WaitQueue = &*dest.cast::<WaitQueue>();
-        let thread: &Thread = &*t.cast::<Thread>();
-        let mut src_proof = ChainLockProof::assume_held_unchecked(src_wq);
-        let mut dst_proof = ChainLockProof::assume_held_unchecked(dst_wq);
-        let mut t_proof = ChainLockProof::assume_held_unchecked(thread);
-        WaitQueue::move_thread(&mut src_proof, &mut dst_proof, &mut t_proof);
     }
 }
 
@@ -3195,7 +2761,8 @@ mod tests {
                 let preempt_disabled = unsafe { PreemptDisabledToken::new() };
                 let mut guard = OwnerGuard::new(wq_ref, token);
                 let mut proof = guard.proof();
-                wake_one_res = proof.wake_one_locked(Ok(()), token, &preempt_disabled);
+                // SAFETY: The active transaction is not yet finalized and `wq_ref` is empty.
+                wake_one_res = unsafe { proof.wake_one_locked(Ok(()), token, &preempt_disabled) };
                 ChainLockTransaction::finalize(token);
                 guard.release();
                 DONE
@@ -3214,7 +2781,8 @@ mod tests {
                 let preempt_disabled = unsafe { PreemptDisabledToken::new() };
                 let mut guard = OwnerGuard::new(wq_ref, token);
                 let mut proof = guard.proof();
-                wake_all_res = proof.wake_all_locked(Ok(()), token, &preempt_disabled);
+                // SAFETY: The active transaction is not yet finalized and `wq_ref` is empty.
+                wake_all_res = unsafe { proof.wake_all_locked(Ok(()), token, &preempt_disabled) };
                 guard.release();
                 DONE
             },
@@ -3421,20 +2989,16 @@ mod tests {
             ///
             /// Same preconditions as [`WaitQueueCollection::insert`].
             unsafe fn insert(&mut self, thread: &mut ChainLockProof<'_, Thread>) {
-                // SAFETY: `self.wqc` is never moved through this mutable reference (`insert` only
-                // mutates the pinned WAVL tree in place), and the caller upholds `insert`'s
-                // preconditions.
-                unsafe { self.wqc.as_mut().get_unchecked_mut().insert(thread) };
+                // SAFETY: The caller upholds `insert`'s preconditions.
+                unsafe { self.wqc.as_mut().insert(thread) };
             }
 
             /// # Safety
             ///
             /// Same preconditions as [`WaitQueueCollection::remove`].
             unsafe fn remove(&mut self, thread: &mut ChainLockProof<'_, Thread>) {
-                // SAFETY: `self.wqc` is never moved through this mutable reference (`remove` only
-                // mutates the pinned WAVL tree in place), and the caller upholds `remove`'s
-                // preconditions.
-                unsafe { self.wqc.as_mut().get_unchecked_mut().remove(thread) };
+                // SAFETY: The caller upholds `remove`'s preconditions.
+                unsafe { self.wqc.as_mut().remove(thread) };
             }
         }
 
@@ -3589,15 +3153,16 @@ mod tests {
             |token| {
                 let mut wq_guard = OwnerGuard::new(&*wq, token);
                 let mut wq_proof = wq_guard.proof();
-                let wqc = wq_proof.collection_mut();
+                let mut wqc = wq_proof.collection_mut();
 
                 let t0 = threads.get(0);
                 let mut t0_guard = OwnerGuard::acquire_or_backoff(t0, token).expect("uncontended");
 
                 // SAFETY: `t0` is a live test thread whose lock `t0_guard` holds, and it is not
                 // in any queue.
-                unsafe { wqc.insert(&mut t0_guard.proof()) };
-                let finish_time = t0_guard.proof().scheduler_state().finish_time();
+                unsafe { wqc.as_mut().insert(&mut t0_guard.proof()) };
+                // SAFETY: `t0` is in no scheduler run queue (see above).
+                let finish_time = unsafe { t0_guard.proof().scheduler_state().finish_time() };
                 // SAFETY: `t0`'s lock is held by `t0_guard` and the queue lock by `wq_guard`,
                 // which are the only locks the sort key is written under.
                 let sort_key = unsafe { *t0.wait_queue_state.blocked_threads_tree_sort_key.get() };
@@ -3610,7 +3175,7 @@ mod tests {
                 );
 
                 // SAFETY: `t0` is a member of `wqc` and its lock is held by `t0_guard`.
-                unsafe { wqc.remove(&mut t0_guard.proof()) };
+                unsafe { wqc.as_mut().remove(&mut t0_guard.proof()) };
                 // SAFETY: As above; `t0` is no longer in the tree, so `subtree_min_deadline` is
                 // not written by anyone either.
                 let (sort_key, subtree_best) = unsafe {
@@ -3678,7 +3243,7 @@ mod tests {
         ChainLockTransaction::until_done(IRQ_SAVE_OPTION, clt_tag!("test_min_deadline"), |token| {
             let mut wq_guard = OwnerGuard::new(&*wq, token);
             let mut wq_proof = wq_guard.proof();
-            let wqc = wq_proof.collection_mut();
+            let mut wqc = wq_proof.collection_mut();
 
             let (t0, t1, t2) = (threads.get(0), threads.get(1), threads.get(2));
             let mut t0_guard = OwnerGuard::acquire_or_backoff(t0, token).expect("uncontended");
@@ -3691,22 +3256,22 @@ mod tests {
             // and is inserted only while not in any queue and removed only while a member of
             // `wqc`.
             unsafe {
-                wqc.insert(&mut t0_guard.proof());
+                wqc.as_mut().insert(&mut t0_guard.proof());
                 mins[1] = wqc.min_inheritable_relative_deadline();
 
-                wqc.insert(&mut t1_guard.proof());
+                wqc.as_mut().insert(&mut t1_guard.proof());
                 mins[2] = wqc.min_inheritable_relative_deadline();
 
-                wqc.insert(&mut t2_guard.proof());
+                wqc.as_mut().insert(&mut t2_guard.proof());
                 mins[3] = wqc.min_inheritable_relative_deadline();
 
-                wqc.remove(&mut t2_guard.proof());
+                wqc.as_mut().remove(&mut t2_guard.proof());
                 mins[4] = wqc.min_inheritable_relative_deadline();
 
-                wqc.remove(&mut t1_guard.proof());
+                wqc.as_mut().remove(&mut t1_guard.proof());
                 mins[5] = wqc.min_inheritable_relative_deadline();
 
-                wqc.remove(&mut t0_guard.proof());
+                wqc.as_mut().remove(&mut t0_guard.proof());
                 mins[6] = wqc.min_inheritable_relative_deadline();
             }
 
@@ -3752,7 +3317,7 @@ mod tests {
             |token| {
                 let mut wq_guard = OwnerGuard::new(&*wq, token);
                 let mut wq_proof = wq_guard.proof();
-                let wqc = wq_proof.collection_mut();
+                let mut wqc = wq_proof.collection_mut();
 
                 let (t0, t1) = (threads.get(0), threads.get(1));
                 let mut t0_guard = OwnerGuard::acquire_or_backoff(t0, token).expect("uncontended");
@@ -3764,17 +3329,17 @@ mod tests {
                 // `OwnerGuard`, and is inserted only while not in any queue and removed only
                 // while a member of `wqc`.
                 unsafe {
-                    wqc.insert(&mut t1_guard.proof());
+                    wqc.as_mut().insert(&mut t1_guard.proof());
                     storages[1] = wqc.find_inherited_scheduler_state_storage();
 
-                    wqc.insert(&mut t0_guard.proof());
+                    wqc.as_mut().insert(&mut t0_guard.proof());
                     front_after_both = wqc.peek_front();
                     storages[2] = wqc.find_inherited_scheduler_state_storage();
 
-                    wqc.remove(&mut t1_guard.proof());
+                    wqc.as_mut().remove(&mut t1_guard.proof());
                     storages[3] = wqc.find_inherited_scheduler_state_storage();
 
-                    wqc.remove(&mut t0_guard.proof());
+                    wqc.as_mut().remove(&mut t0_guard.proof());
                 }
 
                 t0_guard.release();
@@ -3804,12 +3369,12 @@ mod tests {
         ChainLockTransaction::until_done(IRQ_SAVE_OPTION, tag, |token| {
             let mut wq_guard = OwnerGuard::new(wq, token);
             let mut wq_proof = wq_guard.proof();
-            let wqc = wq_proof.collection_mut();
+            let mut wqc = wq_proof.collection_mut();
             for i in 0..3 {
                 let mut guard = OwnerGuard::acquire_or_backoff(threads.get(i), token).unwrap();
                 // SAFETY: The thread is a live test thread whose lock `guard` holds, and is not
                 // in any queue.
-                unsafe { wqc.insert(&mut guard.proof()) };
+                unsafe { wqc.as_mut().insert(&mut guard.proof()) };
                 guard.release();
             }
             wq_guard.release();
@@ -3823,11 +3388,11 @@ mod tests {
         ChainLockTransaction::until_done(IRQ_SAVE_OPTION, tag, |token| {
             let mut wq_guard = OwnerGuard::new(wq, token);
             let mut wq_proof = wq_guard.proof();
-            let wqc = wq_proof.collection_mut();
+            let mut wqc = wq_proof.collection_mut();
             for i in 0..3 {
                 let mut guard = OwnerGuard::acquire_or_backoff(threads.get(i), token).unwrap();
                 // SAFETY: The thread is a member of `wqc` and its lock is held by `guard`.
-                unsafe { wqc.remove(&mut guard.proof()) };
+                unsafe { wqc.as_mut().remove(&mut guard.proof()) };
                 guard.release();
             }
             wq_guard.release();
@@ -3962,7 +3527,7 @@ mod tests {
             |token| {
                 let mut wq_guard = OwnerGuard::new(&*wq, token);
                 let mut wq_proof = wq_guard.proof();
-                let wqc = wq_proof.collection_mut();
+                let mut wqc = wq_proof.collection_mut();
                 let mut t0_guard = OwnerGuard::acquire_or_backoff(t0, token).expect("uncontended");
                 let mut t1_guard = OwnerGuard::acquire_or_backoff(t1, token).expect("uncontended");
                 let mut t2_guard = OwnerGuard::acquire_or_backoff(t2, token).expect("uncontended");
@@ -3980,9 +3545,9 @@ mod tests {
                 // SAFETY: Each thread is a live test thread whose lock its `OwnerGuard` holds,
                 // and is not in any queue.
                 unsafe {
-                    wqc.insert(&mut t0_guard.proof());
-                    wqc.insert(&mut t1_guard.proof());
-                    wqc.insert(&mut t2_guard.proof());
+                    wqc.as_mut().insert(&mut t0_guard.proof());
+                    wqc.as_mut().insert(&mut t1_guard.proof());
+                    wqc.as_mut().insert(&mut t2_guard.proof());
                 }
 
                 // Re-derive the shared pointer after `insert` mutates `wqc` so the C++ reads use
@@ -4010,9 +3575,9 @@ mod tests {
                 // SAFETY: Each thread is a member of `wqc` and its lock is held by its
                 // `OwnerGuard`.
                 unsafe {
-                    wqc.remove(&mut t0_guard.proof());
-                    wqc.remove(&mut t1_guard.proof());
-                    wqc.remove(&mut t2_guard.proof());
+                    wqc.as_mut().remove(&mut t0_guard.proof());
+                    wqc.as_mut().remove(&mut t1_guard.proof());
+                    wqc.as_mut().remove(&mut t2_guard.proof());
                 }
 
                 t0_guard.release();
@@ -4248,14 +3813,8 @@ mod tests {
                 pin_init::stack_pin_init!(let list = ThreadUnblockList::init());
                 // SAFETY: `list` is newly initialized and empty; on success the transaction is
                 // finalized and `list` is passed to `scheduler::unblock_list` below.
-                let res = unsafe {
-                    BrwLockOps::lock_for_wake(
-                        &mut guard.proof(),
-                        current_mono_time(),
-                        list.as_mut(),
-                        token,
-                    )
-                };
+                let res =
+                    unsafe { BrwLockOps::lock_for_wake(&mut guard.proof(), list.as_mut(), token) };
                 let Some(count) = res else {
                     // `lock_for_wake` put every thread back and released its lock; returning
                     // drops `guard`, releasing the queue lock before the backoff.
@@ -4326,14 +3885,8 @@ mod tests {
                 //
                 // SAFETY: `list` is newly initialized and empty; the call is expected to fail and
                 // leave it empty, which is checked below before it is dropped.
-                res = unsafe {
-                    BrwLockOps::lock_for_wake(
-                        &mut guard.proof(),
-                        current_mono_time(),
-                        list.as_mut(),
-                        token,
-                    )
-                };
+                res =
+                    unsafe { BrwLockOps::lock_for_wake(&mut guard.proof(), list.as_mut(), token) };
                 list_empty = list.is_empty();
                 first_unlocked = first_ref.lock().is_unlocked();
                 count = guard.proof().count();
@@ -4393,7 +3946,7 @@ mod tests {
                     unsafe { t.lock().as_chain_lock() }.release(token);
                 }
             }
-            list.as_mut().as_list().clear();
+            list.as_mut().clear();
             guard.release();
             ChainLockTransaction::finalize(token);
             DONE
@@ -4536,7 +4089,7 @@ mod tests {
                 // transaction and no `ChainLockProof` for `first` is live.
                 unsafe { first_ref.lock().as_chain_lock() }.release(token);
             }
-            list.as_mut().as_list().clear();
+            list.as_mut().clear();
             guard.release();
             ChainLockTransaction::finalize(token);
             DONE

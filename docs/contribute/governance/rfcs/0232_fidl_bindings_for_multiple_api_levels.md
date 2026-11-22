@@ -386,7 +386,7 @@ The Android SDK allows specifying `compileSdkVersion` and `minSdkVersion`. See
 [evolution]: /docs/development/api/evolution.md
 [fi-0182]: https://fuchsia.dev/error/fi-0182
 [fi-0183]: https://fuchsia.dev/error/fi-0183
-[legacy]: /docs/reference/fidl/language/versioning.md#legacy
+[legacy]: /docs/reference/fidl/language/versioning.md
 [rfc-0002-dynamics]: /docs/contribute/governance/rfcs/0002_platform_versioning.md#dynamics
 [rfc-0083-amendment]: https://fuchsia-review.googlesource.com/c/fuchsia/+/734932
 [rfc-0083]: /docs/contribute/governance/rfcs/0083_fidl_versioning.md

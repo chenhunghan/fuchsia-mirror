@@ -58,6 +58,5 @@ rustc_test(
 # run: fx test fuchsia_bt_test_affordances_tests
 fx_unittest_package(
     name = "fuchsia_bt_test_affordances_tests",
-    package_name = "fuchsia_bt_test_affordances_tests",
     unit_tests = [":affordances_test"],
 )

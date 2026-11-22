@@ -75,7 +75,6 @@ fuchsia_rust_driver("bt-transport-uart-rust-driver") {
 
 fuchsia_driver_component("bt-transport-uart-rust") {
   cm_label = ":bt-transport-uart-rust-manifest"
-  info = "meta/bt-transport-uart-info.json"
   deps = [
     ":bt-transport-uart-rust-driver",
     ":bt_transport_uart_rust_bind",

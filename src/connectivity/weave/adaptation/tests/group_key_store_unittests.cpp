@@ -116,19 +116,75 @@ TEST_F(GroupKeyStoreTest, StoreAndRetrieveKey) {
 }
 
 TEST_F(GroupKeyStoreTest, StoreInvalidKey) {
-  const WeaveGroupKey test_key{.KeyLen = WeaveGroupKey::MaxKeySize + 1};
-  EXPECT_EQ(group_key_store().StoreGroupKey(test_key), WEAVE_ERROR_INVALID_ARGUMENT);
+  const WeaveGroupKey exceeds_max_key{
+      .KeyId = kTestKeyId,
+      .KeyLen = WeaveGroupKey::MaxKeySize + 1,
+  };
+  EXPECT_EQ(group_key_store().StoreGroupKey(exceeds_max_key), WEAVE_ERROR_INVALID_ARGUMENT);
+
+  // Non-fabric keys append a 4-byte StartTime at offset kWeaveAppGroupKeySize,
+  // so lengths in (kWeaveAppGroupKeySize, MaxKeySize] or < kWeaveAppGroupKeySize
+  // must be rejected rather than reading past key_data or truncating StartTime.
+  const WeaveGroupKey oversized_app_key =
+      CreateGroupKey(kTestKeyId, 0xAA, WeaveGroupKey::MaxKeySize, 0xABCDEF);
+  EXPECT_EQ(group_key_store().StoreGroupKey(oversized_app_key), WEAVE_ERROR_INVALID_ARGUMENT);
+
+  const WeaveGroupKey slightly_oversized_app_key =
+      CreateGroupKey(kTestKeyId, 0xAA, kWeaveAppGroupKeySize + 1, 0xABCDEF);
+  EXPECT_EQ(group_key_store().StoreGroupKey(slightly_oversized_app_key),
+            WEAVE_ERROR_INVALID_ARGUMENT);
+
+  const WeaveGroupKey undersized_app_key =
+      CreateGroupKey(kTestKeyId, 0xAA, kWeaveAppGroupKeySize - 1, 0xABCDEF);
+  EXPECT_EQ(group_key_store().StoreGroupKey(undersized_app_key), WEAVE_ERROR_INVALID_ARGUMENT);
+
+  const WeaveGroupKey empty_app_key = CreateGroupKey(kTestKeyId, 0, 0, 0xABCDEF);
+  EXPECT_EQ(group_key_store().StoreGroupKey(empty_app_key), WEAVE_ERROR_INVALID_ARGUMENT);
+
+  const WeaveGroupKey oversized_fabric_key{
+      .KeyId = WeaveKeyId::kFabricSecret,
+      .KeyLen = WeaveGroupKey::MaxKeySize + 1,
+  };
+  EXPECT_EQ(group_key_store().StoreGroupKey(oversized_fabric_key), WEAVE_ERROR_INVALID_ARGUMENT);
+
+  WeaveGroupKey retrieved_key;
+  EXPECT_EQ(group_key_store().RetrieveGroupKey(kTestKeyId, retrieved_key),
+            WEAVE_DEVICE_ERROR_CONFIG_NOT_FOUND);
 }
 
 TEST_F(GroupKeyStoreTest, StoreAndRetrieveFabricSecretKey) {
-  const WeaveGroupKey test_key =
-      CreateGroupKey(WeaveKeyId::kFabricSecret, 0, kWeaveAppGroupKeySize);
-  EXPECT_EQ(group_key_store().StoreGroupKey(test_key), WEAVE_NO_ERROR);
+  const WeaveGroupKey full_fabric_key =
+      CreateGroupKey(WeaveKeyId::kFabricSecret, 0x5A, WeaveGroupKey::MaxKeySize);
+  EXPECT_EQ(group_key_store().StoreGroupKey(full_fabric_key), WEAVE_NO_ERROR);
 
   WeaveGroupKey retrieved_key;
   EXPECT_EQ(group_key_store().RetrieveGroupKey(WeaveKeyId::kFabricSecret, retrieved_key),
             WEAVE_NO_ERROR);
-  VerifyGroupKey(retrieved_key, test_key);
+  VerifyGroupKey(retrieved_key, full_fabric_key);
+
+  const WeaveGroupKey shorter_fabric_key =
+      CreateGroupKey(WeaveKeyId::kFabricSecret, 0, kWeaveAppGroupKeySize);
+  EXPECT_EQ(group_key_store().StoreGroupKey(shorter_fabric_key), WEAVE_NO_ERROR);
+  EXPECT_EQ(group_key_store().RetrieveGroupKey(WeaveKeyId::kFabricSecret, retrieved_key),
+            WEAVE_NO_ERROR);
+  VerifyGroupKey(retrieved_key, shorter_fabric_key);
+}
+
+TEST_F(GroupKeyStoreTest, RetrieveCorruptedKeyLength) {
+  const uint8_t short_data[2] = {0x11, 0x22};
+  EXPECT_EQ(EnvironmentConfig::WriteConfigValueBin("gk-00001002", short_data, sizeof(short_data)),
+            WEAVE_NO_ERROR);
+
+  WeaveGroupKey retrieved_key{};
+  EXPECT_EQ(group_key_store().RetrieveGroupKey(kTestKeyId, retrieved_key),
+            WEAVE_ERROR_INVALID_ARGUMENT);
+
+  const uint8_t missing_start_time[kWeaveAppGroupKeySize] = {0x33};
+  EXPECT_EQ(EnvironmentConfig::WriteConfigValueBin("gk-00001002", missing_start_time,
+                                                   sizeof(missing_start_time)),
+            WEAVE_NO_ERROR);
+  EXPECT_EQ(group_key_store().RetrieveGroupKey(kTestKeyId, retrieved_key),
+            WEAVE_ERROR_INVALID_ARGUMENT);
 }
 
 TEST_F(GroupKeyStoreTest, RetrieveNonExistentKey) {

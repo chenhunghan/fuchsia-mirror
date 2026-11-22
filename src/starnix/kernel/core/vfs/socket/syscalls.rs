@@ -11,7 +11,7 @@ use crate::vfs::buffers::{
     AncillaryData, ControlMsg, UserBuffersInputBuffer, UserBuffersOutputBuffer,
 };
 use crate::vfs::socket::{
-    SA_FAMILY_SIZE, SA_STORAGE_SIZE, Socket, SocketAddress, SocketDomain, SocketFile,
+    SA_FAMILY_SIZE, SA_STORAGE_SIZE, SockOptValue, Socket, SocketAddress, SocketDomain, SocketFile,
     SocketMessageFlags, SocketPeer, SocketProtocol, SocketShutdownFlags, SocketType, UnixSocket,
     resolve_unix_socket_address,
 };
@@ -821,6 +821,7 @@ fn sendmsg_internal_with_header(
     )?;
     let iovec = read_iovec_from_msghdr(current_task, message_header.into())?;
 
+    let socket_ops = file.downcast_file::<SocketFile>().unwrap();
     let mut next_message_offset: usize = 0;
     let mut ancillary_data = Vec::new();
     let header_size = CMsgHdrPtr::size_of_object_for(current_task);
@@ -844,10 +845,15 @@ fn sendmsg_internal_with_header(
         let data = current_task
             .read_memory_to_vec((message_header.control + next_data_offset)?, data_size)?;
         next_message_offset += cmsg_align(current_task, header_size + data.len())?;
-        let data = AncillaryData::from_cmsg(
+
+        let Some(data) = AncillaryData::from_cmsg(
             current_task,
+            socket_ops.socket.domain,
             ControlMsg::new(cmsg.cmsg_level, cmsg.cmsg_type, data),
-        )?;
+        )?
+        else {
+            continue;
+        };
         if data.total_size(current_task) == 0 {
             continue;
         }
@@ -855,7 +861,6 @@ fn sendmsg_internal_with_header(
     }
 
     let flags = SocketMessageFlags::from_bits(flags).ok_or_else(|| errno!(EOPNOTSUPP))?;
-    let socket_ops = file.downcast_file::<SocketFile>().unwrap();
     if dest_address.is_some()
         && socket_ops.socket.domain == SocketDomain::Inet
         && socket_ops.socket.socket_type != SocketType::Stream
@@ -969,47 +974,39 @@ pub fn sys_getsockopt(
     let file = current_task.get_file(fd)?;
     let socket = Socket::get_from_file(&file)?;
 
-    let optlen = current_task.read_object(user_optlen)? as usize;
-    let optval_buffer_len = optlen;
-    let mut optval = current_task.read_memory_to_vec(user_optval, optlen as usize)?;
+    let optlen = current_task.read_object(user_optlen)?;
+    let user_opt = SockOptValue::from_user(user_optval, optlen)?;
+    let buffer_size = user_opt.len();
 
     let result = if socket.domain.is_inet() && IpTables::can_handle_getsockopt(level, optname) {
-        current_task.kernel().iptables().getsockopt(current_task, socket, optname, optval.clone())
+        current_task.kernel().iptables().getsockopt(current_task, socket, optname, user_opt)
     } else {
-        socket.getsockopt(current_task, level, optname, optlen as u32)
+        socket.getsockopt(current_task, level, optname, optlen)
     };
+
+    // Linux getsockopt allows the user to pass a buffer smaller than the option's
+    // actual size, in which case the kernel truncates the returned value to fit
+    // the buffer and returns success.
+    let result = result.map(|mut optval| {
+        optval.truncate(buffer_size);
+        optval
+    });
 
     // Even if `getsockopt()` above returned an error we still need to run
     // the eBPF program - it may handle the error.
-    let (optlen, error) = match result {
-        Ok(new_optval) => {
-            // Linux getsockopt allows the user to pass a buffer smaller than the option's
-            // actual size, in which case the kernel truncates the returned value to fit
-            // the buffer and returns success.
-            //
-            // On the other hand, if the option is smaller than the user provided buffer,
-            // the eBPF program can still use the entire user allocated buffer if needed.
-            let len = std::cmp::min(new_optval.len(), optval.len());
-            optval[..len].copy_from_slice(&new_optval[..len]);
-            (len, None)
-        }
-        Err(e) => (optlen, Some(e)),
-    };
-
     let root_cgroup = current_task.kernel().ebpf_state.attachments.root_cgroup();
-    let (optval, optlen) = root_cgroup.run_getsockopt_prog(
+    let optval = root_cgroup.run_getsockopt_prog(
         current_task,
         level,
         optname,
-        optval,
-        optlen,
-        error,
+        result,
+        buffer_size,
         socket,
     )?;
 
-    assert!(optlen <= optval_buffer_len);
-    current_task.write_memory(user_optval, &optval[..optlen])?;
-    current_task.write_object(user_optlen, &(optlen as u32))?;
+    assert!(optval.len() <= buffer_size);
+    current_task.write_memory(user_optval, &optval)?;
+    current_task.write_object(user_optlen, &(optval.len() as u32))?;
 
     Ok(())
 }
@@ -1025,21 +1022,16 @@ pub fn sys_setsockopt(
     let file = current_task.get_file(fd)?;
     let socket = Socket::get_from_file(&file)?;
 
-    let user_opt = UserBuffer { address: user_optval, length: optlen as usize };
+    let user_opt = SockOptValue::from_user(user_optval, optlen)?;
 
     // Run eBPF program if any.
     let root_cgroup = current_task.kernel().ebpf_state.attachments.root_cgroup();
-    let optval = match root_cgroup.run_setsockopt_prog(
-        current_task,
-        level,
-        optname,
-        user_opt.into(),
-        socket,
-    ) {
-        SetSockOptProgramResult::Allow(value) => value,
-        SetSockOptProgramResult::Fail(errno) => return Err(errno),
-        SetSockOptProgramResult::Bypass => return Ok(()), // The option was handled by eBPF.
-    };
+    let optval =
+        match root_cgroup.run_setsockopt_prog(current_task, level, optname, user_opt, socket) {
+            SetSockOptProgramResult::Allow(value) => value,
+            SetSockOptProgramResult::Fail(errno) => return Err(errno),
+            SetSockOptProgramResult::Bypass => return Ok(()), // The option was handled by eBPF.
+        };
 
     if socket.domain.is_inet() && IpTables::can_handle_setsockopt(level, optname) {
         current_task.kernel().iptables().setsockopt(current_task, socket, optname, optval)

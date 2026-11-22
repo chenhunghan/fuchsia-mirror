@@ -2,15 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use bt_repl::Commands;
 use fidl_fuchsia_bluetooth_hfp as hfp;
-use futures::{pin_mut, select, FutureExt};
+use futures::{FutureExt, pin_mut, select};
 
+mod commands;
 mod fidl;
-mod repl;
 
+use commands::{Command, CommandHandler};
 use fidl::hands_free::HandsFree;
-use repl::command_handler::CommandHandler;
-use repl::runner::Runner as ReplRunner;
+
+/// Prompt shown by the REPL.
+const PROMPT: &str = "hf> ";
 
 #[fuchsia::main]
 async fn main() {
@@ -25,9 +28,7 @@ async fn main() {
     let hands_free_fut = hands_free.fuse();
     pin_mut!(hands_free_fut);
 
-    let repl_runner = ReplRunner::new(command_handler);
-
-    let repl_fut = repl_runner.run().fuse();
+    let repl_fut = bt_repl::run(PROMPT, Commands::<Command>::new(), command_handler).fuse();
     pin_mut!(repl_fut);
 
     let fut = async {

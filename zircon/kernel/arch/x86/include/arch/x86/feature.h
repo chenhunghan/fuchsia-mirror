@@ -10,14 +10,12 @@
 #include <assert.h>
 #include <stdint.h>
 #include <zircon/compiler.h>
+#include <zircon/types.h>
 
 #include <arch/x86.h>
 #include <arch/x86/feature_ffi.h>
 #include <arch/x86/idle_states.h>
-
-namespace cpu_id {
-class CpuId;
-}  // namespace cpu_id
+#include <ktl/atomic.h>
 
 #define MAX_SUPPORTED_CPUID (0x17)
 #define MAX_SUPPORTED_CPUID_HYP (0x40000001)
@@ -66,16 +64,6 @@ static_assert(sizeof(x86_cpuid_bit) == 8);
   (struct x86_cpuid_bit) { (enum x86_cpuid_leaf_num)(leaf), (word), (bit) }
 
 extern "C" {
-/* Invoked on each CPU prior to lk_main being called. */
-void x86_feature_early_init_percpu();
-
-/* Invoked on boot CPU after command line and UART enabled, but before
- * code patching or the MMU are enabled. */
-void x86_cpu_feature_init();
-
-/* Invoked on each CPU late in init sequence. */
-void x86_cpu_feature_late_init_percpu();
-
 extern struct cpuid_leaf _cpuid[MAX_SUPPORTED_CPUID + 1];
 extern struct cpuid_leaf _cpuid_hyp[MAX_SUPPORTED_CPUID_HYP - X86_CPUID_HYP_BASE + 1];
 extern struct cpuid_leaf _cpuid_ext[MAX_SUPPORTED_CPUID_EXT - X86_CPUID_EXT_BASE + 1];
@@ -83,9 +71,16 @@ extern uint32_t max_cpuid;
 extern uint32_t max_ext_cpuid;
 extern uint32_t max_hyp_cpuid;
 }
+static_assert(ktl::atomic_ref<uint32_t>::is_always_lock_free);
 
 static inline const struct cpuid_leaf* x86_get_cpuid_leaf(enum x86_cpuid_leaf_num leaf) {
   if (leaf < X86_CPUID_HYP_BASE) {
+    // Leaf 0x6 is refreshed concurrently by Rust (cpu_feature_late_init_percpu) with 32-bit atomic
+    // stores, so a plain pointer to it must never be handed out; read its bits through
+    // x86_feature_test(), which loads each register with ktl::atomic_ref.
+    if (leaf == X86_CPUID_THERMAL_AND_POWER) {
+      return nullptr;
+    }
     if (unlikely(leaf > max_cpuid))
       return NULL;
 
@@ -102,15 +97,53 @@ static inline const struct cpuid_leaf* x86_get_cpuid_leaf(enum x86_cpuid_leaf_nu
     return &_cpuid_ext[(uint32_t)leaf - (uint32_t)X86_CPUID_EXT_BASE];
   }
 }
-/* Retrieve the specified subleaf.  This function is not cached.
- * Returns false if leaf num is invalid */
-bool x86_get_cpuid_subleaf(enum x86_cpuid_leaf_num, uint32_t, struct cpuid_leaf*);
+
+/* Retrieve the specified subleaf. This function is not cached.
+ * Returns false if leaf num is invalid. */
+inline bool x86_get_cpuid_subleaf(enum x86_cpuid_leaf_num num, uint32_t subleaf,
+                                  struct cpuid_leaf* leaf) {
+#ifdef __clang__
+  [[clang::always_inline]]
+#endif
+  return rust_x86_get_cpuid_subleaf(static_cast<uint32_t>(num), subleaf, leaf);
+}
 
 static inline bool x86_feature_test(struct x86_cpuid_bit bit) {
   DEBUG_ASSERT(bit.word <= 3 && bit.bit <= 31);
 
   if (bit.word > 3 || bit.bit > 31)
     return false;
+
+  if (bit.leaf_num == X86_CPUID_THERMAL_AND_POWER) {
+    static_assert(X86_CPUID_THERMAL_AND_POWER <= MAX_SUPPORTED_CPUID);
+    if (unlikely(bit.leaf_num > max_cpuid)) {
+      return false;
+    }
+    // Leaf 0x6 is refreshed atomically on CPU 0 in cpu_feature_late_init_percpu. Relaxed
+    // ordering suffices since each word is read independently and publishes no other state.
+    uint32_t word = 0;
+    switch (bit.word) {
+      case 0:
+        word = ktl::atomic_ref<uint32_t>(_cpuid[X86_CPUID_THERMAL_AND_POWER].a)
+                   .load(ktl::memory_order_relaxed);
+        break;
+      case 1:
+        word = ktl::atomic_ref<uint32_t>(_cpuid[X86_CPUID_THERMAL_AND_POWER].b)
+                   .load(ktl::memory_order_relaxed);
+        break;
+      case 2:
+        word = ktl::atomic_ref<uint32_t>(_cpuid[X86_CPUID_THERMAL_AND_POWER].c)
+                   .load(ktl::memory_order_relaxed);
+        break;
+      case 3:
+        word = ktl::atomic_ref<uint32_t>(_cpuid[X86_CPUID_THERMAL_AND_POWER].d)
+                   .load(ktl::memory_order_relaxed);
+        break;
+      default:
+        return false;
+    }
+    return ((1u << bit.bit) & word) != 0;
+  }
 
   const struct cpuid_leaf* leaf = x86_get_cpuid_leaf(bit.leaf_num);
   if (!leaf)
@@ -129,8 +162,6 @@ static inline bool x86_feature_test(struct x86_cpuid_bit bit) {
       return false;
   }
 }
-
-extern "C" void x86_feature_debug();
 
 /* add feature bits to test here */
 /* format: X86_CPUID_BIT(cpuid leaf, register (eax-edx:0-3), bit) */
@@ -231,20 +262,6 @@ extern "C" {
 extern enum x86_vendor_list x86_vendor;
 }
 
-struct x86_model_info {
-  uint8_t processor_type;
-  uint8_t family;
-  uint8_t model;
-  uint8_t stepping;
-
-  uint32_t display_family;
-  uint32_t display_model;
-
-  uint32_t patch_level;
-};
-
-extern "C" const struct x86_model_info* x86_get_model();
-
 enum x86_microarch_list {
   X86_MICROARCH_UNKNOWN,
   X86_MICROARCH_INTEL_NEHALEM,
@@ -269,33 +286,14 @@ enum x86_microarch_list {
 extern "C" {
 // Pre-computed complex features to test for or features that are tested extremely
 // regularly in the system.
-extern bool g_x86_feature_fsgsbase;
 extern bool g_x86_feature_invpcid;
 // Combination of both PCID & INVLPCID features present, and enabled by kernel cmdline option.
 extern bool g_x86_feature_pcid_enabled;
 extern bool g_x86_feature_has_smap;
-}
-
-enum x86_hypervisor_list {
-  X86_HYPERVISOR_UNKNOWN,
-  X86_HYPERVISOR_NONE,
-  X86_HYPERVISOR_KVM,
-};
-
-extern "C" {
-extern enum x86_hypervisor_list x86_hypervisor;
 extern bool g_hypervisor_has_pv_clock;
-extern bool g_hypervisor_has_pv_eoi;
-extern bool g_hypervisor_has_pv_ipi;
 }
 
 static inline bool x86_hypervisor_has_pv_clock() { return g_hypervisor_has_pv_clock; }
-
-static inline bool x86_hypervisor_has_pv_eoi() { return g_hypervisor_has_pv_eoi; }
-
-static inline bool x86_hypervisor_has_pv_ipi() { return g_hypervisor_has_pv_ipi; }
-
-static inline bool x86_has_hypervisor() { return x86_hypervisor != X86_HYPERVISOR_NONE; }
 
 /* returns 0 if unknown, otherwise value in Hz */
 typedef uint64_t (*x86_get_timer_freq_func_t)();
@@ -325,16 +323,13 @@ typedef struct {
 extern "C" {
 extern const x86_microarch_config_t* x86_microarch_config;
 extern bool g_has_ibpb;
-extern bool g_ras_fill_on_ctxt_switch;
 extern bool g_cpu_vulnerable_to_rsb_underflow;
-extern bool g_cpu_vulnerable_to_rsb_cross_thread;
-extern bool g_should_ibpb_on_ctxt_switch;
-extern bool g_ssb_mitigated;
+extern ktl::atomic<bool> g_cpu_vulnerable_to_rsb_cross_thread;
 extern bool g_l1d_flush_on_vmentry;
 extern bool g_md_clear_on_user_return;
-extern bool g_has_enhanced_ibrs;
-extern bool g_has_meltdown;
 }
+static_assert(sizeof(ktl::atomic<bool>) == sizeof(bool));
+static_assert(ktl::atomic<bool>::is_always_lock_free);
 
 static inline const x86_microarch_config_t* x86_get_microarch_config() {
   return x86_microarch_config;
@@ -342,43 +337,41 @@ static inline const x86_microarch_config_t* x86_get_microarch_config() {
 
 static inline bool x86_cpu_has_ibpb() { return g_has_ibpb; }
 
-static inline bool x86_cpu_should_ras_fill_on_ctxt_switch() { return g_ras_fill_on_ctxt_switch; }
-
 static inline bool x86_cpu_vulnerable_to_rsb_cross_thread() {
-  return g_cpu_vulnerable_to_rsb_cross_thread;
+  // Relaxed suffices: monotonic false -> true latch set during late boot (before
+  // userspace starts and before each secondary CPU enters its idle loop), guarding
+  // only CPU-local RSB overwrite.
+  return g_cpu_vulnerable_to_rsb_cross_thread.load(ktl::memory_order_relaxed);
 }
 
 static inline bool x86_cpu_vulnerable_to_rsb_underflow() {
   return g_cpu_vulnerable_to_rsb_underflow;
 }
 
-static inline bool x86_cpu_should_ibpb_on_ctxt_switch() { return g_should_ibpb_on_ctxt_switch; }
-
-static inline bool x86_cpu_should_mitigate_ssb() { return g_ssb_mitigated; }
-
 static inline bool x86_cpu_should_l1d_flush_on_vmentry() { return g_l1d_flush_on_vmentry; }
 
 static inline bool x86_cpu_should_md_clear_on_user_return() { return g_md_clear_on_user_return; }
 
-static inline bool x86_cpu_has_enhanced_ibrs() { return g_has_enhanced_ibrs; }
-
-static inline bool x86_cpu_has_meltdown() { return g_has_meltdown; }
-
-// Vendor-specific per-cpu init functions, in src/amd.rs and src/intel.rs
-inline void x86_amd_init_percpu() { rust_x86_amd_init_percpu(); }
-inline void x86_intel_init_percpu() { rust_x86_intel_init_percpu(); }
-inline bool x86_intel_cpu_has_rsb_fallback() { return rust_x86_intel_cpu_has_rsb_fallback(); }
-inline uint32_t x86_amd_get_patch_level() { return rust_x86_amd_get_patch_level(); }
-inline uint32_t x86_intel_get_patch_level() { return rust_x86_intel_get_patch_level(); }
-inline bool x86_amd_has_retbleed() { return rust_x86_amd_has_retbleed(); }
-inline void x86_amd_zen2_retbleed_mitigation(const x86_model_info& model) {
-  rust_x86_amd_zen2_retbleed_mitigation(&model);
-}
-
-const x86_microarch_config_t* get_microarch_config(const cpu_id::CpuId* cpuid);
-inline bool x86_intel_idle_state_may_empty_rsb(const X86IdleState* state) {
-  return rust_x86_intel_idle_state_may_empty_rsb(state);
-}
+#ifdef KERNEL_RETPOLINE
+constexpr bool kX86KernelRetpoline = true;
+#else
+constexpr bool kX86KernelRetpoline = false;
+#endif
+#ifdef X64_KERNEL_JCC_WORKAROUND
+constexpr bool kX86KernelJccWorkaround = true;
+#else
+constexpr bool kX86KernelJccWorkaround = false;
+#endif
+#ifdef HARDEN_SLS
+constexpr bool kX86HardenSls = true;
+#else
+constexpr bool kX86HardenSls = false;
+#endif
+#ifdef ZERO_CALL_USED_REGS
+constexpr bool kX86ZeroCallUsedRegs = true;
+#else
+constexpr bool kX86ZeroCallUsedRegs = false;
+#endif
 
 // Called from assembly.
 extern "C" void x86_cpu_maybe_l1d_flush(zx_status_t syscall_return);

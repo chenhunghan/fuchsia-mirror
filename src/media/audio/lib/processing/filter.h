@@ -108,21 +108,41 @@ class SincFilter : public Filter {
  public:
   static constexpr auto kSideTaps = SincFilterCoefficientTable::kSideTaps;
   static constexpr auto kFracSideLength = SincFilterCoefficientTable::kFracSideLength;
+  static constexpr auto kFracHighPassSideLength =
+      SincFilterCoefficientTable::kFracHighPassSideLength;
   static constexpr auto kMaxFracSideLength = SincFilterCoefficientTable::kMaxFracSideLength;
 
   SincFilter(int32_t source_rate, int32_t dest_rate,
              int64_t side_length = SincFilterCoefficientTable::kFracSideLength,
-             int32_t num_frac_bits = Fixed::Format::FractionalBits)
+             int32_t num_frac_bits = Fixed::Format::FractionalBits, bool high_pass = false,
+             bool low_pass = false)
       : Filter(source_rate, dest_rate, side_length, num_frac_bits),
-        filter_coefficients_(cache_, Inputs{
-                                         .side_length = this->side_length(),
-                                         .num_frac_bits = this->num_frac_bits(),
-                                         .rate_conversion_ratio = this->rate_conversion_ratio(),
-                                     }) {}
-
-  static inline Fixed Length(int32_t source_frame_rate, int32_t dest_frame_rate) {
-    return SincFilterCoefficientTable::Length(source_frame_rate, dest_frame_rate);
+        high_pass_(high_pass),
+        low_pass_(low_pass),
+        filter_coefficients_(
+            cache_, high_pass  ? SincFilterCoefficientTable::MakeHighPassInputs(
+                                     source_rate, kUltrasoundMinFrequencyHz, this->side_length(),
+                                     this->num_frac_bits())
+                    : low_pass ? SincFilterCoefficientTable::MakeLowPassInputs(
+                                     source_rate, dest_rate, kAudioMaxFrequencyHz,
+                                     this->side_length(), this->num_frac_bits())
+                               : Inputs{
+                                     .side_length = this->side_length(),
+                                     .num_frac_bits = this->num_frac_bits(),
+                                     .rate_conversion_ratio = this->rate_conversion_ratio(),
+                                     .high_pass = false,
+                                 }) {
+    FX_DCHECK(!(high_pass_ && low_pass_));
   }
+
+  static Fixed Length(int32_t source_frame_rate, int32_t dest_frame_rate, bool high_pass = false,
+                      bool low_pass = false) {
+    return SincFilterCoefficientTable::Length(source_frame_rate, dest_frame_rate, high_pass,
+                                              low_pass);
+  }
+
+  bool high_pass() const { return high_pass_; }
+  bool low_pass() const { return low_pass_; }
 
   float ComputeSample(int64_t frac_offset, float* center) override {
     return ComputeSampleFromTable(*filter_coefficients_, frac_offset, center);
@@ -146,6 +166,8 @@ class SincFilter : public Filter {
   static CacheT* const cache_;
   static std::vector<CacheT::SharedPtr>* persistent_cache_;
 
+  bool high_pass_ = false;
+  bool low_pass_ = false;
   LazySharedCoefficientTable<Inputs> filter_coefficients_;
 };
 

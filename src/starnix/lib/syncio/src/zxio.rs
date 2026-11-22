@@ -525,7 +525,7 @@ pub type zxio_fsverity_descriptor_t = zxio_fsverity_descriptor;
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
 pub struct zxio_private {
-    pub reserved: [u64; 30usize],
+    pub reserved: [u64; 8usize],
 }
 pub type zxio_private_t = zxio_private;
 #[repr(C)]
@@ -559,12 +559,6 @@ pub struct zxio_verification_options {
 pub type zxio_verification_options_t = zxio_verification_options;
 pub type zxio_selinux_context_state_t = u8;
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct zxio_node_attr_zxio_fscrypt_policy_t {
-    pub key_identifier: [u8; 16usize],
-    pub flags: u8,
-}
-#[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct zxio_node_attr {
     pub protocols: zxio_node_protocols_t,
@@ -593,7 +587,13 @@ pub struct zxio_node_attr {
     pub object_type: zxio_object_type_t,
     pub encryption_policy: zxio_node_attr_zxio_fscrypt_policy_t,
     pub has: zxio_node_attr_zxio_node_attr_has_t,
-    pub __bindgen_padding_2: [u8; 1usize],
+    pub __bindgen_padding_2: u8,
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct zxio_node_attr_zxio_fscrypt_policy_t {
+    pub key_identifier: [u8; 16usize],
+    pub flags: u8,
 }
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
@@ -1436,7 +1436,6 @@ pub const ZXIO_OBJECT_TYPE_SYNCHRONOUS_DATAGRAM_SOCKET: zxio_object_type_t = 9;
 pub const ZXIO_OBJECT_TYPE_STREAM_SOCKET: zxio_object_type_t = 10;
 pub const ZXIO_OBJECT_TYPE_RAW_SOCKET: zxio_object_type_t = 11;
 pub const ZXIO_OBJECT_TYPE_PACKET_SOCKET: zxio_object_type_t = 12;
-pub const ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET: zxio_object_type_t = 13;
 pub const ZXIO_OBJECT_TYPE_SYMLINK: zxio_object_type_t = 14;
 pub const ZXIO_SELINUX_CONTEXT_STATE_DATA: zxio_selinux_context_state_t = 0;
 pub const ZXIO_SELINUX_CONTEXT_STATE_USE_XATTRS: zxio_selinux_context_state_t = 1;

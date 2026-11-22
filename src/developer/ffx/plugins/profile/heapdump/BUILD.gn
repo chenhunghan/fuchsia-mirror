@@ -34,7 +34,7 @@ if (is_host) {
     deps = [
       "//src/lib/fuchsia",
       "//src/lib/fuchsia-async",
-      "//src/performance/memory/pprof",
+      "//src/memory/lib/pprof",
       "//third_party/rust_crates:anyhow",
       "//third_party/rust_crates:flate2",
       "//third_party/rust_crates:log",
@@ -65,7 +65,7 @@ ffx_e2e_product_bundle("product_bundle") {
     }
     base_packages = [
       {
-        package_target = "//src/performance/memory/heapdump/example"
+        package_target = "//src/memory/heapdump/example"
       },
     ]
   }

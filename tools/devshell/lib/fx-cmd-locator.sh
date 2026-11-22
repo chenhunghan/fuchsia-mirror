@@ -84,11 +84,6 @@ function _fx_registry_log {
   fi
 }
 
-function _fx_all_prebuilt_paths {
-  local -r var="PREBUILT_""ALL_PATHS"
-  printf '%s' "${!var:-}"
-}
-
 function _fx_ensure_python3_bin {
   local -r var="PREBUILT_""PYTHON3_DIR"
   local -r py_dir="${!var:-}"
@@ -276,18 +271,23 @@ function list_registered_host_tools_help_records {
   fi
 }
 
-function _fx_strip_prebuilt_paths_from_path {
-  local in_path="$1"
-  local -r all_prebuilt="$(_fx_all_prebuilt_paths)"
-  if [[ -z "${in_path}" ]]; then
-    printf '%s' "${in_path}"
-    return 0
-  fi
+# Populates `_fx_computed_path` in the caller's scope without spawning subshells.
+function _fx_compute_command_path_into_var {
+  local -r inject="$1"
+  local rem="${2-}"
+  local -r var="PREBUILT_""ALL_PATHS"
+  local -r all_prebuilt="${!var:-}"
   local -r wrapped_prebuilt=":${all_prebuilt}:"
-  local -a parts kept=()
+  local -a kept=()
   local part
-  IFS=':' read -r -a parts <<< "${in_path}"
-  for part in "${parts[@]}"; do
+  while [[ -n "${rem}" ]]; do
+    if [[ "${rem}" == *:* ]]; then
+      part="${rem%%:*}"
+      rem="${rem#*:}"
+    else
+      part="${rem}"
+      rem=""
+    fi
     [[ -n "${part}" ]] || continue
     if [[ -n "${all_prebuilt}" && "${wrapped_prebuilt}" == *":${part}:"* ]]; then
       continue
@@ -298,23 +298,11 @@ function _fx_strip_prebuilt_paths_from_path {
     kept+=("${part}")
   done
   local IFS=':'
-  printf '%s' "${kept[*]}"
-}
-
-function _fx_compute_command_path {
-  local -r inject="$1"
-  local -r base_path="${2:-${PATH}}"
-  local stripped
-  stripped="$(_fx_strip_prebuilt_paths_from_path "${base_path}")"
-  if [[ "${inject}" == "1" ]]; then
-    local -r all_prebuilt="$(_fx_all_prebuilt_paths)"
-    if [[ -n "${all_prebuilt}" ]]; then
-      printf '%s' "${all_prebuilt}${stripped:+:${stripped}}"
-    else
-      printf '%s' "${stripped}"
-    fi
+  local stripped="${kept[*]}"
+  if [[ "${inject}" == "1" && -n "${all_prebuilt}" ]]; then
+    _fx_computed_path="${all_prebuilt}${stripped:+:${stripped}}"
   else
-    printf '%s' "${stripped}"
+    _fx_computed_path="${stripped}"
   fi
 }
 
@@ -325,15 +313,70 @@ function _fx_apply_prebuilt_paths {
   else
     export FX_INJECT_PREBUILT_PATHS=0
   fi
-  local new_path
-  new_path="$(_fx_compute_command_path "${FX_INJECT_PREBUILT_PATHS}" "${PATH}")"
-  export PATH="${new_path}"
+  local _fx_computed_path=""
+  _fx_compute_command_path_into_var "${FX_INJECT_PREBUILT_PATHS}" "${PATH}"
+  export PATH="${_fx_computed_path}"
+}
+
+# Conservative pre-filter for fx_host_tools.json: false positives fall through
+# to locator.py, while `\u` guards against JSON unicode-escaped tool names.
+function _maybe_is_registered_host_tool {
+  local -r cmd_name="${1:-}"
+  local -r vendor="${2:-}"
+  [[ -n "${cmd_name}" ]] || return 1
+  local -a reg_files
+  if [[ -n "${vendor}" ]]; then
+    reg_files=("${FUCHSIA_DIR}/vendor/${vendor}/scripts/devshell/fx_host_tools.json")
+  else
+    reg_files=(
+      "${FUCHSIA_DIR}"/vendor/*/scripts/devshell/fx_host_tools.json
+      "${FUCHSIA_DIR}/tools/devshell/fx_host_tools.json"
+    )
+  fi
+  local reg_file content
+  for reg_file in "${reg_files[@]}"; do
+    [[ -f "${reg_file}" ]] || continue
+    IFS= read -r -d '' content < "${reg_file}" || true
+    if [[ "${content}" == *"\"${cmd_name}\""* || "${content}" == *'\u'* ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 function resolve_fx_command_dispatch {
   local -r cmd_name="$1"
   local -r req_vendor="${2:-}"
   [[ -n "${cmd_name}" ]] || return 1
+
+  if [[ -n "${_FX_PRE_RESOLVED_CMD:-}" ]]; then
+    local pre_cmd="${_FX_PRE_RESOLVED_CMD}"
+    local pre_kind="${_FX_PRE_RESOLVED_KIND:-}"
+    local pre_vendor="${_FX_PRE_RESOLVED_VENDOR:-}"
+    local pre_exec="${_FX_PRE_RESOLVED_EXEC:-}"
+    local pre_mode="${_FX_PRE_RESOLVED_MODE:-}"
+    # Clear in-process for direct callers; callers using command substitution
+    # (e.g. scripts/fx) run in a subshell and must also unset these in the
+    # parent shell so they do not leak into executed subcommands.
+    unset _FX_PRE_RESOLVED_CMD _FX_PRE_RESOLVED_KIND _FX_PRE_RESOLVED_VENDOR _FX_PRE_RESOLVED_EXEC _FX_PRE_RESOLVED_MODE
+    if [[ -z "${req_vendor}" && "${pre_cmd}" == "${cmd_name}" ]]; then
+      if [[ "${pre_kind}" == "not_found" || -z "${pre_exec}" ]]; then
+        _fx_registry_log "lookup '${cmd_name}': not found in registry or legacy paths"
+        return 1
+      fi
+      if _fx_registry_log_enabled; then
+        if [[ -n "${pre_vendor}" ]]; then
+          _fx_registry_log "lookup '${cmd_name}': not in vendor registry; falling back to legacy vendor path $(_relative "${pre_exec}")"
+        elif [[ "${pre_kind}" == "legacy_host_tool" || "${pre_mode}" == "legacy_host_tool" ]]; then
+          _fx_registry_log "lookup '${cmd_name}': not in registry; falling back to legacy host-tools binary $(_relative "${pre_exec}")"
+        else
+          _fx_registry_log "lookup '${cmd_name}': not in registry; falling back to legacy path $(_relative "${pre_exec}")"
+        fi
+      fi
+      printf 'legacy\n%s\n\n%s\n1\n' "${pre_vendor}" "${pre_exec}"
+      return 0
+    fi
+  fi
 
   local build_dir=""
   if fx-build-dir-if-present >/dev/null 2>&1; then
@@ -528,105 +571,239 @@ function fx-ensure-registered-host-tool {
   return 1
 }
 
-function _get_metadata_values {
-  local -r key=$1
-  local -r metadata_file=$2
-  local -r unknown_vars=$3
+# Populates the caller's `_fx_metadata_values` array with the value of each
+# `#### <key>=<value>` metadata header line in the given file, with ${VAR}
+# placeholders expanded from shell/environment variables.
+#
+# Args:
+#   $1: The metadata key, e.g. EXECUTABLE or PREBUILTS.
+#   $2: The metadata file to read.
+#   $3: How to handle unknown variables: "keep" to leave them unexpanded, or
+#       "empty" to expand them to an empty string.
+function _collect_metadata_values {
+  local -r key="$1"
+  local -r metadata_file="$2"
+  local -r unknown_vars="$3"
+  _fx_metadata_values=()
+  [[ -f "${metadata_file}" ]] || return 0
 
-  export FUCHSIA_DIR HOST_PLATFORM
-  if [[ -n "${!PREBUILT_*}" ]]; then
-    export "${!PREBUILT_@}"
-  fi
+  local -r lb='${' rb='}'
+  local raw trimmed after_hashes k cur out prefix rest var is_set val
+  local host_tools_loaded=0 host_tools_val=""
 
-  awk -F ' *= *' -v key="${key}" -v unknown_vars="${unknown_vars}" \
-      -f - "${metadata_file}" <<'EOF'
-    $0 ~ ("^#### +" key " *=") {
-      line = $2;
-      out = "";
-      while (match(line, /\$\{[A-Za-z0-9_]+\}/)) {
-        var = substr(line, RSTART + 2, RLENGTH - 3);
-        if (var in ENVIRON) {
-          val = ENVIRON[var];
-        } else if (unknown_vars == "keep") {
-          val = substr(line, RSTART, RLENGTH);
-        } else {
-          val = "";
-        }
-        out = out substr(line, 1, RSTART - 1) val;
-        line = substr(line, RSTART + RLENGTH);
-      }
-      print out line;
-    }
+  while IFS= read -r raw || [[ -n "${raw}" ]]; do
+    trimmed="${raw#"${raw%%[![:space:]]*}"}"
+    if [[ -z "${trimmed}" ]]; then
+      continue
+    fi
+    if [[ "${trimmed}" != \#* ]]; then
+      # Stop scanning at the first non-empty, non-comment line so we only
+      # inspect the metadata header block and avoid scanning the body of large
+      # scripts or binaries.
+      break
+    fi
+    if [[ "${raw}" != "####"[[:space:]]* || "${raw}" != *=* ]]; then
+      continue
+    fi
+    after_hashes="${raw#\#\#\#\#}"
+    after_hashes="${after_hashes#"${after_hashes%%[![:space:]]*}"}"
+    k="${after_hashes%%=*}"
+    k="${k%"${k##*[![:space:]]}"}"
+    if [[ "${k}" != "${key}" ]]; then
+      continue
+    fi
 
-    !/^#/ && NF > 0 { exit }
-EOF
+    cur="${after_hashes#*=}"
+    cur="${cur#"${cur%%[![:space:]]*}"}"
+    out=""
+    # Build the output left-to-right so expanded values are never re-scanned.
+    while [[ "${cur}" == *"${lb}"*"${rb}"* ]]; do
+      prefix="${cur%%"${lb}"*}"
+      rest="${cur#*"${lb}"}"
+      var="${rest%%"${rb}"*}"
+      cur="${rest#*"${rb}"}"
+      if [[ -n "${var}" && "${var}" != *[!A-Za-z0-9_]* && "${var}" != [0-9]* ]]; then
+        if [[ "${var}" == "HOST_TOOLS_DIR" ]]; then
+          if [[ "${host_tools_loaded}" -eq 0 ]]; then
+            host_tools_val="$(get_host_tools_dir)"
+            host_tools_loaded=1
+          fi
+          is_set="1"
+          val="${host_tools_val}"
+        else
+          is_set="${!var+1}"
+          val="${!var:-}"
+        fi
+        if [[ -n "${is_set}" ]]; then
+          out+="${prefix}${val}"
+        elif [[ "${unknown_vars}" == "keep" ]]; then
+          out+="${prefix}${lb}${var}${rb}"
+        else
+          out+="${prefix}"
+        fi
+      elif [[ "${unknown_vars}" == "keep" ]]; then
+        out+="${prefix}${lb}${var}${rb}"
+      else
+        out+="${prefix}"
+      fi
+    done
+    _fx_metadata_values+=("${out}${cur}")
+  done < "${metadata_file}"
 }
 
-function get_exec_from_metadata {
-  local -r metadata_file=$1
+function _collect_prebuilts_from_metadata {
+  local -r metadata_file="$1"
+  [[ -f "${metadata_file}" ]] || return 0
 
-  export HOST_TOOLS_DIR="$(get_host_tools_dir)"
-  _get_metadata_values EXECUTABLE "${metadata_file}" keep
+  # Unknown variables expand to empty and are dropped, since a prebuilt variable
+  # may not be defined in every environment (e.g. trimmed-down test
+  # environments). Split each value on whitespace (or commas/semicolons).
+  local -a _fx_metadata_values=() words=()
+  local v
+  _collect_metadata_values PREBUILTS "${metadata_file}" empty
+  for v in "${_fx_metadata_values[@]}"; do
+    IFS=$' \t\r\n' read -r -a words <<< "${v//[,;]/ }"
+    _fx_prebuilts+=("${words[@]}")
+  done
 }
 
 function get_prebuilts_from_metadata {
   local -r metadata_file=$1
-  [[ -f "${metadata_file}" ]] || return 0
+  local -a _fx_prebuilts=()
+  _collect_prebuilts_from_metadata "${metadata_file}"
+  if [[ ${#_fx_prebuilts[@]} -gt 0 ]]; then
+    printf '%s\n' "${_fx_prebuilts[@]}"
+  fi
+}
 
-  _get_metadata_values PREBUILTS "${metadata_file}" empty | tr -s '[:space:],;' '\n'
+# In-process counterpart to the unregistered lookup levels (2, 4, 5) in
+# //tools/devshell/fx_cli/locator.py:resolve_command.
+function _resolve_unregistered_executable {
+  local cmd_name="${1:-}"
+  local vendor="${2:-}"
+  [[ -n "${cmd_name}" && "${cmd_name}" != */* ]] || return 1
+  local -a search_dirs=()
+  if [[ -n "${vendor}" ]]; then
+    search_dirs=(
+      "${FUCHSIA_DIR}/vendor/${vendor}/scripts/devshell"
+      "${FUCHSIA_DIR}/vendor/${vendor}/scripts/devshell/contrib"
+    )
+  else
+    local vd
+    for vd in "${FUCHSIA_DIR}"/vendor/*; do
+      [[ -d "${vd}" ]] || continue
+      search_dirs+=(
+        "${vd}/scripts/devshell"
+        "${vd}/scripts/devshell/contrib"
+      )
+    done
+    search_dirs+=(
+      "${FUCHSIA_DIR}/tools/devshell"
+      "${FUCHSIA_DIR}/tools/devshell/contrib"
+    )
+  fi
+
+  local d first_cmd_path=""
+  for d in "${search_dirs[@]}"; do
+    [[ -d "${d}" ]] || continue
+    if [[ -f "${d}/${cmd_name}" && -x "${d}/${cmd_name}" ]]; then
+      first_cmd_path="${d}/${cmd_name}"
+      break
+    fi
+    if [[ -f "${d}/${cmd_name}.fx" ]]; then
+      first_cmd_path="${d}/${cmd_name}.fx"
+      break
+    fi
+  done
+
+  if [[ -z "${first_cmd_path}" && -z "${vendor}" ]]; then
+    local host_tools
+    host_tools="$(get_host_tools_dir)"
+    if [[ -n "${host_tools}" && -f "${host_tools}/${cmd_name}" && -x "${host_tools}/${cmd_name}" ]]; then
+      first_cmd_path="${host_tools}/${cmd_name}"
+    fi
+  fi
+
+  _resolve_exec_from_path "${first_cmd_path}"
 }
 
 function find_executable {
-  local cmd_name="$1"
+  local cmd_name="${1:-}"
   local vendor="${2:-}"
-  local dispatch
-  dispatch="$(resolve_fx_command_dispatch "${cmd_name}" "${vendor}")" || return $?
-  local -a df
-  mapfile -t df <<< "${dispatch}"
-  if [[ "${df[0]:-}" == "registered" ]]; then
-    _find_registered_executable_from_entry "${cmd_name}" "${df[2]:-}" "${df[3]:-}" "${df[1]:-}"
+  if _fx_registry_log_enabled || _maybe_is_registered_host_tool "${cmd_name}" "${vendor}"; then
+    local dispatch
+    dispatch="$(resolve_fx_command_dispatch "${cmd_name}" "${vendor}")" || return $?
+    local -a df
+    mapfile -t df <<< "${dispatch}"
+    if [[ "${df[0]:-}" == "registered" ]]; then
+      _find_registered_executable_from_entry "${cmd_name}" "${df[2]:-}" "${df[3]:-}" "${df[1]:-}"
+      return $?
+    fi
+    find_exec_from_path "${df[3]:-}"
     return $?
   fi
-  find_exec_from_path "${df[3]:-}"
+  local _fx_resolved_exec="" rc=0
+  _resolve_unregistered_executable "${cmd_name}" "${vendor}" || rc=$?
+  if [[ -n "${_fx_resolved_exec}" ]]; then
+    echo "${_fx_resolved_exec}"
+  fi
+  return "${rc}"
 }
 
-function find_exec_from_path {
+function _resolve_exec_from_path {
   local cmd_path="$1"
+  _fx_resolved_exec=""
+  if [[ -z "${cmd_path}" ]]; then
+    return 1
+  fi
   cmd_path="${cmd_path%.fx}"
   local fx_file_path="${cmd_path}.fx"
-  local prebuilts_to_ensure=(
-    $(get_prebuilts_from_metadata "${fx_file_path}")
-    $(get_prebuilts_from_metadata "${cmd_path}")
-  )
+  local -a _fx_prebuilts=()
+  _collect_prebuilts_from_metadata "${fx_file_path}"
+  _collect_prebuilts_from_metadata "${cmd_path}"
 
   local target_exec="${cmd_path}"
   local from_metadata=""
   if [[ -f "${fx_file_path}" ]]; then
-    from_metadata="$(get_exec_from_metadata "${fx_file_path}")"
-    if [[ -n "${from_metadata}" ]]; then
+    local -a _fx_metadata_values=()
+    # Leave unknown variables unexpanded so that a typo fails loudly as a
+    # missing executable rather than silently expanding to an empty string.
+    _collect_metadata_values EXECUTABLE "${fx_file_path}" keep
+    if [[ ${#_fx_metadata_values[@]} -gt 0 ]]; then
+      from_metadata="${_fx_metadata_values[0]}"
       target_exec="${from_metadata%% *}"
     fi
   fi
 
   if [[ "${target_exec}" == "${FUCHSIA_DIR}/prebuilt/"* ]]; then
-    prebuilts_to_ensure+=("${target_exec}")
+    _fx_prebuilts+=("${target_exec}")
   fi
-  if [[ ${#prebuilts_to_ensure[@]} -gt 0 ]]; then
-    fx-ensure-prebuilt "${prebuilts_to_ensure[@]}" || return 1
+  if [[ ${#_fx_prebuilts[@]} -gt 0 ]]; then
+    fx-ensure-prebuilt "${_fx_prebuilts[@]}" || return 1
   fi
 
   if [[ -n "${from_metadata}" ]]; then
-    echo "${from_metadata}"
+    _fx_resolved_exec="${from_metadata}"
     if [[ -f "${cmd_path}" && ! "${cmd_path}" -ef "${from_metadata}" ]]; then
-      fx-error "Invalid ${fx_file_path}: if both ${basename_exec} and EXECUTABLE metadata exist, they must point to the same file"
+      fx-error "Invalid ${fx_file_path}: if both ${cmd_path##*/} and EXECUTABLE metadata exist, they must point to the same file"
       return 1
     fi
   else
-    echo "${cmd_path}"
+    _fx_resolved_exec="${cmd_path}"
     if [[ ! -x "${cmd_path}" ]]; then
       return 1
     fi
   fi
+}
+
+function find_exec_from_path {
+  local _fx_resolved_exec=""
+  local rc=0
+  _resolve_exec_from_path "${1:-}" || rc=$?
+  if [[ -n "${_fx_resolved_exec}" || -z "${1:-}" ]]; then
+    echo "${_fx_resolved_exec}"
+  fi
+  return "${rc}"
 }
 
 function find_execs_and_metadata {

@@ -23,10 +23,41 @@ fn test_odpm_iio_bus_symlink() {
 }
 
 #[test]
+fn test_odpm_platform_bus_symlinks() {
+    let cpm_target = std::fs::read_link("/sys/bus/platform/devices/cpm")
+        .expect("failed to read cpm platform bus symlink");
+    assert_eq!(cpm_target.to_str().unwrap(), "../../../devices/platform/cpm");
+
+    let odpm_target = std::fs::read_link("/sys/bus/platform/devices/cpm:ODPM")
+        .expect("failed to read cpm:ODPM platform bus symlink");
+    assert_eq!(odpm_target.to_str().unwrap(), "../../../devices/platform/cpm/cpm:ODPM");
+}
+
+#[test]
 fn test_odpm_subsystem_symlink() {
+    let cpm_target = std::fs::read_link("/sys/devices/platform/cpm/subsystem")
+        .expect("failed to read cpm subsystem symlink");
+    assert_eq!(cpm_target.to_str().unwrap(), "../../../bus/platform");
+
+    let odpm_target = std::fs::read_link("/sys/devices/platform/cpm/cpm:ODPM/subsystem")
+        .expect("failed to read cpm:ODPM subsystem symlink");
+    assert_eq!(odpm_target.to_str().unwrap(), "../../../../bus/platform");
+
     let target = std::fs::read_link(format!("{PLATFORM_DEVICE_DIR}/subsystem"))
         .expect("failed to read subsystem symlink");
     assert_eq!(target.to_str().unwrap(), "../../../../../bus/iio");
+}
+
+#[test]
+fn test_odpm_uevent_files_are_empty() {
+    for path in [
+        "/sys/devices/platform/cpm/uevent",
+        "/sys/devices/platform/cpm/cpm:ODPM/uevent",
+        "/sys/devices/platform/cpm/cpm:ODPM/iio:device0/uevent",
+    ] {
+        let uevent = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        assert_eq!(uevent, "", "expected empty uevent file at {path}");
+    }
 }
 
 #[test]

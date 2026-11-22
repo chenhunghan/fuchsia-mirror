@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.ethernet",
+    src = "fuchsia.ethernet.bind",
+    api_area = "Driver SDK",
+    category = "partner",
+    visibility = [
+        "//sdk:__pkg__",
+        "//src/connectivity/ethernet/drivers/dwmac:__pkg__",
+        "//src/connectivity/ethernet/drivers/ethernet/netdevice-migration:__pkg__",
+        "//src/connectivity/ethernet/drivers/realtek-8211f:__pkg__",
+        "//src/connectivity/wlan/drivers/wlansoftmac:__pkg__",
+    ],
+)

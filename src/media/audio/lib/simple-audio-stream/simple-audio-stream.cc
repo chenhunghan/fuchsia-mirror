@@ -255,7 +255,7 @@ void SimpleAudioStream::DeactivateStreamChannel(StreamChannel* channel) {
     stream_channel_ = nullptr;
   }
 
-  // Any pending LLCPP completer must be either replied to or closed before we destroy it.
+  // Any pending FIDL wire completer must be either replied to or closed before we destroy it.
   if (channel->plug_completer_.has_value()) {
     zxlogf(INFO, "Plug completer is still open when deactivating stream channel");
     // This is expected/normal: clients may always have an outstanding Plug hanging-get, and it is
@@ -264,7 +264,7 @@ void SimpleAudioStream::DeactivateStreamChannel(StreamChannel* channel) {
   }
   channel->plug_completer_.reset();
 
-  // Any pending LLCPP completer must be either replied to or closed before we destroy it.
+  // Any pending FIDL wire completer must be either replied to or closed before we destroy it.
   if (channel->gain_completer_.has_value()) {
     zxlogf(INFO, "Gain completer is still open when deactivating stream channel");
     // This is expected/normal: clients may always have an outstanding Gain hanging-get, and it is
@@ -286,7 +286,7 @@ void SimpleAudioStream::DeactivateRingBufferChannel(const Channel* channel) {
     RingBufferShutdown();
     rb_vmo_fetched_ = false;
     delay_info_updated_ = false;
-    // Any pending LLCPP completer must be either replied to or closed before we destroy it.
+    // Any pending FIDL wire completer must be either replied to or closed before we destroy it.
     if (delay_completer_.has_value()) {
       zxlogf(INFO, "Delay completer is still open when deactivating ring buffer channel");
       // This is expected/normal: clients may always have an outstanding Delay hanging-get while the
@@ -298,7 +298,7 @@ void SimpleAudioStream::DeactivateRingBufferChannel(const Channel* channel) {
     expected_notifications_per_ring_.store(0);
     {
       fbl::AutoLock position_lock(&position_lock_);
-      // Any pending LLCPP completer must be either replied to or closed before we destroy it.
+      // Any pending FIDL wire completer must be either replied to or closed before we destroy it.
       if (position_completer_.has_value()) {
         zxlogf(INFO, "Position completer is still open when deactivating ring buffer channel");
         // This is expected/normal: clients may always have an outstanding Position hanging-get

@@ -8,9 +8,12 @@ use component_events::events::Event;
 use fidl::endpoints::{DiscoverableProtocolMarker, ServerEnd, ServiceMarker as _};
 use fidl_fuchsia_component_test as ftest;
 use fidl_fuchsia_data as fdata;
+use fidl_fuchsia_driver_framework as fdf;
+use fidl_fuchsia_driver_token as fdriver_token;
 use fidl_fuchsia_hardware_network as fhwnet;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_logger as flogger;
+use fidl_fuchsia_net_tun as fnet_tun;
 use fidl_fuchsia_netemul::{
     self as fnetemul, ChildDef, ChildUses, ManagedRealmMarker, ManagedRealmRequest,
     NETEMUL_SERVICES_COMPONENT_NAME, RealmOptions, SandboxRequest, SandboxRequestStream,
@@ -34,22 +37,99 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
-use vfs::ObjectRequestRef;
-use vfs::directory::entry::{EntryInfo, OpenRequest};
 use vfs::directory::helper::DirectlyMutable as _;
 use vfs::directory::immutable::simple::Simple as SimpleImmutableDir;
-use vfs::remote::RemoteLike;
 
 type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 
 const REALM_COLLECTION_NAME: &str = "netemul";
-const DEVFS: &str = "dev";
-const DEVFS_PATH: &str = "/dev";
-const DEVFS_CAPABILITY: &str = "dev-topological";
 const CUSTOM_ARTIFACTS_PATH: &str = "/custom_artifacts";
 const CUSTOM_ARTIFACTS_CAPABILITY: &str = "custom_artifacts";
+const PARENT_PKG_PATH: &str = "/parent_pkg";
 const HWNETWORK_SERVICE_MEMBER_NAME: &str = "device";
-const DEVICE_TOPOLOGY_MEMBER_NAME: &str = "device_topology";
+const DEVICE_TOKEN_MEMBER_NAME: &str = "token";
+
+#[derive(Default)]
+struct NodeTokens {
+    by_instance: HashMap<ValidInstanceName, zx::Koid>,
+    by_koid: HashMap<zx::Koid, Vec<fdf::BusInfo>>,
+}
+
+#[derive(Clone, Eq, PartialEq, Hash)]
+struct ValidInstanceName(String);
+
+impl ValidInstanceName {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn to_bus_info(&self) -> Vec<fdf::BusInfo> {
+        vec![fdf::BusInfo {
+            bus: Some(fdf::BusType::DeviceTree),
+            address: Some(fdf::DeviceAddress::StringValue(self.0.clone())),
+            ..Default::default()
+        }]
+    }
+}
+
+impl std::fmt::Display for ValidInstanceName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for ValidInstanceName {
+    type Error = zx::Status;
+
+    fn try_from(instance_name: String) -> Result<Self, Self::Error> {
+        let max_len = usize::try_from(fdf::MAX_DEVICE_ADDRESS_STR_LEN)
+            .expect("MAX_DEVICE_ADDRESS_STR_LEN fits in usize")
+            .min(usize::try_from(fio::MAX_NAME_LENGTH).expect("MAX_NAME_LENGTH fits in usize"));
+        if instance_name.is_empty()
+            || instance_name.len() > max_len
+            || instance_name == "."
+            || instance_name == ".."
+            || instance_name.contains(['/', '\0'])
+        {
+            return Err(zx::Status::INVALID_ARGS);
+        }
+        Ok(Self(instance_name))
+    }
+}
+
+fn handle_node_bus_topology_request(
+    request: fdriver_token::NodeBusTopologyRequest,
+    node_tokens: &fuchsia_sync::Mutex<NodeTokens>,
+) -> Result<(), fidl::Error> {
+    match request {
+        fdriver_token::NodeBusTopologyRequest::Get { token, responder } => {
+            let bus_info =
+                token.koid().ok().and_then(|koid| node_tokens.lock().by_koid.get(&koid).cloned());
+            match bus_info {
+                Some(bus_info) => responder.send(Ok(&bus_info)),
+                None => responder.send(Err(zx::Status::NOT_FOUND.into_raw())),
+            }
+        }
+        fdriver_token::NodeBusTopologyRequest::_UnknownMethod { ordinal, .. } => {
+            error!("unexpected NodeBusTopology method ordinal: {ordinal}");
+            Ok(())
+        }
+    }
+}
+
+async fn serve_node_bus_topology(
+    stream: fdriver_token::NodeBusTopologyRequestStream,
+    node_tokens: Arc<fuchsia_sync::Mutex<NodeTokens>>,
+) {
+    stream
+        .try_for_each(|request| {
+            futures::future::ready(handle_node_bus_topology_request(request, &node_tokens))
+        })
+        .await
+        .unwrap_or_else(|e| {
+            error!("error serving NodeBusTopology: {e:?}");
+        });
+}
 
 #[derive(Error, Debug)]
 enum CreateRealmError {
@@ -69,10 +149,6 @@ enum CreateRealmError {
     StorageCapabilityVariantNotProvided,
     #[error("storage capability path not provided")]
     StorageCapabilityPathNotProvided,
-    #[error("devfs capability name not provided")]
-    DevfsCapabilityNameNotProvided,
-    #[error("invalid devfs subdirectory '{0}'")]
-    InvalidDevfsSubdirectory(String),
     #[error("duplicate protocol '{0}' exposed by component '{1}'")]
     DuplicateProtocolExposed(String, String),
     #[error("is_weak provided for capability that does not support it '{0}")]
@@ -91,8 +167,6 @@ impl From<CreateRealmError> for zx::Status {
             | CreateRealmError::ModifiedNonexistentProgram(String { .. })
             | CreateRealmError::StorageCapabilityVariantNotProvided
             | CreateRealmError::StorageCapabilityPathNotProvided
-            | CreateRealmError::DevfsCapabilityNameNotProvided
-            | CreateRealmError::InvalidDevfsSubdirectory(String { .. })
             | CreateRealmError::DuplicateProtocolExposed(String { .. }, String { .. })
             | CreateRealmError::WeakBindingUnsupported(String { .. })
             | CreateRealmError::InvalidConfigCapabilityName(String { .. }, String { .. }) => {
@@ -163,7 +237,6 @@ impl std::fmt::Display for StorageVariant {
 
 #[derive(Debug, Eq, Hash, PartialEq)]
 enum UniqueCapability<'a> {
-    DevFs { name: Cow<'a, str> },
     Protocol { proto_name: Cow<'a, str> },
     Configuration { name: Cow<'a, str> },
     Storage { mount_path: Cow<'a, str> },
@@ -181,10 +254,10 @@ type ExposedProtocols = HashMap<String, Vec<String>>;
 async fn create_realm_instance(
     RealmOptions { name, children, .. }: RealmOptions,
     prefix: &str,
-    devfs: Arc<SimpleImmutableDir>,
-    devfs_proxy: fio::DirectoryProxy,
     hwnetwork_service_proxy: fio::DirectoryProxy,
+    node_tokens: Arc<fuchsia_sync::Mutex<NodeTokens>>,
     custom_artifacts_proxy: fio::DirectoryProxy,
+    pkg_dir_path: &str,
 ) -> Result<(RealmInstance, ExposedProtocols), CreateRealmError> {
     // Keep track of dependencies between child components in the test realm in order to create the
     // relevant routes at the end. RealmBuilder doesn't allow creating routes between components if
@@ -197,10 +270,16 @@ async fn create_realm_instance(
 
     let realm_name =
         name.map(|name| format!("{}-{}", prefix, name)).unwrap_or_else(|| prefix.to_string());
+    let pkg_dir_proxy = fuchsia_fs::directory::open_in_namespace(
+        pkg_dir_path,
+        fio::PERM_READABLE | fio::PERM_EXECUTABLE,
+    )
+    .map_err(fcomponent::error::Error::FailedToOpenPkgDir)?;
     let builder = RealmBuilder::with_params(
         RealmBuilderParams::new()
             .in_collection(REALM_COLLECTION_NAME.to_string())
-            .realm_name(realm_name.clone()),
+            .realm_name(realm_name.clone())
+            .with_pkg_dir_proxy(pkg_dir_proxy),
     )
     .await?;
     let custom_artifacts_clone = Clone::clone(&custom_artifacts_proxy);
@@ -208,18 +287,22 @@ async fn create_realm_instance(
         .add_local_child(
             NETEMUL_SERVICES_COMPONENT_NAME,
             move |handles: LocalComponentHandles| {
-                let devfs_proxy = Clone::clone(&devfs_proxy);
                 let custom_artifacts_proxy = Clone::clone(&custom_artifacts_clone);
                 let hwnetwork_service_proxy = Clone::clone(&hwnetwork_service_proxy);
-                Box::pin(async {
+                let node_tokens = Clone::clone(&node_tokens);
+                Box::pin(async move {
                     let mut fs = ServiceFs::new();
                     let _ = fs
                         .dir("svc")
-                        .add_remote(fhwnet::ServiceMarker::SERVICE_NAME, hwnetwork_service_proxy);
-                    fs.add_remote(DEVFS, devfs_proxy)
-                        .add_remote(CUSTOM_ARTIFACTS_CAPABILITY, custom_artifacts_proxy)
+                        .add_remote(fhwnet::ServiceMarker::SERVICE_NAME, hwnetwork_service_proxy)
+                        .add_fidl_service(|stream: fdriver_token::NodeBusTopologyRequestStream| {
+                            stream
+                        });
+                    fs.add_remote(CUSTOM_ARTIFACTS_CAPABILITY, custom_artifacts_proxy)
                         .serve_connection(handles.outgoing_dir)?
-                        .collect::<()>()
+                        .for_each_concurrent(None, move |stream| {
+                            serve_node_bus_topology(stream, Clone::clone(&node_tokens))
+                        })
                         .await;
                     Ok(())
                 })
@@ -237,6 +320,12 @@ async fn create_realm_instance(
                         NETEMUL_SERVICES_COMPONENT_NAME,
                     ),
                 ))
+                .capability(Capability::protocol::<fdriver_token::NodeBusTopologyMarker>().as_(
+                    generate_protocol_name_alias(
+                        fdriver_token::NodeBusTopologyMarker::PROTOCOL_NAME,
+                        NETEMUL_SERVICES_COMPONENT_NAME,
+                    ),
+                ))
                 .from(&netemul_services)
                 .to(Ref::parent()),
         )
@@ -244,10 +333,16 @@ async fn create_realm_instance(
 
     // Keep track of the protocols that exist in the realm along with the children that offer
     // that protocol.
-    let mut capability_from_children: ExposedProtocols = HashMap::from_iter(std::iter::once((
-        fhwnet::ServiceMarker::SERVICE_NAME.to_string(),
-        vec![NETEMUL_SERVICES_COMPONENT_NAME.to_string()],
-    )));
+    let mut capability_from_children: ExposedProtocols = HashMap::from_iter([
+        (
+            fhwnet::ServiceMarker::SERVICE_NAME.to_string(),
+            vec![NETEMUL_SERVICES_COMPONENT_NAME.to_string()],
+        ),
+        (
+            fdriver_token::NodeBusTopologyMarker::PROTOCOL_NAME.to_string(),
+            vec![NETEMUL_SERVICES_COMPONENT_NAME.to_string()],
+        ),
+    ]);
     let mut children_with_uses = vec![];
     for ChildDef {
         source,
@@ -364,46 +459,6 @@ async fn create_realm_instance(
                         // defined here for each of the built-in netemul capabilities, corresponding
                         // to their FIDL representation, routing logic, and capability name.
                         let cap = match cap {
-                            fnetemul::Capability::NetemulDevfs(fnetemul::DevfsDep {
-                                name: capability_name,
-                                subdir,
-                                ..
-                            }) => {
-                                let capability_name = capability_name
-                                    .ok_or(CreateRealmError::DevfsCapabilityNameNotProvided)?;
-                                if let Some(subdir) = subdir.as_ref() {
-                                    let _: Arc<SimpleImmutableDir> = open_or_create_dir(
-                                        devfs.clone(),
-                                        &std::path::Path::new(subdir),
-                                    )
-                                    .await
-                                    .map_err(|e| {
-                                        error!(
-                                            "failed to create subdirectory '{}' in devfs: {}",
-                                            subdir, e
-                                        );
-                                        CreateRealmError::InvalidDevfsSubdirectory(
-                                            subdir.to_string(),
-                                        )
-                                    })?;
-                                }
-                                let mut capability = Capability::directory(DEVFS_CAPABILITY)
-                                    .rights(fio::R_STAR_DIR)
-                                    .path(DEVFS_PATH)
-                                    .as_(capability_name.clone());
-                                if let Some(subdir) = subdir {
-                                    capability = capability.subdir(subdir);
-                                }
-                                builder
-                                    .add_route(
-                                        Route::new()
-                                            .capability(capability)
-                                            .from(&netemul_services)
-                                            .to(&child_ref),
-                                    )
-                                    .await?;
-                                UniqueCapability::DevFs { name: capability_name.into() }
-                            }
                             fnetemul::Capability::NetemulNetworkContext(fnetemul::Empty {}) => {
                                 builder
                                     .add_route(
@@ -622,6 +677,20 @@ async fn create_realm_instance(
                                 UniqueCapability::new_protocol::<ftracing_provider::RegistryMarker>(
                                 )
                             }
+                            fnetemul::Capability::NetemulNetworkTun(fnetemul::Empty) => {
+                                builder
+                                    .add_route(
+                                        Route::new()
+                                            .capability(Capability::protocol::<
+                                                fnet_tun::ControlMarker,
+                                            >(
+                                            ))
+                                            .from(Ref::parent())
+                                            .to(&child_ref),
+                                    )
+                                    .await?;
+                                UniqueCapability::new_protocol::<fnet_tun::ControlMarker>()
+                            }
                         };
                         match unique_caps.entry(cap) {
                             Entry::Occupied(entry) => {
@@ -715,99 +784,61 @@ fn resolve_capability_path(
 }
 
 struct ManagedRealm {
-    scope: vfs::execution_scope::ExecutionScope,
     server_end: ServerEnd<ManagedRealmMarker>,
     realm: RealmInstance,
-    devfs: Arc<SimpleImmutableDir>,
     hwnetwork_service: Arc<SimpleImmutableDir>,
+    node_tokens: Arc<fuchsia_sync::Mutex<NodeTokens>>,
     capability_from_children: ExposedProtocols,
-}
-
-// This represents a device in devfs. It can serve both the device's FIDL protocol as well
-// as fuchsia.device/Controller protocol.
-// As a DirectoryEntry, the DevfsDevice acts as both a directory, and a protocol (similar to how
-// devfs works).
-struct DevfsDevice {
-    device: fidl_fuchsia_netemul_network::DeviceProxy_Proxy,
-    path: String,
-}
-
-// TODO(https://fxbug.dev/326325522): This is an abuse of directories.
-impl RemoteLike for DevfsDevice {
-    fn open(
-        self: Arc<Self>,
-        _scope: vfs::execution_scope::ExecutionScope,
-        path: vfs::path::Path,
-        _flags: fio::Flags,
-        object_request: ObjectRequestRef<'_>,
-    ) -> Result<(), zx::Status> {
-        // If we are opening the device directly we get the device protocol.
-        if path.is_dot() || path.is_empty() {
-            self.device.serve_device(object_request.take().into_server_end()).map_err(|e| {
-                error!("failed to serve device on path {}: {}", self.path, e);
-                zx::Status::INTERNAL
-            })?;
-            return Ok(());
-        }
-        // If we are opening "device_controller" then we get fuchsia.device/Controller.
-        if path.as_ref() == "device_controller" {
-            self.device.serve_controller(object_request.take().into_server_end()).map_err(|e| {
-                error!("failed to serve controller on path {}: {}", self.path, e);
-                zx::Status::INTERNAL
-            })?;
-            return Ok(());
-        }
-
-        // Failed to serve device or controller
-        error!("failed to serve device or controller: Bad path {}", path.as_ref());
-        Err(zx::Status::BAD_PATH)
-    }
-}
-
-impl vfs::directory::entry::DirectoryEntry for DevfsDevice {
-    fn open_entry(self: Arc<Self>, request: OpenRequest<'_>) -> Result<(), zx::Status> {
-        request.open_remote(self)
-    }
-}
-
-impl vfs::directory::entry::GetEntryInfo for DevfsDevice {
-    fn entry_info(&self) -> EntryInfo {
-        EntryInfo::new(1, fio::DirentType::Directory)
-    }
 }
 
 fn realm_moniker(realm: &RealmInstance) -> String {
     format!("{}:{}", REALM_COLLECTION_NAME, realm.root.child_name())
 }
 
-async fn add_hwnetwork_service(
+fn add_hwnetwork_service(
     hwnetwork_service: &Arc<SimpleImmutableDir>,
-    instance_name: String,
-    device_proxy: fnetemul_network::DeviceProxy_Proxy,
+    node_tokens: &Arc<fuchsia_sync::Mutex<NodeTokens>>,
+    instance_name: ValidInstanceName,
+    device: fhwnet::DeviceProxy,
 ) -> Result<(), zx::Status> {
     let instance_dir = vfs::directory::immutable::simple();
-    hwnetwork_service.add_entry(&instance_name, instance_dir.clone()).inspect_err(|err| {
-        error!("failed to create service for {instance_name}: {err:?}");
+    hwnetwork_service.add_entry(instance_name.as_str(), instance_dir.clone()).inspect_err(
+        |err| {
+            if *err == zx::Status::ALREADY_EXISTS {
+                warn!("cannot add device '{instance_name}': instance name is already in use");
+            } else {
+                error!("failed to create service for {instance_name}: {err:?}");
+            }
+        },
+    )?;
+    let token = zx::Event::create();
+    let koid = token.koid().map_err(|err| {
+        error!("failed to get koid for token of {instance_name}: {err:?}");
+        err
     })?;
-    let (device_controller, device_controller_server_end) = fidl::endpoints::create_proxy();
-    device_proxy.serve_controller(device_controller_server_end).map_err(|err| {
-        error!(
-            "failed to serve controller on path svc/{}/{}/{}: {:?}",
-            fhwnet::ServiceMarker::SERVICE_NAME,
-            instance_name,
-            DEVICE_TOPOLOGY_MEMBER_NAME,
-            err
-        );
-        zx::Status::INTERNAL
-    })?;
+    {
+        let mut guard = node_tokens.lock();
+        if guard.by_instance.contains_key(&instance_name) {
+            error!("duplicate node token entry for {instance_name}");
+            return Err(zx::Status::ALREADY_EXISTS);
+        }
+        if guard.by_koid.contains_key(&koid) {
+            error!("duplicate node token koid {koid:?} for {instance_name}");
+            return Err(zx::Status::ALREADY_EXISTS);
+        }
+        let bus_info = instance_name.to_bus_info();
+        assert!(guard.by_instance.insert(instance_name.clone(), koid).is_none());
+        assert!(guard.by_koid.insert(koid, bus_info).is_none());
+    }
+    info!("adding virtual device '{instance_name}'");
     instance_dir
         .add_entry(
             HWNETWORK_SERVICE_MEMBER_NAME,
             vfs::service::endpoint(move |_scope, request| {
-                match device_proxy.serve_device(request.into_zx_channel().into()) {
+                match device.clone(ServerEnd::new(request.into_zx_channel())) {
                     Err(e) => {
                         error!(
-                            "failed to serve device on path svc/{}/{}/{}: {}",
+                            "failed to clone device on path svc/{}/{}/{}: {}",
                             fhwnet::ServiceMarker::SERVICE_NAME,
                             instance_name,
                             HWNETWORK_SERVICE_MEMBER_NAME,
@@ -819,48 +850,40 @@ async fn add_hwnetwork_service(
             }),
         )
         .expect("adding the member service should always succeed");
-    // TODO(https://fxbug.dev/501161302): Remove or replace once netcfg no
-    // longer needs topo path.
+    let token = Arc::new(token);
     instance_dir
         .add_entry(
-            DEVICE_TOPOLOGY_MEMBER_NAME,
-            vfs::service::host::<fidl_fuchsia_device_fs::TopologicalPathRequestStream, _, _>(
-                move |requests| {
-                    requests
-                        .try_for_each({
-                            let device_controller = device_controller.clone();
-                            move |request| {
-                                let device_controller = device_controller.clone();
-                                async move {
-                                    use fidl_fuchsia_device_fs::TopologicalPathRequest;
-                                    match request {
-                                        TopologicalPathRequest::GetTopologicalPath {
-                                            responder,
-                                        } => {
-                                            match device_controller.get_topological_path().await? {
-                                                Ok(path) => responder.send(Ok(&path)),
-                                                Err(err) => responder.send(Err(err)),
-                                            }
-                                        }
-                                    }
-                                }
+            DEVICE_TOKEN_MEMBER_NAME,
+            vfs::service::host::<fdriver_token::NodeTokenRequestStream, _, _>(move |requests| {
+                let token = Arc::clone(&token);
+                requests
+                    .try_for_each(move |request| {
+                        let token = Arc::clone(&token);
+                        async move {
+                            match request {
+                                fdriver_token::NodeTokenRequest::Get { responder } => responder
+                                    .send(
+                                        token
+                                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
+                                            .map_err(zx::Status::into_raw),
+                                    ),
                             }
+                        }
+                    })
+                    .map(|result| {
+                        result.unwrap_or_else(|err| {
+                            error!("error while serving token: {err:?}");
                         })
-                        .map(|result| {
-                            result.unwrap_or_else(|err| {
-                                error!("error while serving device_topology: {err:?}");
-                            })
-                        })
-                },
-            ),
+                    })
+            }),
         )
-        .expect("adding the device topology should always succeed");
+        .expect("adding the device token should always succeed");
     Ok(())
 }
 
 impl ManagedRealm {
     async fn run_service(self) -> Result {
-        let Self { scope, server_end, realm, devfs, hwnetwork_service, capability_from_children } =
+        let Self { server_end, realm, hwnetwork_service, node_tokens, capability_from_children } =
             self;
         let mut stream = server_end.into_stream();
         while let Some(request) = stream.try_next().await.context("FIDL error")? {
@@ -917,122 +940,39 @@ impl ManagedRealm {
                             format!("failed to open service {} in directory", service_path)
                         })?;
                 }
-                ManagedRealmRequest::GetDevfs { devfs: server_end, control_handle: _ } => {
-                    // On errors `server_end` will be closed with an epitaph.
-                    vfs::directory::serve_on(
-                        devfs.clone(),
-                        fio::PERM_READABLE,
-                        scope.clone(),
-                        server_end,
-                    );
-                }
-                ManagedRealmRequest::AddDevice { path, device, responder } => {
+                ManagedRealmRequest::AddDevice { instance_name, device, responder } => {
                     // ClientEnd::into_proxy should only return an Err when there is no executor, so
                     // this is not expected to ever cause a panic.
                     let device = device.into_proxy();
-                    let devfs = devfs.clone();
-                    let hwnetwork_service = hwnetwork_service.clone();
-                    let response = (|| async move {
-                        let (parent_path, device_name) =
-                            split_path_into_dir_and_file_name(&std::path::Path::new(&path))
-                                .map_err(|e| {
-                                    error!(
-                                        "failed to split path '{}' into directory and filename: {}",
-                                        path, e
-                                    );
-                                    zx::Status::INVALID_ARGS
-                                })?;
-                        let dir = open_or_create_dir(devfs, parent_path).await.map_err(|e| {
-                            error!("failed to open or create path '{}': {}", path, e);
-                            zx::Status::INVALID_ARGS
-                        })?;
-                        let response = dir.add_entry(
-                            device_name,
-                            Arc::new(DevfsDevice { device: device.clone(), path: path.clone() }),
-                        );
-                        match response {
-                            Ok(()) => {
-                                info!("adding virtual device at path '{}/{}'", DEVFS_PATH, path)
-                            }
-                            Err(e) => {
-                                if e == zx::Status::ALREADY_EXISTS {
-                                    warn!(
-                                        "cannot add device at path '{}/{}': path is already in use",
-                                        DEVFS_PATH, path
-                                    )
-                                } else {
-                                    error!(
-                                        "unexpected error adding entry at path '{}/{}': {}",
-                                        DEVFS_PATH, path, e
-                                    )
-                                }
-                            }
-                        }
-                        response?;
-                        add_hwnetwork_service(
-                            &hwnetwork_service,
-                            device_name.to_string(),
-                            device.clone(),
-                        )
-                        .await
-                    })()
-                    .await;
+                    let response = ValidInstanceName::try_from(instance_name).and_then(|name| {
+                        add_hwnetwork_service(&hwnetwork_service, &node_tokens, name, device)
+                    });
                     responder
                         .send(response.map_err(zx::Status::into_raw))
                         .context("responding to AddDevice request")?;
                 }
-                ManagedRealmRequest::RemoveDevice { path, responder } => {
-                    let devfs = devfs.clone();
-                    let hwnetwork_service = hwnetwork_service.clone();
-                    let response = (|| async move {
-                        let (parent_path, device_name) =
-                            split_path_into_dir_and_file_name(&std::path::Path::new(&path))
-                                .map_err(|e| {
-                                    error!(
-                                        "failed to split path '{}' into directory and filename: {}",
-                                        path, e
-                                    );
-                                    zx::Status::INVALID_ARGS
-                                })?;
-                        let dir = open_or_create_dir(devfs, parent_path).await.map_err(|e| {
-                            error!("failed to open or create path '{}': {}", path, e);
-                            zx::Status::INVALID_ARGS
-                        })?;
-                        let response = match dir.remove_entry(device_name, false) {
-                            Ok(entry) => {
-                                if let Some(entry) = entry {
-                                    let _: Arc<_> = entry;
-                                    info!(
-                                        "removing virtual device at path '{}/{}'",
-                                        DEVFS_PATH, path
-                                    );
-                                    Ok(())
-                                } else {
-                                    warn!(
-                                        "cannot remove device at path '{}/{}': path is not \
-                                        currently bound to a device",
-                                        DEVFS_PATH, path,
-                                    );
-                                    Err(zx::Status::NOT_FOUND)
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "error removing device at path '{}/{}': {}",
-                                    DEVFS_PATH, path, e
-                                );
-                                Err(e)
-                            }
-                        };
-                        response?;
+                ManagedRealmRequest::RemoveDevice { instance_name, responder } => {
+                    let response = ValidInstanceName::try_from(instance_name).and_then(|name| {
                         match hwnetwork_service
-                            .remove_entry(device_name, true /* must be directory */)?
+                            .remove_entry(name.as_str(), true /* must be directory */)?
                         {
-                            Some(_) => Ok(()),
-                            None => Err(zx::Status::NOT_FOUND),
+                            Some(_) => {
+                                info!("removing virtual device '{name}'");
+                                let mut guard = node_tokens.lock();
+                                if let Some(koid) = guard.by_instance.remove(&name) {
+                                    let _: Option<Vec<fdf::BusInfo>> = guard.by_koid.remove(&koid);
+                                }
+                                Ok(())
+                            }
+                            None => {
+                                warn!(
+                                    "cannot remove device '{name}': \
+                                    instance name is not currently bound to a device"
+                                );
+                                Err(zx::Status::NOT_FOUND)
+                            }
                         }
-                    })()
-                    .await;
+                    });
                     responder
                         .send(response.map_err(zx::Status::into_raw))
                         .context("responding to RemoveDevice request")?;
@@ -1302,64 +1242,10 @@ impl CrashListener {
     }
 }
 
-fn split_path_into_dir_and_file_name<'a>(
-    path: &'a std::path::Path,
-) -> Result<(&'a std::path::Path, &'a str)> {
-    let file_name = path
-        .file_name()
-        .context("path does not end in a normal file or directory name")?
-        .to_str()
-        .context("invalid file name")?;
-    let parent = path.parent().context("path terminates in a root")?;
-
-    Ok((parent, file_name))
-}
-
-async fn open_or_create_dir(
-    root: Arc<SimpleImmutableDir>,
-    path: &std::path::Path,
-) -> Result<Arc<SimpleImmutableDir>> {
-    let root = futures::stream::iter(path.components())
-        .map(Ok)
-        .try_fold(root, |root, component| async move {
-            let entry = match component {
-                std::path::Component::Prefix(_) | std::path::Component::ParentDir => {
-                    Err(anyhow!("path cannot contain prefix or parent component ('..')"))
-                }
-                component => component.as_os_str().to_str().context("invalid path component"),
-            }?;
-            // Get a handle to the entry, and create it if it doesn't already exist.
-            let entry = match root.get_entry(entry) {
-                Ok(entry) => entry,
-                Err(status) => match status {
-                    zx::Status::NOT_FOUND => {
-                        root.add_entry(entry, vfs::directory::immutable::simple::simple())
-                            .context("failed to add directory entry")?;
-                        root.get_entry(entry).context("failed to get directory entry")?
-                    }
-                    status => {
-                        return Err(anyhow!(
-                            "got unexpected error on get entry '{}': expected {}, got {}",
-                            entry,
-                            zx::Status::NOT_FOUND,
-                            status,
-                        ));
-                    }
-                },
-            };
-            // Downcast the entry to a directory so that we can perform directory operations on it.
-            Ok(entry
-                .into_any()
-                .downcast::<SimpleImmutableDir>()
-                .expect("could not downcast entry to a directory"))
-        })
-        .await?;
-    Ok(root)
-}
-
 async fn handle_sandbox(
     stream: SandboxRequestStream,
     sandbox_name: impl std::fmt::Display,
+    pkg_dir_path: &str,
 ) -> Result {
     let (tx, rx) = mpsc::channel(1);
     let realm_index = AtomicU64::new(0);
@@ -1389,33 +1275,28 @@ async fn handle_sandbox(
                     } => {
                         let index = realm_index.fetch_add(1, Ordering::SeqCst);
                         let prefix = format!("{}{}", sandbox_name, index);
-                        let devfs = vfs::directory::immutable::simple::simple();
-                        let devfs_proxy = vfs::directory::serve_read_only(
-                            devfs.clone(),
-                            vfs::execution_scope::ExecutionScope::new(),
-                        );
                         let hwnetwork_service = vfs::directory::immutable::simple::simple();
                         let hwnetwork_service_proxy = vfs::directory::serve_read_only(
                             hwnetwork_service.clone(),
                             vfs::execution_scope::ExecutionScope::new(),
                         );
+                        let node_tokens = Arc::new(fuchsia_sync::Mutex::new(NodeTokens::default()));
                         match create_realm_instance(
                             options,
                             &prefix,
-                            devfs.clone(),
-                            devfs_proxy,
                             hwnetwork_service_proxy,
+                            node_tokens.clone(),
                             custom_artifacts,
+                            pkg_dir_path,
                         )
                         .await
                         {
                             Ok((realm, capability_from_children)) => tx
                                 .send(ManagedRealm {
-                                    scope: vfs::execution_scope::ExecutionScope::new(),
                                     server_end,
                                     realm,
-                                    devfs,
                                     hwnetwork_service,
+                                    node_tokens,
                                     capability_from_children,
                                 })
                                 .await
@@ -1465,7 +1346,7 @@ async fn main() -> Result {
     let sandbox_index = AtomicU64::new(0);
     fs.for_each_concurrent(None, |stream| async {
         let index = sandbox_index.fetch_add(1, Ordering::SeqCst);
-        handle_sandbox(stream, index)
+        handle_sandbox(stream, index, PARENT_PKG_PATH)
             .await
             .unwrap_or_else(|e| error!("error handling SandboxRequestStream: {:?}", e))
     })
@@ -1479,14 +1360,14 @@ mod tests {
     use cm_rust::NativeIntoFidl as _;
     use diagnostics_assertions::assert_data_tree;
     use fidl::endpoints::Proxy as _;
-    use fidl_fuchsia_device as fdevice;
     use fidl_fuchsia_netemul as fnetemul;
     use fidl_fuchsia_netemul_test::{self as fnetemul_test, CounterMarker};
     use fixture::fixture;
     use fuchsia_component::client::Service;
-    use fuchsia_fs::directory as fvfs_watcher;
     use std::convert::TryFrom as _;
     use test_case::test_case;
+
+    const TEST_PKG_PATH: &str = "/pkg";
 
     // We can't just use a counter for the sandbox identifier, as we do in `main`, because tests
     // each run in separate processes, but use the same backing collection of components created
@@ -1498,7 +1379,7 @@ mod tests {
         let (sandbox_proxy, stream) =
             fidl::endpoints::create_proxy_and_stream::<fnetemul::SandboxMarker>();
         (sandbox_proxy, async move {
-            handle_sandbox(stream, sandbox_name).await.expect("handle_sandbox error")
+            handle_sandbox(stream, sandbox_name, TEST_PKG_PATH).await.expect("handle_sandbox error")
         })
     }
 
@@ -2200,6 +2081,39 @@ mod tests {
     }
 
     #[fixture(with_sandbox)]
+    #[fuchsia::test]
+    async fn network_tun_used_by_child(sandbox: fnetemul::SandboxProxy) {
+        let realm = TestRealm::new(
+            &sandbox,
+            fnetemul::RealmOptions {
+                children: Some(vec![fnetemul::ChildDef {
+                    source: Some(fnetemul::ChildSource::Component(COUNTER_URL.to_string())),
+                    name: Some("counter-with-network-tun".to_string()),
+                    exposes: Some(vec![CounterMarker::PROTOCOL_NAME.to_string()]),
+                    uses: Some(fnetemul::ChildUses::Capabilities(vec![
+                        fnetemul::Capability::LogSink(fnetemul::Empty {}),
+                        fnetemul::Capability::NetemulNetworkTun(fnetemul::Empty {}),
+                        counter_config_cap(),
+                    ])),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+        );
+        let counter = realm.connect_to_protocol::<CounterMarker>();
+        let (tun_control, server_end) = fidl::endpoints::create_proxy::<fnet_tun::ControlMarker>();
+        counter
+            .connect_to_protocol(fnet_tun::ControlMarker::PROTOCOL_NAME, server_end.into_channel())
+            .expect("failed to connect to network-tun through counter");
+        let (device, server_end) = fidl::endpoints::create_proxy::<fnet_tun::DeviceMarker>();
+        tun_control
+            .create_device(&fnet_tun::DeviceConfig::default(), server_end)
+            .expect("calling create device");
+        let _signals: zx::EventPair =
+            device.get_signals().await.expect("network-tun device is served");
+    }
+
+    #[fixture(with_sandbox)]
     #[fuchsia::test(logging = false)]
     async fn create_realm_invalid_options(sandbox: fnetemul::SandboxProxy) {
         // TODO(https://github.com/frondeus/test-case/issues/37): consider using the #[test_case]
@@ -2382,37 +2296,6 @@ mod tests {
                         fnetemul::Capability::StorageDep(fnetemul::StorageDep {
                             variant: Some(fnetemul::StorageVariant::Data),
                             path: Some(DATA_PATH.to_string()),
-                            ..Default::default()
-                        }),
-                    ])),
-                    ..Default::default()
-                }],
-                epitaph: zx::Status::INVALID_ARGS,
-            },
-            TestCase {
-                name: "devfs capability name not provided",
-                children: vec![fnetemul::ChildDef {
-                    name: Some(COUNTER_COMPONENT_NAME.to_string()),
-                    source: Some(fnetemul::ChildSource::Component(COUNTER_URL.to_string())),
-                    uses: Some(fnetemul::ChildUses::Capabilities(vec![
-                        fnetemul::Capability::NetemulDevfs(fnetemul::DevfsDep {
-                            name: None,
-                            ..Default::default()
-                        }),
-                    ])),
-                    ..Default::default()
-                }],
-                epitaph: zx::Status::INVALID_ARGS,
-            },
-            TestCase {
-                name: "invalid subdirectory of devfs requested",
-                children: vec![fnetemul::ChildDef {
-                    name: Some(COUNTER_COMPONENT_NAME.to_string()),
-                    source: Some(fnetemul::ChildSource::Component(COUNTER_URL.to_string())),
-                    uses: Some(fnetemul::ChildUses::Capabilities(vec![
-                        fnetemul::Capability::NetemulDevfs(fnetemul::DevfsDep {
-                            name: Some("does-not-matter".to_string()),
-                            subdir: Some("..".to_string()),
                             ..Default::default()
                         }),
                     ])),
@@ -2616,206 +2499,141 @@ mod tests {
         endpoint.expect("endpoint creation").into_proxy()
     }
 
-    fn get_device_proxy(
+    fn get_device(
         endpoint: &fnetemul_network::EndpointProxy,
-    ) -> fidl::endpoints::ClientEnd<fnetemul_network::DeviceProxy_Marker> {
-        let (device_proxy, server) =
-            fidl::endpoints::create_endpoints::<fnetemul_network::DeviceProxy_Marker>();
-        endpoint.get_proxy_(server).expect("failed to get device proxy from netdevice endpoint");
-        device_proxy
+    ) -> fidl::endpoints::ClientEnd<fhwnet::DeviceMarker> {
+        let (port, port_server) = fidl::endpoints::create_endpoints::<fhwnet::PortMarker>();
+        endpoint.get_port(port_server).expect("failed to get port from netdevice endpoint");
+        let (device, server) = fidl::endpoints::create_endpoints::<fhwnet::DeviceMarker>();
+        port.into_proxy().get_device(server).expect("failed to get device from port");
+        device
     }
 
-    async fn get_devfs_watcher(realm: &fnetemul::ManagedRealmProxy) -> fvfs_watcher::Watcher {
-        let (devfs, server) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
-        realm.get_devfs(server).expect("calling get devfs");
-        fvfs_watcher::Watcher::new(&devfs).await.expect("watcher creation")
+    #[derive(Clone, Copy)]
+    enum HwNetworkServiceVariant {
+        ShortName,
+        LongName,
     }
 
-    async fn wait_for_event_on_path(
-        watcher: &mut fvfs_watcher::Watcher,
-        event: fvfs_watcher::WatchEvent,
-        path: &std::path::Path,
-    ) {
-        watcher
-            .try_filter_map(|fvfs_watcher::WatchMessage { event: actual, filename }| {
-                futures::future::ok((actual == event && filename == path).then(|| ()))
-            })
-            .try_next()
-            .await
-            .expect("error watching directory")
-            .unwrap_or_else(|| {
-                panic!("watcher stream expired before expected event {:?} was observed", event)
-            });
+    impl HwNetworkServiceVariant {
+        fn device_name(self) -> &'static str {
+            match self {
+                Self::ShortName => "test",
+                Self::LongName => "test_device_with_name_exceeding_thirty_two_bytes",
+            }
+        }
     }
 
-    #[fixture(with_sandbox)]
+    #[test_case(HwNetworkServiceVariant::ShortName; "short_name")]
+    #[test_case(HwNetworkServiceVariant::LongName; "long_name")]
     #[fuchsia::test]
-    async fn devfs(sandbox: fnetemul::SandboxProxy) {
-        let TestRealm { realm } = TestRealm::new(
-            &sandbox,
-            fnetemul::RealmOptions {
-                children: Some(vec![counter_component()]),
-                ..Default::default()
-            },
-        );
-        let mut watcher = get_devfs_watcher(&realm).await;
+    async fn hwnetwork_service(variant: HwNetworkServiceVariant) {
+        let test_device_name = variant.device_name();
+        // TODO(https://fxbug.dev/42075656): Use #[fixture] for this once it
+        // integrates well with #[test_case].
+        with_sandbox(&format!("hwnetwork_service_{test_device_name}"), |sandbox| async move {
+            let realm = TestRealm::new(&sandbox, fnetemul::RealmOptions { ..Default::default() });
 
-        const TEST_DEVICE_NAME: &str = "test";
-        let endpoint = create_endpoint(
-            &sandbox,
-            TEST_DEVICE_NAME,
-            fnetemul_network::EndpointConfig {
-                mtu: 1500,
-                mac: None,
-                port_class: fidl_fuchsia_hardware_network::PortClass::Virtual,
-                checksum_offload: false,
-            },
-        )
-        .await;
+            let endpoint = create_endpoint(
+                &sandbox,
+                test_device_name,
+                fnetemul_network::EndpointConfig {
+                    mtu: 1500,
+                    mac: None,
+                    port_class: fidl_fuchsia_hardware_network::PortClass::Virtual,
+                    checksum_offload: false,
+                },
+            )
+            .await;
 
-        realm
-            .add_device(TEST_DEVICE_NAME, get_device_proxy(&endpoint))
-            .await
-            .expect("calling add device")
-            .map_err(zx::Status::err_from_raw)
-            .expect("error adding device");
-        wait_for_event_on_path(
-            &mut watcher,
-            fvfs_watcher::WatchEvent::ADD_FILE,
-            &std::path::Path::new(TEST_DEVICE_NAME),
-        )
-        .await;
-        assert_eq!(
-            realm
-                .add_device(TEST_DEVICE_NAME, get_device_proxy(&endpoint))
+            let add_result = realm
+                .realm
+                .add_device(test_device_name, get_device(&endpoint))
                 .await
                 .expect("calling add device")
+                .map_err(zx::Status::err_from_raw);
+            if matches!(variant, HwNetworkServiceVariant::LongName) {
+                assert_eq!(add_result, Err(zx::Status::INVALID_ARGS));
+                return;
+            }
+            add_result.expect("error adding device");
+
+            let service = realm.connect_to_service(fhwnet::ServiceMarker);
+
+            // Read the directory to see if the device instance is there.
+            let instances = service.clone().enumerate().await.expect("enumerate failed");
+
+            let names: Vec<_> = instances.iter().map(|p| p.instance_name()).collect();
+            assert_eq!(names, vec![test_device_name]);
+
+            // Verify we can connect to the members of the service.
+            let instance =
+                service.connect_to_instance(test_device_name).expect("connect to instance failed");
+            let _device = instance.connect_to_device().expect("connect to device failed");
+            let device_token = instance.connect_to_token().expect("connect to device token failed");
+
+            // Verify token works with NodeBusTopology.
+            let token = device_token
+                .get()
+                .await
+                .expect("get token failed")
                 .map_err(zx::Status::err_from_raw)
-                .expect_err("adding a duplicate device should fail"),
-            zx::Status::ALREADY_EXISTS,
-        );
+                .expect("get token returned error");
+            let bus_topology = realm.connect_to_protocol::<fdriver_token::NodeBusTopologyMarker>();
+            let bus_info = bus_topology
+                .get(token)
+                .await
+                .expect("bus_topology.get failed")
+                .map_err(zx::Status::err_from_raw)
+                .expect("bus_topology.get returned error");
+            assert_eq!(
+                bus_info,
+                vec![fdf::BusInfo {
+                    bus: Some(fdf::BusType::DeviceTree),
+                    address: Some(fdf::DeviceAddress::StringValue(test_device_name.to_string())),
+                    ..Default::default()
+                }]
+            );
 
-        // Check the device's `fuchsia.device/Controller.GetTopologicalPath`.
-        let (controller, server_end) = fidl::endpoints::create_proxy::<fdevice::ControllerMarker>();
-        get_device_proxy(&endpoint)
-            .into_proxy()
-            .serve_controller(server_end)
-            .expect("failed to serve device");
-        let path = controller
-            .get_topological_path()
-            .await
-            .expect("calling get topological path")
-            .map_err(zx::Status::err_from_raw)
-            .expect("failed to get topological path");
-        assert!(path.contains(TEST_DEVICE_NAME));
+            // Adding the device again causes an error.
+            let result = realm
+                .realm
+                .add_device(test_device_name, get_device(&endpoint))
+                .await
+                .expect("calling add device again");
+            assert_eq!(
+                result.map_err(zx::Status::err_from_raw),
+                Err(zx::Status::ALREADY_EXISTS),
+                "Expected ALREADY_EXISTS when adding duplicate device"
+            );
 
-        realm
-            .remove_device(TEST_DEVICE_NAME)
-            .await
-            .expect("calling remove device")
-            .map_err(zx::Status::err_from_raw)
-            .expect("error removing device");
-        wait_for_event_on_path(
-            &mut watcher,
-            fvfs_watcher::WatchEvent::REMOVE_FILE,
-            &std::path::Path::new(TEST_DEVICE_NAME),
-        )
-        .await;
-        assert_eq!(
+            // We can remove the device so that it can no longer be enumerated.
             realm
-                .remove_device(TEST_DEVICE_NAME)
+                .realm
+                .remove_device(test_device_name)
                 .await
                 .expect("calling remove device")
                 .map_err(zx::Status::err_from_raw)
-                .expect_err("removing a nonexistent device should fail"),
-            zx::Status::NOT_FOUND,
-        );
-    }
+                .expect("error removing device");
 
-    #[fixture(with_sandbox)]
-    #[fuchsia::test]
-    async fn hwnetwork_service(sandbox: fnetemul::SandboxProxy) {
-        let realm = TestRealm::new(&sandbox, fnetemul::RealmOptions { ..Default::default() });
+            // Reuse the service proxy to check that it reflects the removal.
+            let instances = service.enumerate().await.expect("enumerate failed after removal");
+            let names: Vec<_> = instances.iter().map(|p| p.instance_name()).collect();
+            assert_eq!(names, Vec::<&str>::new());
 
-        const TEST_DEVICE_NAME: &str = "test";
-        let endpoint = create_endpoint(
-            &sandbox,
-            TEST_DEVICE_NAME,
-            fnetemul_network::EndpointConfig {
-                mtu: 1500,
-                mac: None,
-                port_class: fidl_fuchsia_hardware_network::PortClass::Virtual,
-                checksum_offload: false,
-            },
-        )
+            // Removing it again causes an error.
+            let result = realm
+                .realm
+                .remove_device(test_device_name)
+                .await
+                .expect("calling remove device again");
+            assert_eq!(
+                result.map_err(zx::Status::err_from_raw),
+                Err(zx::Status::NOT_FOUND),
+                "Expected NOT_FOUND when removing non-existent device"
+            );
+        })
         .await;
-
-        realm
-            .realm
-            .add_device(TEST_DEVICE_NAME, get_device_proxy(&endpoint))
-            .await
-            .expect("calling add device")
-            .map_err(zx::Status::err_from_raw)
-            .expect("error adding device");
-
-        let service = realm.connect_to_service(fhwnet::ServiceMarker);
-
-        // Read the directory to see if the device instance is there.
-        let instances = service.clone().enumerate().await.expect("enumerate failed");
-
-        let names: Vec<_> = instances.iter().map(|p| p.instance_name()).collect();
-        assert_eq!(names, vec![TEST_DEVICE_NAME]);
-
-        // Verify we can connect to the members of the service.
-        let instance =
-            service.connect_to_instance(TEST_DEVICE_NAME).expect("connect to instance failed");
-        let _device = instance.connect_to_device().expect("connect to device failed");
-        let device_topology =
-            instance.connect_to_device_topology().expect("connect to device topology failed");
-
-        // Verify topology works by calling get_topological_path
-        let topo_path = device_topology
-            .get_topological_path()
-            .await
-            .expect("get_topological_path failed")
-            .expect("get_topological_path returned error");
-        assert!(!topo_path.is_empty());
-        assert!(topo_path.contains(TEST_DEVICE_NAME));
-
-        // Adding the "test" device again causes an error.
-        let result = realm
-            .realm
-            .add_device(TEST_DEVICE_NAME, get_device_proxy(&endpoint))
-            .await
-            .expect("calling add device again");
-        assert_eq!(
-            result.map_err(zx::Status::err_from_raw),
-            Err(zx::Status::ALREADY_EXISTS),
-            "Expected ALREADY_EXISTS when adding duplicate device"
-        );
-
-        // We can remove the "test" device so that it can no longer be enumerated.
-        realm
-            .realm
-            .remove_device(TEST_DEVICE_NAME)
-            .await
-            .expect("calling remove device")
-            .map_err(zx::Status::err_from_raw)
-            .expect("error removing device");
-
-        // Reuse the service proxy to check that it reflects the removal.
-        let instances = service.enumerate().await.expect("enumerate failed after removal");
-        let names: Vec<_> = instances.iter().map(|p| p.instance_name()).collect();
-        assert_eq!(names, Vec::<&str>::new());
-
-        // Removing it again causes an error.
-        let result =
-            realm.realm.remove_device(TEST_DEVICE_NAME).await.expect("calling remove device again");
-        assert_eq!(
-            result.map_err(zx::Status::err_from_raw),
-            Err(zx::Status::NOT_FOUND),
-            "Expected NOT_FOUND when removing non-existent device"
-        );
     }
 
     #[fixture(with_sandbox)]
@@ -2844,7 +2662,7 @@ mod tests {
         // Add the device.
         realm
             .realm
-            .add_device(TEST_DEVICE_NAME, get_device_proxy(&endpoint))
+            .add_device(TEST_DEVICE_NAME, get_device(&endpoint))
             .await
             .expect("calling add device")
             .map_err(zx::Status::err_from_raw)
@@ -2878,7 +2696,7 @@ mod tests {
 
         realm_a
             .realm
-            .add_device(TEST_DEVICE_NAME, get_device_proxy(&endpoint))
+            .add_device(TEST_DEVICE_NAME, get_device(&endpoint))
             .await
             .expect("calling add device")
             .map_err(zx::Status::err_from_raw)
@@ -2939,7 +2757,7 @@ mod tests {
         .await;
         realm
             .realm
-            .add_device(TEST_DEVICE_NAME, get_device_proxy(&endpoint))
+            .add_device(TEST_DEVICE_NAME, get_device(&endpoint))
             .await
             .expect("FIDL error")
             .map_err(zx::Status::err_from_raw)
@@ -2960,140 +2778,6 @@ mod tests {
         let instances = service.enumerate().await.expect("enumerate failed");
         let names: Vec<_> = instances.iter().map(|p| p.instance_name()).collect();
         assert_eq!(names, vec![TEST_DEVICE_NAME]);
-    }
-
-    #[fixture(with_sandbox)]
-    #[fuchsia::test]
-    async fn devfs_per_realm(sandbox: fnetemul::SandboxProxy) {
-        const TEST_DEVICE_NAME: &str = "test";
-        let endpoint = create_endpoint(
-            &sandbox,
-            TEST_DEVICE_NAME,
-            fnetemul_network::EndpointConfig {
-                mtu: 1500,
-                mac: None,
-                port_class: fidl_fuchsia_hardware_network::PortClass::Virtual,
-                checksum_offload: false,
-            },
-        )
-        .await;
-        let (TestRealm { realm: realm_a }, TestRealm { realm: realm_b }) = (
-            TestRealm::new(
-                &sandbox,
-                fnetemul::RealmOptions {
-                    children: Some(vec![counter_component()]),
-                    ..Default::default()
-                },
-            ),
-            TestRealm::new(
-                &sandbox,
-                fnetemul::RealmOptions {
-                    children: Some(vec![counter_component()]),
-                    ..Default::default()
-                },
-            ),
-        );
-        let mut watcher_a = get_devfs_watcher(&realm_a).await;
-        realm_a
-            .add_device(TEST_DEVICE_NAME, get_device_proxy(&endpoint))
-            .await
-            .expect("calling add device")
-            .map_err(zx::Status::err_from_raw)
-            .expect("error adding device");
-        wait_for_event_on_path(
-            &mut watcher_a,
-            fvfs_watcher::WatchEvent::ADD_FILE,
-            &std::path::Path::new(TEST_DEVICE_NAME),
-        )
-        .await;
-        // Expect not to see a matching device in `realm_b`'s devfs.
-        let devfs_b = {
-            let (devfs, server) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
-            realm_b.get_devfs(server).expect("calling get devfs");
-            devfs
-        };
-        let (status, buf) = devfs_b.read_dirents(fio::MAX_BUF).await.expect("calling read dirents");
-        zx::Status::ok(status).expect("failed reading directory entries");
-        assert_eq!(
-            fuchsia_fs::directory::parse_dir_entries(&buf)
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .expect("failed parsing directory entries"),
-            &[fuchsia_fs::directory::DirEntry {
-                name: ".".to_string(),
-                kind: fuchsia_fs::directory::DirentKind::Directory
-            }],
-        );
-    }
-
-    #[fixture(with_sandbox)]
-    #[fuchsia::test]
-    async fn devfs_used_by_child(sandbox: fnetemul::SandboxProxy) {
-        let realm = TestRealm::new(
-            &sandbox,
-            fnetemul::RealmOptions {
-                children: Some(vec![
-                    fnetemul::ChildDef {
-                        source: Some(fnetemul::ChildSource::Component(COUNTER_URL.to_string())),
-                        name: Some("counter-with-devfs".to_string()),
-                        exposes: Some(vec![CounterMarker::PROTOCOL_NAME.to_string()]),
-                        uses: Some(fnetemul::ChildUses::Capabilities(vec![
-                            fnetemul::Capability::LogSink(fnetemul::Empty {}),
-                            fnetemul::Capability::NetemulDevfs(fnetemul::DevfsDep {
-                                name: Some("test-specific-devfs".to_string()),
-                                subdir: None,
-                                ..Default::default()
-                            }),
-                            counter_config_cap(),
-                        ])),
-                        ..Default::default()
-                    },
-                    // TODO(https://fxbug.dev/42144060): when we can allow ERROR logs for routing
-                    // errors, add a child component that does not `use` `devfs`, and verify that we
-                    // cannot get at the realm's `devfs` through it. It should result in a
-                    // zx::Status::UNAVAILABLE error.
-                ]),
-                ..Default::default()
-            },
-        );
-        let counter = realm.connect_to_protocol::<CounterMarker>();
-
-        const TEST_DEVICE_NAME: &str = "test";
-        let endpoint = create_endpoint(
-            &sandbox,
-            TEST_DEVICE_NAME,
-            fnetemul_network::EndpointConfig {
-                mtu: 1500,
-                mac: None,
-                port_class: fidl_fuchsia_hardware_network::PortClass::Virtual,
-                checksum_offload: false,
-            },
-        )
-        .await;
-        realm
-            .realm
-            .add_device(TEST_DEVICE_NAME, get_device_proxy(&endpoint))
-            .await
-            .expect("FIDL error")
-            .map_err(zx::Status::err_from_raw)
-            .expect("error adding device");
-
-        // Expect the device to implement `fuchsia.device/Controller.GetTopologicalPath`.
-        let (controller, server_end) = fidl::endpoints::create_proxy::<fdevice::ControllerMarker>();
-        counter
-            .open_in_namespace(
-                &format!("{}/{}/device_controller", DEVFS_PATH, TEST_DEVICE_NAME),
-                fio::PERM_READABLE,
-                server_end.into_channel(),
-            )
-            .expect("failed to connect to device through counter");
-        let path = controller
-            .get_topological_path()
-            .await
-            .expect("FIDL error")
-            .map_err(zx::Status::err_from_raw)
-            .expect("failed to get topological path");
-        assert!(path.contains(TEST_DEVICE_NAME));
     }
 
     #[fixture(with_sandbox)]
@@ -3270,149 +2954,32 @@ mod tests {
         .await
     }
 
-    #[fixture(with_sandbox)]
-    #[fuchsia::test]
-    async fn devfs_intermediate_directories(sandbox: fnetemul::SandboxProxy) {
-        let TestRealm { realm } = TestRealm::new(
-            &sandbox,
-            fnetemul::RealmOptions {
-                children: Some(vec![counter_component()]),
-                ..Default::default()
-            },
-        );
-        const CLASS_DIR: &str = "class";
-        const NETWORK_DIR: &str = "network";
-        const TEST_DEVICE_NAME: &str = "ep0";
-        let ethernet_path = format!("{}/{}", CLASS_DIR, NETWORK_DIR);
-        let test_device_path = format!("{}/{}/{}", CLASS_DIR, NETWORK_DIR, TEST_DEVICE_NAME);
-        let endpoint = create_endpoint(
-            &sandbox,
-            TEST_DEVICE_NAME,
-            fnetemul_network::EndpointConfig {
-                mtu: 1500,
-                mac: None,
-                port_class: fidl_fuchsia_hardware_network::PortClass::Virtual,
-                checksum_offload: false,
-            },
-        )
-        .await;
-
-        let (devfs, server_end) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
-        realm.get_devfs(server_end).expect("calling get devfs");
-        let mut dev_watcher = fvfs_watcher::Watcher::new(&devfs).await.expect("watcher creation");
-        realm
-            .add_device(&test_device_path, get_device_proxy(&endpoint))
-            .await
-            .expect("calling add device")
-            .map_err(zx::Status::err_from_raw)
-            .expect("error adding device");
-        wait_for_event_on_path(
-            &mut dev_watcher,
-            fvfs_watcher::WatchEvent::ADD_FILE,
-            &std::path::Path::new(CLASS_DIR),
-        )
-        .await;
-
-        let (network, server_end) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
-        devfs
-            .open(
-                &ethernet_path,
-                fio::PERM_READABLE | fio::Flags::PROTOCOL_DIRECTORY,
-                &Default::default(),
-                server_end.into_channel(),
-            )
-            .expect("calling open");
-        let mut watcher = fvfs_watcher::Watcher::new(&network).await.expect("watcher creation");
-        wait_for_event_on_path(
-            &mut watcher,
-            fvfs_watcher::WatchEvent::EXISTING,
-            &std::path::Path::new(TEST_DEVICE_NAME),
-        )
-        .await;
-        realm
-            .remove_device(&test_device_path)
-            .await
-            .expect("calling remove device")
-            .map_err(zx::Status::err_from_raw)
-            .expect("error removing device");
-        wait_for_event_on_path(
-            &mut watcher,
-            fvfs_watcher::WatchEvent::REMOVE_FILE,
-            &std::path::Path::new(TEST_DEVICE_NAME),
-        )
-        .await;
-    }
-
-    #[fixture(with_sandbox)]
+    #[test_case("", "empty"; "empty")]
+    #[test_case(".", "curdir"; "curdir")]
+    #[test_case("..", "parent"; "parent")]
+    #[test_case("class/network/ep0", "nested"; "nested")]
+    #[test_case("class/ethernet/..", "nested_parent"; "nested_parent")]
     #[fuchsia::test(logging = false)]
-    async fn add_remove_device_invalid_path(sandbox: fnetemul::SandboxProxy) {
-        let TestRealm { realm } = TestRealm::new(&sandbox, fnetemul::RealmOptions::default());
-        const INVALID_FILE_PATH: &str = "class/ethernet/..";
-        let (device_proxy, _server) =
-            fidl::endpoints::create_endpoints::<fnetemul_network::DeviceProxy_Marker>();
-        let err = realm
-            .add_device(INVALID_FILE_PATH, device_proxy)
-            .await
-            .expect("calling add device")
-            .map_err(zx::Status::err_from_raw)
-            .expect_err("add device with invalid path should fail");
-        assert_eq!(err, zx::Status::INVALID_ARGS);
-        let err = realm
-            .remove_device(INVALID_FILE_PATH)
-            .await
-            .expect("calling remove device")
-            .map_err(zx::Status::err_from_raw)
-            .expect_err("remove device with invalid path should fail");
-        assert_eq!(err, zx::Status::INVALID_ARGS);
-    }
-
-    #[fixture(with_sandbox)]
-    #[fuchsia::test]
-    async fn devfs_subdirs_created_on_request(sandbox: fnetemul::SandboxProxy) {
-        const DEVFS_SUBDIR_USER_URL: &str = "#meta/devfs-subdir-user.cm";
-        const SUBDIR: &str = "class/ethernet";
-        let realm = TestRealm::new(
-            &sandbox,
-            fnetemul::RealmOptions {
-                children: Some(vec![fnetemul::ChildDef {
-                    source: Some(fnetemul::ChildSource::Component(
-                        DEVFS_SUBDIR_USER_URL.to_string(),
-                    )),
-                    name: Some(COUNTER_COMPONENT_NAME.to_string()),
-                    exposes: Some(vec![CounterMarker::PROTOCOL_NAME.to_string()]),
-                    uses: Some(fnetemul::ChildUses::Capabilities(vec![
-                        fnetemul::Capability::LogSink(fnetemul::Empty {}),
-                        fnetemul::Capability::NetemulDevfs(fnetemul::DevfsDep {
-                            name: Some("dev-class-ethernet".to_string()),
-                            subdir: Some(SUBDIR.to_string()),
-                            ..Default::default()
-                        }),
-                    ])),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            },
-        );
-        let counter = realm.connect_to_protocol::<CounterMarker>();
-        let path = format!("{}/{}", DEVFS_PATH, SUBDIR);
-
-        let (ethernet, server_end) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
-        counter
-            .open_in_namespace(&path, fio::PERM_READABLE, server_end.into_channel())
-            .unwrap_or_else(|e| panic!("failed to connect to {} through counter: {:?}", path, e));
-        let (status, buf) =
-            ethernet.read_dirents(fio::MAX_BUF).await.expect("calling read dirents");
-        zx::Status::ok(status).expect("failed reading directory entries");
-        assert_eq!(
-            fuchsia_fs::directory::parse_dir_entries(&buf)
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .expect("failed parsing directory entries"),
-            &[fuchsia_fs::directory::DirEntry {
-                name: ".".to_string(),
-                kind: fuchsia_fs::directory::DirentKind::Directory
-            }],
-        );
+    async fn add_remove_device_invalid_name(invalid_name: &str, variant: &str) {
+        with_sandbox(&format!("add_remove_device_invalid_name_{variant}"), |sandbox| async move {
+            let TestRealm { realm } = TestRealm::new(&sandbox, fnetemul::RealmOptions::default());
+            let (device, _server) = fidl::endpoints::create_endpoints::<fhwnet::DeviceMarker>();
+            let err = realm
+                .add_device(invalid_name, device)
+                .await
+                .expect("calling add device")
+                .map_err(zx::Status::err_from_raw)
+                .expect_err("add device with invalid name should fail");
+            assert_eq!(err, zx::Status::INVALID_ARGS);
+            let err = realm
+                .remove_device(invalid_name)
+                .await
+                .expect("calling remove device")
+                .map_err(zx::Status::err_from_raw)
+                .expect_err("remove device with invalid name should fail");
+            assert_eq!(err, zx::Status::INVALID_ARGS);
+        })
+        .await;
     }
 
     #[test_case(COUNTER_URL, "relative"; "relative_url")]

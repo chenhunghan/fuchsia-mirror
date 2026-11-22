@@ -66,8 +66,8 @@ class LdStartupCreateProcessTests
 
     // Load the dynamic linker and record its entry point.
     std::optional<LoadResult> result;
-    ASSERT_NO_FATAL_FAILURE(
-        this->Load(GetInterp(executable_name, expected_config), result, root_vmar()));
+    ASSERT_NO_FATAL_FAILURE(this->Load(GetInterp(executable_name, expected_config), result,
+                                       std::forward_as_tuple(root_vmar()), std::make_tuple()));
     set_entry(result->entry + result->loader.load_bias());
     set_stack_size(result->stack_size);
 
@@ -77,7 +77,8 @@ class LdStartupCreateProcessTests
 
     // Load the vDSO and record its base address.
     // No handles to the VMAR where it was loaded survive.
-    ASSERT_NO_FATAL_FAILURE(this->Load(*GetVdsoVmo(), result, root_vmar()));
+    ASSERT_NO_FATAL_FAILURE(
+        this->Load(*GetVdsoVmo(), result, std::forward_as_tuple(root_vmar()), std::make_tuple()));
     set_vdso_base(result->info.vaddr_start() + result->loader.load_bias());
     std::ignore = std::move(result->loader).Commit(kNoRelro);
 

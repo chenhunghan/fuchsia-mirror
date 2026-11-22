@@ -13,7 +13,7 @@ from honeydew.affordances.power.system_power_state_controller import (
 from honeydew.device_classes import workbench
 from honeydew.fuchsia_device import fuchsia_device
 from honeydew.transports.ffx import config as ffx_config
-from honeydew.transports.ffx import ffx
+from honeydew.transports.ffx import ffx_impl
 from honeydew.transports.fuchsia_controller import (
     fuchsia_controller as fc_transport,
 )
@@ -27,7 +27,7 @@ class WorkbenchTests(unittest.TestCase):
         super().setUp()
         with (
             mock.patch.object(
-                ffx.FFX,
+                ffx_impl.FfxImpl,
                 "_check_running_monitor",
                 return_value=False,
                 autospec=True,
@@ -38,7 +38,7 @@ class WorkbenchTests(unittest.TestCase):
                 autospec=True,
             ),
             mock.patch.object(
-                ffx.FFX,
+                ffx_impl.FfxImpl,
                 "check_connection",
                 autospec=True,
             ),
@@ -65,7 +65,6 @@ class WorkbenchTests(unittest.TestCase):
                     subtools_search_path=None,
                     proxy_timeout_secs=None,
                     ssh_keepalive_timeout=None,
-                    emu_instance_dir=None,
                     ssh_private_keys=None,
                     ssh_public_keys=None,
                     shared_data="/tmp/shared_data",

@@ -287,3 +287,104 @@ func TestDeviceStartClosesSerialWatcherSocket(t *testing.T) {
 		})
 	}
 }
+
+func TestDeviceResolveFastbootTransport(t *testing.T) {
+	ipv6Addr := &net.IPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0"}
+	for _, tc := range []struct {
+		name         string
+		serialNumber string
+		tcpFastboot  bool
+		ipv6         *net.IPAddr
+		wantTarget   string
+		wantTCPFlash bool
+		wantErr      bool
+	}{
+		{
+			name:         "usb_fastboot_uses_id_prefix",
+			serialNumber: "SER12345",
+			ipv6:         ipv6Addr,
+			wantTarget:   "id:SER12345",
+		},
+		{
+			name:         "tcp_fastboot_without_serial_number_uses_ipv6",
+			tcpFastboot:  true,
+			ipv6:         ipv6Addr,
+			wantTarget:   "fe80::1%eth0",
+			wantTCPFlash: true,
+		},
+		{
+			name:         "tcp_fastboot_takes_precedence_over_serial_number",
+			serialNumber: "SER12345",
+			tcpFastboot:  true,
+			ipv6:         ipv6Addr,
+			wantTarget:   "fe80::1%eth0",
+			wantTCPFlash: true,
+		},
+		{
+			name:         "tcp_fastboot_without_ipv6_rejected",
+			serialNumber: "SER12345",
+			tcpFastboot:  true,
+			wantErr:      true,
+		},
+		{
+			name:        "tcp_fastboot_with_empty_ip_rejected",
+			tcpFastboot: true,
+			ipv6:        &net.IPAddr{},
+			wantErr:     true,
+		},
+		{
+			name:    "usb_fastboot_without_serial_number_rejected",
+			ipv6:    ipv6Addr,
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dev := &Device{
+				genericFuchsiaTarget: &genericFuchsiaTarget{
+					addrResolved: true,
+					ipv6:         tc.ipv6,
+				},
+				config: DeviceConfig{
+					SerialNumber: tc.serialNumber,
+					TCPFastboot:  tc.tcpFastboot,
+					Network:      NetworkProperties{Nodename: "fuchsia-node-1"},
+				},
+			}
+			gotTarget, gotTCP, err := dev.resolveFastbootTransport()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("resolveFastbootTransport() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && (gotTarget != tc.wantTarget || gotTCP != tc.wantTCPFlash) {
+				t.Errorf("resolveFastbootTransport() = (%q, %v), want (%q, %v)", gotTarget, gotTCP, tc.wantTarget, tc.wantTCPFlash)
+			}
+		})
+	}
+}
+
+func TestDeviceAccessorsPreferConfig(t *testing.T) {
+	dev := &Device{genericFuchsiaTarget: &genericFuchsiaTarget{}}
+	dev.SetNodename("fuchsia-discovered")
+	dev.SetSerialNumber("SER-DISCOVERED")
+	if got := dev.Nodename(); got != "fuchsia-discovered" {
+		t.Errorf("Nodename() = %q, want %q", got, "fuchsia-discovered")
+	}
+	if got := dev.SerialNumber(); got != "SER-DISCOVERED" {
+		t.Errorf("SerialNumber() = %q, want %q", got, "SER-DISCOVERED")
+	}
+
+	configured := &Device{
+		genericFuchsiaTarget: &genericFuchsiaTarget{},
+		config: DeviceConfig{
+			SerialNumber: "SER-CONFIGURED",
+			Network:      NetworkProperties{Nodename: "fuchsia-configured"},
+		},
+	}
+	configured.SetNodename("fuchsia-discovered")
+	configured.SetSerialNumber("SER-DISCOVERED")
+	if got := configured.Nodename(); got != "fuchsia-configured" {
+		t.Errorf("Nodename() = %q, want %q", got, "fuchsia-configured")
+	}
+	if got := configured.SerialNumber(); got != "SER-CONFIGURED" {
+		t.Errorf("SerialNumber() = %q, want %q", got, "SER-CONFIGURED")
+	}
+}

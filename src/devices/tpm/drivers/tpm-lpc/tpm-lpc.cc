@@ -11,7 +11,10 @@
 #include <lib/ddk/device.h>
 #include <lib/ddk/driver.h>
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
+#include <lib/fit/defer.h>
 #include <lib/zx/result.h>
+
+#include <array>
 
 #include <fbl/auto_lock.h>
 
@@ -43,14 +46,71 @@ zx_status_t TpmLpc::Create(void* ctx, zx_device_t* dev) {
   return driver->Bind(&driver);
 }
 
+TpmLpc::~TpmLpc() { Shutdown(); }
+
+void TpmLpc::Shutdown() {
+  if (outgoing_.has_value()) {
+    sync_completion_t outgoing_reset;
+    if (async::PostTask(loop_.dispatcher(), [this, &outgoing_reset]() {
+          outgoing_.reset();
+          sync_completion_signal(&outgoing_reset);
+        }) == ZX_OK) {
+      sync_completion_wait(&outgoing_reset, ZX_TIME_INFINITE);
+    }
+  }
+  loop_.Shutdown();
+}
+
 zx_status_t TpmLpc::Bind(std::unique_ptr<TpmLpc>* driver) {
   zx_status_t status = loop_.StartThread("tpm-lpc-fidl-thread");
   if (status != ZX_OK) {
     zxlogf(ERROR, "Failed to start FIDL thread: %d", status);
     return status;
   }
-  status = DdkAdd(ddk::DeviceAddArgs("tpm-lpc").set_inspect_vmo(inspect_.DuplicateVmo()));
+  auto cleanup = fit::defer([this]() { Shutdown(); });
+
+  auto endpoints = fidl::Endpoints<fuchsia_io::Directory>::Create();
+  zx_status_t serve_status = ZX_ERR_INTERNAL;
+  sync_completion_t served;
+  zx_status_t post_status = async::PostTask(
+      loop_.dispatcher(),
+      [this, &serve_status, &served, server = std::move(endpoints.server)]() mutable {
+        outgoing_.emplace(loop_.dispatcher());
+        fuchsia_hardware_tpmimpl::Service::InstanceHandler handler({
+            .device =
+                [this](fidl::ServerEnd<fuchsia_hardware_tpmimpl::TpmImpl> server_end) {
+                  fidl::BindServer(loop_.dispatcher(), std::move(server_end), this);
+                },
+        });
+        zx::result result =
+            outgoing_->AddService<fuchsia_hardware_tpmimpl::Service>(std::move(handler));
+        if (result.is_ok()) {
+          result = outgoing_->Serve(std::move(server));
+        }
+        if (result.is_error()) {
+          outgoing_.reset();
+        }
+        serve_status = result.status_value();
+        sync_completion_signal(&served);
+      });
+  if (post_status != ZX_OK) {
+    zxlogf(ERROR, "Failed to post task to FIDL thread: %d", post_status);
+    return post_status;
+  }
+  sync_completion_wait(&served, ZX_TIME_INFINITE);
+  if (serve_status != ZX_OK) {
+    zxlogf(ERROR, "tpm-lpc: Failed to serve outgoing directory: %s",
+           zx_status_get_string(serve_status));
+    return serve_status;
+  }
+
+  std::array offers = {fuchsia_hardware_tpmimpl::Service::Name};
+  status = DdkAdd(ddk::DeviceAddArgs("tpm-lpc")
+                      .set_inspect_vmo(inspect_.DuplicateVmo())
+                      .set_fidl_service_offers(offers)
+                      .set_outgoing_dir(endpoints.client.TakeChannel()));
   if (status == ZX_OK) {
+    cleanup.cancel();
     [[maybe_unused]] auto ptr = driver->release();
   }
   return status;
@@ -109,11 +169,6 @@ zx::result<> TpmLpc::PerformTransfer(uint16_t address, fidl::VectorView<uint8_t>
     }
   }
   return zx::ok();
-}
-
-void TpmLpc::TpmImplConnectServer(zx::channel server) {
-  fidl::BindServer(loop_.dispatcher(),
-                   fidl::ServerEnd<fuchsia_hardware_tpmimpl::TpmImpl>(std::move(server)), this);
 }
 
 void TpmLpc::Read(ReadRequestView request, ReadCompleter::Sync& completer) {

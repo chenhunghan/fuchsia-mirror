@@ -111,7 +111,6 @@ fuchsia_unittest_package("power-manager-integration-test") {
     environments = [
       astro_env,
       nelson_env,
-      nuc7_env,
       nuc11_env,
       sherlock_env,
       vim3_env,

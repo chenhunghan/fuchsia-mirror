@@ -10,21 +10,26 @@
 #include <fuchsia/hardware/usb/bus/cpp/banjo.h>
 #include <fuchsia/hardware/usb/hci/cpp/banjo.h>
 #include <lib/async-loop/cpp/loop.h>
-#include <lib/async/cpp/executor.h>
-#include <lib/device-protocol/pci.h>
+#include <lib/async/cpp/task.h>
 #include <lib/dma-buffer/buffer.h>
 #include <lib/driver/compat/cpp/banjo_server.h>
 #include <lib/driver/compat/cpp/device_server.h>
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/mmio/cpp/mmio.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/driver/platform-device/cpp/pdev.h>
+#include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/fpromise/promise.h>
 #include <lib/fpromise/single_threaded_executor.h>
 #include <lib/inspect/cpp/inspect.h>
+#include <lib/sync/cpp/completion.h>
 #include <lib/zx/profile.h>
 #include <unistd.h>
+
+#include <memory>
+#include <string_view>
 
 #include <fbl/array.h>
 #include <fbl/auto_lock.h>
@@ -189,7 +194,10 @@ class UsbXhci : public fdf::DriverBase2,
   // Returns whether or not a device is connected to the root hub.
   // Always returns true for devices attached via a hub.
   bool IsDeviceConnected(uint8_t slot) {
-    auto state = device_state_[slot - 1];
+    if (slot == 0) {
+      return false;
+    }
+    auto state = GetDeviceState(slot - 1);
     if (!state) {
       return false;
     }
@@ -227,6 +235,11 @@ class UsbXhci : public fdf::DriverBase2,
   // Returns true if the device_id is within valid bounds for device_state_.
   bool IsValidDeviceId(uint32_t device_id) const { return device_id < max_slots_; }
 
+  // Returns true if the 1-based slot_id is within valid bounds for device_state_.
+  bool IsValidSlotId(uint32_t slot_id) const {
+    return slot_id != 0 && IsValidDeviceId(slot_id - 1);
+  }
+
   // Returns true if ep_address maps to a valid endpoint index.
   // EP0 (ep_address == 0) maps to index 0 (DCI 1).
   // Non-EP0 must map to an index in [1, 30] (DCI 2..31).
@@ -258,7 +271,66 @@ class UsbXhci : public fdf::DriverBase2,
 
   CommandRing* GetCommandRing() { return &command_ring_; }
 
-  fbl::Array<fbl::RefPtr<DeviceState>>& GetDeviceState() { return device_state_; }
+  fbl::RefPtr<DeviceState> GetDeviceState(uint32_t device_id) const {
+    fbl::AutoLock _(&device_state_lock_);
+    if (device_id >= device_state_.size()) {
+      return nullptr;
+    }
+    return device_state_[device_id];
+  }
+
+  void SetDeviceState(uint32_t device_id, fbl::RefPtr<DeviceState> state) {
+    fbl::RefPtr<DeviceState> old_state;
+    {
+      fbl::AutoLock _(&device_state_lock_);
+      if (device_id < device_state_.size()) {
+        old_state = std::move(device_state_[device_id]);
+        device_state_[device_id] = std::move(state);
+      }
+    }
+  }
+
+  fbl::RefPtr<DeviceState> TakeDeviceState(uint32_t device_id) {
+    fbl::AutoLock _(&device_state_lock_);
+    if (device_id >= device_state_.size()) {
+      return nullptr;
+    }
+    return std::move(device_state_[device_id]);
+  }
+
+  void ClearDeviceStateIfMatches(uint32_t device_id, const DeviceState* expected) {
+    fbl::RefPtr<DeviceState> old_state;
+    {
+      fbl::AutoLock _(&device_state_lock_);
+      if (device_id < device_state_.size() && device_state_[device_id].get() == expected) {
+        old_state = std::move(device_state_[device_id]);
+      }
+    }
+  }
+
+  size_t DeviceStateCount() const {
+    fbl::AutoLock _(&device_state_lock_);
+    return device_state_.size();
+  }
+
+  bool HasDeviceState() const {
+    fbl::AutoLock _(&device_state_lock_);
+    return static_cast<bool>(device_state_);
+  }
+
+  void InitDeviceState(fbl::Array<fbl::RefPtr<DeviceState>> states) {
+    fbl::Array<fbl::RefPtr<DeviceState>> old_states;
+    {
+      fbl::AutoLock _(&device_state_lock_);
+      old_states = std::move(device_state_);
+      device_state_ = std::move(states);
+    }
+  }
+
+  fbl::Array<fbl::RefPtr<DeviceState>> TakeAllDeviceStates() {
+    fbl::AutoLock _(&device_state_lock_);
+    return std::move(device_state_);
+  }
 
   // Returns the state of a 1-based port index.
   PortState& GetPortState(size_t port_id) {
@@ -289,6 +361,10 @@ class UsbXhci : public fdf::DriverBase2,
   // Schedules a promise for execution on the executor
   void ScheduleTask(uint16_t target_interrupter, fpromise::promise<void, zx_status_t> promise) {
     interrupter(target_interrupter).ring().ScheduleTask(std::move(promise));
+  }
+
+  bool IsControllerHalted() const {
+    return !mmio_.has_value() || USBSTS::Get(cap_length_).ReadFrom(&mmio_.value()).HCHalted();
   }
 
   bool IsHaltedOrStopping() const {
@@ -370,6 +446,25 @@ class UsbXhci : public fdf::DriverBase2,
 
   void SetRunningForTesting(bool running) { running_ = running; }
   void SignalBringupForTesting() { sync_completion_signal(&bringup_); }
+  zx_status_t FlushDdkCallbacksForTesting(zx::duration timeout = zx::sec(5)) {
+    auto done = std::make_shared<libsync::Completion>();
+    if (!PostCallback([signal = fit::defer([done] { done->Signal(); })] {})) {
+      return ZX_OK;
+    }
+    return done->Wait(timeout);
+  }
+  bool IsDdkInteractionShuttingDownForTesting() {
+    fbl::AutoLock _(&ddk_interaction_lock_);
+    return ddk_interaction_shutting_down_;
+  }
+  bool IsBusInterfaceValidForTesting() {
+    fbl::AutoLock _(&ddk_interaction_lock_);
+    return bus_.is_valid();
+  }
+  void SetHubRemoveEnqueuedCompletionForTesting(std::shared_ptr<libsync::Completion> completion) {
+    fbl::AutoLock _(&ddk_interaction_lock_);
+    hub_remove_enqueued_for_testing_ = std::move(completion);
+  }
 
   // Asynchronously submits a command to the command queue.
   TRBPromise SubmitCommand(const TRB& command, std::unique_ptr<TRBContext> trb_context);
@@ -386,13 +481,50 @@ class UsbXhci : public fdf::DriverBase2,
 
   void RingDoorbell(uint8_t slot, uint8_t target);
 
-  fidl::ClientEnd<fuchsia_power_system::ActivityGovernor>& activity_governer() {
-    return activity_governer_;
+  fidl::ClientEnd<fuchsia_power_system::ActivityGovernor> ConnectActivityGovernor() const {
+    if (config_.enable_suspend() && incoming_) {
+      zx::result client = incoming_->Connect<fuchsia_power_system::ActivityGovernor>();
+      if (client.is_ok() && client->is_valid()) {
+        return std::move(*client);
+      }
+      fdf::warn("Failed to connect to power system: {}, continuing without it", client);
+    }
+    return {};
   }
 
  private:
+  void HaltController(std::string_view phase);
+  bool DrainPendingOnce();
+  void DrainUntilQuiescent();
+  void DisconnectAllDevices() const;
+  void ResetAllDevices() const;
+  void ShutdownDdkInteractionDispatcher();
   std::vector<fbl::RefPtr<DeviceState>> CollectDisconnectSubtree(fbl::RefPtr<DeviceState> root);
   static void DrainAndResetDeviceOnInterrupter(const fbl::RefPtr<DeviceState>& state);
+  bool DrainDisabledSubtree(
+      const std::vector<fbl::RefPtr<DeviceState>>& targets,
+      const fpromise::result<std::vector<fpromise::result<void, zx_status_t>>>& results,
+      std::string_view context, std::vector<fbl::RefPtr<DeviceState>>* removable_downstream,
+      zx_status_t* root_error);
+  zx_status_t RemoveSubtreeFromBusOnDdkDispatcher(
+      const fbl::RefPtr<DeviceState>& root,
+      const std::vector<fbl::RefPtr<DeviceState>>& removable_downstream, zx_status_t root_error)
+      __TA_EXCLUDES(ddk_interaction_lock_);
+  bool IsOnDdkInteractionDispatcherLocked() const __TA_REQUIRES(ddk_interaction_lock_) {
+    const fdf::UnownedDispatcher current_dispatcher = fdf::Dispatcher::GetCurrent();
+    return ddk_interaction_dispatcher_.get() != nullptr && current_dispatcher->get() != nullptr &&
+           current_dispatcher->async_dispatcher() == ddk_interaction_dispatcher_.async_dispatcher();
+  }
+  // Snapshots the raw Banjo bus interface client under ddk_interaction_lock_ so callers can invoke
+  // bus methods without holding ddk_interaction_lock_ across reentrant callbacks.
+  // UsbHciSetBusInterface(nullptr) clears bus_ and fences ddk_interaction_dispatcher_ (waiting for
+  // any in-flight bus callback to finish, except when invoked reentrantly from
+  // ddk_interaction_dispatcher_ itself), so callers must invoke UsbHciSetBusInterface(nullptr)
+  // from a context that does not block in-flight bus callbacks before destroying bus_intf->ctx.
+  ddk::UsbBusInterfaceProtocolClient SnapshotBusClient() __TA_EXCLUDES(ddk_interaction_lock_) {
+    fbl::AutoLock _(&ddk_interaction_lock_);
+    return bus_;
+  }
 
   DISALLOW_COPY_ASSIGN_AND_MOVE(UsbXhci);
 
@@ -400,12 +532,13 @@ class UsbXhci : public fdf::DriverBase2,
   // number we create to save resources for now.
   static constexpr uint16_t kMaxInterrupters = 2;
 
-  template <typename T>
-  void PostCallback(T&& callback) {
-    ddk_interaction_executor_->schedule_task(fpromise::make_ok_promise().then(
-        [this, cb = std::forward<T>(callback)](fpromise::result<void, void>& result) mutable {
-          cb(bus_);
-        }));
+  bool PostCallback(fit::closure callback) __TA_EXCLUDES(ddk_interaction_lock_) {
+    fbl::AutoLock _(&ddk_interaction_lock_);
+    if (ddk_interaction_shutting_down_ || !ddk_interaction_dispatcher_.get()) {
+      return false;
+    }
+    return async::PostTask(ddk_interaction_dispatcher_.async_dispatcher(), std::move(callback)) ==
+           ZX_OK;
   }
 
   fpromise::promise<void, zx_status_t> ConfigureHubAsync(uint32_t device_id, usb_speed_t speed,
@@ -424,6 +557,7 @@ class UsbXhci : public fdf::DriverBase2,
   uint16_t InterrupterMapping();
 
   xhci_config::Config config_ = {};
+  std::shared_ptr<fdf::Namespace> incoming_;
 
   // Global scheduler lock. This should be held when adding or removing
   // interrupters, and; eventually dynamically assigning transfer rings
@@ -431,8 +565,6 @@ class UsbXhci : public fdf::DriverBase2,
   fbl::Mutex scheduler_lock_;
 
   zx_status_t CreateNode();
-
-  fidl::ClientEnd<fuchsia_power_system::ActivityGovernor> activity_governer_;
 
   // PCI protocol client (if x86)
   fdf::Pci pci_;
@@ -485,7 +617,7 @@ class UsbXhci : public fdf::DriverBase2,
   DoorbellOffset doorbell_offset_;
 
   // The value in the CAPLENGTH register (see xHCI section 5.3.1)
-  uint8_t cap_length_;
+  uint8_t cap_length_ = 0;
 
   // The last recorded MFINDEX value
   std::atomic<uint32_t> last_mfindex_ = 0;
@@ -493,8 +625,12 @@ class UsbXhci : public fdf::DriverBase2,
   // Runtime register offset (see xHCI section 5.3.8)
   RuntimeRegisterOffset runtime_offset_;
 
+  // Leaf lock guarding device_state_. Never hold across transaction_lock_, callbacks, or
+  // DeviceState destruction.
+  mutable fbl::Mutex device_state_lock_;
+
   // Status information on connected devices
-  fbl::Array<fbl::RefPtr<DeviceState>> device_state_;
+  fbl::Array<fbl::RefPtr<DeviceState>> device_state_ __TA_GUARDED(device_state_lock_);
 
   // Status information for each port in the system
   fbl::Array<PortState> port_state_;
@@ -506,7 +642,7 @@ class UsbXhci : public fdf::DriverBase2,
   HCCPARAMS1 hcc_;
 
   // Number of slots supported by the HCI
-  size_t max_slots_;
+  size_t max_slots_ = 0;
 
   // The size of a slot entry in bytes
   size_t slot_size_bytes_;
@@ -520,20 +656,27 @@ class UsbXhci : public fdf::DriverBase2,
   // Isochronous scheduling threshold in units of frames.
   uint32_t ist_frames_;
 
-  // USB bus protocol client
-  ddk::UsbBusInterfaceProtocolClient bus_;
-
-  // Pending DDK callbacks that need to be ran on the dedicated DDK interaction thread
-  fdf::SynchronizedDispatcher ddk_interaction_dispatcher_;
+  // Pending DDK callbacks that need to be run on the dedicated DDK interaction thread, plus the
+  // USB bus protocol client they invoke.
+  // Leaf lock: never wait on ddk_interaction_dispatcher_ or invoke bus_ callbacks while holding
+  // ddk_interaction_lock_.
+  // ddk_interaction_shutdown_ must outlive ddk_interaction_dispatcher_ because the dispatcher's
+  // shutdown callback signals ddk_interaction_shutdown_.
   libsync::Completion ddk_interaction_shutdown_;
-  std::optional<async::Executor> ddk_interaction_executor_;
+  fbl::Mutex ddk_interaction_lock_;
+  ddk::UsbBusInterfaceProtocolClient bus_ __TA_GUARDED(ddk_interaction_lock_);
+  bool ddk_interaction_started_ __TA_GUARDED(ddk_interaction_lock_) = false;
+  bool ddk_interaction_shutting_down_ __TA_GUARDED(ddk_interaction_lock_) = false;
+  fdf::SynchronizedDispatcher ddk_interaction_dispatcher_ __TA_GUARDED(ddk_interaction_lock_);
+  std::shared_ptr<libsync::Completion> hub_remove_enqueued_for_testing_
+      __TA_GUARDED(ddk_interaction_lock_);
 
   // Whether or not the HCI instance is currently active
   std::atomic_bool running_ = true;
 
   // Pointer to the test harness when being called from a unit test
   // This is an opaque pointer that is managed by the test.
-  void* test_harness_;
+  void* test_harness_ = nullptr;
 
   // Init Helper Functions and Variables
   // Resets the xHCI controller. This should only be called during initialization.
@@ -561,7 +704,6 @@ class UsbXhci : public fdf::DriverBase2,
   fidl::WireSyncClient<fuchsia_driver_framework::NodeController> controller_;
   fidl::ServerBindingGroup<fuchsia_hardware_usb_hci::UsbHci> bindings_;
 
-  std::shared_ptr<fdf::Namespace> incoming_;
   std::string node_name_;
   std::optional<inspect::ComponentInspector> inspector_;
 };

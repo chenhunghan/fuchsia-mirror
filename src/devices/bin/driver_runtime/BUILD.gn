@@ -2,15 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/cpp/sdk_shared_library.gni")
-import("//build/test.gni")
-
 group("tests") {
   testonly = true
   deps = [
     ":driver_runtime_death_tests",
-    ":driver_runtime_scheduler_role_tests",
+    ":driver_runtime_scheduler_role_tests_package",
     ":driver_runtime_sdk_tests",
     ":driver_runtime_shutdown_process_tests",
     ":driver_runtime_tests",
@@ -20,160 +16,6 @@ group("tests") {
 
 config("include") {
   include_dirs = [ "include" ]
-}
-
-sdk_shared_library("driver_runtime") {
-  category = "partner"
-  libcxx_linkage = "static"
-  no_headers = true
-  sdk_name = "driver_runtime_shared_lib"
-  public = []
-  sources = []
-
-  deps = [ ":driver_runtime_impl" ]
-  runtime_deps = [
-    "//sdk/lib/fdio",
-    "//sdk/lib/svc",
-    "//zircon/system/ulib/trace-engine",
-  ]
-}
-
-test("driver_runtime_test") {
-  sources = [
-    "arena_test.cc",
-    "channel_test.cc",
-    "dispatcher_dump_test.cc",
-    "dispatcher_test.cc",
-    "handle_test.cc",
-    "runtime_test_case.cc",
-    "thread_context_test.cc",
-    "token_test.cc",
-  ]
-  deps = [
-    ":driver_runtime_impl",
-    "//sdk/lib/async:async-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/driver/component/cpp",
-    "//sdk/lib/driver/runtime:driver_runtime",
-    "//sdk/lib/driver/runtime:driver_runtime_cpp",
-    "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
-    "//sdk/lib/driver/runtime:driver_runtime_internal",
-    "//sdk/lib/driver/runtime:driver_runtime_testing",
-    "//sdk/lib/driver/runtime/testing/cpp",
-    "//sdk/lib/driver/testing/cpp",
-    "//sdk/lib/fidl/cpp/wire",
-    "//sdk/lib/fidl_driver:fidl_driver_transport",
-    "//zircon/system/ulib/fbl",
-    "//zircon/system/ulib/sync",
-    "//zircon/system/ulib/sync:sync-cpp",
-    "//zircon/system/ulib/zx",
-    "//zircon/system/ulib/zxtest",
-  ]
-}
-
-test("driver_runtime_scheduler_role_test") {
-  sources = [ "scheduler_role_test.cc" ]
-  deps = [
-    ":driver_runtime_impl",
-    "//sdk/lib/async:async-cpp",
-    "//sdk/lib/driver/runtime:driver_runtime",
-    "//sdk/lib/driver/runtime:driver_runtime_cpp",
-    "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
-    "//sdk/lib/driver/runtime:driver_runtime_testing",
-    "//sdk/lib/driver/testing/cpp",
-    "//zircon/system/ulib/fbl",
-    "//zircon/system/ulib/sync",
-    "//zircon/system/ulib/sync:sync-cpp",
-    "//zircon/system/ulib/zx",
-    "//zircon/system/ulib/zxtest",
-  ]
-}
-
-test("driver_runtime_death_test") {
-  sources = [ "channel_death_test.cc" ]
-  deps = [
-    ":driver_runtime_impl",
-    "//sdk/lib/driver/runtime:driver_runtime",
-    "//sdk/lib/driver/runtime:driver_runtime_cpp",
-    "//sdk/lib/fidl/cpp/wire",
-    "//zircon/system/ulib/sync",
-    "//zircon/system/ulib/sync:sync-cpp",
-    "//zircon/system/ulib/zx",
-    "//zircon/system/ulib/zxtest",
-  ]
-}
-
-test("driver_runtime_dispatcher_death_test") {
-  sources = [ "dispatcher_death_test.cc" ]
-  deps = [
-    ":driver_runtime_impl",
-    "//sdk/lib/driver/runtime:driver_runtime",
-    "//sdk/lib/driver/runtime:driver_runtime_cpp",
-    "//sdk/lib/driver/runtime:driver_runtime_env",
-    "//sdk/lib/fidl/cpp/wire",
-    "//zircon/system/ulib/fbl",
-    "//zircon/system/ulib/sync",
-    "//zircon/system/ulib/sync:sync-cpp",
-    "//zircon/system/ulib/zx",
-    "//zircon/system/ulib/zxtest",
-  ]
-}
-
-test("driver_runtime_shutdown_process_test") {
-  sources = [ "shutdown_process_test.cc" ]
-  deps = [
-    ":driver_runtime_impl",
-    "//sdk/lib/driver/runtime:driver_runtime",
-    "//sdk/lib/driver/runtime:driver_runtime_cpp",
-    "//sdk/lib/driver/runtime:driver_runtime_testing",
-    "//sdk/lib/driver/testing/cpp",
-    "//sdk/lib/fidl/cpp/wire",
-    "//zircon/system/ulib/fbl",
-    "//zircon/system/ulib/sync",
-    "//zircon/system/ulib/sync:sync-cpp",
-    "//zircon/system/ulib/zx",
-    "//zircon/system/ulib/zxtest",
-  ]
-}
-
-test("fixture_test") {
-  sources = [ "fixture_test.cc" ]
-  deps = [
-    "//sdk/lib/driver/testing/cpp",
-    "//src/devices/lib/driver:driver_runtime",
-    "//src/lib/fxl/test:gtest_main",
-  ]
-}
-
-fuchsia_unittest_package("driver_runtime_sdk_tests") {
-  deps = [ ":fixture_test" ]
-}
-
-fuchsia_unittest_package("driver_runtime_tests") {
-  deps = [ ":driver_runtime_test" ]
-}
-
-fuchsia_unittest_package("driver_runtime_scheduler_role_tests") {
-  manifest = "meta/driver_runtime_scheduler_role_test.cml"
-  deps = [ ":driver_runtime_scheduler_role_test" ]
-  test_specs = {
-    log_settings = {
-      max_severity = "ERROR"
-    }
-  }
-  test_type = "system"
-}
-
-fuchsia_unittest_package("driver_runtime_death_tests") {
-  deps = [ ":driver_runtime_death_test" ]
-}
-
-fuchsia_unittest_package("driver_runtime_dispatcher_death_tests") {
-  deps = [ ":driver_runtime_dispatcher_death_test" ]
-}
-
-fuchsia_unittest_package("driver_runtime_shutdown_process_tests") {
-  deps = [ ":driver_runtime_shutdown_process_test" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -202,48 +44,63 @@ fuchsia_unittest_package("driver_runtime_shutdown_process_tests") {
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
 if (is_fuchsia) {
+  sdk_shared_library("driver_runtime") {
+    sources = []
+    public = []
+    sdk_area = "Driver SDK"
+    category = "partner"
+    sdk_name = "driver_runtime_shared_lib"
+    deps = [ ":driver_runtime_impl" ]
+    libcxx_linkage = "static"
+    no_headers = true
+    visibility = [ "//*" ]
+    runtime_deps = [
+      "//sdk/lib/fdio",
+      "//sdk/lib/svc",
+      "//zircon/system/ulib/trace-engine",
+    ]
+  }
+}
+if (is_fuchsia) {
   source_set("driver_runtime_impl") {
     sources = [
       "api.cc",
       "arena.cc",
+      "channel.cc",
+      "dispatcher.cc",
+      "dispatcher_coordinator.cc",
+      "dispatcher_dump.cc",
+      "dispatcher_internals.cc",
+      "handle.cc",
+      "message_packet.cc",
+      "thread_context.cc",
+      "thread_pool.cc",
+      "token_manager.cc",
+    ]
+    public = [
       "arena.h",
       "async_loop_owned_event_handler.h",
       "callback_request.h",
       "canary.h",
-      "channel.cc",
       "channel.h",
-      "dispatcher.cc",
       "dispatcher.h",
-      "dispatcher_coordinator.cc",
       "dispatcher_coordinator.h",
-      "dispatcher_dump.cc",
-      "dispatcher_internals.cc",
       "dispatcher_internals.h",
       "dispatcher_state.h",
-      "handle.cc",
       "handle.h",
-      "message_packet.cc",
       "message_packet.h",
       "object.h",
-      "thread_context.cc",
       "thread_context.h",
-      "thread_pool.cc",
       "thread_pool.h",
-      "token_manager.cc",
       "token_manager.h",
     ]
     deps = [
       "//sdk/fidl/fuchsia.driver.host:fuchsia.driver.host_cpp",
       "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_cpp",
       "//sdk/lib/component/incoming/cpp",
-      "//sdk/lib/driver/runtime:driver_runtime_env",
       "//sdk/lib/driver/runtime:driver_runtime_internal",
       "//sdk/lib/driver/runtime:driver_runtime_testing",
-      "//sdk/lib/fidl/cpp/wire",
       "//src/devices/lib/log",
-      "//zircon/system/public",
-      "//zircon/system/ulib/fbl",
-      "//zircon/system/ulib/sync:sync-cpp",
       "//zircon/system/ulib/trace",
     ]
     public_configs = [ ":include" ]
@@ -251,11 +108,208 @@ if (is_fuchsia) {
       "./*",
       "//sdk/lib/fidl_driver/tests/*",
       "//src/tests/benchmarks/fidl/driver_cpp:*",
-      "//src/tests/benchmarks/fidl/driver_llcpp:*",
+      "//src/tests/benchmarks/fidl/driver_cpp_wire:*",
     ]
     public_deps = [
       "//sdk/lib/async-loop:async-loop-cpp",
       "//sdk/lib/driver/runtime:driver_runtime",
+      "//sdk/lib/driver/runtime:driver_runtime_env",
+      "//sdk/lib/fidl/cpp/wire",
+      "//src/zircon/lib/zircon:headers",
+      "//zircon/system/ulib/fbl",
+      "//zircon/system/ulib/sync:sync-cpp",
     ]
   }
+}
+
+cc_test_executable("driver_runtime_test") {
+  sources = [
+    "arena_test.cc",
+    "channel_test.cc",
+    "dispatcher_dump_test.cc",
+    "dispatcher_test.cc",
+    "handle_test.cc",
+    "runtime_test_case.cc",
+    "runtime_test_case.h",
+    "test_utils.h",
+    "thread_context_test.cc",
+    "token_test.cc",
+  ]
+  deps = [
+    ":driver_runtime_impl",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/driver/component/cpp",
+    "//sdk/lib/driver/runtime:driver_runtime",
+    "//sdk/lib/driver/runtime:driver_runtime_cpp",
+    "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
+    "//sdk/lib/driver/runtime:driver_runtime_internal",
+    "//sdk/lib/driver/runtime:driver_runtime_testing",
+    "//sdk/lib/driver/runtime/testing/cpp",
+    "//sdk/lib/driver/testing/cpp",
+    "//sdk/lib/fidl/cpp/wire",
+    "//sdk/lib/fidl_driver:fidl_driver_transport",
+    "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/sync",
+    "//zircon/system/ulib/sync:sync-cpp",
+    "//zircon/system/ulib/zx",
+    "//zircon/system/ulib/zxtest",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("driver_runtime_scheduler_role_test") {
+  sources = [
+    "runtime_test_case.h",
+    "scheduler_role_test.cc",
+  ]
+  deps = [
+    ":driver_runtime_impl",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/driver/runtime:driver_runtime",
+    "//sdk/lib/driver/runtime:driver_runtime_cpp",
+    "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
+    "//sdk/lib/driver/runtime:driver_runtime_testing",
+    "//sdk/lib/driver/testing/cpp",
+    "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/sync",
+    "//zircon/system/ulib/sync:sync-cpp",
+    "//zircon/system/ulib/zx",
+    "//zircon/system/ulib/zxtest",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("driver_runtime_death_test") {
+  sources = [
+    "channel_death_test.cc",
+    "test_utils.h",
+  ]
+  deps = [
+    ":driver_runtime_impl",
+    "//sdk/lib/driver/runtime:driver_runtime",
+    "//sdk/lib/driver/runtime:driver_runtime_cpp",
+    "//sdk/lib/fidl/cpp/wire",
+    "//zircon/system/ulib/sync",
+    "//zircon/system/ulib/sync:sync-cpp",
+    "//zircon/system/ulib/zx",
+    "//zircon/system/ulib/zxtest",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("driver_runtime_dispatcher_death_test") {
+  sources = [
+    "dispatcher_death_test.cc",
+    "test_utils.h",
+  ]
+  deps = [
+    ":driver_runtime_impl",
+    "//sdk/lib/driver/runtime:driver_runtime",
+    "//sdk/lib/driver/runtime:driver_runtime_cpp",
+    "//sdk/lib/driver/runtime:driver_runtime_env",
+    "//sdk/lib/fidl/cpp/wire",
+    "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/sync",
+    "//zircon/system/ulib/sync:sync-cpp",
+    "//zircon/system/ulib/zx",
+    "//zircon/system/ulib/zxtest",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("driver_runtime_shutdown_process_test") {
+  sources = [
+    "runtime_test_case.h",
+    "shutdown_process_test.cc",
+  ]
+  deps = [
+    ":driver_runtime_impl",
+    "//sdk/lib/driver/runtime:driver_runtime",
+    "//sdk/lib/driver/runtime:driver_runtime_cpp",
+    "//sdk/lib/driver/runtime:driver_runtime_testing",
+    "//sdk/lib/driver/testing/cpp",
+    "//sdk/lib/fidl/cpp/wire",
+    "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/sync",
+    "//zircon/system/ulib/sync:sync-cpp",
+    "//zircon/system/ulib/zx",
+    "//zircon/system/ulib/zxtest",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("fixture_test") {
+  sources = [ "fixture_test.cc" ]
+  deps = [
+    "//sdk/lib/driver/testing/cpp",
+    "//src/devices/lib/driver:driver_runtime",
+    "//src/lib/fxl/test:gtest_main",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+fuchsia_unittest_package("driver_runtime_sdk_tests") {
+  package_name = "driver_runtime_sdk_tests-gn"
+  component_name = "driver_runtime_sdk_tests"
+  deps = [ ":fixture_test" ]
+}
+
+fuchsia_unittest_package("driver_runtime_tests") {
+  package_name = "driver_runtime_tests-gn"
+  component_name = "driver_runtime_tests"
+  deps = [ ":driver_runtime_test" ]
+}
+
+renamed_binary("driver_runtime_scheduler_role_test_packaged") {
+  testonly = true
+  source = "$root_out_dir/driver_runtime_scheduler_role_test"
+  source_deps = [ ":driver_runtime_scheduler_role_test" ]
+  dest = "test/driver_runtime_scheduler_role_test"
+}
+
+fuchsia_component_manifest("driver_runtime_scheduler_role_tests_manifest") {
+  testonly = true
+  component_name = "driver_runtime_scheduler_role_tests"
+  manifest = "meta/driver_runtime_scheduler_role_test.cml"
+}
+
+fuchsia_test_component("driver_runtime_scheduler_role_tests_component") {
+  cm_label = ":driver_runtime_scheduler_role_tests_manifest"
+  test_type = "system"
+  deps = [ ":driver_runtime_scheduler_role_test_packaged" ]
+}
+
+fuchsia_test_package("driver_runtime_scheduler_role_tests_package") {
+  package_name = "driver_runtime_scheduler_role_tests-gn"
+  test_components = [ ":driver_runtime_scheduler_role_tests_component" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+}
+
+fuchsia_unittest_package("driver_runtime_death_tests") {
+  package_name = "driver_runtime_death_tests-gn"
+  component_name = "driver_runtime_death_tests"
+  deps = [ ":driver_runtime_death_test" ]
+}
+
+fuchsia_unittest_package("driver_runtime_dispatcher_death_tests") {
+  package_name = "driver_runtime_dispatcher_death_tests-gn"
+  component_name = "driver_runtime_dispatcher_death_tests"
+  deps = [ ":driver_runtime_dispatcher_death_test" ]
+}
+
+fuchsia_unittest_package("driver_runtime_shutdown_process_tests") {
+  package_name = "driver_runtime_shutdown_process_tests-gn"
+  component_name = "driver_runtime_shutdown_process_tests"
+  deps = [ ":driver_runtime_shutdown_process_test" ]
 }

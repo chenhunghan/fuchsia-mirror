@@ -1,0 +1,29 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "gpt",
+    srcs = [
+        "src/format.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    visibility = ["//src/storage:__subpackages__"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-sync",
+        "//src/storage/lib/block_client/rust:block-client",
+        "//src/storage/lib/block_server",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:crc",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:uuid",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

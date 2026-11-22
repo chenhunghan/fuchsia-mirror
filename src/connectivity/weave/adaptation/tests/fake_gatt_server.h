@@ -6,12 +6,17 @@
 #define SRC_CONNECTIVITY_WEAVE_ADAPTATION_TESTS_FAKE_GATT_SERVER_H_
 
 #include <fuchsia/bluetooth/gatt2/cpp/fidl_test_base.h>
+#include <lib/async/cpp/task.h>
+#include <lib/async/default.h>
+#include <lib/fit/function.h>
+
+#include <mutex>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "fuchsia/bluetooth/cpp/fidl.h"
 #include "fuchsia/bluetooth/gatt2/cpp/fidl.h"
-#include "lib/async/default.h"
 
 namespace weave::adaptation::testing {
 
@@ -46,37 +51,84 @@ class FakeGATTService : public fuchsia::bluetooth::gatt2::testing::Server_TestBa
     };
   }
 
+  struct ReceivedIndication {
+    std::vector<fuchsia::bluetooth::PeerId> peer_ids;
+    std::vector<uint8_t> value;
+  };
+
   void WriteRequest(
       fuchsia::bluetooth::gatt2::testing::LocalService_TestBase::WriteValueCallback callback) {
-    fuchsia::bluetooth::gatt2::LocalServiceWriteValueRequest params;
-    params.set_peer_id(kPeerId);
-    params.set_handle(Handle{0});
-    params.set_offset(0);
-    params.set_value(
-        std::vector<uint8_t>(std::begin(kBtpConnectReqValue), std::end(kBtpConnectReqValue)));
+    WriteRequestForPeer(
+        kPeerId,
+        std::vector<uint8_t>(std::begin(kBtpConnectReqValue), std::end(kBtpConnectReqValue)),
+        std::move(callback));
+  }
 
-    local_service_->WriteValue(std::move(params), std::move(callback));
+  void WriteRequestForPeer(
+      fuchsia::bluetooth::PeerId peer_id, std::vector<uint8_t> value,
+      fuchsia::bluetooth::gatt2::testing::LocalService_TestBase::WriteValueCallback callback,
+      Handle handle = Handle{0}, uint32_t offset = 0) {
+    async::PostTask(gatt_server_dispatcher_,
+                    [this, peer_id, value = std::move(value), callback = std::move(callback),
+                     handle, offset]() mutable {
+                      fuchsia::bluetooth::gatt2::LocalServiceWriteValueRequest params;
+                      params.set_peer_id(peer_id);
+                      params.set_handle(handle);
+                      params.set_offset(offset);
+                      params.set_value(std::move(value));
+                      local_service_->WriteValue(std::move(params), std::move(callback));
+                    });
   }
 
   void OnCharacteristicConfiguration() {
-    local_service_->CharacteristicConfiguration(kPeerId, kCharacteristicHandle, false /* notify */,
-                                                true /* indicate */, []() {});
+    OnCharacteristicConfigurationForPeer(kPeerId, false /* notify */, true /* indicate */, [] {});
+  }
+
+  void OnCharacteristicConfigurationForPeer(
+      fuchsia::bluetooth::PeerId peer_id, bool notify, bool indicate, fit::closure callback = [] {},
+      Handle handle = kCharacteristicHandle) {
+    async::PostTask(gatt_server_dispatcher_, [this, peer_id, notify, indicate,
+                                              callback = std::move(callback), handle]() mutable {
+      local_service_->CharacteristicConfiguration(peer_id, handle, notify, indicate,
+                                                  std::move(callback));
+    });
   }
 
   void OnIndicateValue(fuchsia::bluetooth::gatt2::ValueChangedParameters update,
                        zx::eventpair confirmation) {
-    gatt_subscribe_confirmed_ = true;
+    {
+      std::scoped_lock lock(mutex_);
+      gatt_subscribe_confirmed_ = true;
+      ReceivedIndication ind;
+      if (update.has_peer_ids()) {
+        ind.peer_ids = update.peer_ids();
+      }
+      if (update.has_value()) {
+        ind.value = update.value();
+      }
+      indications_.push_back(std::move(ind));
+    }
     confirmation.signal_peer(/*clear_mask=*/0, ZX_EVENTPAIR_SIGNALED);
   }
 
-  bool WeaveConnectionConfirmed() const { return gatt_subscribe_confirmed_; }
+  bool WeaveConnectionConfirmed() const {
+    std::scoped_lock lock(mutex_);
+    return gatt_subscribe_confirmed_;
+  }
+
+  std::vector<ReceivedIndication> GetIndications() const {
+    std::scoped_lock lock(mutex_);
+    return indications_;
+  }
 
  private:
   fidl::Binding<fuchsia::bluetooth::gatt2::Server> binding_{this};
-  async_dispatcher_t* gatt_server_dispatcher_;
+  async_dispatcher_t* gatt_server_dispatcher_ = nullptr;
   fuchsia::bluetooth::gatt2::LocalServicePtr local_service_;
+  mutable std::mutex mutex_;
   // If a GATT indication has been received.
   bool gatt_subscribe_confirmed_{false};
+  std::vector<ReceivedIndication> indications_;
 };
 
 }  // namespace weave::adaptation::testing

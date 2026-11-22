@@ -678,7 +678,8 @@ void CommandBuffer::FlushDescriptorSet(uint32_t set_index) {
   });
 
   Hash hash = h.value();
-  auto pair = current_pipeline_layout_->GetDescriptorSetAllocator(set_index)->Get(hash);
+  auto pair =
+      current_pipeline_layout_->GetDescriptorSetAllocator(set_index)->Get(hash, sequence_number());
   vk::DescriptorSet vk_set = pair.first;
 
   // The descriptor set was not found in the cache; rebuild.

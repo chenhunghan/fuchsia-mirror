@@ -1,0 +1,78 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "codec_buffer",
+    testonly = True,
+    srcs = ["codec_buffer.cc"],
+    hdrs = ["include/lib/media/test/codec_buffer.h"],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/fbl",
+    ],
+    includes = ["include"],
+    public_configs = [":media_test_include_config"],
+    # Uses Fuchsia-only FIDL and Zircon headers (<lib/zx/bti.h>, <lib/zx/vmo.h>).
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/media/codec/examples:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.mediacodec:fuchsia.mediacodec_hlcpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "codec_client",
+    testonly = True,
+    srcs = [
+        "codec_client.cc",
+        "codec_output.cc",
+    ],
+    hdrs = [
+        "include/lib/media/test/codec_client.h",
+        "include/lib/media/test/codec_output.h",
+    ],
+    implementation_deps = [
+        ":one_shot_event",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/syslog/cpp",
+        # GN `bind_library()` generates `:fuchsia.amlogic.platform.sysmem.heap_cpp`, while Bazel uses `_cc`.
+        "//src/devices/bind/fuchsia.amlogic.platform.sysmem.heap:fuchsia.amlogic.platform.sysmem.heap_cc",  # @bazel2gn:path_overwrite://src/devices/bind/fuchsia.amlogic.platform.sysmem.heap:fuchsia.amlogic.platform.sysmem.heap_cpp
+        # GN `bind_library()` generates `:fuchsia.sysmem.heap_cpp`, while Bazel uses `_cc`.
+        "//src/devices/bind/fuchsia.sysmem.heap:fuchsia.sysmem.heap_cc",  # @bazel2gn:path_overwrite://src/devices/bind/fuchsia.sysmem.heap:fuchsia.sysmem.heap_cpp
+        "//src/lib/fsl",
+    ],
+    includes = ["include"],
+    public_configs = [":media_test_include_config"],
+    # Uses Fuchsia-only FIDL and sysmem bind libraries.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/media/codec/examples/use_media_decoder:__pkg__"],
+    deps = [
+        ":codec_buffer",
+        "//sdk/fidl/fuchsia.mediacodec:fuchsia.mediacodec_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//src/lib/fxl",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "one_shot_event",
+    testonly = True,
+    srcs = ["one_shot_event.cc"],
+    hdrs = ["include/lib/media/test/one_shot_event.h"],
+    includes = ["include"],
+    public_configs = [":media_test_include_config"],
+    # Uses Fuchsia-only Zircon headers (<lib/zx/event.h>, <lib/zx/time.h>).
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/media/codec/examples/use_media_decoder:__pkg__"],
+    deps = ["//zircon/system/ulib/zx"],
+    alwayslink = True,
+)

@@ -1,0 +1,98 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN `data` only takes files, so the resource is a GN `data_deps` instead.
+# @bazel2gn:raw_attribute:data_deps = [ ":images" ]
+fx_cc_binary(
+    name = "bin",
+    srcs = [
+        "main.cc",
+        "view_provider.cc",
+        "view_provider.h",
+    ],
+    # @bazel2gn:skip
+    data = [":images"],
+    gn_output_name = "simplest_sysmem",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":helpers",
+        "//sdk/fidl/fuchsia.ui.app:fuchsia.ui.app_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/ui/scenic/cpp",
+        "//zircon/system/ulib/fbl",
+    ],
+)
+
+fx_cc_library(
+    name = "helpers",
+    srcs = [
+        "png_helper.cc",
+        "sysmem_helper.cc",
+    ],
+    hdrs = [
+        "png_helper.h",
+        "sysmem_helper.h",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.images2:fuchsia.images2_hlcpp",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_hlcpp",
+        "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_hlcpp",
+        "//sdk/lib/syslog/cpp",
+        "//third_party/libpng",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "simplest_sysmem",
+)
+
+fx_component_manifest(
+    name = "simplest_sysmem_manifest",
+    component_name = "simplest_sysmem",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/simplest_sysmem.cml",
+)
+
+fx_component(
+    name = "simplest_sysmem_component",
+    compiled_manifest = ":simplest_sysmem_manifest",
+    visibility = [
+        "//src/testing/system-validation/ui:__pkg__",
+        "//src/ui/examples:__pkg__",
+    ],
+    deps = [
+        ":bin_packaged",
+        ":images",
+    ],
+)
+
+# bazel2gn does not translate resource() targets, so the GN copy stays in
+# BUILD.gn above the sentinel. TODO(https://fxbug.dev/570694755)
+# @bazel2gn:skip
+resource(
+    name = "images",
+    src = "data/smiley.png",
+    dest = "data/images/smiley.png",
+)

@@ -2,9 +2,142 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":audio_ffx_daemon_unittests_test"],
+    visibility = ["//src/media:__pkg__"],
+)
 
 exports_files(
     ["meta/audio_ffx_daemon.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/capturer.rs",
+        "src/clock.rs",
+        "src/device.rs",
+        "src/error.rs",
+        "src/main.rs",
+        "src/renderer.rs",
+        "src/ring_buffer.rs",
+        "src/wav_socket.rs",
+    ],
+    binary_name = "audio_ffx_daemon",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.audio.controller:fuchsia.audio.controller_rust",
+        "//sdk/fidl/fuchsia.audio.device:fuchsia.audio.device_rust",
+        "//sdk/fidl/fuchsia.audio:fuchsia.audio_rust",
+        "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust",
+        "//sdk/fidl/fuchsia.media.audio:fuchsia.media.audio_rust",
+        "//sdk/fidl/fuchsia.media:fuchsia.media_rust",
+        "//sdk/fidl/fuchsia.ultrasound:fuchsia.ultrasound_rust",
+        "//sdk/lib/scheduler/rust",
+        "//sdk/rust/zx",
+        "//sdk/rust/zx-status",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/trace/rust:trace-provider",
+        "//src/media/audio/lib/rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:byteorder",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:hound",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "audio_ffx_daemon",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "audio_ffx_daemon",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    manifest = "meta/audio_ffx_daemon.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged"],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Sets the GN output_name to match meta/audio_ffx_daemon_unittests.cml's program.binary.
+    crate_name = "audio_ffx_daemon_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_packaged_binary(
+    name = "bin_test_packaged",
+    testonly = True,
+    binary = ":bin_test",
+    binary_name = "audio_ffx_daemon_bin_test",
+)
+
+fx_component_manifest(
+    name = "unittests_manifest",
+    testonly = True,
+    component_name = "audio_ffx_daemon_unittests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/audio_ffx_daemon_unittests.cml",
+)
+
+fx_test_component(
+    name = "unittests_component",
+    compiled_manifest = ":unittests_manifest",
+    deps = [":bin_test_packaged"],
+)
+
+fx_package(
+    name = "audio_ffx_daemon_unittests",
+    test_components = [":unittests_component"],
+)
+
+fx_test(
+    name = "audio_ffx_daemon_unittests_test",
+    package = ":audio_ffx_daemon_unittests",
 )

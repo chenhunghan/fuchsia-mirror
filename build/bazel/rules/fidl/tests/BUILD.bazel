@@ -12,6 +12,7 @@ load(
     "build_in_all_idk_api_level_and_cpu_combinations",
 )
 load("//build/bazel/rules/tests:rules.bzl", "build_for_host")
+load(":hlcpp_visibility_test.bzl", "hlcpp_visibility_test")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -43,11 +44,17 @@ filegroup(
     ],
 )
 
+hlcpp_visibility_test(
+    name = "hlcpp_visibility_test",
+)
+
 # Exercises various FIDL library cases.
 filegroup(
     name = "build_only_tests",
     testonly = True,
     srcs = [
+        ":hlcpp_visibility_test",
+
         # Depend on the IDK atom targets.
         ":main_platform_build_test_molecule_idk",
 

@@ -255,6 +255,7 @@ TEST_F(PciDeviceTestsCam, DevicetreeDeviceSkipsCompositeSpec) {
 
   ASSERT_OK(Device::Create(std::move(cfg), &upstream(), &bus(),
                            /*has_acpi=*/false, /*has_devicetree=*/true));
+  ASSERT_OK(bus().get_device(bdf()).Publish());
   EXPECT_EQ(bus().composite_spec_count(), 0u);
 }
 
@@ -268,6 +269,7 @@ TEST_F(PciDeviceTestsCam, NonDevicetreeDeviceAddsCompositeSpec) {
 
   ASSERT_OK(Device::Create(std::move(cfg), &upstream(), &bus(),
                            /*has_acpi=*/false, /*has_devicetree=*/false));
+  ASSERT_OK(bus().get_device(bdf()).Publish());
   EXPECT_EQ(bus().composite_spec_count(), 1u);
 }
 

@@ -13,7 +13,6 @@ go_library(
     srcs = ["results.go"],
     importpath = "go.fuchsia.dev/fuchsia/src/lib/go-benchmarking",
     target_compatible_with = HOST_OS_CONSTRAINTS,
-    visibility = ["//src/tests/end_to_end/idle:__pkg__"],
 )
 
 host_go_test(

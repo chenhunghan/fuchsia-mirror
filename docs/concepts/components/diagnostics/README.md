@@ -68,7 +68,7 @@ To begin working with logging, you may want to:
 * [Understand how Fuchsia writes logs][recording]
 * [Understand how to view Fuchsia logs][viewing]
 
-## Inspect
+## Inspect {#inspect}
 
 Inspect provides components with the ability to expose structured, hierarchical
 information about their state at runtime. Components host a mapped Virtual
@@ -83,7 +83,7 @@ To begin working with Inspect, you may want to:
 * [Understand Fuchsia component inspection][inspect_dev_overview]
 * [Understand Inspect discovery and hosting][inspect_discovery_hosting]
 
-## Archivist
+## Archivist {#archivist}
 
 Archivist ingests data from Inspect and Fuchsia logs, making them available over
 the [`fuchsia.diagnostics/ArchiveAccessor`][ArchiveAccessor-protocol] protocol.
@@ -162,7 +162,7 @@ accomplish through the `CapabilityRequested` event.
 [ffx-target-snapshot-ref]: https://fuchsia.dev/reference/tools/sdk/ffx#ffx_target_snapshot
 [`LogSink`]: https://fuchsia.dev/reference/fidl/fuchsia.logger#LogSink
 [debuglog]: /docs/reference/kernel_objects/debuglog.md
-[128kb buffer in the kernel]: /zircon/kernel/lib/debuglog/debuglog.cc
+[128kb buffer in the kernel]: /zircon/kernel/lib/debuglog/debuglog.rs
 [buffer in the archivist]: /src/diagnostics/archivist/src/logs/mod.rs
 [recording]: /docs/development/diagnostics/logs/recording.md
 [viewing]: /docs/development/diagnostics/logs/viewing.md

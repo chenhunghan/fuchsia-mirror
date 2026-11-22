@@ -20,7 +20,7 @@ impl Driver for {{pascal_case PROJECT_NAME}} {
         Ok(Self { _node: node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("{{pascal_case PROJECT_NAME}}::stop()");
     }
 }

@@ -46,7 +46,7 @@ rustc_binary(
         "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_rust",
         "//sdk/rust/zx",
         "//src/lib/diagnostics/inspect/runtime/rust",
-        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
         "//src/lib/fdio/rust:fdio",
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia",
@@ -101,25 +101,6 @@ fx_component(
     name = "counter-alternative",
     testonly = True,
     compiled_manifest = ":counter-alternative_manifest",
-    visibility = ["//src/connectivity/network/testing/netemul/service:__pkg__"],
-    deps = [":bin_packaged_bin"],
-)
-
-fx_component_manifest(
-    name = "devfs-subdir-user_manifest",
-    testonly = True,
-    component_name = "devfs-subdir-user",
-    includes = [
-        "//sdk/lib/inspect:client.shard",
-        "//sdk/lib/syslog:client.shard",
-    ],
-    manifest = "meta/devfs-subdir-user.cml",
-)
-
-fx_component(
-    name = "devfs-subdir-user",
-    testonly = True,
-    compiled_manifest = ":devfs-subdir-user_manifest",
     visibility = ["//src/connectivity/network/testing/netemul/service:__pkg__"],
     deps = [":bin_packaged_bin"],
 )

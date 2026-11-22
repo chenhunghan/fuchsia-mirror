@@ -81,20 +81,6 @@ zr::static_assert!(align_of::<ChainLock>() == 8);
 zr::static_assert!(size_of::<ChainLockGuard<'static>>() == 16);
 zr::static_assert!(align_of::<ChainLockGuard<'static>>() == 8);
 
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn panic_lock_already_held() -> ! {
-    panic!("ChainLock is already held by the active transaction on this CPU");
-}
-
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn panic_transaction_already_active() -> ! {
-    panic!("ChainLockTransaction is already active on this CPU");
-}
-
 /// Asserts that `lock` is not currently held by the active transaction on the current CPU.
 ///
 /// # Safety-usable invariant
@@ -111,9 +97,10 @@ pub fn assert_lock_not_held<C>(lock: &ClassedChainLock<C>) {
             // `PerCpu::active_cl_transaction`'s safety invariant `active` points to the live,
             // stack-pinned `ChainLockTransaction` on this CPU with no mutable aliases.
             let tx_token = unsafe { (*active).token() };
-            if lock.is_held_by_token(tx_token) {
-                panic_lock_already_held();
-            }
+            assert!(
+                !lock.is_held_by_token(tx_token),
+                "ChainLock is already held by the active transaction on this CPU"
+            );
         }
     }
 }
@@ -136,14 +123,14 @@ pub fn debug_assert_lock_not_held<C>(lock: &ClassedChainLock<C>) {
 #[inline(always)]
 #[track_caller]
 pub fn assert_transaction_active(_clt_token: &ChainLockTransactionToken) {
-    if cfg!(debug_assertions) {
-        let ints_off = crate::arch_rs::ints_disabled();
-        if !ints_off
-            || crate::kernel::percpu::PerCpu::get_current().active_cl_transaction().is_null()
-        {
-            super::chainlock_transaction::panic_no_active_transaction(ints_off);
-        }
-    }
+    debug_assert!(
+        crate::arch_rs::ints_disabled(),
+        "ChainLockTransaction accessed with interrupts enabled"
+    );
+    debug_assert!(
+        !crate::kernel::percpu::PerCpu::get_current().active_cl_transaction().is_null(),
+        "No active ChainLockTransaction on current CPU"
+    );
 }
 
 /// Asserts that no [`ChainLockTransaction`] is currently active on the current CPU.
@@ -155,11 +142,11 @@ pub fn assert_transaction_active(_clt_token: &ChainLockTransactionToken) {
 #[inline(always)]
 #[track_caller]
 pub fn assert_no_transaction_active() {
-    if crate::arch_rs::ints_disabled()
-        && !crate::kernel::percpu::PerCpu::get_current().active_cl_transaction().is_null()
-    {
-        panic_transaction_already_active();
-    }
+    assert!(
+        !(crate::arch_rs::ints_disabled()
+            && !crate::kernel::percpu::PerCpu::get_current().active_cl_transaction().is_null()),
+        "ChainLockTransaction is already active on this CPU"
+    );
 }
 
 /// Asserts in debug builds that no [`ChainLockTransaction`] is active on the current CPU.

@@ -431,8 +431,8 @@ int Duplex(std::unique_ptr<audio::utils::AudioDeviceStream> play_stream,
     return res;
   }
   if (res2 != ZX_OK) {
-    printf("Failed to start playback (res %d)\n", res);
-    return res;
+    printf("Failed to start playback (res %d)\n", res2);
+    return res2;
   }
   int64_t record_start = input->start_time();
   int64_t playback_start = output->start_time();

@@ -2,35 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/testing/cc_test_executable.gni")
-
-cc_test_executable("loop_fixture_unittests") {
-  testonly = true
-
-  sources = [
-    "real_loop_fixture_unittest.cc",
-    "test_loop_fixture_unittest.cc",
-  ]
-
-  deps = [
-    ":loop_fixture",
-    "//sdk/lib/async:async-cpp",
-    "//sdk/lib/async-default",
-    "//sdk/lib/fit-promise",
-    "//src/lib/fxl:fxl_cli",
-    "//src/lib/fxl/test:gtest_main",
-    "//src/lib/fxl/test:test_settings",
-    "//src/lib/testing/predicates",
-    "//third_party/googletest:gmock",
-    "//zircon/system/ulib/sync:sync-cpp",
-  ]
-}
-
-fuchsia_unittest_package("loop_fixture_tests") {
-  deps = [ ":loop_fixture_unittests" ]
-}
-
 group("tests") {
   testonly = true
 
@@ -62,6 +33,32 @@ group("tests") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
+cc_test_executable("loop_fixture_unittests") {
+  sources = [
+    "real_loop_fixture_unittest.cc",
+    "test_loop_fixture_unittest.cc",
+  ]
+  deps = [
+    ":loop_fixture",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/async-default",
+    "//sdk/lib/fit-promise",
+    "//src/lib/fxl:fxl_cli",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/fxl/test:test_settings",
+    "//src/lib/testing/predicates",
+    "//third_party/googletest:gtest",
+    "//zircon/system/ulib/sync:sync-cpp",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+fuchsia_unittest_package("loop_fixture_tests") {
+  package_name = "loop_fixture_tests-gn"
+  component_name = "loop_fixture_tests"
+  deps = [ ":loop_fixture_unittests" ]
+}
 if (is_fuchsia) {
   group("loop_fixture") {
     public_deps = [ ":gtest" ]

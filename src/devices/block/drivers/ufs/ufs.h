@@ -55,6 +55,10 @@ constexpr uint32_t kAutoHibernateExitTimeoutUs = 10000;
 // How many times the runtime link-idle timer re-arms itself when it fires while HCS still shows
 // the link active (not yet parked in Auto-Hibern8) before waiting for the next activity.
 constexpr uint32_t kMaxLinkIdleRearms = 2;
+// JEDEC JEP106 manufacturer ID reported in the host controller's HCMID register (UFSHCI 3.0
+// section 5.2.4 / UFSHCI 4.0 section 5.2.6) by Google UFSHCI host controllers, which select
+// increment_host_pa_tactivate_quirk().
+constexpr uint16_t kGoogleManufacturerId = 0x0926;
 constexpr int kMaxRetries = 3;
 constexpr uint32_t kMaxTransferSize1MiB = 1024 * 1024;
 constexpr uint8_t kPlaceholderTarget = 0;
@@ -153,21 +157,27 @@ struct InspectProperties {
   inspect::UintProperty b_current_power_mode;  // Updated whenever power state changes.
   inspect::UintProperty b_active_icc_level;    // Updated whenever power state changes.
   // Unipro
-  inspect::UintProperty remote_version;           // Set once by the init thread.
-  inspect::UintProperty local_version;            // Set once by the init thread.
-  inspect::UintProperty host_t_activate;          // Set once by the init thread.
-  inspect::UintProperty device_t_activate;        // Set once by the init thread.
-  inspect::UintProperty host_granularity;         // Set once by the init thread.
-  inspect::UintProperty device_granularity;       // Set once by the init thread.
-  inspect::UintProperty pa_active_tx_data_lanes;  // Set once by the init thread.
-  inspect::UintProperty pa_active_rx_data_lanes;  // Set once by the init thread.
-  inspect::UintProperty pa_max_rx_hs_gear;        // Set once by the init thread.
-  inspect::UintProperty pa_tx_gear;               // Updated whenever gear changes.
-  inspect::UintProperty pa_rx_gear;               // Updated whenever gear changes.
-  inspect::BoolProperty tx_termination;           // Set once by the init thread.
-  inspect::BoolProperty rx_termination;           // Set once by the init thread.
-  inspect::UintProperty pa_hs_series;             // Set once by the init thread.
-  inspect::UintProperty power_mode;               // Updated whenever power state changes.
+  inspect::UintProperty remote_version;      // Set once by the init thread.
+  inspect::UintProperty local_version;       // Set once by the init thread.
+  inspect::UintProperty host_t_activate;     // Set once by the init thread.
+  inspect::UintProperty device_t_activate;   // Set once by the init thread.
+  inspect::UintProperty host_granularity;    // Set once by the init thread.
+  inspect::UintProperty device_granularity;  // Set once by the init thread.
+  // Local PA_Hibern8Time (100 us units) and which UniPro timing quirks are active, so field
+  // devices can confirm the workarounds through Inspect.
+  inspect::UintProperty host_hibern8_time;          // Updated on init and PowerDown resume.
+  inspect::BoolProperty host_pa_tactivate_quirk;    // Set once by the init thread.
+  inspect::BoolProperty peer_pa_tactivate_quirk;    // Set once by the init thread.
+  inspect::BoolProperty host_pa_hibern8time_quirk;  // Set once by the init thread.
+  inspect::UintProperty pa_active_tx_data_lanes;    // Set once by the init thread.
+  inspect::UintProperty pa_active_rx_data_lanes;    // Set once by the init thread.
+  inspect::UintProperty pa_max_rx_hs_gear;          // Set once by the init thread.
+  inspect::UintProperty pa_tx_gear;                 // Updated whenever gear changes.
+  inspect::UintProperty pa_rx_gear;                 // Updated whenever gear changes.
+  inspect::BoolProperty tx_termination;             // Set once by the init thread.
+  inspect::BoolProperty rx_termination;             // Set once by the init thread.
+  inspect::UintProperty pa_hs_series;               // Set once by the init thread.
+  inspect::UintProperty power_mode;                 // Updated whenever power state changes.
   // Write Protect
   inspect::BoolProperty is_power_on_write_protect_enabled;   // Set once by the init thread.
   inspect::BoolProperty logical_lun_power_on_write_protect;  // Set once by the init thread.
@@ -206,7 +216,6 @@ class Ufs : public fdf::DriverBase2, public fdf_power::Suspendable<Ufs>, public 
  public:
   static constexpr char kDriverName[] = "ufs";
   // Levels of the framework-provided power element (fuchsia.hardware.power/FrameworkElementLevels).
-  // TODO(https://fxbug.dev/42075643): We need to add sleep(low-power) level
   static constexpr fuchsia_power_broker::PowerLevel kPowerLevelOff = 0;
   static constexpr fuchsia_power_broker::PowerLevel kPowerLevelOn = 1;
 
@@ -372,9 +381,14 @@ class Ufs : public fdf::DriverBase2, public fdf_power::Suspendable<Ufs>, public 
   // QEMU's UFS host controller model does not implement UniPro attributes, UIC power mode
   // changes or Auto-Hibernate, so those steps are skipped and the link is assumed Active.
   bool qemu_quirk() const { return qemu_quirk_; }
+  // Google UFSHCI host controllers (HCPMID.MID == kGoogleManufacturerId): the default reset
+  // PA_TActivate leaves insufficient M-PHY burst-save/wake margin on Hibern8 exit, so add one
+  // PA_Granularity unit to local PA_TActivate (0x15A8) after link startup.
+  bool increment_host_pa_tactivate_quirk() const { return increment_host_pa_tactivate_quirk_; }
 
   virtual bool SupportsPowerDownSuspend() const { return false; }
   virtual bool SupportsRuntimePowerManagement() const { return SupportsPowerDownSuspend(); }
+  virtual uint32_t UicCommandTimeoutUsec() const { return kUicTimeoutUsec; }
 
   // Returns true if any inline encryption key slot has been programmed. Key slot state (UFSHCI
   // CRYPTOCFG and, on platforms where the key table lives inside the host controller power domain,
@@ -404,12 +418,12 @@ class Ufs : public fdf::DriverBase2, public fdf_power::Suspendable<Ufs>, public 
   }
 
   // Masks interrupts, disables the host controller and marks the register space as powered off,
-  // ahead of the PHY driver gating the UFSHCI power domains/clocks. Requires that no I/O slot is
-  // allocated (RequestProcessor::BlockSlotAllocation() has run). Holds uic_lock() so that a UIC
-  // command or key-slot write that has already passed its IsHardwarePoweredOff() check finishes
-  // before the controller is stopped. Returns the status of the host controller disable; the
-  // register space is marked powered off regardless.
-  zx_status_t StopHostControllerForPowerDown();
+  // ahead of the PHY driver gating the UFSHCI power domains/clocks. Any still-allocated I/O slots
+  // are aborted with |abort_status| once HCE is cleared (or have their PMTs quarantined if HCE
+  // fails to clear). Holds uic_lock() so that a UIC command or key-slot write that has already
+  // passed its IsHardwarePoweredOff() check finishes before the controller is stopped. Returns the
+  // status of the host controller disable; the register space is marked powered off regardless.
+  zx_status_t StopHostControllerForPowerDown(zx_status_t abort_status = ZX_ERR_CANCELED);
 
   // Serialises register accesses that happen outside the I/O worker / ISR paths (UIC commands,
   // whether issued by this driver, by the PHY driver through fuchsia.hardware.ufs.phy/Ufshci, or
@@ -444,9 +458,9 @@ class Ufs : public fdf::DriverBase2, public fdf_power::Suspendable<Ufs>, public 
   friend class UfsTest;
   friend class RequestProcessor;
 
-  // Writes UFSHCI CRYPTOCFG DWORD16/17 for |slot| per UFSHCI 3.0 section 5.6.3. The caller holds
-  // uic_lock_ (so that the register writes cannot race with the host controller being powered
-  // down) and has checked IsHardwarePoweredOff().
+  // Writes UFSHCI x-CRYPTOCFG DWORD16/17 for |slot| per UFSHCI 4.0 sections 5.8.3 and 7.1.3. The
+  // caller holds uic_lock_ (so that the register writes cannot race with the host controller being
+  // powered down) and has checked IsHardwarePoweredOff().
   void WriteCryptoConfigLocked(uint8_t slot, uint32_t data_unit_size) TA_REQ(uic_lock_);
   // Re-establishes inline encryption state in the host controller after a PowerDown suspend.
   zx::result<> RestoreCryptoState() TA_EXCL(uic_lock_);
@@ -481,6 +495,7 @@ class Ufs : public fdf::DriverBase2, public fdf_power::Suspendable<Ufs>, public 
   zx::result<> InitMmioBuffer();
   zx::result<> InitController();
   zx::result<> InitDeviceInterface(inspect::Node &controller_node);
+  void ClearLinkStartupUicErrors();
   zx::result<> GetControllerDescriptor();
   zx::result<uint32_t> AddLogicalUnits();
 
@@ -548,6 +563,7 @@ class Ufs : public fdf::DriverBase2, public fdf_power::Suspendable<Ufs>, public 
 
   bool qemu_quirk_ = false;
   bool intel_quirk_ = false;
+  bool increment_host_pa_tactivate_quirk_ = false;
 
   ufs_config::Config config_;
 
@@ -661,8 +677,8 @@ class Ufs : public fdf::DriverBase2, public fdf_power::Suspendable<Ufs>, public 
   fzl::VmoMapper sync_cmd_mapper_;
   fidl::WireSyncClient<fuchsia_hardware_inlineencryption::Controller> inline_encryption_client_;
 
-  // UFSHCI 3.0 section 5.6: CRYPTOCAP.CFGC is 8 bits, but the driver (and the block server's
-  // session-scoped slot numbering) currently supports at most 32 slots.
+  // UFSHCI 4.0 section 5.8.1: CCAP.CFGC is 8 bits (up to 256 configurations), but the driver (and
+  // the block server's session-scoped slot numbering) currently supports at most 32 slots.
   static constexpr uint8_t kMaxCryptoSlots = 32;
   // Data unit size programmed into each crypto slot, or 0 if the slot has not been programmed.
   // Shadow of the CRYPTOCFG registers, so it shares their lock (uic_lock_): every writer also

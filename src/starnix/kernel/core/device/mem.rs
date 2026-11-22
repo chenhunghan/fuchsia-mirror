@@ -436,41 +436,41 @@ pub fn mem_device_init(kernel: &Kernel) -> Result<(), Errno> {
         DeviceMetadata::new("null".into(), DeviceId::NULL, DeviceMode::Char),
         mem_class.clone(),
         simple_device_ops::<DevNull>,
-    );
+    )?;
     registry.add_device(
         kernel,
         "zero".into(),
         DeviceMetadata::new("zero".into(), DeviceId::ZERO, DeviceMode::Char),
         mem_class.clone(),
         simple_device_ops::<DevZero>,
-    );
+    )?;
     registry.add_device(
         kernel,
         "full".into(),
         DeviceMetadata::new("full".into(), DeviceId::FULL, DeviceMode::Char),
         mem_class.clone(),
         simple_device_ops::<DevFull>,
-    );
+    )?;
     registry.add_device(
         kernel,
         "random".into(),
         DeviceMetadata::new("random".into(), DeviceId::RANDOM, DeviceMode::Char),
         mem_class.clone(),
         simple_device_ops::<DevRandom>,
-    );
+    )?;
     registry.add_device(
         kernel,
         "urandom".into(),
         DeviceMetadata::new("urandom".into(), DeviceId::URANDOM, DeviceMode::Char),
         mem_class.clone(),
         simple_device_ops::<DevRandom>,
-    );
+    )?;
     registry.add_device(
         kernel,
         "kmsg".into(),
         DeviceMetadata::new("kmsg".into(), DeviceId::KMSG, DeviceMode::Char),
         mem_class,
         open_kmsg,
-    );
+    )?;
     Ok(())
 }

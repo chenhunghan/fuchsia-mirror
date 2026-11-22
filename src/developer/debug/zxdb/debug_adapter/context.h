@@ -37,7 +37,7 @@ class DebugAdapterReader;
 class DebugAdapterWriter;
 
 // Types of variables reported in variables request.
-enum class VariablesType {
+enum class VariablesType : uint8_t {
   kLocal = 0,
   kArguments,
   kRegister,
@@ -58,7 +58,7 @@ struct VariablesRecord {
 // Handles processing requests from debug adapter client with help from zxdb client session and dap
 // library.
 // Note: All methods in this class need to be executed on main thread to avoid concurrency bugs.
-class DebugAdapterContext : public ThreadObserver,
+class DebugAdapterContext : public ThreadObserver,  // NOLINT(misc-multiple-inheritance)
                             public ProcessObserver,
                             public SessionObserver,
                             public BreakpointObserver,
@@ -73,7 +73,7 @@ class DebugAdapterContext : public ThreadObserver,
   Session* session() { return console_->context().session(); }
   dap::Session& dap() { return *dap_; }
   debug::StreamBuffer* stream() { return stream_; }
-  bool supports_run_in_terminal() { return supports_run_in_terminal_; }
+  bool supports_run_in_terminal() const { return supports_run_in_terminal_; }
 
   // Notification about the stream.
   void OnStreamReadable();
@@ -114,7 +114,7 @@ class DebugAdapterContext : public ThreadObserver,
 
   // Checks if thread is in stopped state; returns error if not stopped.
   // `thread` can be nullptr, in which case an error is returned.
-  Err CheckStoppedThread(Thread* thread);
+  static Err CheckStoppedThread(Thread* thread);
 
   // Returns a vector of elided frame matches against a stack.
   // The returned vector will have the same `size()` as the `stack`.

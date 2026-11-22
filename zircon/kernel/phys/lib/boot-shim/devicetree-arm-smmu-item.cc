@@ -100,7 +100,7 @@ devicetree::ScanState ArmDevicetreeSmmuItem::OnNode(const devicetree::NodePath& 
   // pass.
   ZX_DEBUG_ASSERT(pass_cnt_ == 1);
   ZX_DEBUG_ASSERT(smmu_cnt_ < data_.size());
-  zbi_dcfg_arm_smmu_driver_t& item = data_[smmu_cnt_++];
+  zbi_dcfg_arm_smmu_v2_driver_t& item = data_[smmu_cnt_++];
 
   // Start by recording our base address.
   item.mmio_phys = *base_address;
@@ -221,7 +221,7 @@ devicetree::ScanState ArmDevicetreeSmmuItem::OnScan() {
     }
 
     fbl::AllocChecker ac;
-    data_ = Allocate<zbi_dcfg_arm_smmu_driver_t>(smmu_cnt_, ac);
+    data_ = Allocate<zbi_dcfg_arm_smmu_v2_driver_t>(smmu_cnt_, ac);
     // Success or failure, it is time to reset our counter.  On failure, we will be done and should
     // report that we have 0 successfully parsed SMMUs.  On success, we are about to begin our
     // second pass and will use this field to keep track of which SMMU instance we are parsing at
@@ -243,7 +243,7 @@ fit::result<ArmDevicetreeSmmuItem::DataZbi::Error> ArmDevicetreeSmmuItem::Append
     auto result = zbi.Append(
         {
             .type = ZBI_TYPE_KERNEL_DRIVER,
-            .extra = ZBI_KERNEL_DRIVER_ARM_SMMU,
+            .extra = ZBI_KERNEL_DRIVER_ARM_SMMU_V2,
         },
         std::as_bytes(data_));
 

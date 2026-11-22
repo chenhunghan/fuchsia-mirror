@@ -4,18 +4,25 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-config("includes") {
-  include_dirs = [ "include" ]
+import("//build/cpp/library_headers.gni")
+import("//zircon/kernel/kernel_rust_mod.gni")
+
+library_headers("headers") {
+  headers = [ "dev/hdcp/amlogic_s912/init.h" ]
+  public_deps = [ "//sdk/lib/zbi-format" ]
+}
+
+kernel_rust_mod("amlogic_s912-rs") {
+  sources = [ "hdcp.rs" ]
+  deps = [
+    "//sdk/rust/zbi",
+    "//src/lib/regio",
+    "//src/lib/zr",
+  ]
+  test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }
 
 source_set("amlogic_s912") {
-  public = [ "include/dev/hdcp/amlogic_s912/init.h" ]
-  public_deps = [ "//sdk/lib/zbi-format" ]
-  sources = [ "hdcp.cc" ]
-  deps = [
-    "//zircon/kernel/dev/interrupt",
-    "//zircon/kernel/lib/cbuf",
-  ]
-
-  public_configs = [ ":includes" ]
+  public_deps = [ ":headers" ]
+  deps = [ ":amlogic_s912-rs" ]
 }

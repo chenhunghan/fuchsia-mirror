@@ -9,8 +9,5 @@ import enum
 class Implementation(enum.StrEnum):
     """Different Tracing affordance implementations available."""
 
-    # Use Tracing affordances that is implemented using Fuchsia-Controller
-    FUCHSIA_CONTROLLER = "fuchsia-controller"
-
     # Use Tracing affordances that is implemented using FFX
     FFX = "ffx"

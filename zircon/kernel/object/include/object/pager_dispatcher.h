@@ -24,28 +24,19 @@ zx_status_t cpp_pager_dispatcher_create(
 
 void cpp_pager_proxy_free(PagerProxy* proxy);
 void* cpp_pager_proxy_get_ref_counted(PagerProxy* proxy);
-const void* cpp_pager_proxy_get_dll_node(const PagerProxy* proxy);
 zx_status_t cpp_pager_proxy_create(PagerDispatcher* dispatcher, PortDispatcher* port, uint64_t key,
                                    uint32_t options, PagerProxy** out_proxy);
-zx_status_t cpp_pager_proxy_create_page_source(PagerProxy* proxy, PageSource** out_src);
+PageProvider* cpp_pager_proxy_as_page_provider(PagerProxy* proxy);
 
 void rust_pager_dispatcher_state_init(void* state, const PagerDispatcher* disp);
 void rust_pager_dispatcher_state_destroy(void* state);
 Lock<CriticalMutex>* rust_pager_dispatcher_state_get_lock(const void* state);
 void rust_pager_dispatcher_on_zero_handles(const PagerDispatcher* disp);
-PagerProxy* rust_pager_dispatcher_release_proxy(const PagerDispatcher* disp, PagerProxy* proxy);
-void rust_pager_dispatcher_get_debug_name(const PagerDispatcher* disp, char* name, size_t len);
 }
 
 class PagerDispatcher final : public Dispatcher {
  public:
   ~PagerDispatcher() final;
-
-  // Drop and return this object's reference to |proxy|. Must be called under
-  // |proxy|'s lock to prevent races with dispatcher teardown.
-  fbl::RefPtr<PagerProxy> ReleaseProxy(PagerProxy* proxy) const TA_REQ(proxy->mtx_) {
-    return fbl::ImportFromRawPtr(rust_pager_dispatcher_release_proxy(this, proxy));
-  }
 
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_PAGER; }
   zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
@@ -59,10 +50,6 @@ class PagerDispatcher final : public Dispatcher {
   }
 
   void on_zero_handles() final { rust_pager_dispatcher_on_zero_handles(this); }
-
-  void get_debug_name(char* name, size_t len) const {
-    rust_pager_dispatcher_get_debug_name(this, name, len);
-  }
 
  protected:
   Lock<CriticalMutex>* get_lock() const final;

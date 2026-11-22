@@ -2,10 +2,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
 load("//build/bazel/rules/idk:idk_cc_prebuilt_library.bzl", "idk_cc_shared_library_zx")
 load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
 
 package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    [
+        "buffer.cc",
+        "buffer.h",
+        "context_impl.h",
+        "hash_table.h",
+        "rolling_buffer.cc",
+        "rolling_buffer.h",
+    ],
+    visibility = ["//zircon/system/ulib/trace-engine/test:__pkg__"],
+)
 
 idk_cc_shared_library_zx(
     name = "trace-engine",
@@ -84,4 +97,21 @@ idk_cc_source_library(
         # <trace-engine/handler.h> has #include <lib/async/dispatcher.h>.
         "//sdk/lib/async",
     ],
+)
+
+# Header-only source package for use by exported trace-reader package.
+# This code also runs on the host.
+# //zircon/system/ulib/trace-engine is not yet bazel2gn-synced; keep synced
+# manually with BUILD.gn until the package is migrated.
+# @bazel2gn:skip
+fx_cc_source_library_zx(
+    name = "trace-engine-headers-for-reader",
+    hdrs = [
+        "include/lib/trace-engine/buffer_internal.h",
+        "include/lib/trace-engine/context.h",
+        "include/lib/trace-engine/fields.h",
+        "include/lib/trace-engine/types.h",
+    ],
+    includes = ["include"],
+    visibility = ["//:__subpackages__"],
 )

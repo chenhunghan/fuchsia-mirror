@@ -2,34 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/dist/resource.gni")
-
-resource("file_resource") {
-  sources = [ "data/file" ]
-  outputs = [ "data/file" ]
-}
-
-resource("fidl_file_resource") {
-  sources = [ "data/fidl_file" ]
-  outputs = [ "data/fidl_file" ]
-}
-
-resource("subdir_file_resource") {
-  sources = [ "data/file" ]
-  outputs = [ "data/subdir/subdir-file" ]
-}
-
-fuchsia_unittest_package("fuchsia-fs-tests") {
-  manifest = "meta/fuchsia_fs_tests.cml"
-  deps = [
-    ":fidl_file_resource",
-    ":file_resource",
-    ":fuchsia-fs_test",
-    ":subdir_file_resource",
-  ]
-}
-
 group("tests") {
   testonly = true
   deps = [ ":fuchsia-fs-tests" ]
@@ -152,4 +124,40 @@ rustc_library("fuchsia-fs_fdomain") {
 fidl("fidl.test.schema") {
   testonly = true
   sources = [ "data/schema.test.fidl" ]
+}
+
+resource("file_resource") {
+  sources = [ "data/file" ]
+  outputs = [ "data/file" ]
+}
+
+resource("fidl_file_resource") {
+  sources = [ "data/fidl_file" ]
+  outputs = [ "data/fidl_file" ]
+}
+
+resource("subdir_file_resource") {
+  sources = [ "data/file" ]
+  outputs = [ "data/subdir/subdir-file" ]
+}
+
+fuchsia_component_manifest("fuchsia-fs-tests_manifest") {
+  testonly = true
+  component_name = "fuchsia-fs-tests"
+  manifest = "meta/fuchsia_fs_tests.cml"
+}
+
+fuchsia_test_component("fuchsia-fs-tests_component") {
+  cm_label = ":fuchsia-fs-tests_manifest"
+  deps = [ ":fuchsia-fs_test" ]
+}
+
+fuchsia_test_package("fuchsia-fs-tests") {
+  package_name = "fuchsia-fs-tests-gn"
+  test_components = [ ":fuchsia-fs-tests_component" ]
+  deps = [
+    ":fidl_file_resource",
+    ":file_resource",
+    ":subdir_file_resource",
+  ]
 }

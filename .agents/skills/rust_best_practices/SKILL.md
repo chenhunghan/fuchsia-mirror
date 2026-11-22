@@ -33,9 +33,11 @@ practices, refer to the `rust_driver_best_practices` skill.
 * **Consistent Word Order**: Keep word ordering consistent across APIs (e.g.
   `new_connection` and `open_connection`, rather than mixing prefixes and
   suffixes). See [C-WORD-ORDER].
-* **Use Statements at Top**: All `use` statements must be grouped together at
-  the top of the file. Do not place `use` statements inline within functions or
-  modules. This makes file dependencies clear and easy to find.
+* **Use Statements at Top of Enclosing Module**: Group all `use` statements
+  together at the top of their enclosing module (at the top of the file for
+  file-level items, or at the top of an inline `mod test` / `mod tests` block
+  for test-only imports). Do not place `use` statements inline within function
+  bodies. This makes module dependencies clear and easy to find.
 * **Avoid Long Namespaces**: Use `use` statements to import symbols so that you
   can avoid long namespaced structs or methods in the code. This improves
   readability.
@@ -179,6 +181,7 @@ practices, refer to the `rust_driver_best_practices` skill.
   their usage. See [C-EXAMPLE].
   > [!NOTE]
   > This guideline is not strictly enforced for targets building on Fuchsia until doctests are supported on Fuchsia targets.
+
 * **Ergonomic Examples**: Examples should use the `?` operator, not `try!`, and
   not call `unwrap` or `expect`. See [C-QUESTION-MARK].
 * **Function Failure and Safety**: Function docs must clearly document:
@@ -214,6 +217,7 @@ practices, refer to the `rust_driver_best_practices` skill.
     performance).
   
   **Do:**
+
   ```rust
   // SAFETY: The `bytes` returned from our string builder are guaranteed to be
   // valid UTF-8. We used to call `from_utf8`, but this caused performance issues
@@ -222,6 +226,7 @@ practices, refer to the `rust_driver_best_practices` skill.
   ```
 
   **Don't:**
+
   ```rust
   // SAFETY: We shouldn't have to validate `bytes`, and the safe version is slow.
   let s = unsafe { String::from_utf8_unchecked(bytes) };
@@ -238,6 +243,7 @@ practices, refer to the `rust_driver_best_practices` skill.
       if they are in an `unsafe` function body.
   
   **Do:**
+
   ```rust
   unsafe fn clear_slice(ptr: *mut i32, len: usize) {
       assert!(len.checked_mul(mem::size_of::<i32>()).unwrap() < isize::MAX);
@@ -290,7 +296,10 @@ practices, refer to the `rust_driver_best_practices` skill.
 
 Upon finishing authoring a change to Rust code, you MUST use this skill to
 review the change. Verify that:
-- [ ] All `use` statements are grouped at the top of the file.
+
+- [ ] All `use` statements are grouped at the top of their enclosing module (top
+  of the file, or top of `mod test` / `mod tests` for test-only imports), never
+  inline within functions.
 - [ ] No shorthand or abbreviated names are used for variables or structs.
 - [ ] No `#[allow(unused)]` or `#[allow(dead_code)]` attributes remain in the
   final code.

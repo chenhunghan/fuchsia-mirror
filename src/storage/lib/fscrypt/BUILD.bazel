@@ -2,9 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fscrypt-tests"],
+    visibility = ["//src/storage:__pkg__"],
+)
 
 rustc_library(
     name = "fscrypt",
@@ -15,9 +23,6 @@ rustc_library(
         "src/proxy_filename.rs",
     ],
     edition = "2024",
-    test_deps = [
-        "//third_party/rust_crates/vendor:hex",
-    ],
     visibility = [
         "//src/storage/crypt/fxfs/common:__pkg__",
         "//src/storage/crypt/starnix:__pkg__",
@@ -26,14 +31,29 @@ rustc_library(
         "//src/storage/lib/block_server/vmo_backed:__pkg__",
         "//vendor/google:__subpackages__",
     ],
-    with_unit_tests = True,
     deps = [
         "//src/storage/fxfs/unicode",
+        "//third_party/rust_crates/vendor:aes",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:base64",
+        "//third_party/rust_crates/vendor:cbc",
         "//third_party/rust_crates/vendor:hmac",
         "//third_party/rust_crates/vendor:sha2",
         "//third_party/rust_crates/vendor:siphasher",
         "//third_party/rust_crates/vendor:zerocopy",
     ],
+)
+
+rustc_test(
+    name = "fscrypt_test",
+    crate = ":fscrypt",
+    tags = ["manual"],
+    deps = [
+        "//third_party/rust_crates/vendor:hex",
+    ],
+)
+
+fx_unittest_package(
+    name = "fscrypt-tests",
+    unit_tests = [":fscrypt_test"],
 )

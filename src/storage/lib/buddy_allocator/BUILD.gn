@@ -50,13 +50,13 @@ rustc_library("buddy_allocator") {
     ":*",
     "//src/storage/lib/*",
   ]
-  deps = []
+  deps = [ "//src/storage/lib/units" ]
 }
 
 rustc_test("buddy_allocator_test") {
   sources = [ "src/lib.rs" ]
   edition = "2024"
-  deps = [] + [ "//src/lib/fuchsia" ]
+  deps = [ "//src/storage/lib/units" ] + [ "//src/lib/fuchsia" ]
 }
 
 fuchsia_unittest_package("buddy-allocator-tests") {

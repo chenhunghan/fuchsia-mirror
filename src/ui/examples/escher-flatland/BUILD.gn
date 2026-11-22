@@ -17,7 +17,12 @@ vulkan_executable("escher-flatland-bin") {
   ]
 }
 
-fuchsia_package_with_single_component("escher-flatland") {
+fuchsia_component("escher-flatland_component") {
+  component_name = "escher-flatland"
   manifest = "meta/escher-flatland.cml"
   deps = [ ":escher-flatland-bin" ]
+}
+
+fuchsia_package("escher-flatland") {
+  deps = [ ":escher-flatland_component" ]
 }

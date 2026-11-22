@@ -4,6 +4,7 @@
 
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/testing:golden_test.bzl", "golden_test")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -19,4 +20,21 @@ host_rustc_test(
         "//third_party/rust_crates/vendor:pretty_assertions",
         "//tools/lib/reference_doc",
     ],
+)
+
+genrule(
+    name = "generate_cml_refdoc",
+    testonly = True,
+    outs = ["cml_refdoc.md"],
+    cmd = "$(location //tools/cmc) print-cml-reference -o $@",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tools = ["//tools/cmc"],
+)
+
+golden_test(
+    name = "cml-refdoc-golden_test",
+    goldens = {
+        "src/test_data/cml_refdoc.golden.md": ":generate_cml_refdoc",
+    },
+    visibility = ["//tools:__pkg__"],
 )

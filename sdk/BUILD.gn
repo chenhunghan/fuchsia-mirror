@@ -223,6 +223,7 @@ run_fuchsia_bazel_sdk_tests("final_fuchsia_idk_bazel_sdk_tests") {
   target_cpus = idk_buildable_cpus
   idk_exported_path = "$root_build_dir/sdk/exported/fuchsia_idk"
   idk_exported_target = "//sdk:final_fuchsia_idk.exported"
+  use_oot_bazel = true
 }
 
 # This target generates a Fuchsia Bazel SDK directory directly
@@ -239,6 +240,7 @@ generate_fuchsia_bazel_sdk("final_fuchsia_sdk") {
 run_fuchsia_bazel_sdk_tests("final_fuchsia_sdk_tests") {
   target_cpus = idk_buildable_cpus
   fuchsia_sdk_target = ":final_fuchsia_sdk"
+  use_oot_bazel = true
 
   # NOTE: For now, nothing should depend on the :final_fuchsia_sdk_test
   # target, except //:root_targets and //:build_only. This ensures the
@@ -649,7 +651,7 @@ sdk_molecule("core_packages") {
     "//src/graphics/tests/vkloop:vkloop-test-sdk",
     "//src/graphics/tests/vkreadback:vkreadback_test_sdk",
     "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_sdk",
-    "//src/performance/memory/heapdump/collector:collector_sdk",
+    "//src/memory/heapdump/collector:collector_sdk",
     "//src/testing/fidl/intl_property_manager:intl_property_manager_sdk",
   ]
 }
@@ -695,8 +697,8 @@ sdk_molecule("core_cc_prebuilt_libraries") {
     "//sdk/lib/syslog/cpp:backend_fuchsia_globals_sdk",
     "//sdk/lib/vfs/internal:vfs_internal_sdk",
     "//src/devices/bin/driver_runtime:driver_runtime_sdk",
-    "//src/performance/memory/heapdump/instrumentation:instrumentation_sdk",
-    "//src/performance/memory/sampler/instrumentation:instrumentation_sdk",
+    "//src/memory/heapdump/instrumentation:instrumentation_sdk",
+    "//src/memory/sampler/instrumentation:instrumentation_sdk",
     "//third_party/Vulkan-Loader/src:libvulkan_sdk",
     "//zircon/system/ulib/sync:sync_sdk",
     "//zircon/system/ulib/trace-engine:trace-engine_sdk",
@@ -743,8 +745,10 @@ sdk_molecule("core_cc_source_libraries") {
     "//sdk/lib/driver/metadata/cpp:cpp_sdk",
     "//sdk/lib/driver/mmio/cpp:cpp_sdk",
     "//sdk/lib/driver/mock-mmio/cpp:cpp_sdk",
+    "//sdk/lib/driver/pci/cpp:cpp_sdk",
     "//sdk/lib/driver/platform-device/cpp:cpp_sdk",
     "//sdk/lib/driver/power/cpp:cpp_sdk",
+    "//sdk/lib/driver/resource-vote/cpp:cpp_sdk",
     "//sdk/lib/driver/testing/cpp:cpp_sdk",
     "//sdk/lib/driver/testing/cpp:scoped_global_logger_sdk",
     "//sdk/lib/fidl/cpp:cpp_sdk",
@@ -773,6 +777,15 @@ sdk_molecule("core_cc_source_libraries") {
     "//sdk/lib/vfs/cpp:cpp_sdk",
     "//sdk/lib/virtgralloc:virtgralloc_headers_sdk",
     "//sdk/lib/zbi-format:zbi-format_sdk",
+
+    # TODO(https://fxbug.dev/444521390): Stabilize or remove `vmo_store`.
+    "//src/lib/vmo_store:vmo_store_sdk",
+
+    # TODO(https://fxbug.dev/444521390): Remove `fbl` from the IDK.
+    "//zircon/system/ulib/fbl:fbl_sdk",
+
+    # TODO(https://fxbug.dev/444521390): Stabilize or remove `fzl`.
+    "//zircon/system/ulib/fzl:fzl_sdk",
     "//zircon/system/ulib/hwreg:hwreg_public_sdk",
     "//zircon/system/ulib/inspect:inspect_sdk",
     "//zircon/system/ulib/trace:trace_sdk",
@@ -926,7 +939,6 @@ if (current_toolchain == default_toolchain) {
       "//sdk/lib/driver/devicetree/visitors/drivers/mali-gpu:mali-gpu-visitor_visitor_sdk",
       "//sdk/lib/driver/devicetree/visitors/drivers/mmc/sdmmc:sdmmc-visitor_visitor_sdk",
       "//sdk/lib/driver/devicetree/visitors/drivers/power/power-domain:power-domain-visitor_visitor_sdk",
-      "//sdk/lib/driver/devicetree/visitors/drivers/power/power-element:power-element-visitor_visitor_sdk",
       "//sdk/lib/driver/devicetree/visitors/drivers/pwm-controllers/pwm:pwm-visitor_visitor_sdk",
       "//sdk/lib/driver/devicetree/visitors/drivers/pwm-controllers/pwm-init:pwm-init-visitor_visitor_sdk",
       "//sdk/lib/driver/devicetree/visitors/drivers/registers:registers-visitor_visitor_sdk",
@@ -948,11 +960,7 @@ if (current_toolchain == default_toolchain) {
       # Remove the `fbl` dependency from `mock-mmio-reg`.
       "//sdk/lib/driver/mmio/testing/cpp:cpp_sdk",
       "//src/devices/registers/testing/mock-registers:mock-registers_sdk",
-      "//src/devices/testing/fake-mmio-reg:fake-mmio-reg_sdk",
       "//src/devices/testing/mock-mmio-reg:mock-mmio-reg_sdk",
-
-      # TODO(https://fxbug.dev/444521390): Eliminate vendor dependencies on fbl.
-      "//zircon/system/ulib/fbl:fbl_sdk",
     ]
   }
 
@@ -1063,6 +1071,7 @@ if (current_toolchain == default_toolchain) {
       link_rbe_exec_strategy = link_rbe_exec_strategy
       rust_rbe_enable = rust_rbe_enable
       rust_rbe_exec_strategy = rust_rbe_exec_strategy
+      disable_xattr_for_rbe = disable_xattr_for_rbe
       update_goldens = update_goldens
       build_should_trace_actions = build_should_trace_actions
     }

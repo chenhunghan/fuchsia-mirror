@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/cpp/library_headers.gni")
+import("//build/toolchain/toolchain_environment.gni")
+import("//build/zircon/zircon_cpu.gni")
+
+library_headers("headers") {
+  headers = [
+    "phys/address-space/$zircon_cpu.h",
+    "phys/address-space/address-space.h",
+  ]
+
+  public_configs = [ "//zircon/kernel/lib/page:configuration" ]
+
+  public_deps = [
+    "../runtime:headers",
+    "//zircon/kernel/lib/ktl:headers",
+    "//zircon/kernel/lib/libc:headers",
+
+    # <phys/address-space/address-space.h> has #include <lib/fit/function.h>
+    "//sdk/lib/fit:headers",
+
+    # <phys/address-space/address-space.h> has #include <lib/memalloc/range.h>
+    "//zircon/kernel/phys/lib/memalloc:range.headers",
+
+    # <phys/address-space/address-space.h> has #include
+    # <lib/arch/paging-traits.h> <phys/address-space/${zircon_cpu}.h> has
+    # #include <lib/arch/${zircon_cpu}/paging-traits.h>
+    "//zircon/kernel/lib/arch:headers",
+
+    # <phys/address-space/address-space.h> has #include <hwreg/array.h>
+    # <phys/address-space/x86.h> has #include <hwreg/x86msr.h>
+    "//zircon/system/ulib/hwreg:headers",
+  ]
+}
+
+if (toolchain_environment == "kernel.phys") {
+  static_library("address-space") {
+    complete_static_lib = true
+
+    public_deps = [ ":headers" ]
+
+    sources = [
+      "${zircon_cpu}-address-space.cc",
+      "address-space-map.cc",
+      "address-space.cc",
+    ]
+
+    deps = [
+      "../allocation",
+      "../output",
+      "../runtime",
+      "//sdk/lib/fit",
+      "//src/lib/zbitl",
+      "//zircon/kernel/lib/arch",
+      "//zircon/kernel/lib/boot-options",
+      "//zircon/kernel/phys/lib/memalloc",
+      "//zircon/system/ulib/fbl",
+      "//zircon/system/ulib/uart",
+    ]
+  }
+}

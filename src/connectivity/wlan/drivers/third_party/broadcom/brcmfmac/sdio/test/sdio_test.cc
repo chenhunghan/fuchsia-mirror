@@ -27,17 +27,26 @@
 #include <zircon/errors.h>
 #include <zircon/types.h>
 
+#include <cstring>
 #include <memory>
+#include <string_view>
 #include <tuple>
+#include <unordered_map>
+#include <vector>
 
 #include <sdk/lib/driver/testing/cpp/driver_runtime.h>
 #include <zxtest/zxtest.h>
 
+#include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/brcm_hw_ids.h"
+#include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/brcmu_d11.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/bus.h"
+#include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/chip.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/common.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/device.h"
+#include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/proto.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/test/stub_device.h"
 #include "src/devices/gpio/testing/fake-gpio/fake-gpio.h"
+#include "src/devices/lib/broadcom/commands.h"
 
 // These numbers come from real bugs.
 #define NOT_ALIGNED_SIZE 1541
@@ -60,13 +69,61 @@ class FakeSdioDevice : public wlan::brcmfmac::StubDevice {
     shutdown_complete.Wait();
   }
 
+  async_dispatcher_t* GetTimerDispatcher() override {
+    return fdf::Dispatcher::GetCurrent()->async_dispatcher();
+  }
+
+  zx_status_t LoadFirmware(const char* path, zx_handle_t* fw, size_t* size) override {
+    if (!enable_firmware_load_) {
+      return StubDevice::LoadFirmware(path, fw, size);
+    }
+    const std::string_view filepath(path);
+    if (filepath.ends_with(".clm_blob")) {
+      return fail_clm_load_;
+    }
+    constexpr std::string_view kFakeNvram = "boardrev=0x1100\n";
+    constexpr uint8_t kFakeFirmware[16] = {};
+    const void* payload = filepath.ends_with(".txt") ? static_cast<const void*>(kFakeNvram.data())
+                                                     : static_cast<const void*>(kFakeFirmware);
+    const size_t payload_size = filepath.ends_with(".txt") ? kFakeNvram.size()
+                                                           : sizeof(kFakeFirmware);
+    zx::vmo vmo;
+    zx_status_t status = zx::vmo::create(4096, 0, &vmo);
+    if (status != ZX_OK) {
+      return status;
+    }
+    status = vmo.write(payload, 0, payload_size);
+    if (status != ZX_OK) {
+      return status;
+    }
+    status = vmo.set_property(ZX_PROP_VMO_CONTENT_SIZE, &payload_size, sizeof(payload_size));
+    if (status != ZX_OK) {
+      return status;
+    }
+    *size = payload_size;
+    firmware_vmos_.push_back(std::move(vmo));
+    *fw = firmware_vmos_.back().get();
+    return ZX_OK;
+  }
+
   zx::result<fuchsia_wlan_broadcom::WifiConfig> GetWifiConfig() override {
     // Provide a fake implementation for this metadata.
     return zx::ok(fuchsia_wlan_broadcom::WifiConfig{{
         .oob_irq_mode = ZX_INTERRUPT_MODE_LEVEL_LOW,
-        .clm_needed = true,
+        .clm_needed = clm_needed_,
+        .cc_table = {fuchsia_wlan_broadcom::CcEntry{{
+            .cc_abbr = "WW",
+            .cc_rev = 0,
+        }}},
     }});
   }
+
+  bool enable_firmware_load_ = false;
+  bool clm_needed_ = true;
+  zx_status_t fail_clm_load_ = ZX_ERR_NOT_FOUND;
+
+ private:
+  std::vector<zx::vmo> firmware_vmos_;
 };
 
 class MockSdio : public ddk::MockSdio {
@@ -863,5 +920,560 @@ TEST_F(SdioTest, PrepareAndReleaseVmoClosesHandles) {
   // Both unregistered VMO handles returned by fn1 and fn2 must be closed by brcmf_sdio_release_vmo.
   ASSERT_NO_FATAL_FAILURE(get_handle_count(&handle_count));
   EXPECT_EQ(handle_count, 1u);
+}
+
+// Fake SDIO endpoint emulating a BCM4329 SiliconBackplane card so tests can run full
+// brcmf_sdio_register(), brcmf_sdiod_probe(..., /*reloading=*/true), and brcmf_sdio_exit() flows.
+class FakeReloadableSdio : public ddk::SdioProtocol<FakeReloadableSdio> {
+ public:
+  sdio_protocol_t GetProto() { return {.ops = &sdio_protocol_ops_, .ctx = this}; }
+
+  ddk::SdioProtocolClient GetClient() {
+    sdio_protocol_t proto = GetProto();
+    return ddk::SdioProtocolClient(&proto);
+  }
+
+  zx_status_t SdioGetDevHwInfo(sdio_hw_info_t* out_hw_info) {
+    *out_hw_info = {};
+    out_hw_info->dev_hw_info.num_funcs = 3;
+    out_hw_info->func_hw_info.manufacturer_id = 0x02d0;
+    out_hw_info->func_hw_info.product_id = 0x4329;
+    return ZX_OK;
+  }
+
+  zx_status_t SdioEnableFn() { return fail_enable_fn_; }
+  zx_status_t SdioDisableFn() { return ZX_OK; }
+  zx_status_t SdioEnableFnIntr() { return ZX_OK; }
+  zx_status_t SdioDisableFnIntr() { return ZX_OK; }
+
+  zx_status_t SdioUpdateBlockSize(uint16_t blk_sz, bool deflt) {
+    if (fail_update_block_size_ != ZX_OK) {
+      return fail_update_block_size_;
+    }
+    block_size_ = blk_sz;
+    return ZX_OK;
+  }
+
+  zx_status_t SdioGetBlockSize(uint16_t* out_cur_blk_size) {
+    if (fail_get_block_size_after_ == 0) {
+      return fail_get_block_size_;
+    }
+    if (fail_get_block_size_after_ > 0) {
+      --fail_get_block_size_after_;
+    }
+    *out_cur_blk_size = block_size_;
+    return ZX_OK;
+  }
+
+  zx_status_t SdioDoRwByte(bool write, uint32_t addr, uint8_t write_byte, uint8_t* out_read_byte) {
+    if (addr == SBSDIO_FUNC1_CHIPCLKCSR && fail_chipclkcsr_ != ZX_OK) {
+      return fail_chipclkcsr_;
+    }
+    if (write) {
+      uint8_t stored = write_byte;
+      if (addr == SBSDIO_FUNC1_CHIPCLKCSR && !suppress_chipclkcsr_echo_) {
+        // Advertise ALP/HT clock availability bits matching the requested clock bits.
+        constexpr uint8_t kForceAlpOrReq = 0x01 | 0x08;
+        constexpr uint8_t kForceHtOrReq = 0x02 | 0x10;
+        constexpr uint8_t kAlpAvail = 0x40;
+        constexpr uint8_t kHtAndAlpAvail = 0xc0;
+        stored &= 0x3f;
+        if (write_byte & kForceHtOrReq) {
+          stored |= kHtAndAlpAvail;
+        } else if (write_byte & kForceAlpOrReq) {
+          stored |= kAlpAvail;
+        }
+      } else if (addr == SBSDIO_FUNC1_CHIPCLKCSR && suppress_chipclkcsr_echo_) {
+        stored = 0;
+      }
+      f1_regs_[addr] = stored;
+    } else if (out_read_byte) {
+      auto it = f1_regs_.find(addr);
+      *out_read_byte = (it != f1_regs_.end()) ? it->second : 0;
+    }
+    return ZX_OK;
+  }
+
+  zx_status_t SdioGetInBandIntr(zx::interrupt* out_irq) { return ZX_ERR_NOT_SUPPORTED; }
+  void SdioAckInBandIntr() {}
+  zx_status_t SdioIoAbort() { return ZX_OK; }
+  zx_status_t SdioIntrPending(bool* out_pending) {
+    *out_pending = false;
+    return ZX_OK;
+  }
+
+  zx_status_t SdioDoVendorControlRwByte(bool write, uint8_t addr, uint8_t write_byte,
+                                        uint8_t* out_read_byte) {
+    if (fail_vendor_control_ != ZX_OK) {
+      return fail_vendor_control_;
+    }
+    if (write) {
+      vendor_regs_[addr] = write_byte;
+    } else if (out_read_byte) {
+      auto it = vendor_regs_.find(addr);
+      *out_read_byte = (it != vendor_regs_.end()) ? it->second : 0;
+    }
+    return ZX_OK;
+  }
+
+  zx_status_t SdioRegisterVmo(uint32_t vmo_id, zx::vmo vmo, uint64_t offset, uint64_t size,
+                              uint32_t vmo_rights) {
+    vmos_[vmo_id] = std::move(vmo);
+    return ZX_OK;
+  }
+
+  zx_status_t SdioUnregisterVmo(uint32_t vmo_id, zx::vmo* out_vmo) {
+    auto it = vmos_.find(vmo_id);
+    if (it == vmos_.end()) {
+      return ZX_ERR_NOT_FOUND;
+    }
+    *out_vmo = std::move(it->second);
+    vmos_.erase(it);
+    return ZX_OK;
+  }
+
+  zx_status_t SdioDoRwTxn(const sdio_rw_txn_t* txn) {
+    const uint32_t window = (static_cast<uint32_t>(f1_regs_[SBSDIO_FUNC1_SBADDRLOW]) << 8) |
+                            (static_cast<uint32_t>(f1_regs_[SBSDIO_FUNC1_SBADDRMID]) << 16) |
+                            (static_cast<uint32_t>(f1_regs_[SBSDIO_FUNC1_SBADDRHIGH]) << 24);
+    uint32_t addr = (window & SBSDIO_SBWINDOW_MASK) | (txn->addr & SBSDIO_SB_OFT_ADDR_MASK);
+    for (size_t i = 0; i < txn->buffers_count; ++i) {
+      const auto& buf = txn->buffers_list[i];
+      if ((buf.size % sizeof(uint32_t)) != 0) {
+        return ZX_ERR_NOT_SUPPORTED;
+      }
+      auto vmo_it = vmos_.find(buf.buffer.vmo_id);
+      if (vmo_it == vmos_.end()) {
+        return ZX_ERR_BAD_HANDLE;
+      }
+      for (size_t offset = 0; offset < buf.size; offset += sizeof(uint32_t)) {
+        if (txn->write) {
+          uint32_t val = 0;
+          zx_status_t status = vmo_it->second.read(&val, buf.offset + offset, sizeof(val));
+          if (status != ZX_OK) {
+            return status;
+          }
+          backplane_regs_[addr] = val;
+          constexpr uint32_t kCm3SbTmStateLowAddr = 0x18002f98;
+          constexpr uint32_t kTargetStateLowReset = 0x1;
+          if (addr == kCm3SbTmStateLowAddr && (val & kTargetStateLowReset) == 0) {
+            backplane_regs_[0xfffc] = 0x00002000;
+          }
+        } else {
+          const uint32_t val = ReadBackplane32(addr);
+          zx_status_t status = vmo_it->second.write(&val, buf.offset + offset, sizeof(val));
+          if (status != ZX_OK) {
+            return status;
+          }
+        }
+        if (txn->incr) {
+          addr += sizeof(uint32_t);
+        }
+      }
+    }
+    return ZX_OK;
+  }
+
+  zx_status_t SdioRequestCardReset() {
+    ++card_reset_count_;
+    return fail_card_reset_;
+  }
+  zx_status_t SdioPerformTuning() { return ZX_OK; }
+
+  zx_status_t fail_update_block_size_ = ZX_OK;
+  zx_status_t fail_get_block_size_ = ZX_OK;
+  int fail_get_block_size_after_ = -1;
+  zx_status_t fail_enable_fn_ = ZX_OK;
+  zx_status_t fail_chipclkcsr_ = ZX_OK;
+  zx_status_t fail_vendor_control_ = ZX_OK;
+  zx_status_t fail_card_reset_ = ZX_OK;
+  bool suppress_chipclkcsr_echo_ = false;
+  uint32_t chip_id_ = BRCM_CC_4329_CHIP_ID;
+  int card_reset_count_ = 0;
+
+ private:
+  uint32_t ReadBackplane32(uint32_t addr) const {
+    constexpr uint32_t kSiEnumBase = 0x18000000;
+    constexpr uint32_t kSocramCoreInfoAddr = 0x18003000;
+    constexpr uint32_t kSocramOne64kBank = (1u << 4) | 2u;
+    constexpr uint32_t kSbIdHighOffset = 0xffc;
+    constexpr uint32_t kSbTmStateLowOffset = 0xf98;
+    constexpr uint32_t kCoreRev5 = 5;
+    constexpr uint32_t kTargetStateLowReset = 0x1;
+
+    if (addr == kSiEnumBase) {
+      return chip_id_;
+    }
+    if (addr == kSocramCoreInfoAddr) {
+      return kSocramOne64kBank;
+    }
+    if (addr >= kSiEnumBase && (addr & 0xfff) == kSbIdHighOffset) {
+      return kCoreRev5;
+    }
+    auto it = backplane_regs_.find(addr);
+    if (it != backplane_regs_.end()) {
+      return it->second;
+    }
+    if (addr >= kSiEnumBase && (addr & 0xfff) == kSbTmStateLowOffset) {
+      return kTargetStateLowReset;
+    }
+    return 0;
+  }
+
+  uint16_t block_size_ = 0;
+  std::unordered_map<uint32_t, uint8_t> f1_regs_;
+  std::unordered_map<uint8_t, uint8_t> vendor_regs_;
+  std::unordered_map<uint32_t, uint32_t> backplane_regs_;
+  std::unordered_map<uint32_t, zx::vmo> vmos_;
+};
+
+void VerifyTxRejectedCleanlyWhileSdioDown(brcmf_pub* drvr) {
+  uint8_t frame_buf[128] = {};
+  wlan::drivers::components::Frame frame(nullptr, /*vmo_id=*/1, /*vmo_offset=*/0, /*buffer_id=*/0,
+                                         frame_buf, sizeof(frame_buf), /*port_id=*/0);
+  frame.ShrinkHead(64);
+  EXPECT_EQ(brcmf_tx_queue_frames(drvr, cpp20::span(&frame, 1)), ZX_ERR_IO);
+}
+
+TEST_F(SdioTest, ReloadEarlyFailurePreservesBusAndProtoAndCompletesTx) {
+  FakeSdioDevice device;
+  FakeReloadableSdio sdio1;
+  FakeReloadableSdio sdio2;
+  fidl::WireSyncClient<fuchsia_hardware_gpio::Gpio> gpios[GPIO_COUNT] = {};
+  ddk::SdioProtocolClient sdio_clients[SDIO_FN_COUNT] = {sdio1.GetClient(), sdio2.GetClient()};
+
+  std::unique_ptr<brcmf_bus> bus_if;
+  ASSERT_OK(brcmf_sdio_register(device.drvr(), gpios, sdio_clients, &bus_if));
+  auto cleanup = fit::defer([&] {
+    sdio1.fail_update_block_size_ = ZX_OK;
+    sdio1.fail_enable_fn_ = ZX_OK;
+    brcmf_sdio_exit(bus_if.get());
+  });
+
+  brcmf_sdio_dev* sdiodev = bus_if->bus_priv.sdio;
+  brcmf_sdio* orig_bus = sdiodev->bus;
+  ASSERT_NOT_NULL(orig_bus);
+  brcmf_proto* orig_proto = device.drvr()->proto;
+  brcmf_chip* orig_ci = orig_bus->ci;
+  brcmf_core* orig_sdio_core = orig_bus->sdio_core;
+  brcmf_core* orig_cc_core = sdiodev->cc_core;
+  ASSERT_NOT_NULL(orig_proto);
+  ASSERT_NOT_NULL(orig_ci);
+  ASSERT_NOT_NULL(orig_sdio_core);
+  ASSERT_NOT_NULL(orig_cc_core);
+  ASSERT_EQ(sdiodev->state, BRCMF_SDIOD_DOWN);
+
+  // Fail SetBlockSize on function 1 during reload.
+  sdio1.fail_update_block_size_ = ZX_ERR_TIMED_OUT;
+  EXPECT_EQ(brcmf_sdiod_probe(sdiodev, /*reloading=*/true), ZX_ERR_TIMED_OUT);
+  sdio1.fail_update_block_size_ = ZX_OK;
+  EXPECT_EQ(device.drvr()->proto, orig_proto);
+  EXPECT_EQ(sdiodev->bus, orig_bus);
+  EXPECT_EQ(orig_bus->ci, orig_ci);
+  EXPECT_EQ(orig_bus->sdio_core, orig_sdio_core);
+  EXPECT_EQ(sdiodev->cc_core, orig_cc_core);
+  VerifyTxRejectedCleanlyWhileSdioDown(device.drvr());
+
+  // Fail EnableFn on function 1 during reload.
+  sdio1.fail_enable_fn_ = ZX_ERR_IO;
+  EXPECT_EQ(brcmf_sdiod_probe(sdiodev, /*reloading=*/true), ZX_ERR_IO);
+  sdio1.fail_enable_fn_ = ZX_OK;
+  EXPECT_EQ(device.drvr()->proto, orig_proto);
+  EXPECT_EQ(sdiodev->bus, orig_bus);
+  EXPECT_EQ(orig_bus->ci, orig_ci);
+  EXPECT_EQ(orig_bus->sdio_core, orig_sdio_core);
+  EXPECT_EQ(sdiodev->cc_core, orig_cc_core);
+  VerifyTxRejectedCleanlyWhileSdioDown(device.drvr());
+}
+
+TEST_F(SdioTest, ReloadProbeAttachFailurePreservesChipAndCompletesTx) {
+  FakeSdioDevice device;
+  FakeReloadableSdio sdio1;
+  FakeReloadableSdio sdio2;
+  fidl::WireSyncClient<fuchsia_hardware_gpio::Gpio> gpios[GPIO_COUNT] = {};
+  ddk::SdioProtocolClient sdio_clients[SDIO_FN_COUNT] = {sdio1.GetClient(), sdio2.GetClient()};
+
+  std::unique_ptr<brcmf_bus> bus_if;
+  ASSERT_OK(brcmf_sdio_register(device.drvr(), gpios, sdio_clients, &bus_if));
+  auto cleanup = fit::defer([&] {
+    sdio1.fail_chipclkcsr_ = ZX_OK;
+    sdio1.fail_vendor_control_ = ZX_OK;
+    sdio1.suppress_chipclkcsr_echo_ = false;
+    sdio1.chip_id_ = BRCM_CC_4329_CHIP_ID;
+    sdio2.fail_get_block_size_after_ = -1;
+    brcmf_sdio_exit(bus_if.get());
+  });
+
+  brcmf_sdio_dev* sdiodev = bus_if->bus_priv.sdio;
+  brcmf_sdio* orig_bus = sdiodev->bus;
+  ASSERT_NOT_NULL(orig_bus);
+  brcmf_proto* orig_proto = device.drvr()->proto;
+  brcmf_chip* orig_ci = orig_bus->ci;
+  brcmf_core* orig_sdio_core = orig_bus->sdio_core;
+  brcmf_core* orig_cc_core = sdiodev->cc_core;
+  ASSERT_NOT_NULL(orig_proto);
+  ASSERT_NOT_NULL(orig_ci);
+  ASSERT_NOT_NULL(orig_sdio_core);
+  ASSERT_NOT_NULL(orig_cc_core);
+  ASSERT_EQ(sdiodev->state, BRCMF_SDIOD_DOWN);
+
+  // 1. Fail ChipClkCSR write inside brcmf_sdio_probe_attach during brcmf_sdio_recovery.
+  sdio1.fail_chipclkcsr_ = ZX_ERR_IO_REFUSED;
+  EXPECT_EQ(brcmf_sdio_recovery(bus_if.get()), ZX_ERR_IO_NOT_PRESENT);
+  sdio1.fail_chipclkcsr_ = ZX_OK;
+  EXPECT_EQ(device.drvr()->proto, orig_proto);
+  EXPECT_EQ(sdiodev->bus, orig_bus);
+  EXPECT_EQ(orig_bus->ci, orig_ci);
+  EXPECT_EQ(orig_bus->sdio_core, orig_sdio_core);
+  EXPECT_EQ(sdiodev->cc_core, orig_cc_core);
+  VerifyTxRejectedCleanlyWhileSdioDown(device.drvr());
+
+  // 2. Fail ChipClkCSR readback mismatch inside brcmf_sdio_probe_attach.
+  sdio1.suppress_chipclkcsr_echo_ = true;
+  EXPECT_EQ(brcmf_sdiod_probe(sdiodev, /*reloading=*/true), ZX_ERR_IO_NOT_PRESENT);
+  sdio1.suppress_chipclkcsr_echo_ = false;
+  EXPECT_EQ(device.drvr()->proto, orig_proto);
+  EXPECT_EQ(sdiodev->bus, orig_bus);
+  EXPECT_EQ(orig_bus->ci, orig_ci);
+  EXPECT_EQ(orig_bus->sdio_core, orig_sdio_core);
+  EXPECT_EQ(sdiodev->cc_core, orig_cc_core);
+  VerifyTxRejectedCleanlyWhileSdioDown(device.drvr());
+
+  // 3. Fail brcmf_chip_attach (unsupported chip ID) and verify bus->ci / cores are not nulled out.
+  sdio1.chip_id_ = 0xffff;
+  EXPECT_EQ(brcmf_sdiod_probe(sdiodev, /*reloading=*/true), ZX_ERR_IO_NOT_PRESENT);
+  sdio1.chip_id_ = BRCM_CC_4329_CHIP_ID;
+  EXPECT_EQ(device.drvr()->proto, orig_proto);
+  EXPECT_EQ(sdiodev->bus, orig_bus);
+  EXPECT_EQ(orig_bus->ci, orig_ci);
+  EXPECT_EQ(orig_bus->sdio_core, orig_sdio_core);
+  EXPECT_EQ(sdiodev->cc_core, orig_cc_core);
+  VerifyTxRejectedCleanlyWhileSdioDown(device.drvr());
+
+  // 4. Fail GetBlockSize on fn2 inside brcmf_sdio_probe_attach after brcmf_chip_attach succeeds,
+  // verifying the staged chip is detached and orig_ci / settings stay intact for later reloads.
+  sdio2.fail_get_block_size_ = ZX_ERR_IO;
+  sdio2.fail_get_block_size_after_ = 1;  // Succeed in brcmf_sdiod_set_block_size, fail in attach.
+  EXPECT_EQ(brcmf_sdiod_probe(sdiodev, /*reloading=*/true), ZX_ERR_IO_NOT_PRESENT);
+  sdio2.fail_get_block_size_after_ = -1;
+  ASSERT_NOT_NULL(sdiodev->settings);
+  EXPECT_NOT_NULL(sdiodev->settings->bus.sdio);
+  EXPECT_EQ(orig_bus->ci, orig_ci);
+  EXPECT_EQ(orig_bus->sdio_core, orig_sdio_core);
+  EXPECT_EQ(sdiodev->cc_core, orig_cc_core);
+  VerifyTxRejectedCleanlyWhileSdioDown(device.drvr());
+
+  // 5. Fail vendor_control_rb after the new chip info is committed onto bus->ci, verifying
+  // bus->ci stays valid (not double-detached on fail:) and a subsequent reload still succeeds.
+  sdio1.fail_vendor_control_ = ZX_ERR_IO;
+  EXPECT_EQ(brcmf_sdiod_probe(sdiodev, /*reloading=*/true), ZX_ERR_IO_NOT_PRESENT);
+  sdio1.fail_vendor_control_ = ZX_OK;
+  EXPECT_NOT_NULL(orig_bus->ci);
+  EXPECT_NOT_NULL(orig_bus->sdio_core);
+  EXPECT_NOT_NULL(sdiodev->cc_core);
+  VerifyTxRejectedCleanlyWhileSdioDown(device.drvr());
+
+  // 6. Subsequent reload succeeds cleanly.
+  EXPECT_OK(brcmf_sdiod_probe(sdiodev, /*reloading=*/true));
+  EXPECT_EQ(device.drvr()->proto, orig_proto);
+  EXPECT_EQ(sdiodev->bus, orig_bus);
+  EXPECT_NOT_NULL(orig_bus->ci);
+  EXPECT_NOT_NULL(orig_bus->sdio_core);
+  EXPECT_NOT_NULL(sdiodev->cc_core);
+}
+
+zx_status_t g_test_fail_ver_dcmd = ZX_OK;
+
+zx_status_t StubQueryDcmd(brcmf_pub* drvr, int ifidx, uint cmd, void* buf, uint len,
+                          bcme_status_t* fwerr) {
+  if (fwerr) {
+    *fwerr = BCME_OK;
+  }
+  if (cmd == BRCMF_C_GET_VAR && buf != nullptr && len >= 4 && std::memcmp(buf, "ver", 4) == 0) {
+    if (g_test_fail_ver_dcmd != ZX_OK) {
+      return g_test_fail_ver_dcmd;
+    }
+    constexpr char kVer[] = "wl0: version 1.0\n";
+    std::memset(buf, 0, len);
+    std::memcpy(buf, kVer, std::min<size_t>(len, sizeof(kVer)));
+    return ZX_OK;
+  }
+  if (cmd == BRCMF_C_GET_VERSION && buf != nullptr && len >= sizeof(uint32_t)) {
+    const uint32_t io_type = BRCMU_D11AC_IOTYPE;
+    std::memcpy(buf, &io_type, sizeof(io_type));
+    return ZX_OK;
+  }
+  if (buf != nullptr && len > 0) {
+    std::memset(buf, 0, len);
+  }
+  return ZX_OK;
+}
+
+zx_status_t StubSetDcmd(brcmf_pub* drvr, int ifidx, uint cmd, void* buf, uint len,
+                        bcme_status_t* fwerr) {
+  if (fwerr) {
+    *fwerr = BCME_OK;
+  }
+  return ZX_OK;
+}
+
+// Registers a bus on FakeReloadableSdio and starts it with fake firmware, so tests can run complete
+// reloads.
+class SdioReloadTest : public SdioTest {
+ protected:
+  void SetUp() override {
+    device_.enable_firmware_load_ = true;
+    device_.clm_needed_ = false;
+    ASSERT_OK(fidl_loop_.StartThread("fidl-servers"));
+
+    fidl::WireSyncClient<fuchsia_hardware_gpio::Gpio> gpios[GPIO_COUNT] = {};
+    gpios[WIFI_OOB_IRQ_GPIO_INDEX].Bind(wifi_gpio_.SyncCall(&fake_gpio::FakeGpio::Connect));
+    ddk::SdioProtocolClient sdio_clients[SDIO_FN_COUNT] = {sdio1_.GetClient(), sdio2_.GetClient()};
+    ASSERT_OK(brcmf_sdio_register(device_.drvr(), gpios, sdio_clients, &bus_if_));
+    orig_query_dcmd_ = device_.drvr()->proto->query_dcmd;
+    orig_set_dcmd_ = device_.drvr()->proto->set_dcmd;
+    device_.drvr()->proto->query_dcmd = StubQueryDcmd;
+    device_.drvr()->proto->set_dcmd = StubSetDcmd;
+
+    ASSERT_OK(brcmf_sdio_load_files(device_.drvr(), /*reload=*/false));
+    ASSERT_OK(brcmf_bus_started(device_.drvr(), /*drvr_restarting=*/false));
+
+    sdiodev_ = bus_if_->bus_priv.sdio;
+    orig_config_ = device_.drvr()->config;
+    orig_ifp_ = device_.drvr()->iflist[0];
+    ASSERT_NOT_NULL(orig_config_);
+    ASSERT_NOT_NULL(orig_ifp_);
+    ASSERT_NO_FATAL_FAILURE(ExpectBusUp());
+  }
+
+  void TearDown() override {
+    g_test_fail_ver_dcmd = ZX_OK;
+    if (bus_if_) {
+      device_.drvr()->proto->query_dcmd = orig_query_dcmd_;
+      device_.drvr()->proto->set_dcmd = orig_set_dcmd_;
+      brcmf_sdio_exit(bus_if_.get());
+    }
+  }
+
+  void ExpectBusUp() {
+    EXPECT_EQ(sdiodev_->state, BRCMF_SDIOD_DATA);
+    EXPECT_EQ(bus_if_->state, BRCMF_BUS_UP);
+    EXPECT_TRUE(sdiodev_->bus->wd_active.load());
+    EXPECT_EQ(device_.drvr()->config, orig_config_);
+    EXPECT_EQ(device_.drvr()->iflist[0], orig_ifp_);
+  }
+
+  void ExpectBusDownAndIntact() {
+    EXPECT_EQ(sdiodev_->state, BRCMF_SDIOD_DOWN);
+    EXPECT_EQ(bus_if_->state, BRCMF_BUS_DOWN);
+    EXPECT_FALSE(sdiodev_->bus->wd_active.load());
+    EXPECT_EQ(device_.drvr()->config, orig_config_);
+    EXPECT_EQ(device_.drvr()->iflist[0], orig_ifp_);
+    VerifyTxRejectedCleanlyWhileSdioDown(device_.drvr());
+  }
+
+  // Fails a reload after the firmware is running, in the two places that can happen, then checks
+  // that the next reload succeeds. `reload` runs one reload attempt.
+  void TestPostFirmwareFailures(fit::function<zx_status_t()> reload) {
+    // Fail CLM load after brcmf_sdio_firmware_callback marks the bus up and starts the watchdog.
+    device_.clm_needed_ = true;
+    device_.fail_clm_load_ = ZX_ERR_NOT_FOUND;
+    int card_resets = sdio1_.card_reset_count_;
+    EXPECT_EQ(reload(), ZX_ERR_NOT_FOUND);
+    // Once before the reload and once more after the failure, to quiet the running firmware.
+    EXPECT_EQ(sdio1_.card_reset_count_, card_resets + 2);
+    device_.clm_needed_ = false;
+    ExpectBusDownAndIntact();
+
+    // Fail preinit DCMD in brcmf_bus_started after brcmf_sdio_load_files succeeds.
+    g_test_fail_ver_dcmd = ZX_ERR_TIMED_OUT;
+    card_resets = sdio1_.card_reset_count_;
+    EXPECT_EQ(reload(), ZX_ERR_TIMED_OUT);
+    EXPECT_EQ(sdio1_.card_reset_count_, card_resets + 2);
+    g_test_fail_ver_dcmd = ZX_OK;
+    ExpectBusDownAndIntact();
+
+    // Subsequent reload brings the bus back up cleanly.
+    card_resets = sdio1_.card_reset_count_;
+    EXPECT_OK(reload());
+    EXPECT_EQ(sdio1_.card_reset_count_, card_resets + 1);
+    ExpectBusUp();
+  }
+
+  FakeSdioDevice device_;
+  FakeReloadableSdio sdio1_;
+  FakeReloadableSdio sdio2_;
+  async::Loop fidl_loop_{&kAsyncLoopConfigNoAttachToCurrentThread};
+  async_patterns::TestDispatcherBound<fake_gpio::FakeGpio> wifi_gpio_{fidl_loop_.dispatcher(),
+                                                                      std::in_place};
+  std::unique_ptr<brcmf_bus> bus_if_;
+  brcmf_sdio_dev* sdiodev_ = nullptr;
+  brcmf_cfg80211_info* orig_config_ = nullptr;
+  brcmf_if* orig_ifp_ = nullptr;
+  decltype(brcmf_proto::query_dcmd) orig_query_dcmd_ = nullptr;
+  decltype(brcmf_proto::set_dcmd) orig_set_dcmd_ = nullptr;
+};
+
+TEST_F(SdioReloadTest, RecoveryPostFirmwareFailureResetsBusStateAndRecovers) {
+  TestPostFirmwareFailures([this] { return brcmf_sdio_recovery(bus_if_.get()); });
+}
+
+// Device::Reset reloads through bus suspend and resume instead of recovery.
+TEST_F(SdioReloadTest, ResumePostFirmwareFailureResetsBusStateAndRecovers) {
+  TestPostFirmwareFailures([this] {
+    EXPECT_OK(brcmf_bus_suspend(bus_if_.get()));
+    return brcmf_bus_resume(bus_if_.get());
+  });
+}
+
+TEST_F(SdioReloadTest, ResumeProbeFailureKeepsBusDown) {
+  ASSERT_OK(brcmf_bus_suspend(bus_if_.get()));
+  sdio1_.fail_chipclkcsr_ = ZX_ERR_IO_REFUSED;
+  EXPECT_EQ(brcmf_bus_resume(bus_if_.get()), ZX_ERR_IO_NOT_PRESENT);
+  sdio1_.fail_chipclkcsr_ = ZX_OK;
+  ExpectBusDownAndIntact();
+
+  ASSERT_OK(brcmf_bus_suspend(bus_if_.get()));
+  EXPECT_OK(brcmf_bus_resume(bus_if_.get()));
+  ExpectBusUp();
+}
+
+// Device::Reset resumes even when suspend failed or was skipped, so resume must not rely on suspend
+// having reset the card and taken the reload lock.
+TEST_F(SdioReloadTest, ResumeAfterFailedOrSkippedSuspend) {
+  // Suspend was skipped.
+  int card_resets = sdio1_.card_reset_count_;
+  EXPECT_OK(brcmf_bus_resume(bus_if_.get()));
+  EXPECT_EQ(sdio1_.card_reset_count_, card_resets + 1);
+  ExpectBusUp();
+
+  // Suspend failed and the card still does not reset.
+  sdio1_.fail_card_reset_ = ZX_ERR_IO;
+  EXPECT_EQ(brcmf_bus_suspend(bus_if_.get()), ZX_ERR_IO);
+  EXPECT_EQ(brcmf_bus_resume(bus_if_.get()), ZX_ERR_IO);
+  sdio1_.fail_card_reset_ = ZX_OK;
+  ExpectBusDownAndIntact();
+
+  // Suspend failed and the card resets by the time resume runs.
+  sdio1_.fail_card_reset_ = ZX_ERR_IO;
+  EXPECT_EQ(brcmf_bus_suspend(bus_if_.get()), ZX_ERR_IO);
+  sdio1_.fail_card_reset_ = ZX_OK;
+  EXPECT_OK(brcmf_bus_resume(bus_if_.get()));
+  ExpectBusUp();
+}
+
+// A failed first attach must free the bus exactly once.
+TEST_F(SdioTest, RegisterFailsCleanlyWhenChipDoesNotRespond) {
+  FakeSdioDevice device;
+  FakeReloadableSdio sdio1;
+  FakeReloadableSdio sdio2;
+  fidl::WireSyncClient<fuchsia_hardware_gpio::Gpio> gpios[GPIO_COUNT] = {};
+  ddk::SdioProtocolClient sdio_clients[SDIO_FN_COUNT] = {sdio1.GetClient(), sdio2.GetClient()};
+
+  sdio1.fail_chipclkcsr_ = ZX_ERR_IO_REFUSED;
+  std::unique_ptr<brcmf_bus> bus_if;
+  EXPECT_EQ(brcmf_sdio_register(device.drvr(), gpios, sdio_clients, &bus_if),
+            ZX_ERR_IO_NOT_PRESENT);
+  EXPECT_NULL(bus_if);
 }
 }  // namespace

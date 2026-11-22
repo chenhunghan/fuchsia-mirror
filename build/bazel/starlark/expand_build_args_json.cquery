@@ -56,6 +56,16 @@ def format(target):
         # For debuggability, record the labels of the input build_flags()
         sources.append(str(info.label))
 
+    extra_fields = {}
+
+    # extra_cpp_link_flags carries link_deps flags serialized into
+    # cc_shared_library link response files, where CcInfo on
+    # additional_linker_inputs is ignored (see "Supporting `cc_shared_library()`
+    # targets" in //build/bazel_sdk/fuchsia_rules_common/build_flags/README.md).
+    extra_cpp_link_flags = getattr(list_info, "extra_cpp_link_flags", None)
+    if extra_cpp_link_flags:
+        extra_fields["extra_cpp_link_flags"] = extra_cpp_link_flags
+
     return json.encode(struct(
         label = str(target.label),
         cflags = cflags,
@@ -68,4 +78,5 @@ def format(target):
         rustflags = rustflags,
         rustenv = rustenv,
         sources = sources,
+        **extra_fields
     ))

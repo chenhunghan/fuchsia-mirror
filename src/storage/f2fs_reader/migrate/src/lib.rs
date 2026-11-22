@@ -21,7 +21,7 @@ use fxfs::object_store::{
     NewChildStoreOptions, ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKind, ObjectStore,
     ObjectValue, PosixAttributes, StoreOptions, Timestamp, VOLUME_DATA_KEY_ID,
 };
-use fxfs_crypto::{Crypt, EncryptionKey};
+use fxfs_crypto::{Crypt, EncryptionKey, MAX_SYMLINK_LEN};
 use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
@@ -90,7 +90,6 @@ fn migrate_xattr(
                     "unexpected security xattr {:?}",
                     xattr.name
                 );
-                // TODO(https://fxbug.dev/450104899): Ensure that 'security.sehash' is also treated as 'security' xattr namespace.
                 let mut name: Vec<u8> = b"security.".into();
                 name.extend_from_slice(&xattr.name);
                 transaction.add(
@@ -522,16 +521,17 @@ pub async fn migrate(
                         f2fs_metadata_blocks.insert(*addr);
                     }
 
-                    // Symlinks are stored as inline data.
-                    let Some(filename) = &inode.inline_data else {
-                        bail!("Symlink missing inline data");
-                    };
-                    let mut filename = filename.to_vec();
+                    // Key selection here and in deep_copy_files relies on these agreeing.
+                    let encrypted = inode.header.advise_flags.contains(AdviseFlags::Encrypted);
+                    ensure!(
+                        encrypted == inode.context.is_some()
+                            && encrypted == dir.dir_type().is_encrypted(),
+                        "Inconsistent symlink encryption state"
+                    );
+                    let filename = f2fs.read_raw_symlink(&inode).await?;
+                    ensure!(filename.len() <= MAX_SYMLINK_LEN, "Symlink too long");
 
                     if dir.dir_type().is_encrypted() {
-                        // Redundant 2-byte length prefix on encrypted symlinks (use
-                        // inline_data.len()).
-                        filename.drain(..2);
                         transaction.add(
                             dir.owner().store_object_id(),
                             Mutation::replace_or_insert_object(
@@ -558,6 +558,14 @@ pub async fn migrate(
                     }
 
                     if filename.len() <= MAX_INLINE_SYMLINK_SIZE {
+                        // Fxfs stores the target inline, so any F2FS data block holding it isn't
+                        // copied. Preserve it along with the other F2FS metadata.
+                        for extent in inode.data_blocks() {
+                            f2fs_metadata_blocks.extend(
+                                extent.physical_block_num
+                                    ..extent.physical_block_num + extent.length,
+                            );
+                        }
                         let object_attributes = inode_to_object_attributes(&inode, 0);
                         let value = if dir.dir_type().is_encrypted() {
                             ObjectValue::encrypted_symlink(
@@ -920,7 +928,7 @@ pub async fn verify(
                 }
                 FileType::Symlink => {
                     if check_file_contents {
-                        let f2fs_link = f2fs.read_symlink(&inode)?;
+                        let f2fs_link = f2fs.read_symlink(&inode).await?;
                         let fxfs_link = dir
                             .store()
                             .read_symlink(object_id)
@@ -1028,14 +1036,17 @@ pub async fn deep_copy_files(
             vol.crypt().clone(),
         )
         .await?;
-        if inode.header.inline_flags.contains(InlineFlags::Data) {
-            let inline_data = inode.inline_data.as_ref().unwrap();
-            let (data, key_id, encrypt) =
-                if inode.header.advise_flags.contains(AdviseFlags::Encrypted) {
-                    (&inline_data[2..], FSCRYPT_KEY_ID, false)
-                } else {
-                    (&inline_data[..], VOLUME_DATA_KEY_ID, true)
-                };
+        let inline_data = if inode.header.mode.is_symlink() {
+            Some(f2fs.read_raw_symlink(&inode).await?)
+        } else {
+            inode.inline_data.as_deref().map(<[u8]>::to_vec)
+        };
+        if let Some(data) = inline_data {
+            let (key_id, encrypt) = if inode.header.advise_flags.contains(AdviseFlags::Encrypted) {
+                (FSCRYPT_KEY_ID, false)
+            } else {
+                (VOLUME_DATA_KEY_ID, true)
+            };
             let mut buffer = object.allocate_buffer(FXFS_BLOCK_SIZE.get() as usize).await;
             let mut transaction = fxfs
                 .root_store()
@@ -1045,7 +1056,8 @@ pub async fn deep_copy_files(
                 )
                 .await
                 .expect("new default encrypted file transaction");
-            buffer.subslice_mut(..data.len()).copy_from_slice(data);
+            buffer.subslice_mut(..data.len()).copy_from_slice(&data);
+            buffer.subslice_mut(data.len()..).fill(0);
             object
                 .raw_multi_write(
                     &mut transaction,

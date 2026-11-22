@@ -22,5 +22,6 @@ fuchsia_package("block_tools") {
     "iochk",
     "iotime",
     "lsblk",
+    "ufsutil",
   ]
 }

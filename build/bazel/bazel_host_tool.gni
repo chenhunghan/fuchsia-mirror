@@ -13,9 +13,86 @@ _temp = {
 _host_tools_dir = _temp.host_tools_dir
 _host_tools_base_path_override = _temp.host_tools_base_path_override
 
+# Host tool output locations
+#
+# Infra expects every host tool to exist in both the base host toolchain's
+# `root_out_dir` (e.g. `host_x64/`) and, when `select_variant` redirects host
+# executables to a variant toolchain, that variant toolchain's `root_out_dir`
+# (e.g. `host_x64-asan/`), with `tool_paths.json` pointing at the latter.
+# Tools listed in `tool_paths.json` must share a directory: e.g. ffx subtools
+# and test-pilot must be next to ffx (see
+# //tools/integration/testsharder/task_requests.go and
+# //tools/botanist/cmd/run.go). bazel_host_tool() satisfies this contract while
+# host tools are migrated from GN to Bazel.
+#
+# TODO(https://fxbug.dev/583564369): Revisit this contract once the GN to Bazel
+# migration is done.
+#
+# - GN executables: `variant_target()` in //build/config/BUILDCONFIG.gn builds
+#   the executable in the host variant toolchain (e.g. `host_x64-asan`),
+#   reports it in `tool_paths.json` from that toolchain's `root_out_dir`, and
+#   copies it to the base host toolchain's `root_out_dir` (e.g. `host_x64/`).
+# - bazel_host_tool(): the base host toolchain instance (e.g. `host_x64`)
+#   invokes Bazel, which builds the tool for the `host` Bazel platform. That
+#   platform's configuration reflects the `select_variant` value for host
+#   binaries (see //build/bazel/config/bazel_args.gni), so the binary is
+#   already built with the host variant's instrumentation where Bazel supports
+#   it: sanitizers (e.g. ASan) for C++ only, coverage and profile for C++ and
+#   Rust, nothing for Go yet. The base instance then copies the binary to
+#   `host_x64/` and, when `select_variant` redirects host executables to a
+#   variant toolchain (including `-novariant`), to that toolchain's
+#   `root_out_dir` (`bazel_host_tool_root_out_dir`, e.g. `host_x64-asan/`).
+#   `tool_paths.json` reports the latter. The GN host variant toolchain
+#   instance forwards to the base one instead of copying the outputs again.
+#
+# See the variant toolchain branch of the template below for an example.
+#
+# `_tool_paths_toolchain` is the toolchain where GN builds host executables for
+# the current host toolchain:
+if (!is_host) {
+  # Not a host toolchain. This file is still imported here because, following
+  # GN convention, BUILD.gn files import it at the top level (directly or via
+  # //src/developer/ffx/build/ffx_tool.gni) and evaluate it in every toolchain,
+  # including ones that define both host and Fuchsia targets (e.g.
+  # //build/bazel/rules/tests/BUILD.gn). bazel_host_tool() asserts `is_host`,
+  # so use an explicitly invalid toolchain that makes any use of
+  # `bazel_host_tool_root_out_dir` here easy to spot.
+  _tool_paths_toolchain = "//:BAZEL_HOST_TOOL_IN_NON_HOST_TOOLCHAIN"
+} else if (_host_tools_base_path_override != "") {
+  # Sub-builds (see //build/subbuild.gni): host tools are copied from the
+  # parent build's base toolchain outputs and never built in a variant
+  # toolchain, so keep them in the base toolchain's `root_out_dir`.
+  _tool_paths_toolchain = toolchain_variant.base
+} else if (toolchain_variant.default_host_variant_toolchain !=
+           toolchain_variant.base) {
+  # A host variant is selected (e.g. `host_asan`, `host_asan-ubsan`): GN builds
+  # host executables in that variant toolchain (e.g. `host_x64-asan-ubsan/`).
+  _tool_paths_toolchain = toolchain_variant.default_host_variant_toolchain
+} else if (select_variant_canonical != []) {
+  # Only target variants are selected (e.g. `lto`, `thinlto`, `kasan`): none
+  # of them match host executables, so the catch-all `novariant` selector that
+  # BUILDCONFIG.gn appends to any non-empty `select_variant` (other than
+  # `[ "clang" ]`) does, and GN builds host executables in
+  # `${toolchain_variant.base}-novariant` (e.g. `host_x64-novariant/`).
+  _tool_paths_toolchain = "${toolchain_variant.base}-novariant"
+} else {
+  # No variant is selected: GN builds host executables in the base toolchain.
+  _tool_paths_toolchain = toolchain_variant.base
+}
+
+# The directory where bazel_host_tool() places and reports its output binary
+# for the current host toolchain (see above).
+bazel_host_tool_root_out_dir =
+    get_label_info("//anything(${_tool_paths_toolchain})", "root_out_dir")
+
 # bazel_host_tool() is a wrapper around bazel_build_action that provides
 # the tool_paths metadata that BUILDCONFIG.gn provides for GN executable
 # targets.
+#
+# When `select_variant` redirects host executables to a variant toolchain
+# (including `-novariant`), the binary (and its `companion_files`) is also
+# copied to `bazel_host_tool_root_out_dir`, and `tool_paths` metadata points
+# there (see "Host tool output locations" above).
 #
 # In sub-builds (see //build/subbuild.gni), where
 # `host_tools_base_path_override` is set, it doesn't build anything. Instead it
@@ -37,7 +114,8 @@ _host_tools_base_path_override = _temp.host_tools_base_path_override
 #
 #  companion_files: (list of strings, optional) basenames of companion files
 #     in `{{BAZEL_TARGET_OUT_DIR}}` to copy alongside the binary into
-#     `root_out_dir` (and `host_tools_dir` when `install_host_tool` is true).
+#     `root_out_dir` and `bazel_host_tool_root_out_dir` (and `host_tools_dir`
+#     when `install_host_tool` is true).
 #
 #  All other bazel_build_action() inputs *except* 'copy_outputs'
 #     are forwarded to bazel_build_action().  The template creates
@@ -51,6 +129,7 @@ template("bazel_host_tool") {
   assert(!defined(invoker.copy_outputs),
          "This template creates copy_outputs, don't provide it.")
 
+  _companion_files = []
   if (defined(invoker.companion_files)) {
     foreach(_companion_file, invoker.companion_files) {
       assert(
@@ -58,6 +137,7 @@ template("bazel_host_tool") {
               get_path_info(_companion_file, "file") == _companion_file,
           "companion_files must be non-empty basenames, got ${_companion_file}.")
     }
+    _companion_files = invoker.companion_files
   }
 
   if (defined(invoker.output_name)) {
@@ -66,22 +146,99 @@ template("bazel_host_tool") {
     _output_name = target_name
   }
 
-  if (current_toolchain == toolchain_variant.base) {
-    _output_path = "${root_out_dir}/${_output_name}"
+  if (current_toolchain != toolchain_variant.base) {
+    # Variant toolchain (e.g. `host_x64-asan`): make the outputs available in
+    # this toolchain's `root_out_dir`.
+    #
+    # If in a variant toolchain, the expectation is to find the host binary
+    # in the _variant_'s toolchain outdir.  For non-Bazel targets, this is
+    # where they are compiled to, and then they're copied to the base
+    # toolchain location.  However, Bazel knows nothing about GN toolchain
+    # variants: the tool is built once, by the base toolchain instance of this
+    # target (see below). So we do the opposite: the base toolchain instance
+    # copies the outputs into `bazel_host_tool_root_out_dir` itself, and any
+    # other variant toolchain copies them from the base toolchain's
+    # `root_out_dir`.
+    #
+    # Actions that use `host_out_dir` to locate the binary for compiled_action()
+    # expect to find the binary at the variant path.
+    #
+    # For example, with `select_variant = [ "host_asan" ]`:
+    #
+    #   GN executable("foo"): built in the variant toolchain, copied to base.
+    #
+    #     :foo(host_x64-asan)   builds  host_x64-asan/foo  (in tool_paths.json)
+    #     :foo(host_x64)        copies  host_x64-asan/foo -> host_x64/foo
+    #
+    #   bazel_host_tool("bar"): built by Bazel, copied by the base instance.
+    #
+    #     :bar(host_x64)        runs Bazel, then copies
+    #                                   <bazel-out>/bar -> host_x64/bar
+    #                                   <bazel-out>/bar -> host_x64-asan/bar
+    #                                   (in tool_paths.json)
+    #     :bar(host_x64-asan)   group() forwarding to :bar(host_x64)
+    #     :bar(host_x64-ubsan)  copies  host_x64/bar -> host_x64-ubsan/bar
+    #                                   (any other variant toolchain)
+    #
+    # (Bazel applies the host variant's sanitizer instrumentation only to C++
+    # binaries, so a C++ `bar` is an ASan binary in all locations. Rust
+    # binaries only get the coverage and profile variants, and Go binaries no
+    # variant instrumentation yet.)
+    _base_target = ":${target_name}(${toolchain_variant.base})"
+    if (root_out_dir == bazel_host_tool_root_out_dir) {
+      # This is the variant toolchain where GN builds host executables (see
+      # "Host tool output locations" above): the base toolchain instance
+      # already copies the outputs here, so forward to it rather than writing
+      # the same outputs again.
+      group(target_name) {
+        forward_variables_from(invoker,
+                               [
+                                 "testonly",
+                                 "visibility",
+                               ])
+        public_deps = [ _base_target ]
+      }
+      not_needed([
+                   "_companion_files",
+                   "_output_name",
+                 ])
+    } else {
+      # Any other variant toolchain (e.g. one that a target-specific
+      # `select_variant` selector picks for some host executables): copy the
+      # outputs from the base toolchain's `root_out_dir`.
+      _base_out_dir = get_label_info(_base_target, "root_out_dir")
 
+      copy(target_name) {
+        forward_variables_from(invoker,
+                               [
+                                 "testonly",
+                                 "visibility",
+                               ])
+        sources = []
+        foreach(_file, [ _output_name ] + _companion_files) {
+          sources += [ "${_base_out_dir}/${_file}" ]
+        }
+        outputs = [ "${root_out_dir}/{{source_file_part}}" ]
+        deps = [ _base_target ]
+      }
+    }
+    not_needed(invoker, "*")
+  } else {
+    # Base toolchain (e.g. `host_x64`): this is the only instance that
+    # produces the tool, either by building it with Bazel or, in sub-builds, by
+    # copying it from the parent build (see the two branches below). It also
+    # emits the `tool_paths` metadata, so each tool is listed once in
+    # `tool_paths.json` regardless of how many variant toolchains copy it.
     _install_host_tool =
         defined(invoker.install_host_tool) && invoker.install_host_tool &&
         # Only install in the "real" host toolchain.
         current_toolchain == host_toolchain
 
-    _companion_files = []
-    if (defined(invoker.companion_files)) {
-      _companion_files = invoker.companion_files
-    }
     _runtime_files = []
     foreach(_companion_file, _companion_files) {
       _runtime_files +=
-          [ rebase_path("${root_out_dir}/${_companion_file}", root_build_dir) ]
+          [ rebase_path("${bazel_host_tool_root_out_dir}/${_companion_file}",
+                        root_build_dir) ]
     }
 
     _metadata = {
@@ -91,174 +248,124 @@ template("bazel_host_tool") {
           label = get_label_info(":${target_name}", "label_with_toolchain")
           name = _output_name
           os = current_os
-          path = rebase_path(_output_path, root_build_dir)
+          path = rebase_path("${bazel_host_tool_root_out_dir}/${_output_name}",
+                             root_build_dir)
           if (_runtime_files != []) {
             runtime_files = _runtime_files
           }
         },
       ]
     }
-  }
 
-  if (current_toolchain == toolchain_variant.base &&
-      _host_tools_base_path_override != "") {
-    # build/subbuild.py runs `gn gen` and Ninja directly, without
-    # build/regenerator.py, so sub-builds have no Bazel workspace or Ninja
-    # delayed-action worker and can't run bazel_action() targets. Like
-    # install_host_tools(), reuse the parent build's binary instead. This
-    # relies on the parent build having built the tool before starting the
-    # sub-build (see the `deps` of the subbuild() action).
-    _parent_build_files = []
-    foreach(_file, [ _output_name ] + _companion_files) {
-      _parent_build_file_rebased =
-          "${_host_tools_base_path_override}/" +
-          rebase_path("${root_out_dir}/${_file}", root_build_dir)
-      _parent_build_files += [ "//" + rebase_path(_parent_build_file_rebased,
-                                                  "//",
-                                                  root_build_dir) ]
-    }
-
-    _install_deps = []
-    if (_install_host_tool) {
-      _install_target = "${target_name}.install"
-      _install_deps += [ ":${_install_target}" ]
-
-      copy(_install_target) {
-        forward_variables_from(invoker, [ "testonly" ])
-        visibility = [ ":*" ]
-        sources = _parent_build_files
-        outputs = [ "${_host_tools_dir}/{{source_file_part}}" ]
-      }
-    }
-
-    copy(target_name) {
-      forward_variables_from(invoker,
-                             [
-                               "testonly",
-                               "visibility",
-                             ])
-      sources = _parent_build_files
-      outputs = [ "${root_out_dir}/{{source_file_part}}" ]
-      deps = _install_deps
-      metadata = _metadata
-    }
-    not_needed(invoker, "*")
-  } else if (current_toolchain == toolchain_variant.base) {
-    # If in the base toolchain, copy the Bazel outputs as normal. Variant
-    # toolchains need to be handled separately (see the else case below)
-
-    bazel_build_action(target_name) {
-      forward_variables_from(invoker,
-                             "*",
-                             [
-                               "output_name",
-                               "bazel_output_path",
-                               "install_host_tool",
-                               "companion_files",
-
-                               # standard "deep-forwarded" params
-                               "testonly",
-                               "visibility",
-                             ])
-      forward_variables_from(invoker,
-                             [
-                               "testonly",
-                               "visibility",
-                             ])
-
-      bazel_config = "host"
-
-      # We want to copy the binary to `//out/default/host_x64/my_tool` but
-      # the 'ninja_base_dir' defaults to `target_out_dir`, which is
-      # `//out/default/host_x64/some/path/`.
-      # Set `ninja_base_dir` to `root_build_dir` (ie, `//out/default`), so that
-      # here we can use an output path that's relative to the root of the build.
-      # This also allows us to install files in `host_tools_dir` if requested,
-      # which `root_out_dir` would not support.
-      ninja_base_dir = root_build_dir
-
-      copy_outputs = [
-        {
-          bazel = invoker.bazel_output_path
-
-          # We want to copy the binary to `//out/default/host_x64/my_tool` but
-          # the default 'ninja_base_dir' is `//out/default/host_x64/some/path/`
-          # and so above we forcibly set the `ninja_base_dir` to
-          # `//out/default`, so that here we can use an output path that's
-          # relative to the root of the build.
-          ninja = rebase_path(_output_path, root_build_dir)
-        },
-      ]
-
-      foreach(_companion_file, _companion_files) {
-        copy_outputs += [
-          {
-            bazel = "{{BAZEL_TARGET_OUT_DIR}}/${_companion_file}"
-            ninja = rebase_path("${root_out_dir}/${_companion_file}",
-                                root_build_dir)
-          },
-        ]
+    if (_host_tools_base_path_override != "") {
+      # Sub-build (`host_tools_base_path_override` is set, see
+      # //build/subbuild.gni): copy the tool from the parent build instead of
+      # building it.
+      #
+      # build/subbuild.py runs `gn gen` and Ninja directly, without
+      # build/regenerator.py, so sub-builds have no Bazel workspace or Ninja
+      # delayed-action worker and can't run bazel_action() targets. Like
+      # install_host_tools(), reuse the parent build's binary instead. This
+      # relies on the parent build having built the tool before starting the
+      # sub-build (see the `deps` of the subbuild() action).
+      _parent_build_files = []
+      foreach(_file, [ _output_name ] + _companion_files) {
+        _parent_build_file_rebased =
+            "${_host_tools_base_path_override}/" +
+            rebase_path("${root_out_dir}/${_file}", root_build_dir)
+        _parent_build_files +=
+            [ "//" +
+              rebase_path(_parent_build_file_rebased, "//", root_build_dir) ]
       }
 
-      # Add an additional copy in the host tools outdir if requested.
+      _install_deps = []
       if (_install_host_tool) {
-        copy_outputs += [
-          {
-            bazel = invoker.bazel_output_path
+        _install_target = "${target_name}.install"
+        _install_deps += [ ":${_install_target}" ]
 
-            # The use of 'root_build_dir' as 'ninja_base_dir' is why we can
-            # also copy to the `host_tools_dir` here, as it's also able to
-            # be expressed relative to the root_build_dir.
-            ninja = rebase_path("${_host_tools_dir}/${_output_name}",
-                                root_build_dir)
-          },
-        ]
+        copy(_install_target) {
+          forward_variables_from(invoker, [ "testonly" ])
+          visibility = [ ":*" ]
+          sources = _parent_build_files
+          outputs = [ "${_host_tools_dir}/{{source_file_part}}" ]
+        }
+      }
 
-        foreach(_companion_file, _companion_files) {
+      copy(target_name) {
+        forward_variables_from(invoker,
+                               [
+                                 "testonly",
+                                 "visibility",
+                               ])
+        sources = _parent_build_files
+        outputs = [ "${root_out_dir}/{{source_file_part}}" ]
+        deps = _install_deps
+        metadata = _metadata
+      }
+      not_needed(invoker, "*")
+    } else {
+      # Regular build: build the tool with Bazel, then copy the binary and its
+      # companion files from the Bazel output tree into each directory in
+      # `_output_dirs`, where GN dependents and `tool_paths.json` expect them:
+      # this toolchain's `root_out_dir`, `bazel_host_tool_root_out_dir` when a
+      # variant redirects host executables (see "Host tool output locations"
+      # above), and `host_tools_dir` when `install_host_tool` is set.
+      _output_dirs = [ root_out_dir ]
+      if (bazel_host_tool_root_out_dir != root_out_dir) {
+        _output_dirs += [ bazel_host_tool_root_out_dir ]
+      }
+      if (_install_host_tool) {
+        _output_dirs += [ _host_tools_dir ]
+      }
+
+      bazel_build_action(target_name) {
+        forward_variables_from(invoker,
+                               "*",
+                               [
+                                 "output_name",
+                                 "bazel_output_path",
+                                 "install_host_tool",
+                                 "companion_files",
+
+                                 # standard "deep-forwarded" params
+                                 "testonly",
+                                 "visibility",
+                               ])
+        forward_variables_from(invoker,
+                               [
+                                 "testonly",
+                                 "visibility",
+                               ])
+
+        bazel_config = "host"
+
+        # Set `ninja_base_dir` to `root_build_dir` (e.g. `//out/default`) rather
+        # than the default `target_out_dir`
+        # (`//out/default/host_x64/some/path/`) so output paths can target
+        # `root_out_dir` and `host_tools_dir` directly.
+        ninja_base_dir = root_build_dir
+
+        copy_outputs = []
+        foreach(_dir, _output_dirs) {
           copy_outputs += [
             {
-              bazel = "{{BAZEL_TARGET_OUT_DIR}}/${_companion_file}"
-              ninja = rebase_path("${_host_tools_dir}/${_companion_file}",
-                                  root_build_dir)
+              bazel = invoker.bazel_output_path
+              ninja = rebase_path("${_dir}/${_output_name}", root_build_dir)
             },
           ]
+          foreach(_companion_file, _companion_files) {
+            copy_outputs += [
+              {
+                bazel = "{{BAZEL_TARGET_OUT_DIR}}/${_companion_file}"
+                ninja =
+                    rebase_path("${_dir}/${_companion_file}", root_build_dir)
+              },
+            ]
+          }
         }
+
+        metadata = _metadata
       }
-
-      metadata = _metadata
     }
-  } else {
-    # If in a variant toolchain, the expectation is to find the host binary
-    # in the _variant_'s toolchain outdir.  For non-Bazel targets, this is
-    # where they are compiled to, and then they're copied to the base
-    # toolchain location.  However, we need to do the opposite and copy it
-    # to the variant toolchain outdir.
-    #
-    # If `host_out_dir` would point at the non-variant path, then we could
-    # use that and avoid this copy.  Actions that are using `host_out_dir`
-    # to locate the binary for compiled_action() expect to find the
-    # binary at the variant path, so we need this copy.  If they used the
-    # copy in the non-variant location, then we could do a group with public
-    # deps here instead of the copy().
-
-    base_target = ":${target_name}(${toolchain_variant.base})"
-    base_target_outdir = get_label_info(base_target, "root_out_dir")
-
-    copy(target_name) {
-      forward_variables_from(invoker,
-                             [
-                               "testonly",
-                               "visibility",
-                             ])
-      sources = [ "${base_target_outdir}/${_output_name}" ]
-      if (defined(invoker.companion_files)) {
-        foreach(_companion_file, invoker.companion_files) {
-          sources += [ "${base_target_outdir}/${_companion_file}" ]
-        }
-      }
-      outputs = [ "${root_out_dir}/{{source_file_part}}" ]
-      deps = [ base_target ]
-    }
-    not_needed(invoker, "*")
   }
 }

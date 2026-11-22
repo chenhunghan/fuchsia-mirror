@@ -94,6 +94,7 @@ cc_test_executable("system_log_recorder_unittest_exe") {
     "//src/developer/forensics/feedback_data/system_log_recorder/encoding:identity_encoder",
     "//src/developer/forensics/feedback_data/system_log_recorder/encoding:production",
     "//src/developer/forensics/testing:gtest_with_syslog_main",
+    "//src/developer/forensics/testing:log_message",
     "//src/developer/forensics/testing:unit_test_fixture",
     "//src/developer/forensics/testing/stubs:diagnostics",
     "//src/developer/forensics/utils:vmo",
@@ -109,7 +110,7 @@ cc_test_executable("writer_unittest_exe") {
   sources = [ "writer_unittest.cc" ]
 
   deps = [
-    "//sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp",
+    "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
     "//src/developer/forensics/feedback_data/system_log_recorder:reader",
     "//src/developer/forensics/feedback_data/system_log_recorder:src",
     "//src/developer/forensics/feedback_data/system_log_recorder/encoding:decoder",

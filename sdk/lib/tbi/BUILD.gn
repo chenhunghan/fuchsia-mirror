@@ -34,6 +34,7 @@ library_headers("tbi") {
   visibility = [
     ":*",
     "//sdk/lib/c/test/sanitizer:*",
+    "//src/bringup/bin/critical-services/storage-watchdog:*",
     "//zircon/system/utest/debugger:*",
   ]
 }

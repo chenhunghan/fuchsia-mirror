@@ -100,7 +100,7 @@ class ServerConnector : public fidl::WireServer<fuchsia_hardware_audio::CodecCon
     fidl::BindServer(core_->dispatcher(), std::move(request), server_.get(), std::move(on_unbound));
   }
 
-  // LLCPP implementation for the CodecConnector API.
+  // FIDL wire implementation for the CodecConnector API.
   void Connect(fuchsia_hardware_audio::wire::CodecConnectorConnectRequest* request,
                ConnectCompleter::Sync& completer) override {
     if (server_) {

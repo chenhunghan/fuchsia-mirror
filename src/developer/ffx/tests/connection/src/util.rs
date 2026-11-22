@@ -163,10 +163,10 @@ where
     } else {
         format!("{}{}", base_addr, port.map(|v| format!(":{}", v)).unwrap_or_default())
     };
-    let nodename = std::env::var("FUCHSIA_NODENAME").unwrap();
+    let nodename = std::env::var("FUCHSIA_NODENAME").unwrap_or_default();
 
     isolate.ffx(&["target", "add", &addr]).await.expect("add target");
-    let target_identifier = if nodename.is_empty() { &addr } else { &nodename };
+    let target_identifier = if addr.is_empty() { &nodename } else { &addr };
     isolate.ffx(&["-t", target_identifier, "target", "wait"]).await.expect("wait for target");
 
     let (launched_component, component_connector) =

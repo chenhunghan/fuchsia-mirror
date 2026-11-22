@@ -74,7 +74,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, SingleThreadLifecycle) {
 
   // Expect an update from `ThreadObserver::DidCreateThread`.
   ASSERT_EQ(updates.size(), 1u);
-  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_EQ(updates[0].id, static_cast<dap::integer>(kThreadKoid));
   EXPECT_EQ(updates[0].name, "test 19028730");
   EXPECT_TRUE(updates[0].tasks.has_value());
   EXPECT_EQ(updates[0].tasks.value().size(), 0u);
@@ -110,7 +110,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, SingleThreadLifecycle) {
 
   // Expect a non-cancelled update from `ThreadObserver::OnThreadStopped`.
   ASSERT_EQ(updates.size(), 1u);
-  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_EQ(updates[0].id, static_cast<dap::integer>(kThreadKoid));
   EXPECT_EQ(updates[0].name, "test 19028730");
   EXPECT_TRUE(updates[0].tasks.has_value());
   EXPECT_EQ(updates[0].tasks.value().size(), 2u);
@@ -132,7 +132,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, SingleThreadLifecycle) {
 
   // Expect an update from `ThreadObserver::DidUpdateStackFrames` (Thread Resumed).
   ASSERT_EQ(updates.size(), 1u);
-  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_EQ(updates[0].id, static_cast<dap::integer>(kThreadKoid));
   EXPECT_EQ(updates[0].name, "test 19028730");
   EXPECT_TRUE(updates[0].tasks.has_value());
   EXPECT_EQ(updates[0].tasks.value().size(), 0u);
@@ -150,7 +150,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, SingleThreadLifecycle) {
 
   // Expect an update from `ThreadObserver::WillDestroyThread`.
   ASSERT_EQ(updates.size(), 1u);
-  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_EQ(updates[0].id, static_cast<dap::integer>(kThreadKoid));
   EXPECT_EQ(updates[0].name, "test 19028730");
   EXPECT_FALSE(updates[0].tasks.has_value());
 }
@@ -174,7 +174,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, NestedAsyncTaskStructure) {
 
   // Expect an update from `ThreadObserver::DidCreateThread`.
   ASSERT_EQ(updates.size(), 1u);
-  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_EQ(updates[0].id, static_cast<dap::integer>(kThreadKoid));
   EXPECT_EQ(updates[0].name, "test 19028730");
   EXPECT_TRUE(updates[0].tasks.has_value());
   EXPECT_EQ(updates[0].tasks.value().size(), 0u);
@@ -200,7 +200,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, NestedAsyncTaskStructure) {
 
   // Expect an update from `ThreadObserver::OnThreadStopped`.
   ASSERT_EQ(updates.size(), 1u);
-  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_EQ(updates[0].id, static_cast<dap::integer>(kThreadKoid));
   EXPECT_EQ(updates[0].name, "test 19028730");
   EXPECT_TRUE(updates[0].tasks.has_value());
   EXPECT_EQ(updates[0].tasks.value().size(), 2u);
@@ -541,7 +541,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, CppDispatcherSingleThreadLifecycle) {
 
   // Expect an update from ThreadObserver::DidCreateThread.
   ASSERT_EQ(updates.size(), 1u);
-  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_EQ(updates[0].id, static_cast<dap::integer>(kThreadKoid));
   EXPECT_TRUE(updates[0].tasks.has_value());
   EXPECT_EQ(updates[0].tasks.value().size(), 0u);
 
@@ -570,7 +570,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, CppDispatcherSingleThreadLifecycle) {
 
   // Expect an update from ThreadObserver::OnThreadStopped with C++ async backtrace.
   ASSERT_EQ(updates.size(), 1u);
-  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_EQ(updates[0].id, static_cast<dap::integer>(kThreadKoid));
   EXPECT_TRUE(updates[0].tasks.has_value());
   EXPECT_EQ(updates[0].tasks.value().size(), 2u);
   ASSERT_TRUE(updates[0].tasks.value()[0].id.has_value());
@@ -602,7 +602,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, CppNonDriverFramesAndImmediateDestruction
 
   // Expect update from ThreadObserver::DidCreateThread.
   ASSERT_EQ(updates.size(), 1u);
-  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_EQ(updates[0].id, static_cast<dap::integer>(kThreadKoid));
   EXPECT_TRUE(updates[0].tasks.has_value());
   EXPECT_EQ(updates[0].tasks.value().size(), 0u);
 
@@ -642,7 +642,7 @@ TEST_F(AsyncBacktraceSubscriptionTest, CppNonDriverFramesAndImmediateDestruction
 
   // Expect an update from ThreadObserver::WillDestroyThread (tasks omitted).
   ASSERT_EQ(updates.size(), 1u);
-  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_EQ(updates[0].id, static_cast<dap::integer>(kThreadKoid));
   EXPECT_FALSE(updates[0].tasks.has_value());
 
   updates.clear();

@@ -11,25 +11,20 @@
     ],
     offer: [
         {
+            // Must match the regulator's `vreg_name`, which aml-pwm-regulator uses to look up its
+            // global ID.
             name: "vreg-pwm-big",
             service: "fuchsia.hardware.vreg.Service",
             from: "#pwm_a-regulator",
             to: "#power-controller",
         },
         {
+            // Must match the regulator's `vreg_name`, which aml-pwm-regulator uses to look up its
+            // global ID.
             name: "vreg-pwm-little",
             service: "fuchsia.hardware.vreg.Service",
             from: "#pwm_a0_d-regulator",
             to: "#power-controller",
-        },
-        {
-            from: "#self",
-            to: "#power-controller",
-            driver_config: "fuchsia.hardware.power.DomainMetadata",
-            domains: [
-                { id: 0 },
-                { id: 1 },
-            ],
         },
     ],
 }

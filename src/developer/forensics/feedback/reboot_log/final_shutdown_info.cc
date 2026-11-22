@@ -4,6 +4,7 @@
 
 #include "src/developer/forensics/feedback/reboot_log/final_shutdown_info.h"
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <unordered_set>
@@ -394,72 +395,72 @@ std::string FinalShutdownInfo::ToRebootReasonString() const {
   }
 }
 
-std::optional<fuchsia::feedback::RebootReason> FinalShutdownInfo::ToFidlRebootReason() const {
+std::optional<fuchsia_feedback::RebootReason> FinalShutdownInfo::ToFidlRebootReason() const {
   switch (reason_) {
     case FinalShutdownReason::kCold:
-      return fuchsia::feedback::RebootReason::COLD;
+      return fuchsia_feedback::RebootReason::kCold;
     case FinalShutdownReason::kKernelPanic:
-      return fuchsia::feedback::RebootReason::KERNEL_PANIC;
+      return fuchsia_feedback::RebootReason::kKernelPanic;
     case FinalShutdownReason::kOom:
-      return fuchsia::feedback::RebootReason::SYSTEM_OUT_OF_MEMORY;
+      return fuchsia_feedback::RebootReason::kSystemOutOfMemory;
     case FinalShutdownReason::kHwWatchdog:
-      return fuchsia::feedback::RebootReason::HARDWARE_WATCHDOG_TIMEOUT;
+      return fuchsia_feedback::RebootReason::kHardwareWatchdogTimeout;
     case FinalShutdownReason::kSwWatchdog:
-      return fuchsia::feedback::RebootReason::SOFTWARE_WATCHDOG_TIMEOUT;
+      return fuchsia_feedback::RebootReason::kSoftwareWatchdogTimeout;
     case FinalShutdownReason::kBrownout:
-      return fuchsia::feedback::RebootReason::BROWNOUT;
+      return fuchsia_feedback::RebootReason::kBrownout;
     case FinalShutdownReason::kSpontaneousReboot:
-      return fuchsia::feedback::RebootReason::BRIEF_POWER_LOSS;
+      return fuchsia_feedback::RebootReason::kBriefPowerLoss;
     case FinalShutdownReason::kSpontaneousRebootDuringShutdown:
-      return fuchsia::feedback::RebootReason::SPONTANEOUS_REBOOT_DURING_SHUTDOWN;
+      return fuchsia_feedback::RebootReason::kSpontaneousRebootDuringShutdown;
     case FinalShutdownReason::kRootJobTermination:
-      return fuchsia::feedback::RebootReason::ROOT_JOB_TERMINATION;
+      return fuchsia_feedback::RebootReason::kRootJobTermination;
     case FinalShutdownReason::kUserHardReset:
-      return fuchsia::feedback::RebootReason::USER_HARD_RESET;
+      return fuchsia_feedback::RebootReason::kUserHardReset;
     case FinalShutdownReason::kNotParseable:
     case FinalShutdownReason::kGenericGraceful:
     case FinalShutdownReason::kUnexpectedReasonGraceful:
       return std::nullopt;
     case FinalShutdownReason::kSuspensionFailure:
-      return fuchsia::feedback::RebootReason::SUSPENSION_FAILURE;
+      return fuchsia_feedback::RebootReason::kSuspensionFailure;
     case FinalShutdownReason::kUserRequest:
-      return fuchsia::feedback::RebootReason::USER_REQUEST;
+      return fuchsia_feedback::RebootReason::kUserRequest;
     case FinalShutdownReason::kSystemUpdate:
-      return fuchsia::feedback::RebootReason::SYSTEM_UPDATE;
+      return fuchsia_feedback::RebootReason::kSystemUpdate;
     case FinalShutdownReason::kRetrySystemUpdate:
-      return fuchsia::feedback::RebootReason::RETRY_SYSTEM_UPDATE;
+      return fuchsia_feedback::RebootReason::kRetrySystemUpdate;
     case FinalShutdownReason::kHighTemperature:
-      return fuchsia::feedback::RebootReason::HIGH_TEMPERATURE;
+      return fuchsia_feedback::RebootReason::kHighTemperature;
     case FinalShutdownReason::kSessionFailure:
-      return fuchsia::feedback::RebootReason::SESSION_FAILURE;
+      return fuchsia_feedback::RebootReason::kSessionFailure;
     case FinalShutdownReason::kSysmgrFailure:
-      return fuchsia::feedback::RebootReason::SYSMGR_FAILURE;
+      return fuchsia_feedback::RebootReason::kSysmgrFailure;
     case FinalShutdownReason::kCriticalComponentFailure:
-      return fuchsia::feedback::RebootReason::CRITICAL_COMPONENT_FAILURE;
+      return fuchsia_feedback::RebootReason::kCriticalComponentFailure;
     case FinalShutdownReason::kCriticalDriverFailure:
-      return fuchsia::feedback::RebootReason::CRITICAL_DRIVER_FAILURE;
+      return fuchsia_feedback::RebootReason::kCriticalDriverFailure;
     case FinalShutdownReason::kFdr:
-      return fuchsia::feedback::RebootReason::FACTORY_DATA_RESET;
+      return fuchsia_feedback::RebootReason::kFactoryDataReset;
     case FinalShutdownReason::kZbiSwap:
-      return fuchsia::feedback::RebootReason::ZBI_SWAP;
+      return fuchsia_feedback::RebootReason::kZbiSwap;
     case FinalShutdownReason::kNetstackMigration:
-      return fuchsia::feedback::RebootReason::NETSTACK_MIGRATION;
+      return fuchsia_feedback::RebootReason::kNetstackMigration;
     case FinalShutdownReason::kAndroidUnexpectedReason:
-      return fuchsia::feedback::RebootReason::ANDROID_UNEXPECTED_REASON;
+      return fuchsia_feedback::RebootReason::kAndroidUnexpectedReason;
     case FinalShutdownReason::kAndroidNoReason:
-      return fuchsia::feedback::RebootReason::ANDROID_NO_REASON;
+      return fuchsia_feedback::RebootReason::kAndroidNoReason;
     case FinalShutdownReason::kAndroidRescueParty:
-      return fuchsia::feedback::RebootReason::ANDROID_RESCUE_PARTY;
+      return fuchsia_feedback::RebootReason::kAndroidRescueParty;
     case FinalShutdownReason::kAndroidCriticalProcessFailure:
-      return fuchsia::feedback::RebootReason::ANDROID_CRITICAL_PROCESS_FAILURE;
+      return fuchsia_feedback::RebootReason::kAndroidCriticalProcessFailure;
     case FinalShutdownReason::kDeveloperRequest:
-      return fuchsia::feedback::RebootReason::DEVELOPER_REQUEST;
+      return fuchsia_feedback::RebootReason::kDeveloperRequest;
     case FinalShutdownReason::kUserRequestDeviceStuck:
-      return fuchsia::feedback::RebootReason::USER_REQUEST_DEVICE_STUCK;
+      return fuchsia_feedback::RebootReason::kUserRequestDeviceStuck;
     case FinalShutdownReason::kBatteryDrained:
-      return fuchsia::feedback::RebootReason::BATTERY_DRAINED;
+      return fuchsia_feedback::RebootReason::kBatteryDrained;
     case FinalShutdownReason::kPowerLevelTransitionStuck:
-      return fuchsia::feedback::RebootReason::POWER_LEVEL_TRANSITION_STUCK;
+      return fuchsia_feedback::RebootReason::kPowerLevelTransitionStuck;
   }
 }
 

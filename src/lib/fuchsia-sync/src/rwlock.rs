@@ -136,7 +136,7 @@ const READER_MASK: i32 = !0b0111;
 ///
 /// * If a reader tries to acquire the lock => Exclusive access (readers and writers blocked)
 /// * If a writer tries to acquire the lock => Exclusive access (writers blocked)
-/// * If a writer tries to downgrade the lock => Shared access (writers blocked)
+/// * If a writer tries to downgrade the lock => Unique reader (writers blocked)
 /// * If the writer releases the lock => Initial
 ///
 /// ## Exclusive access (readers blocked)
@@ -192,6 +192,21 @@ const READER_MASK: i32 = !0b0111;
 /// * If a writer tries to acquire the lock => Unique reader (readers and writers blocked)
 /// * Otherwise => Shared access (unblocked)
 ///
+/// ## Unique reader (writers blocked)
+///
+/// In this state, there is exactly one reader, who is running on the current thread, and the
+/// WRITER_BLOCKED_BIT is set. Zero or more writers are waiting for exclusive access (the bit may
+/// have been carried over conservatively by `lock_exclusive_slow` even if no other writer is
+/// queued).
+///
+/// This state is transitory and the state machine will leave this state without outside
+/// intervention by moving to the "Shared access (unblocked)" state and waking a writer (if any) so
+/// a queued writer can re-arm WRITER_BLOCKED_BIT without stranding readers behind a stale bit.
+///
+/// * If a reader tries to acquire the lock => Unique reader (readers and writers blocked)
+/// * If a writer tries to acquire the lock => Unique reader (writers blocked)
+/// * Otherwise => Shared access (unblocked)
+///
 /// ## Unique reader (readers and writers blocked)
 ///
 /// In this state, there is exactly one reader, who is running on the current thread, and the
@@ -199,30 +214,34 @@ const READER_MASK: i32 = !0b0111;
 /// exclusive access, and a non-zero number of readers are waiting for shared access.
 ///
 /// This state is transitory and the state machine will leave this state without outside
-/// intervention by moving to the "Shared access (writers blocked)" state and waking any blocked
-/// readers.
-///
+/// intervention by moving to the "Shared access (unblocked)" state, waking any blocked readers, and
+/// waking a writer (if any).
 ///
 /// * If a reader tries to acquire the lock => Unique reader (readers and writers blocked)
 /// * If a writer tries to acquire the lock => Unique reader (readers and writers blocked)
-/// * Otherwise => Shared access (writers blocked)
+/// * Otherwise => Shared access (unblocked)
 
+#[inline]
 fn is_locked_exclusive(state: i32) -> bool {
     state & WRITER_BIT != 0
 }
 
+#[inline]
 fn has_blocked_writer(state: i32) -> bool {
     state & WRITER_BLOCKED_BIT != 0
 }
 
+#[inline]
 fn has_blocked_reader(state: i32) -> bool {
     state & READER_BLOCKED_BIT != 0
 }
 
+#[inline]
 fn can_lock_shared(state: i32) -> bool {
     !is_locked_exclusive(state) && !has_blocked_writer(state) && !has_blocked_reader(state)
 }
 
+#[inline]
 fn is_unlocked(state: i32) -> bool {
     state & (WRITER_BIT | READER_MASK) == 0
 }
@@ -414,22 +433,34 @@ impl RawSyncRwLock {
 
     #[cold]
     fn downgrade_slow(&self, mut state: i32) {
-        debug_assert!(has_blocked_reader(state));
+        debug_assert!(has_blocked_reader(state) || has_blocked_writer(state));
         loop {
-            if !has_blocked_reader(state) {
-                // Someone else must have woken up the readers.
+            let blocked_bits = state & (READER_BLOCKED_BIT | WRITER_BLOCKED_BIT);
+            if blocked_bits == 0 {
+                // Someone else must have cleared the blocked bits.
                 return;
             }
 
             match self.state.compare_exchange(
                 state,
-                state - READER_BLOCKED_BIT,
+                state - blocked_bits,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    // We cleared the READER_BLOCKED_BIT, so we need to wake the readers.
-                    self.wake_readers();
+                    // Wake blocked readers first so they can share the downgraded lock
+                    // immediately. If WRITER_BLOCKED_BIT was set, also wake a writer:
+                    // `lock_exclusive_slow` conservatively keeps WRITER_BLOCKED_BIT set after a
+                    // contended acquisition even when no other writer is queued, so leaving it set
+                    // would block all readers for the entire downgraded section. If a writer is
+                    // actually queued, waking it lets it re-arm WRITER_BLOCKED_BIT without losing
+                    // any other waiting writers.
+                    if blocked_bits & READER_BLOCKED_BIT != 0 {
+                        self.wake_readers();
+                    }
+                    if blocked_bits & WRITER_BLOCKED_BIT != 0 {
+                        self.wake_writer();
+                    }
                     return;
                 }
                 Err(observed_state) => {
@@ -522,9 +553,10 @@ unsafe impl lock_api::RawRwLock for RawSyncRwLock {
 unsafe impl lock_api::RawRwLockDowngrade for RawSyncRwLock {
     #[inline]
     unsafe fn downgrade(&self) {
-        let state = self.state.fetch_add(READER_UNIT - WRITER_BIT, Ordering::Release);
+        let state = self.state.fetch_add(READER_UNIT - WRITER_BIT, Ordering::Release)
+            + (READER_UNIT - WRITER_BIT);
 
-        if has_blocked_reader(state) {
+        if has_blocked_reader(state) || has_blocked_writer(state) {
             self.downgrade_slow(state);
         }
     }
@@ -585,6 +617,237 @@ mod test {
         assert_eq!(*guard2, 6);
     }
 
+    fn load_raw_state(lock: &lock_api::RwLock<RawSyncRwLock, u32>) -> i32 {
+        // SAFETY: Only performs an atomic load of the internal futex state for test
+        // synchronization without mutating lock state or bypassing locking invariants.
+        unsafe { lock_api::RwLock::raw(lock) }.state.load(Ordering::Acquire)
+    }
+
+    #[test]
+    fn test_downgrade_clears_stale_writer_blocked_bit_without_blocked_readers() {
+        // Bypass lock cycle detection to inspect RawSyncRwLock state transitions directly.
+        let lock = Arc::new(lock_api::RwLock::<RawSyncRwLock, u32>::new(0));
+        let writer_acquired = Arc::new(zx::Futex::new(0));
+        let allow_downgrade = Arc::new(zx::Futex::new(0));
+        let writer_downgraded = Arc::new(zx::Futex::new(0));
+        let release_downgraded = Arc::new(zx::Futex::new(0));
+
+        // Hold a shared lock so the writer must go through `lock_exclusive_slow`, which sets
+        // WRITER_BLOCKED_BIT conservatively upon acquiring the lock even with no other writers.
+        let initial_reader = lock.read();
+
+        let writer = {
+            let lock = Arc::clone(&lock);
+            let writer_acquired = Arc::clone(&writer_acquired);
+            let allow_downgrade = Arc::clone(&allow_downgrade);
+            let writer_downgraded = Arc::clone(&writer_downgraded);
+            let release_downgraded = Arc::clone(&release_downgraded);
+            std::thread::spawn(move || {
+                let mut guard = lock.write();
+                *guard = 1;
+                writer_acquired.store(1, Ordering::Release);
+                writer_acquired.wake_all();
+                while allow_downgrade.load(Ordering::Acquire) == 0 {
+                    allow_downgrade.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+                }
+                let downgraded = lock_api::RwLockWriteGuard::downgrade(guard);
+                writer_downgraded.store(1, Ordering::Release);
+                writer_downgraded.wake_all();
+                while release_downgraded.load(Ordering::Acquire) == 0 {
+                    release_downgraded.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+                }
+                assert_eq!(*downgraded, 1);
+            })
+        };
+
+        // Wait until the writer has set WRITER_BLOCKED_BIT in `lock_exclusive_slow`, then release
+        // the reader so the writer acquires the exclusive lock with a stale WRITER_BLOCKED_BIT and
+        // no blocked readers.
+        while !has_blocked_writer(load_raw_state(&lock)) {
+            std::thread::yield_now();
+        }
+        drop(initial_reader);
+        while writer_acquired.load(Ordering::Acquire) == 0 {
+            writer_acquired.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+        }
+
+        let pre_downgrade_state = load_raw_state(&lock);
+        assert!(has_blocked_writer(pre_downgrade_state));
+        assert!(!has_blocked_reader(pre_downgrade_state));
+
+        allow_downgrade.store(1, Ordering::Release);
+        allow_downgrade.wake_all();
+        while writer_downgraded.load(Ordering::Acquire) == 0 {
+            writer_downgraded.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+        }
+
+        // Downgrading must clear the stale WRITER_BLOCKED_BIT even when no readers were queued,
+        // allowing subsequent readers to acquire the shared lock while the downgraded guard is held.
+        assert!(!has_blocked_writer(load_raw_state(&lock)));
+        let new_reader = lock.try_read().expect("reader blocked by stale WRITER_BLOCKED_BIT");
+        assert_eq!(*new_reader, 1);
+        drop(new_reader);
+
+        release_downgraded.store(1, Ordering::Release);
+        release_downgraded.wake_all();
+        writer.join().expect("writer failed");
+    }
+
+    #[test]
+    fn test_downgrade_after_contended_write_allows_readers() {
+        // Bypass lock cycle detection to inspect RawSyncRwLock state transitions directly.
+        let lock = Arc::new(lock_api::RwLock::<RawSyncRwLock, u32>::new(0));
+        let writer_acquired = Arc::new(zx::Futex::new(0));
+        let allow_downgrade = Arc::new(zx::Futex::new(0));
+        let writer_downgraded = Arc::new(zx::Futex::new(0));
+        let release_downgraded = Arc::new(zx::Futex::new(0));
+
+        // Hold a shared lock so the writer must go through `lock_exclusive_slow`, which sets
+        // WRITER_BLOCKED_BIT conservatively upon acquiring the lock even with no other writers.
+        let initial_reader = lock.read();
+
+        let writer = {
+            let lock = Arc::clone(&lock);
+            let writer_acquired = Arc::clone(&writer_acquired);
+            let allow_downgrade = Arc::clone(&allow_downgrade);
+            let writer_downgraded = Arc::clone(&writer_downgraded);
+            let release_downgraded = Arc::clone(&release_downgraded);
+            std::thread::spawn(move || {
+                let mut guard = lock.write();
+                *guard = 1;
+                writer_acquired.store(1, Ordering::Release);
+                writer_acquired.wake_all();
+                while allow_downgrade.load(Ordering::Acquire) == 0 {
+                    allow_downgrade.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+                }
+                let downgraded = lock_api::RwLockWriteGuard::downgrade(guard);
+                writer_downgraded.store(1, Ordering::Release);
+                writer_downgraded.wake_all();
+                while release_downgraded.load(Ordering::Acquire) == 0 {
+                    release_downgraded.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+                }
+                assert_eq!(*downgraded, 1);
+            })
+        };
+
+        // Wait until the writer has set WRITER_BLOCKED_BIT in `lock_exclusive_slow`, then release
+        // the initial reader and wait until the writer holds the exclusive lock and has written 1.
+        while !has_blocked_writer(load_raw_state(&lock)) {
+            std::thread::yield_now();
+        }
+        drop(initial_reader);
+        while writer_acquired.load(Ordering::Acquire) == 0 {
+            writer_acquired.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+        }
+
+        // Queue a reader behind the writer while it holds the exclusive lock with a stale
+        // WRITER_BLOCKED_BIT; it must wake once the writer downgrades rather than waiting for the
+        // downgraded read guard to be dropped.
+        let blocked_reader = {
+            let lock = Arc::clone(&lock);
+            std::thread::spawn(move || {
+                let guard = lock.read();
+                assert_eq!(*guard, 1);
+            })
+        };
+        while !has_blocked_reader(load_raw_state(&lock)) {
+            std::thread::yield_now();
+        }
+
+        allow_downgrade.store(1, Ordering::Release);
+        allow_downgrade.wake_all();
+        while writer_downgraded.load(Ordering::Acquire) == 0 {
+            writer_downgraded.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+        }
+
+        // Both the previously blocked reader and a new reader must make progress while the
+        // downgraded read guard is still held.
+        blocked_reader.join().expect("blocked reader failed");
+        let new_reader = lock.try_read().expect("reader blocked on downgraded lock with no writer");
+        assert_eq!(*new_reader, 1);
+        drop(new_reader);
+
+        release_downgraded.store(1, Ordering::Release);
+        release_downgraded.wake_all();
+        writer.join().expect("writer failed");
+    }
+
+    #[test]
+    fn test_downgrade_preserves_multiple_waiting_writers() {
+        let lock = Arc::new(lock_api::RwLock::<RawSyncRwLock, u32>::new(0));
+        let writer1_acquired = Arc::new(zx::Futex::new(0));
+        let allow_downgrade = Arc::new(zx::Futex::new(0));
+        let writer1_downgraded = Arc::new(zx::Futex::new(0));
+        let release_downgraded = Arc::new(zx::Futex::new(0));
+
+        let writer1 = {
+            let lock = Arc::clone(&lock);
+            let writer1_acquired = Arc::clone(&writer1_acquired);
+            let allow_downgrade = Arc::clone(&allow_downgrade);
+            let writer1_downgraded = Arc::clone(&writer1_downgraded);
+            let release_downgraded = Arc::clone(&release_downgraded);
+            std::thread::spawn(move || {
+                let mut guard = lock.write();
+                *guard += 1;
+                writer1_acquired.store(1, Ordering::Release);
+                writer1_acquired.wake_all();
+                while allow_downgrade.load(Ordering::Acquire) == 0 {
+                    allow_downgrade.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+                }
+                let downgraded = lock_api::RwLockWriteGuard::downgrade(guard);
+                writer1_downgraded.store(1, Ordering::Release);
+                writer1_downgraded.wake_all();
+                while release_downgraded.load(Ordering::Acquire) == 0 {
+                    release_downgraded.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+                }
+                assert_eq!(*downgraded, 1);
+            })
+        };
+
+        while writer1_acquired.load(Ordering::Acquire) == 0 {
+            writer1_acquired.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+        }
+
+        // Queue two additional writers and one reader behind writer1 before it downgrades.
+        let mut waiters = vec![];
+        for _ in 0..2 {
+            let lock = Arc::clone(&lock);
+            waiters.push(std::thread::spawn(move || {
+                let mut guard = lock.write();
+                *guard += 1;
+            }));
+        }
+        let blocked_reader = {
+            let lock = Arc::clone(&lock);
+            std::thread::spawn(move || {
+                let guard = lock.read();
+                assert!(*guard >= 1);
+            })
+        };
+
+        while {
+            let state = load_raw_state(&lock);
+            !has_blocked_writer(state) || !has_blocked_reader(state)
+        } {
+            std::thread::yield_now();
+        }
+
+        allow_downgrade.store(1, Ordering::Release);
+        allow_downgrade.wake_all();
+        while writer1_downgraded.load(Ordering::Acquire) == 0 {
+            writer1_downgraded.wait(0, None, zx::MonotonicInstant::INFINITE).ok();
+        }
+
+        release_downgraded.store(1, Ordering::Release);
+        release_downgraded.wake_all();
+        writer1.join().expect("writer1 failed");
+        blocked_reader.join().expect("blocked reader failed");
+        for waiter in waiters {
+            waiter.join().expect("waiting writer failed");
+        }
+        assert_eq!(*lock.read(), 3);
+    }
+
     struct State {
         value: RwLock<u32>,
         gate: zx::Futex,
@@ -631,6 +894,37 @@ mod test {
                         reader_count, 0,
                         "A reader and writer held the RwLock at the same time."
                     );
+                }
+            })
+        }
+
+        fn spawn_downgrading_writer(state: Arc<Self>, count: usize) -> std::thread::JoinHandle<()> {
+            std::thread::spawn(move || {
+                state.wait_for_gate();
+                for _ in 0..count {
+                    let mut guard = state.value.write();
+                    *guard = *guard + 1;
+                    let writer_count = state.writer_count.fetch_add(1, Ordering::Acquire) + 1;
+                    let reader_count = state.reader_count.load(Ordering::Acquire);
+                    state.writer_count.fetch_sub(1, Ordering::Release);
+                    assert_eq!(writer_count, 1, "More than one writer held the RwLock at once.");
+                    assert_eq!(
+                        reader_count, 0,
+                        "A reader and writer held the RwLock at the same time."
+                    );
+
+                    let downgraded = crate::RwLockWriteGuard::downgrade(guard);
+                    let observed_value = *downgraded;
+                    let reader_count = state.reader_count.fetch_add(1, Ordering::Acquire) + 1;
+                    let writer_count = state.writer_count.load(Ordering::Acquire);
+                    state.reader_count.fetch_sub(1, Ordering::Release);
+                    std::mem::drop(downgraded);
+                    assert!(observed_value > 0, "Downgraded guard saw pre-write value.");
+                    assert_eq!(
+                        writer_count, 0,
+                        "A writer held the RwLock concurrently with a downgraded reader."
+                    );
+                    assert!(reader_count > 0, "Downgraded reader was not counted.");
                 }
             })
         }
@@ -694,6 +988,27 @@ mod test {
         }
         let guard = state.value.read();
         assert_eq!(1000, *guard, "The RwLock held the wrong value at the end.");
+    }
+
+    #[test]
+    fn test_thundering_reads_writes_and_downgrades() {
+        let state = Arc::new(State::default());
+        let mut threads = vec![];
+        for _ in 0..6 {
+            threads.push(State::spawn_writer(Arc::clone(&state), 100));
+            threads.push(State::spawn_downgrading_writer(Arc::clone(&state), 100));
+            threads.push(State::spawn_reader(Arc::clone(&state), 200));
+        }
+
+        // Try to align the thundering herd to stress the RwLock as much as possible.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        state.open_gate();
+
+        while let Some(thread) = threads.pop() {
+            thread.join().expect("failed to join thread");
+        }
+        let guard = state.value.read();
+        assert_eq!(1200, *guard, "The RwLock held the wrong value at the end.");
     }
 
     #[test]

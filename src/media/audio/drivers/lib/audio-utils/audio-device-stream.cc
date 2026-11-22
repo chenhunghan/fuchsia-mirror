@@ -198,7 +198,8 @@ zx_status_t AudioDeviceStream::PlugMonitor(float duration, PlugMonitorCallback* 
   zx_time_t last_plug_time = zx::clock::get_monotonic().get();
   while (true) {
     // TODO(andresoportus): Currently if no plug state changes occur, we wait forever.
-    // Once LLCPP supports async clients, stop monitoring even when there is no plug state change.
+    // Once FIDL wire supports async clients, stop monitoring even when there is no plug state
+    // change.
     audio_stream_cmd_plug_detect_resp_t out_state = {};
     auto status = WatchPlugState(&out_state);
     if (status != ZX_OK) {

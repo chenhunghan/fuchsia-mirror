@@ -1428,6 +1428,61 @@ default $:default
             + "\n",
         )
 
+    def test_bazel_tests_json(self) -> None:
+        _write_file(
+            self._build_dir / "target_tests.gn_targets_manifest.json", "[]"
+        )
+        _write_json(
+            self._build_dir / "bazel_target_infos.json",
+            [
+                {
+                    "bazel_target": "//build/bazel/target_tests:target_tests_stamp",
+                    "gn_targets_manifest": "target_tests.gn_targets_manifest.json",
+                }
+            ],
+        )
+        launcher = self._build_dir / "bazel_workspace/bazel"
+        (self._build_dir / "bazel_workspace/output_base/execroot/_main").mkdir(
+            parents=True, exist_ok=True
+        )
+        cquery_line = json.dumps(
+            {
+                "label": "@@//src/foo:bar_test",
+                "launcher_execroot_path": "bin/bar_test",
+                "runtime_deps_json_execroot_path": "bin/bar_test.json",
+                "os": "linux",
+                "cpu": "x86_64",
+                "list_cases_argument": "",
+            }
+        )
+        _write_file(
+            launcher,
+            f"""#!/bin/sh
+case " $* " in
+  *" cquery "*) printf '%s\\n' '{cquery_line}' ;;
+  *) echo "host_test rule //src/foo:bar_test" ;;
+esac
+""",
+        )
+        launcher.chmod(0o755)
+
+        ret = self.run_client(
+            ["bazel_tests_json", "--test-os=host", "--", "//src/foo:bar_test"]
+        )
+        self.assertEqual(ret.returncode, 0, msg=ret.stderr)
+        parsed = json.loads(ret.stdout)
+        self.assertEqual(parsed[0]["test"]["label"], "@@//src/foo:bar_test")
+
+        self.assert_error(
+            [
+                "bazel_tests_json",
+                "--test-os=fuchsia",
+                "--",
+                "//src/foo:bar_test",
+            ],
+            expected_err="'//src/foo:bar_test' is a host test.\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

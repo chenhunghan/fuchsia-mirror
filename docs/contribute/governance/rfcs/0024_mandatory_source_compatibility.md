@@ -254,7 +254,7 @@ Following the acceptance of this FTP, the process established by the FTP
 as well as the source compatibility rules themselves will be published
 along with other FIDL reference documentation.
 
-## Backwards compatibility
+## Backwards compatibility {#backwards-compatibility}
 
 Application of the guidance proposed may require changes to bindings and
 uses of those bindings, it is up to the respective binding authors to

@@ -22,7 +22,7 @@
 #include "src/starnix/tests/syscalls/cpp/io_uring_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 
-extern std::string DoPrePolicyLoadWork() { return "io_uring_policy"; }
+extern std::string GetTestPolicyName() { return "io_uring_policy"; }
 
 namespace {
 
@@ -88,11 +88,7 @@ TEST_P(IoUringPermissionTest, Sqpoll) {
   ASSERT_TRUE(RunSubprocessAs(TestSecurityContext("sqpoll", allowed), [allowed] {
     // TODO(https://fxbug.dev/515346567): The "io_uring { setup }" permission
     // will be needed once this test starts running on GKI based on Linux 6.18.
-    if (allowed) {
-      EXPECT_THAT(CreateIoUringSqpoll().get(), SyscallSucceeds());
-    } else {
-      EXPECT_THAT(CreateIoUringSqpoll().get(), SyscallFailsWithErrno(EACCES));
-    }
+    EXPECT_THAT(CreateIoUringSqpoll().get(), SyscallSucceedsOrFailsWithErrno(allowed, EACCES));
   }));
 }
 

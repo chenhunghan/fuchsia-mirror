@@ -109,7 +109,7 @@ See [C-LINK](https://rust-lang.github.io/api-guidelines/documentation.html#c-lin
 #### Rustdoc does not show unhelpful implementation details
 See [C-HIDDEN](https://rust-lang.github.io/api-guidelines/documentation.html#c-hidden).
 
-#### Every `unsafe` block has an accompanying justification
+#### Every unsafe block has an accompanying justification {:#every-unsafe-block-has-an-accompanying-justification}
 
 Note: This guideline pertains only to safety documentation when performing unsafe operations. See
 [C-FAILURE](https://rust-lang.github.io/api-guidelines/documentation.html#c-failure) for guidelines
@@ -238,7 +238,7 @@ fn partially_init(n: usize) -> MaybeUninit<[i32; BUFFER_LEN]> {
 }
 ```
 
-#### Unsafe traits are documented, unsafe trait impls are justified
+#### Unsafe traits are documented, unsafe trait impls are justified {:#unsafe-traits-are-documented-unsafe-trait-impls-are-justified}
 
 Unsafe traits should be documented according to the same guidelines as unsafe functions.
 
@@ -306,7 +306,7 @@ unsafe impl UniqueLabeler for SequentialLabeler {
 }
 ```
 
-#### Unsafe operations are always in an `unsafe` block
+#### Unsafe operations are always in an unsafe block {:#unsafe-operations-are-always-in-an-unsafe-block}
 
 Note: This guideline depends on a change to linting behavior and cannot yet be followed
 ([tracking issue](https://fxbug.dev/42176206)). Continue to adhere to other guidelines in this section.

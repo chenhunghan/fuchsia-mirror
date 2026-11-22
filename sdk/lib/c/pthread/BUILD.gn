@@ -24,8 +24,7 @@ llvm_libc_source_set("pthread") {
   ]
 
   # Used by pthread_create.
-  non_test_deps = [ "../zircon:zx-name.printf" ]
-  testonly_deps = [ "../zircon:zx-name.printf.testonly" ]
+  libc_deps = [ "../zircon:zx-name.printf" ]
 }
 
 source_set("attr.header") {

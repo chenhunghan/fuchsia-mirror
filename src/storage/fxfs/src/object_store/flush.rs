@@ -322,7 +322,8 @@ impl ObjectStore {
 
         // Even when initiated as a minor compaction, `tree::flush` merges all layers into a single
         // base layer (`layers_to_keep.is_empty()`) if the existing layer is smaller than
-        // `DEFAULT_RECLAIM_SIZE`, which purges all tombstones and resets `store_borrowed` to 0.
+        // `tree::MINOR_COMPACTION_MERGE_THRESHOLD`, which purges all tombstones and resets
+        // `store_borrowed` to 0.
         reservation_update = ReservationUpdate::new(total_layer_size);
         let new_borrowed = if layers_to_keep.is_empty() {
             0
@@ -664,7 +665,7 @@ mod tests {
             Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
 
         // 1. Populate the store with files to create an initial layer > 512 KiB
-        // (DEFAULT_RECLAIM_SIZE).
+        // (`tree::MINOR_COMPACTION_MERGE_THRESHOLD`).
         let num_files = 2000;
         let mut file_ids = Vec::with_capacity(num_files);
         for i in 0..num_files {
@@ -1000,7 +1001,7 @@ mod tests {
     // compaction itself).
     #[fuchsia::test]
     async fn test_borrow_metadata_space_fails_without_major_compaction() {
-        let reclaim_size = 65536;
+        let reclaim_size = 32768;
         // 102,400 blocks of 512 bytes = 50 MiB device.
         let device = DeviceHolder::new(FakeDevice::new(102400, 512));
         let fs = FxFilesystemBuilder::new()
@@ -1078,7 +1079,7 @@ mod tests {
     async fn test_file_truncate_and_extend_does_not_force_major_compaction() {
         let device = DeviceHolder::new(FakeDevice::new(65536, 512));
         let fs = FxFilesystemBuilder::new()
-            .journal_options(JournalOptions { reclaim_size: 32768, ..Default::default() })
+            .journal_options(JournalOptions { reclaim_size: 16384, ..Default::default() })
             .format(device)
             .await
             .expect("format failed");
@@ -1092,7 +1093,7 @@ mod tests {
             Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
 
         // 1. Populate the store with old files so that its base layer exceeds 512 KiB
-        // (`DEFAULT_RECLAIM_SIZE`).
+        // (`tree::MINOR_COMPACTION_MERGE_THRESHOLD`).
         for i in 0..2000 {
             let filename = format!("base_{i:04}_{:<200}", i);
             let mut transaction = store
@@ -1169,7 +1170,7 @@ mod tests {
     async fn test_temporary_file_create_and_delete_does_not_force_major_compaction() {
         let device = DeviceHolder::new(FakeDevice::new(65536, 512));
         let fs = FxFilesystemBuilder::new()
-            .journal_options(JournalOptions { reclaim_size: 32768, ..Default::default() })
+            .journal_options(JournalOptions { reclaim_size: 16384, ..Default::default() })
             .format(device)
             .await
             .expect("format failed");
@@ -1183,7 +1184,7 @@ mod tests {
             Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
 
         // 1. Populate the store with old files so that its base layer exceeds 512 KiB
-        // (`DEFAULT_RECLAIM_SIZE`).
+        // (`tree::MINOR_COMPACTION_MERGE_THRESHOLD`).
         for i in 0..2000 {
             let filename = format!("base_{i:04}_{:<200}", i);
             let mut transaction = store
@@ -1349,8 +1350,9 @@ mod tests {
             Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
 
         // 1. Populate the store with 2000 files so its base layer exceeds 512 KiB
-        // (`DEFAULT_RECLAIM_SIZE`), plus four files exercising multi-MiB extent ranges across the
-        // 1 MiB fuzzy-hash buckets (`EXTENT_HASH_BUCKET_SIZE`) and `MAX_HASH_PARTITIONS` (4):
+        // (`tree::MINOR_COMPACTION_MERGE_THRESHOLD`), plus four files exercising multi-MiB extent
+        // ranges across the 1 MiB fuzzy-hash buckets (`EXTENT_HASH_BUCKET_SIZE`) and
+        // `MAX_HASH_PARTITIONS` (4):
         //   - `large_base_file`: single contiguous maximum-sized (`1.75 MiB` for 4 KiB blocks)
         //     extent at `512 KiB..2.25 MiB`, spanning 3 buckets (`[0..1M)`, `[1..2M)`, `[2..3M)`).
         //   - `tail_4m_file`: 4 KiB extent only in the 4th bucket (`3.5 MiB..3.5 MiB + 4 KiB`).
@@ -1747,7 +1749,7 @@ mod tests {
     async fn test_mixed_deletes_and_creates_reclaim_space_via_major_compaction() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
         let fs = FxFilesystemBuilder::new()
-            .journal_options(JournalOptions { reclaim_size: 32768, ..Default::default() })
+            .journal_options(JournalOptions { reclaim_size: 16384, ..Default::default() })
             .format(device)
             .await
             .expect("format failed");
@@ -1856,6 +1858,8 @@ impl tree::MajorCompactable<ObjectKey, ObjectValue> for LSMTree<ObjectKey, Objec
             ItemRef { value: ObjectValue::Extent(ExtentValue::None), .. } => false,
             _ => true,
         })
+        .await?
+        .coalesce()
         .await
     }
 
@@ -1873,6 +1877,8 @@ impl tree::MajorCompactable<ObjectKey, ObjectValue> for LSMTree<ObjectKey, Objec
             }
             _ => true,
         })
+        .await?
+        .coalesce()
         .await
     }
 }

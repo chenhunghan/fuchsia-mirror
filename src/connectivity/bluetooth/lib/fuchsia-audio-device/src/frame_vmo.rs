@@ -205,6 +205,11 @@ impl FrameVmo {
         if channel_mask == self.active_channels_mask {
             return Ok(self.active_channels_activity);
         }
+        // Reset notification state on active <-> inactive transitions so a subsequent watcher
+        // still observes the latest state even if channels flip back before it polls.
+        if (self.active_channels_mask == 0) != (channel_mask == 0) {
+            self.active_channels_notified = None;
+        }
         self.active_channels_mask = channel_mask;
         self.active_channels_activity = fasync::MonotonicInstant::now();
         self.stream_disabled_notified = false;

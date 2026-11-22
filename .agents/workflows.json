@@ -1,0 +1,7 @@
+{
+    "inherits": [
+        {
+            "path": "vendor/google/.agents/workflows.json"
+        }
+    ]
+}

@@ -4,7 +4,7 @@ Version: 20260930
 Revision: e85aa3bebaae81ed1e6d163511ac7e1eafe732cf
 Security Critical: yes
 
-License: BSD
+License: BSD-3-Clause
 License File: src/LICENSE
 
 Description:

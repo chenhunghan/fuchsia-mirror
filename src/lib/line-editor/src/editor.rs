@@ -88,7 +88,7 @@ impl Editor {
             writer,
             buffer: BString::default(),
             prompt,
-            prompt_length: prompt.len(),
+            prompt_length: control::visible_column_width(prompt.as_bytes()),
             cursor_position: 0,
             previous_cursor_position: 0,
             column_count,

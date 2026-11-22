@@ -25,18 +25,5 @@
             to: "#system_recovery",
             availability: "same_as_target",
         },
-        {
-            directory: "config-data",
-            from: "parent",
-            to: "#system_recovery",
-            subdir: "system_recovery_fdr",
-        },
-        {
-            directory: "dev-topological",
-            from: "parent",
-            as: "dev-sys-platform",
-            to: "#system_recovery",
-            subdir: "sys/platform",
-        },
     ],
 }

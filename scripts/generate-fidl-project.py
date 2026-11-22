@@ -28,7 +28,7 @@ from pathlib import Path
 #     "deps": []string,
 #     "bindings": {
 #         "hlcpp": {},
-#         "llcpp": {},
+#         "cpp_wire": {},
 #         "rust": {},
 #         "go": {},
 #         "dart": {},

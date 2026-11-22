@@ -664,8 +664,8 @@ namespace {
 struct TestCase {
   using TestFunction = void (*)();
 
-  std::string name = nullptr;
-  std::string description = nullptr;
+  std::string name;
+  std::string description;
   TestFunction test_function = nullptr;
 };
 

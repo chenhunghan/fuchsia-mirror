@@ -268,7 +268,7 @@ recommended way for users to install Bazel (using [bazelisk]).
 [11]: https://fuchsia.googlesource.com/fuchsia/+/d9201b0b2049cd08fbb15b764910edc22dba4837/scripts/sdk/bazel
 [12]: https://github.com/cbracken/rules_dart
 [14]: https://gn.googlesource.com/gn/#versioning-and-distribution
-[16]: /docs/contribute/governance/rfcs/0095_build_and_assemble_workstation_out_of_tree.md#phase_3
+[16]: /docs/contribute/governance/rfcs/0095_build_and_assemble_workstation_out_of_tree.md#phase-3
 [Distributed Product Integration]: /docs/contribute/governance/rfcs/0124_decentralized_product_integration_artifact_description_and_propagation.md
 [Bazel offline builds]: https://docs.bazel.build/versions/main/external.html#offline-builds
 [bazelisk]: https://github.com/bazelbuild/bazelisk

@@ -37,54 +37,65 @@ group("tests") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
+_LIB_SRCS = [
+  "src/actor.rs",
+  "src/cc.rs",
+  "src/inspect.rs",
+  "src/lib.rs",
+  "src/port.rs",
+  "src/power.rs",
+  "src/runner.rs",
+  "src/state.rs",
+  "src/state/sink.rs",
+  "src/typec.rs",
+]
+
+# To avoid "Assignment had no effect" from GN.
+# It's possible this variable is only used in if conditions (e.g. is_host).
+not_needed([ "_LIB_SRCS" ])
+
+_LIB_DEPS = [
+  "//sdk/fidl/fuchsia.hardware.usb.connector:fuchsia.hardware.usb.connector_rust_next",
+  "//sdk/rust/zx",
+  "//src/lib/diagnostics/inspect/rust",
+  "//src/lib/fuchsia-async",
+  "//src/lib/fuchsia-sync",
+  "//third_party/rust_crates:anyhow",
+  "//third_party/rust_crates:futures",
+  "//third_party/rust_crates:log",
+]
+
+# To avoid "Assignment had no effect" from GN.
+# It's possible this variable is only used in if conditions (e.g. is_host).
+not_needed([ "_LIB_DEPS" ])
+
 rustc_library("typec") {
-  sources = [
-    "src/cc.rs",
-    "src/lib.rs",
-    "src/port.rs",
-    "src/state.rs",
-    "src/tests/cc.rs",
-    "src/tests/mod.rs",
-    "src/tests/spec.rs",
-    "src/tests/state.rs",
-    "src/typec.rs",
-  ]
+  sources = _LIB_SRCS
   edition = "2024"
-  deps = [
-    "//sdk/fidl/fuchsia.hardware.usb.connector:fuchsia.hardware.usb.connector_rust_next",
-    "//sdk/rust/zx",
-    "//src/lib/diagnostics/inspect/rust",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-sync",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:log",
-  ]
+  deps = _LIB_DEPS
 }
 if (is_fuchsia) {
   rustc_test("typec_test") {
-    sources = [
-      "src/cc.rs",
-      "src/lib.rs",
-      "src/port.rs",
-      "src/state.rs",
-      "src/tests/cc.rs",
-      "src/tests/mod.rs",
-      "src/tests/spec.rs",
-      "src/tests/state.rs",
-      "src/typec.rs",
-    ]
+    sources = _LIB_SRCS + [
+                "src/tests/attach.rs",
+                "src/tests/boot_and_accessories.rs",
+                "src/tests/cc.rs",
+                "src/tests/concurrency.rs",
+                "src/tests/disconnect.rs",
+                "src/tests/fixture.rs",
+                "src/tests/inspect.rs",
+                "src/tests/mod.rs",
+                "src/tests/spec.rs",
+                "src/tests/state.rs",
+                "src/tests/state_sink.rs",
+                "src/tests/vbus.rs",
+                "src/tests/vbus_discharge.rs",
+              ]
     edition = "2024"
-    deps = [
-             "//sdk/fidl/fuchsia.hardware.usb.connector:fuchsia.hardware.usb.connector_rust_next",
-             "//sdk/rust/zx",
-             "//src/lib/diagnostics/inspect/rust",
-             "//src/lib/fuchsia-async",
-             "//src/lib/fuchsia-sync",
-             "//third_party/rust_crates:anyhow",
-             "//third_party/rust_crates:log",
-           ] + [
+    deps = _LIB_DEPS + [
              "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
              "//src/lib/fuchsia",
+             "//third_party/rust_crates:assert_matches",
            ]
   }
 }

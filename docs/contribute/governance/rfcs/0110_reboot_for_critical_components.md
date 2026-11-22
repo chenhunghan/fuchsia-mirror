@@ -14,7 +14,7 @@ A proposal to introduce a "reboot-on-termination" option to the component
 manifest's child declaration, which provides parity to sysmgr's
 `critical_components` feature.
 
-## Motivation
+## Motivation {#motivation}
 
 In Components v1, sysmgr supports a
 feature called `critical_components` which lets
@@ -55,7 +55,7 @@ The components mentioned in the [Motivation](#motivation) which use
 `critical_components` are blocked from migrating to Components v2 until an
 equivalent feature is available.
 
-## Design
+## Design {#design}
 
 We will add an `on_terminate` enum to [`ChildDecl`][fidl-childdecl] (equivalent
 to the [component manifest][doc-manifests]'s `children` section), providing
@@ -442,7 +442,7 @@ of static event streams, but that's beyond the scope of this proposal.
     If we defer designing a more general solution until then, we may at that
     time have a better understanding of the problem space.
 
-## Future work
+## Future work {#future-work}
 
 `basemgr` and `sessionmgr` implement their own crash recovery strategies which
 could utilize an approach along the lines of the
@@ -487,8 +487,8 @@ revisions for the events API.
 [fidl-destroy]: https://fuchsia.dev/reference/fidl/fuchsia.sys2#fuchsia.sys2/Realm.DestroyChild
 [fidl-reboot]: https://fuchsia.dev/reference/fidl/fuchsia.hardware.power.statecontrol#fuchsia.hardware.power.statecontrol/Admin.Reboot
 [fidl-shutdown]: https://fuchsia.dev/reference/fidl/fuchsia.sys2#fuchsia.sys2/SystemController.Shutdown
-[doc-graceful-reboot]: /docs/concepts/process/why_fuchsia_devices_reboot.md#graceful_reboot
-[doc-main-process-critical]: /docs/concepts/components/v2/elf_runner.md#using_the_elf_runner
+[doc-graceful-reboot]: /docs/concepts/process/why_fuchsia_devices_reboot.md#graceful-reboot
+[doc-main-process-critical]: /docs/concepts/components/v2/elf_runner.md#using-the-elf-runner
 [doc-manifests]: /docs/concepts/components/v2/component_manifests.md
 [gerrit-rfc-component-events]: https://fuchsia-review.googlesource.com/c/fuchsia/+/535692
 [gerrit-system-critical-prototype]: https://fuchsia-review.googlesource.com/c/fuchsia/+/539915

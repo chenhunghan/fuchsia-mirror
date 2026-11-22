@@ -13,10 +13,10 @@
 using fidl::test::compatibility::ArraysStruct;
 using fidl::test::compatibility::Echo_EchoArraysWithError_Result;
 using fidl::test::compatibility::RespondWith;
+using fidl::test::compatibility::this_is_a_flexible_union;
 using fidl::test::compatibility::this_is_a_struct;
 using fidl::test::compatibility::this_is_a_table;
 using fidl::test::compatibility::this_is_a_union;
-using fidl::test::compatibility::this_is_a_xunion;
 
 using fidl_test_compatibility_helpers::DataGenerator;
 using fidl_test_compatibility_helpers::ExtractShortName;
@@ -76,7 +76,7 @@ void InitializeArraysStruct(ArraysStruct* value, DataGenerator& gen) {
     }
 
     value->tables[i] = gen.next<this_is_a_table>();
-    value->xunions[i] = gen.next<this_is_a_xunion>();
+    value->flexible_unions[i] = gen.next<this_is_a_flexible_union>();
   }
 }
 
@@ -111,7 +111,7 @@ void ExpectArraysStructEq(const ArraysStruct& a, const ArraysStruct& b) {
   EXPECT_TRUE(fidl::Equals(a.vectors, b.vectors));
   EXPECT_TRUE(fidl::Equals(a.nullable_vectors, b.nullable_vectors));
   EXPECT_TRUE(fidl::Equals(a.tables, b.tables));
-  EXPECT_TRUE(fidl::Equals(a.xunions, b.xunions));
+  EXPECT_TRUE(fidl::Equals(a.flexible_unions, b.flexible_unions));
 }
 
 class CompatibilityTest : public ::testing::TestWithParam<std::tuple<std::string, std::string>> {

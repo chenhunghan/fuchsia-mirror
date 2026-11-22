@@ -904,6 +904,24 @@ mod everything {
                 .expect("failed to iterate keys");
             DictionaryKeysStream { key_iterator_proxy, key_cache: vec![], more_keys_fut: None }
         }
+
+        /// Creates a new dictionary that contains the same entries as this one. Entries that are
+        /// themselves dictionaries are shared rather than copied, and inserting or removing
+        /// entries in one dictionary afterwards does not affect the other.
+        pub async fn shallow_copy(&self) -> Self {
+            let (handle, handle_other_end) = zx::EventPair::create();
+            self.capabilities_proxy
+                .dictionary_copy(
+                    self.handle.duplicate_handle(zx::Rights::SAME_RIGHTS).expect(
+                        "failed to duplicate handle, please only use handles with the duplicate right",
+                    ),
+                    handle_other_end,
+                )
+                .await
+                .expect("failed to use fuchsia.component.runtime.Capabilities")
+                .expect("failed to copy dictionary");
+            Self { handle, capabilities_proxy: self.capabilities_proxy.clone() }
+        }
     }
 
     impl Clone for Dictionary {
@@ -1733,6 +1751,21 @@ mod everything {
             assert_matches!(dictionary.remove("foo").await, Some(Capability::Dictionary(_)));
             assert_matches!(dictionary.remove("foo").await, None);
             assert!(dictionary.get("foo").await.is_none());
+        }
+
+        #[fuchsia::test]
+        async fn dictionary_shallow_copy_test() {
+            let dictionary = Dictionary::new().await;
+            dictionary.insert("foo", Dictionary::new().await).await;
+
+            let copy = dictionary.shallow_copy().await;
+            assert_matches!(copy.get("foo").await, Some(Capability::Dictionary(_)));
+
+            // Changes to either dictionary are not reflected in the other.
+            dictionary.insert("bar", Dictionary::new().await).await;
+            assert!(copy.get("bar").await.is_none());
+            assert_matches!(copy.remove("foo").await, Some(Capability::Dictionary(_)));
+            assert_matches!(dictionary.get("foo").await, Some(Capability::Dictionary(_)));
         }
 
         #[fuchsia::test]

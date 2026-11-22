@@ -12,7 +12,8 @@ use std::task::{Context, Poll};
 
 use assert_matches::assert_matches;
 use async_ringbuf::traits::{
-    AsyncConsumer as _, AsyncProducer, Consumer as _, Observer as _, Producer as _, Split as _,
+    AsyncConsumer as _, AsyncProducer, Consumer as _, Observer as _, Producer as _, Raw as _,
+    Split as _,
 };
 use fuchsia_async::{self as fasync, ReadableHandle as _, WritableHandle as _};
 use log::{debug, warn};
@@ -378,8 +379,14 @@ pub(super) async fn receive_task<O: ReceiveTaskOps>(
                 // Unblock either when we have some data in the buffer or we hit idle timeout.
                 let fut = futures::future::select(buffer.wait_occupied(1), timer_fut);
                 match fut.await {
-                    futures::future::Either::Left(((), _timer)) => {
-                        // We got more data in the buffer.
+                    futures::future::Either::Left((res, _timer)) => {
+                        // We got more data in the buffer, or the producer closed.
+                        match res {
+                            Ok(()) | Err(async_ringbuf::WaitError::Closed) => {}
+                            Err(async_ringbuf::WaitError::TooLarge { requested, capacity }) => {
+                                unreachable!("requested {requested} exceeds capacity {capacity}");
+                            }
+                        }
                     }
                     futures::future::Either::Right(((), _wait_occupied)) => {
                         // Timed out. Try to get rid of this buffer.
@@ -902,7 +909,13 @@ pub(super) async fn send_task<O: SendTaskOps>(
             // If all the capacity is vacant, that means everything has been
             // flushed to the network.
             let SendBufferWriter { producer } = buffer;
-            producer.wait_vacant(producer.capacity().into()).await;
+            let res = producer.wait_vacant(producer.capacity().into()).await;
+            match res {
+                Ok(()) | Err(async_ringbuf::WaitError::Closed) => {}
+                Err(async_ringbuf::WaitError::TooLarge { requested, capacity }) => {
+                    unreachable!("requested {requested} exceeds capacity {capacity}");
+                }
+            }
             match ops.with_send_buffer(|b| b.apply_new_capacity()) {
                 Some(Ok(b)) => {
                     // We got a new buffer, loop through to start polling on it.
@@ -1028,7 +1041,13 @@ impl<'a, O: SendTaskOps> Future for DriveSendBufferFut<'a, O> {
                         // NB: The wait vacant future holds no state, it is
                         // cheap enough to create a new future at every turn and
                         // poll once.
-                        futures::ready!(buffer.wait_vacant(1).poll_unpin(cx));
+                        let res = futures::ready!(buffer.wait_vacant(1).poll_unpin(cx));
+                        match res {
+                            Ok(()) | Err(async_ringbuf::WaitError::Closed) => {}
+                            Err(async_ringbuf::WaitError::TooLarge { requested, capacity }) => {
+                                unreachable!("requested {requested} exceeds capacity {capacity}");
+                            }
+                        }
                         continue;
                     }
 
@@ -1106,7 +1125,13 @@ impl<'a, O: SendTaskOps> Future for DriveSendBufferFut<'a, O> {
 
             // NB: The wait vacant future holds no state, it is cheap enough
             // to create a new future at every turn and poll once.
-            futures::ready!(buffer.wait_vacant(buffer.capacity().get()).poll_unpin(cx));
+            let res = futures::ready!(buffer.wait_vacant(buffer.capacity().get()).poll_unpin(cx));
+            match res {
+                Ok(()) | Err(async_ringbuf::WaitError::Closed) => {}
+                Err(async_ringbuf::WaitError::TooLarge { requested, capacity }) => {
+                    unreachable!("requested {requested} exceeds capacity {capacity}");
+                }
+            }
             // We have access to the full capacity on the writer side, we
             // can deallocate the buffer.
             let result = match ops.with_send_buffer(|b| b.dealloc()) {

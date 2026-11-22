@@ -21,6 +21,7 @@ package(default_applicable_licenses = ["//:license"])
 rustc_library(
     name = "cgroupfs",
     srcs = [
+        "controllers.rs",
         "cpuset.rs",
         "directory.rs",
         "events.rs",

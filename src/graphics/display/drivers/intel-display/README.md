@@ -6,8 +6,7 @@ Changes to the driver should be reviewed against the documentation for the
 following hardware.
 
 * Tiger Lake - on Intel NUC11
-* Kaby Lake - on Google Pixelbook (eve), Google Pixelbook Go (atlas), and Intel
-  NUC7
+* Kaby Lake - on Google Pixelbook (eve) and Google Pixelbook Go (atlas)
 * Skylake - on Acer Switch Alpha 12
 
 Some of the hardware listed here is not supported, meaning we don't regularly

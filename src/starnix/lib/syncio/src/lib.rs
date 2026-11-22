@@ -11,15 +11,13 @@ use bstr::BString;
 use fidl::encoding::const_assert_eq;
 use fidl::endpoints::SynchronousProxy;
 use fidl_fuchsia_io as fio;
-use pin_weak::sync::PinWeak;
 use std::cell::OnceCell;
 use std::ffi::CStr;
 use std::marker::PhantomData;
 use std::mem::{MaybeUninit, size_of, size_of_val};
 use std::num::TryFromIntError;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
-use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use zerocopy::{FromBytes, Immutable, IntoBytes, TryFromBytes};
 use zxio::{
     ZXIO_SELINUX_CONTEXT_STATE_DATA, ZXIO_SHUTDOWN_OPTIONS_READ, ZXIO_SHUTDOWN_OPTIONS_WRITE,
@@ -568,26 +566,21 @@ const_assert_eq!(AllocateMode::COLLAPSE_RANGE.bits(), zxio::ZXIO_ALLOCATE_COLLAP
 const_assert_eq!(AllocateMode::ZERO_RANGE.bits(), zxio::ZXIO_ALLOCATE_ZERO_RANGE);
 const_assert_eq!(AllocateMode::INSERT_RANGE.bits(), zxio::ZXIO_ALLOCATE_INSERT_RANGE);
 
-// `ZxioStorage` is marked as `PhantomPinned` in order to prevent unsafe moves
-// of the `zxio_storage_t`, because it may store self-referential types defined
-// in zxio.
+// All implementations of `zxio_t` (and `zxio_storage_t`) are required to be
+// trivially movable, so `ZxioStorage` does not need to be pinned.
 #[derive(Default)]
 struct ZxioStorage {
     storage: zxio::zxio_storage_t,
-    _pin: std::marker::PhantomPinned,
 }
 
 /// A handle to a zxio object.
-///
-/// Note: the underlying storage backing the object is pinned on the heap
-/// because it can contain self referential data.
 pub struct Zxio {
-    inner: Pin<Arc<ZxioStorage>>,
+    inner: Arc<ZxioStorage>,
 }
 
 impl Default for Zxio {
     fn default() -> Self {
-        Self { inner: Arc::pin(ZxioStorage::default()) }
+        Self { inner: Arc::new(ZxioStorage::default()) }
     }
 }
 
@@ -597,7 +590,7 @@ impl std::fmt::Debug for Zxio {
     }
 }
 
-pub struct ZxioWeak(PinWeak<ZxioStorage>);
+pub struct ZxioWeak(Weak<ZxioStorage>);
 
 impl ZxioWeak {
     pub fn upgrade(&self) -> Option<Zxio> {
@@ -983,7 +976,7 @@ impl Zxio {
     }
 
     pub fn downgrade(&self) -> ZxioWeak {
-        ZxioWeak(PinWeak::downgrade(self.inner.clone()))
+        ZxioWeak(Arc::downgrade(&self.inner))
     }
 
     pub fn read_at(&self, offset: u64, data: &mut [u8]) -> Result<usize, zx::Status> {
@@ -1415,8 +1408,8 @@ impl Zxio {
     }
 
     pub fn accept(&self) -> Result<Result<Zxio, ZxioErrorCode>, zx::Status> {
-        let mut addrlen = std::mem::size_of::<sockaddr_storage>() as socklen_t;
-        let mut addr = vec![0u8; addrlen as usize];
+        let mut addrlen = size_of::<sockaddr_storage>() as socklen_t;
+        let mut addr = [0u8; size_of::<sockaddr_storage>()];
         let zxio = Zxio::default();
         let mut out_code = 0;
         #[allow(
@@ -1440,8 +1433,8 @@ impl Zxio {
     }
 
     pub fn getsockname(&self) -> Result<Result<Vec<u8>, ZxioErrorCode>, zx::Status> {
-        let mut addrlen = std::mem::size_of::<sockaddr_storage>() as socklen_t;
-        let mut addr = vec![0u8; addrlen as usize];
+        let mut addrlen = size_of::<sockaddr_storage>() as socklen_t;
+        let mut addr = [0u8; size_of::<sockaddr_storage>()];
         let mut out_code = 0;
         #[allow(
             clippy::undocumented_unsafe_blocks,
@@ -1463,8 +1456,8 @@ impl Zxio {
     }
 
     pub fn getpeername(&self) -> Result<Result<Vec<u8>, ZxioErrorCode>, zx::Status> {
-        let mut addrlen = std::mem::size_of::<sockaddr_storage>() as socklen_t;
-        let mut addr = vec![0u8; addrlen as usize];
+        let mut addrlen = size_of::<sockaddr_storage>() as socklen_t;
+        let mut addr = [0u8; size_of::<sockaddr_storage>()];
         let mut out_code = 0;
         #[allow(
             clippy::undocumented_unsafe_blocks,
@@ -1520,9 +1513,16 @@ impl Zxio {
         optname: u32,
         optlen: socklen_t,
     ) -> Result<Result<Vec<u8>, ZxioErrorCode>, zx::Status> {
-        let mut optval = vec![0u8; optlen as usize];
+        // All socket options retrieved via zxio fit well within `MAX_ZXIO_SOCKOPT_LEN` bytes
+        // (the largest is `tcp_info` at 232 bytes); cap the buffer allocation to avoid
+        // unbounded allocations when callers pass large `optlen` values.
+        const MAX_ZXIO_SOCKOPT_LEN: usize = 1024;
+        let mut optval = vec![0u8; std::cmp::min(optlen as usize, MAX_ZXIO_SOCKOPT_LEN)];
         let result = self.getsockopt_slice(level, optname, &mut optval[..])?;
-        Ok(result.map(|optlen| optval[..optlen as usize].to_vec()))
+        Ok(result.map(|optlen| {
+            optval.truncate(optlen as usize);
+            optval
+        }))
     }
 
     pub fn setsockopt(
@@ -1621,7 +1621,7 @@ impl Zxio {
         flags: u32,
     ) -> Result<Result<RecvMessageInfo, ZxioErrorCode>, zx::Status> {
         let mut msg = msghdr::default();
-        let mut addr = vec![0u8; std::mem::size_of::<sockaddr_storage>()];
+        let mut addr = [0u8; size_of::<sockaddr_storage>()];
         msg.msg_name = addr.as_mut_ptr() as *mut c_void;
         msg.msg_namelen = addr.len() as u32;
 
@@ -1630,7 +1630,7 @@ impl Zxio {
             i32::try_from(buffer.len()).map_err(|_: TryFromIntError| zx::Status::INVALID_ARGS)?;
         msg.msg_iov = buffer.as_mut_ptr();
 
-        let mut cmsg_buffer = vec![0u8; MAX_CMSGS_BUFFER];
+        let mut cmsg_buffer = [0u8; MAX_CMSGS_BUFFER];
         msg.msg_control = cmsg_buffer.as_mut_ptr() as *mut c_void;
         msg.msg_controllen = cmsg_buffer.len() as u32;
 
@@ -2062,6 +2062,26 @@ pub fn directory_open_directory_async(
     Ok(proxy)
 }
 
+/// Opens a directory at `path` relative to `directory`, blocking until the server responds.
+///
+/// Adds `PROTOCOL_DIRECTORY` and `FLAG_SEND_REPRESENTATION` to `flags` and waits for the server to
+/// confirm that `path` was opened as a directory.
+pub fn directory_open_directory_sync(
+    directory: &fio::DirectorySynchronousProxy,
+    path: &str,
+    flags: fio::Flags,
+    deadline: zx::MonotonicInstant,
+) -> Result<fio::DirectorySynchronousProxy, zx::Status> {
+    let description =
+        directory_open(directory, path, flags | fio::Flags::PROTOCOL_DIRECTORY, deadline)?;
+    match description.kind {
+        NodeKind::Directory => {
+            Ok(fio::DirectorySynchronousProxy::new(description.node.into_channel()))
+        }
+        _ => Err(zx::Status::NOT_DIR),
+    }
+}
+
 fn map_fidl_error(error: fidl::Error) -> zx::Status {
     match error {
         fidl::Error::ClientChannelClosed { epitaph, .. } => match epitaph.into() {
@@ -2152,6 +2172,46 @@ mod test {
         let info = vmo.basic_info()?;
         assert_eq!(zx::Rights::READ, info.rights & zx::Rights::READ);
         assert_eq!(zx::Rights::EXECUTE, info.rights & zx::Rights::EXECUTE);
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_directory_open_directory_sync() -> Result<(), Error> {
+        let pkg = open_pkg();
+        let bin = directory_open_directory_sync(
+            &pkg,
+            "bin",
+            fio::PERM_READABLE | fio::PERM_EXECUTABLE,
+            zx::MonotonicInstant::INFINITE,
+        )?;
+        let vmo = directory_open_vmo(
+            &bin,
+            "syncio_lib_test",
+            fio::VmoFlags::READ | fio::VmoFlags::EXECUTE,
+            zx::MonotonicInstant::INFINITE,
+        )?;
+        assert!(!vmo.is_invalid());
+
+        assert_eq!(
+            directory_open_directory_sync(
+                &pkg,
+                "nonexistent",
+                fio::PERM_READABLE,
+                zx::MonotonicInstant::INFINITE,
+            )
+            .expect_err("opening nonexistent directory should fail"),
+            zx::Status::NOT_FOUND
+        );
+        assert_eq!(
+            directory_open_directory_sync(
+                &pkg,
+                "bin/syncio_lib_test",
+                fio::PERM_READABLE,
+                zx::MonotonicInstant::INFINITE,
+            )
+            .expect_err("opening a regular file as a directory should fail"),
+            zx::Status::NOT_DIR
+        );
         Ok(())
     }
 

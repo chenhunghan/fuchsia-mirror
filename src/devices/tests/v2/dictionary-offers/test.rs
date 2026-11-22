@@ -113,7 +113,7 @@ async fn test_dictionary_offers() -> Result<()> {
     // This node matches the child.bind
     {
         let dictionary_ref = realm_proxy
-            .get_child_output_dictionary_deprecated(&child_ref)
+            .get_child_output_dictionary(&child_ref)
             .await
             .map_err(|e| format_err!("Failed to call get child output dictionary: {:?}", e))?
             .map_err(|e| format_err!("Failed to get child output dictionary: {:?}", e))?;
@@ -148,7 +148,7 @@ async fn test_dictionary_offers() -> Result<()> {
     // the offers_dictionary.
     {
         let dictionary_ref = realm_proxy
-            .get_child_output_dictionary_deprecated(&child_ref)
+            .get_child_output_dictionary(&child_ref)
             .await
             .map_err(|e| format_err!("Failed to call get child output dictionary: {:?}", e))?
             .map_err(|e| format_err!("Failed to get child output dictionary: {:?}", e))?;
@@ -188,7 +188,7 @@ async fn test_dictionary_offers() -> Result<()> {
     // This carries another dictionary offer of the same service.
     {
         let dictionary_ref = realm_proxy
-            .get_child_output_dictionary_deprecated(&child_ref)
+            .get_child_output_dictionary(&child_ref)
             .await
             .map_err(|e| format_err!("Failed to call get child output dictionary: {:?}", e))?
             .map_err(|e| format_err!("Failed to get child output dictionary: {:?}", e))?;

@@ -9,9 +9,7 @@ import tempfile
 import time
 
 import fuchsia_base_test
-from honeydew.affordances.tracing import tracing_using_ffx
 from mobly import asserts, test_runner
-from parameterized import parameterized
 from trace_processing import trace_importing
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -89,37 +87,18 @@ class TracingAffordanceTests(fuchsia_base_test.FuchsiaBaseTest):
             msg="Expected trace session to be inactive after terminate()",
         )
 
-    @parameterized.expand(
-        [(False,), (True,)],
-        name_func=lambda func, num, p: (
-            f"{func.__name__}_{'compressed' if p.args[0] else 'uncompressed'}"
-        ),
-    )
-    async def test_tracing_trace_download(self, compression: bool) -> None:
+    async def test_tracing_trace_download(self) -> None:
         """This test case tests the following tracing methods and asserts that
             the trace was downloaded successfully.
 
         This test case calls the following tracing methods:
-                * `tracing.initialize(compression=...)`
+                * `tracing.initialize()`
                 * `tracing.start()`
                 * `tracing.stop()`
                 * `tracing.terminate_and_download(directory="/tmp/")`
         """
-        if compression:
-            asserts.skip_if(
-                not isinstance(
-                    self.dut.tracing, tracing_using_ffx.TracingUsingFfx
-                ),
-                "Compression is only supported when using the FFX tracing backend.",
-            )
-        else:
-            asserts.skip_if(
-                isinstance(self.dut.tracing, tracing_using_ffx.TracingUsingFfx),
-                "Uncompressed tracing is not supported when using the FFX tracing backend.",
-            )
-
         # Initialize Tracing Session.
-        self.dut.tracing.initialize(compression=compression)
+        self.dut.tracing.initialize()
 
         # Start Tracing.
         await self.dut.tracing.start()
@@ -149,8 +128,7 @@ class TracingAffordanceTests(fuchsia_base_test.FuchsiaBaseTest):
             )
             asserts.assert_true(
                 model.processes,
-                f"Trace model (compression={compression}) contains no processes, "
-                "trace might be empty or invalid.",
+                "Trace model contains no processes, trace might be empty or invalid.",
             )
 
     async def test_tracing_session(self) -> None:

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <thread>
@@ -327,32 +328,42 @@ TEST_F(RequestProcessorTest, SendRequestUsingSlot) {
   EXPECT_EQ(response.GetHeader().response, UpiuHeaderResponseCode::kTargetSuccess);
 }
 
-TEST_F(RequestProcessorTest, SendRequestUsingSlotTimeout) {
+TEST_F(RequestProcessorTest, SendRequestUsingSlotStallIsNotAbortedAndCompletesLate) {
   constexpr uint8_t kTestLun = 0;
 
+  std::atomic<uint32_t> utrlclr_writes{0};
+  sync_completion_t complete;
+  zx_status_t completion_status = ZX_OK;
   dut_->GetTransferRequestProcessor().SetTimeout(zx::msec(10));
-  auto cleanup =
-      fit::defer([this]() { dut_->GetTransferRequestProcessor().SetTimeout(kCommandTimeout); });
+  auto cleanup = fit::defer([this]() {
+    if (!driver_stopped_) {
+      driver_stopped_ = true;
+      EXPECT_OK(driver_test().StopDriver());
+    }
+    mock_device_.GetScsiCommandProcessor().Reset();
+    mock_device_.GetRegisterMmioProcessor().Reset();
+  });
 
   auto slot = ReserveSlot<ufs::TransferRequestProcessor>();
   ASSERT_OK(slot);
 
-  // Hook TEST_UNIT_READY to time out.
   mock_device_.GetScsiCommandProcessor().SetHook(
       scsi::Opcode::TEST_UNIT_READY,
       [](UfsMockDevice &mock_device, CommandUpiuData &command_upiu, ResponseUpiuData &response_upiu,
          cpp20::span<PhysicalRegionDescriptionTableEntry> &prdt_upius) {
         return zx::error(ZX_ERR_TIMED_OUT);
       });
+  mock_device_.GetRegisterMmioProcessor().SetHook(
+      RegisterMap::kUTRLCLR, [&](UfsMockDevice &mock_device, uint32_t value) {
+        utrlclr_writes.fetch_add(1);
+        RegisterMmioProcessor::DefaultUTRLCLRHandler(mock_device, value);
+      });
 
-  // Send scsi command with SendIoScsiCmd()
   uint8_t cdb_buffer[6] = {};
   auto cdb = reinterpret_cast<scsi::TestUnitReadyCDB *>(cdb_buffer);
   cdb->opcode = scsi::Opcode::TEST_UNIT_READY;
 
   ScsiCommandUpiu upiu(cdb_buffer, sizeof(*cdb), DataDirection::kNone);
-  sync_completion_t complete;
-  zx_status_t completion_status = ZX_OK;
   dut_->GetTransferRequestProcessor().SendIoScsiCmd(
       upiu, kTestLun, slot.value(), zx::unowned_vmo(), 0, 0,
       [&complete, &completion_status](zx_status_t status) {
@@ -360,11 +371,48 @@ TEST_F(RequestProcessorTest, SendRequestUsingSlotTimeout) {
         sync_completion_signal(&complete);
       });
 
-  zx::nanosleep(zx::deadline_after(zx::msec(20)));
-  dut_->GetTransferRequestProcessor().ProcessCompletionOfIoRequests();
+  // Several timeout checks past the command timeout: the I/O slot logs on each expired deadline
+  // and is never aborted (no UTRLCLR, no completion, UTRLDBR still set).
+  for (int i = 0; i < 3; ++i) {
+    zx::nanosleep(zx::deadline_after(zx::msec(20)));
+    EXPECT_EQ(dut_->GetTransferRequestProcessor().ProcessCompletionOfIoRequests(), 0u);
+  }
+  EXPECT_FALSE(sync_completion_signaled(&complete));
+  EXPECT_EQ(utrlclr_writes.load(), 0u);
+  EXPECT_GE(dut_->GetTransferRequestProcessor().GetTimeoutLogCountForTesting(), 3u);
+  {
+    std::lock_guard<std::mutex> lock(dut_->GetTransferRequestProcessor().GetSlotLock());
+    const RequestSlot &req_slot =
+        dut_->GetTransferRequestProcessor().GetRequestListLocked().GetSlot(slot.value());
+    EXPECT_EQ(req_slot.state, SlotState::kScheduled);
+  }
+  EXPECT_NE(UtrListDoorBellReg::Get().ReadFrom(&dut_->GetMmio()).door_bell() & (1u << slot.value()),
+            0u);
 
+  // Simulate late hardware completion clearing UTRLDBR and setting OCS = kSuccess.
+  mock_device_.GetScsiCommandProcessor().Reset();
+  {
+    std::lock_guard<std::mutex> lock(dut_->GetTransferRequestProcessor().GetSlotLock());
+    auto *desc = dut_->GetTransferRequestProcessor()
+                     .GetRequestListLocked()
+                     .GetRequestDescriptor<TransferRequestDescriptor>(slot.value());
+    desc->set_interrupt(false);
+    ASSERT_OK(mock_device_.GetTransferRequestProcessor().HandleTransferRequest(*desc));
+  }
+  const uint32_t doorbell =
+      UtrListDoorBellReg::Get().ReadFrom(mock_device_.GetRegisters()).door_bell() &
+      ~(1u << slot.value());
+  UtrListDoorBellReg::Get().FromValue(doorbell).WriteTo(mock_device_.GetRegisters());
+
+  EXPECT_EQ(dut_->GetTransferRequestProcessor().ProcessCompletionOfIoRequests(), 1u);
   ASSERT_OK(sync_completion_wait(&complete, ZX_TIME_INFINITE));
-  ASSERT_EQ(completion_status, ZX_ERR_TIMED_OUT);
+  ASSERT_EQ(completion_status, ZX_OK);
+  {
+    std::lock_guard<std::mutex> lock(dut_->GetTransferRequestProcessor().GetSlotLock());
+    const RequestSlot &req_slot =
+        dut_->GetTransferRequestProcessor().GetRequestListLocked().GetSlot(slot.value());
+    EXPECT_EQ(req_slot.state, SlotState::kFree);
+  }
 }
 
 TEST_F(RequestProcessorTest, SendScsiUpiu) {

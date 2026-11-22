@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN's action() sets `public_deps`, `script`, `args`, and `inputs` directly instead of running a shell `cmd`.
+# @bazel2gn:raw_attribute:public_deps = [ "//zircon/system/public" ]
+# @bazel2gn:raw_attribute:script = "virtio_magma_h_gen.py"
+# @bazel2gn:raw_attribute:args = [ "fuchsia", rebase_path("../magma/magma.json", root_build_dir), rebase_path("$target_gen_dir/virtio_magma.h", root_build_dir) ]
+# @bazel2gn:raw_attribute:inputs = [ "../magma/magma.json" ]
+genrule(
+    name = "headers",
+    srcs = [
+        "virtio_magma_h_gen.py",
+        # GN tracks ../magma/magma.json via `inputs` above; skip here so bazel2gn keeps `sources` to the script.
+        "//src/graphics/lib/magma/include/magma:magma.json",  # @bazel2gn:skip
+    ],
+    outs = [
+        # GN's action() requires outputs to reside under $target_gen_dir.
+        "virtio_magma.h",  # @bazel2gn:path_overwrite:$target_gen_dir/virtio_magma.h
+    ],
+    # Bazel runs the script with the hermetic prebuilt Python; GN uses
+    # `script` and `args` (set via raw_attribute above) instead of `cmd`.
+    cmd = "$(location @prebuilt_python//:python3) $(location :virtio_magma_h_gen.py) fuchsia $(location //src/graphics/lib/magma/include/magma:magma.json) $@",  # @bazel2gn:skip
+    tools = [
+        ":virtio_magma_h_gen.py",
+        "@prebuilt_python//:python3",
+        "@prebuilt_python//:runtime_files",
+    ],
+)
+
+# Bazel uses fx_cc_library to expose the generated header and CcInfo deps to
+# C++ dependents; GN keeps group("virtio") above the sentinel because bazel2gn
+# converts fx_cc_library to static_library instead of group.
+# @bazel2gn:skip
+fx_cc_library(
+    name = "virtio",
+    hdrs = [":virtio_magma.h"],
+    deps = [
+        ":headers",
+        "//src/zircon/lib/zircon:headers",
+    ],
+)

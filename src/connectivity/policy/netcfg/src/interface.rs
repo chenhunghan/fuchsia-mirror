@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use fidl_fuchsia_driver_framework as fdf;
 use fidl_fuchsia_net_interfaces_admin as fnet_interfaces_admin;
 
 use crate::DeviceClass;
@@ -15,6 +16,53 @@ const INTERFACE_PREFIX_WLAN: &str = "wlan";
 const INTERFACE_PREFIX_ETHERNET: &str = "eth";
 const INTERFACE_PREFIX_AP: &str = "ap";
 const INTERFACE_PREFIX_BLACKHOLE: &str = "blackhole";
+
+#[derive(PartialEq, Eq, Debug, Clone, Hash)]
+enum BusAddress {
+    Int(u8),
+    ArrayInt(Vec<u8>),
+    CharInt(String),
+    ArrayCharInt(Vec<String>),
+    String(String),
+    Unknown,
+}
+
+impl From<&fdf::DeviceAddress> for BusAddress {
+    fn from(address: &fdf::DeviceAddress) -> Self {
+        match address {
+            fdf::DeviceAddress::IntValue(v) => Self::Int(*v),
+            fdf::DeviceAddress::ArrayIntValue(v) => Self::ArrayInt(v.clone()),
+            fdf::DeviceAddress::CharIntValue(v) => Self::CharInt(v.clone()),
+            fdf::DeviceAddress::ArrayCharIntValue(v) => Self::ArrayCharInt(v.clone()),
+            fdf::DeviceAddress::StringValue(v) => Self::String(v.clone()),
+            fdf::DeviceAddress::__SourceBreaking { .. } => Self::Unknown,
+        }
+    }
+}
+
+/// A normalized, hashable representation of a single segment in a driver node's
+/// bus topology (`fuchsia.driver.framework.BusInfo`), obtained from
+/// `fuchsia.driver.token.NodeBusTopology.Get`.
+///
+/// Common formats include:
+/// - PCI: `bus = BusType::Pci`, `address = ArrayInt([bus, device, function])`
+/// - Platform / DeviceTree: `bus = BusType::Platform` or `DeviceTree`,
+///   `address = String("mmc-ffe05000")` or `ArrayCharInt(["05", "00", "6"])`
+/// - SDIO / USB: `bus = BusType::Sdio` or `Usb`, `address = Int(func_or_port)`
+#[derive(PartialEq, Eq, Debug, Clone, Hash)]
+pub(crate) struct BusSegment {
+    bus: Option<u32>,
+    address: Option<BusAddress>,
+}
+
+impl From<&fdf::BusInfo> for BusSegment {
+    fn from(info: &fdf::BusInfo) -> Self {
+        Self {
+            bus: info.bus.map(fdf::BusType::into_primitive),
+            address: info.address.as_ref().map(Into::into),
+        }
+    }
+}
 
 // Interfaces with different InterfaceNamingIdentifiers are expected to have
 // different names.
@@ -25,14 +73,17 @@ const INTERFACE_PREFIX_BLACKHOLE: &str = "blackhole";
 #[derive(PartialEq, Eq, Debug, Clone, Hash)]
 pub(crate) struct InterfaceNamingIdentifier {
     pub(crate) mac: fidl_fuchsia_net_ext::MacAddress,
-    pub(crate) topological_path: String,
+    pub(crate) bus_segments: Vec<BusSegment>,
 }
 
 pub(crate) fn generate_identifier(
     mac_address: &fidl_fuchsia_net_ext::MacAddress,
-    topological_path: &str,
+    bus_info: &[fdf::BusInfo],
 ) -> InterfaceNamingIdentifier {
-    InterfaceNamingIdentifier { mac: *mac_address, topological_path: topological_path.to_string() }
+    InterfaceNamingIdentifier {
+        mac: *mac_address,
+        bus_segments: bus_info.iter().map(Into::into).collect(),
+    }
 }
 
 // Get the NormalizedMac using the last octet of the MAC address. The offset
@@ -57,53 +108,94 @@ fn get_mac_identifier_from_octets(
     Ok(identifier)
 }
 
-// Get the normalized bus path for a topological path.
-// For example, a PCI device at `02:00.1` becomes `02001`.
-// At the time of writing, typical topological paths appear similar to:
-//
-// PCI:
-// "/dev/sys/platform/pt/PCI0/bus/02:00.0/02:00.0/e1000/ethernet"
-//
-// USB over PCI:
-// "/dev/sys/platform/pt/PCI0/bus/00:14.0/00:14.0/xhci/usb/007/ifc-000/<snip>/wlan/wlan-ethernet/ethernet"
-// 00:14:0 following "/PCI0/bus/" represents BDF (Bus Device Function)
-//
-// USB over DWC:
-// "/dev/sys/platform/05:00:18/usb-phy-composite/aml_usb_phy/dwc2/dwc2_phy/dwc2/usb-peripheral/function-000/usb-cdc-netdev/network-device"
-// 05:00:18 following "platform" represents
-// vid(vendor id):pid(product id):did(device id) and are defined in each board file
-//
-// SDIO (DFv1):
-// "/dev/sys/platform/05:00:6/aml-sd-emmc/sdio/broadcom-wlanphy"
-// 05:00:6 following "platform" represents
-// vid(vendor id):pid(product id):did(device id) and are defined in each board file
-//
-// SDIO (DFv2):
-// "/sys/platform/mmc-ffe05000/aml-sd-emmc/sdmmc/sdmmc-sdio/sdmmc-sdio-1/wifi-1/brcmfmac-netdev/network-device"
-// "/sys/platform/aml-sdio/aml-sd-emmc/sdmmc/sdmmc-sdio/sdmmc-sdio-1/wifi/brcmfmac-netdev/network-device"
-//
-// Ethernet Jack for VIM2
-// "/dev/sys/platform/04:02:7/aml-ethernet/Designware-MAC/ethernet"
-//
-// VirtIo
-// "/dev/sys/platform/pt/PC00/bus/00:1e.0/00_1e_0/virtio-net/network-device"
-//
-// Since there is no real standard for topological paths, when no bus path can be found,
-// the function attempts to return one that is unlikely to conflict with any existing path
-// by assuming a bus path of ff:ff:ff, and decrementing from there. This permits
-// generating unique, well-formed names in cases where a matching path component can't be
-// found, while also being relatively recognizable as exceptional.
-fn get_normalized_bus_path_for_topo_path(topological_path: &str) -> String {
-    static PATH_UNIQ_MARKER: AtomicU32 = AtomicU32::new(0xffffff);
-    topological_path
-        .split("/")
-        .find(|pc| {
-            pc.len() >= 7 && pc.chars().all(|c| c.is_digit(16) || c == ':' || c == '.' || c == '_')
-        })
-        .and_then(|s| {
-            Some(s.replace(&[':', '.', '_'], "").trim_end_matches(|c| c == '0').to_string())
-        })
-        .unwrap_or_else(|| format!("{:01$x}", PATH_UNIQ_MARKER.fetch_sub(1, Ordering::SeqCst), 6))
+/// Wrapper around a device's `NodeBusTopology` `BusInfo` segments.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BusTopology<'a>(pub(crate) &'a [fdf::BusInfo]);
+
+impl<'a> BusTopology<'a> {
+    fn format_address(bus: Option<fdf::BusType>, address: &fdf::DeviceAddress) -> Option<String> {
+        match address {
+            fdf::DeviceAddress::IntValue(v) => Some(format!("{v:03}")),
+            fdf::DeviceAddress::ArrayIntValue(v) => match (bus, v.as_slice()) {
+                // Match DFv2 PCI node naming (`%02x_%02x_%01x` in `pci::Device::node_name` in
+                // `//src/devices/pci/drivers/pci/device.cc`).
+                (Some(fdf::BusType::Pci), [b, d, f]) => Some(format!("{b:02x}_{d:02x}_{f:x}")),
+                _ => Some(v.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")),
+            },
+            fdf::DeviceAddress::CharIntValue(v) => Some(v.clone()),
+            fdf::DeviceAddress::ArrayCharIntValue(v) => Some(v.join(":")),
+            fdf::DeviceAddress::StringValue(v) => Some(v.clone()),
+            fdf::DeviceAddress::__SourceBreaking { .. } => None,
+        }
+    }
+
+    // Extract the `BusType` for a device directly from its bus topology segments.
+    pub(crate) fn bus_type(&self) -> BusType {
+        // Walk from the innermost (leaf-most) bus segment toward the root so
+        // bridged devices (e.g. USB or VirtIO over a PCI controller) resolve
+        // to their immediate attachment bus rather than the host bridge.
+        self.0
+            .iter()
+            .rev()
+            .find_map(|info| match info.bus {
+                Some(fdf::BusType::Pci) => Some(BusType::PCI),
+                Some(fdf::BusType::Usb | fdf::BusType::UsbPeripheral) => Some(BusType::USB),
+                Some(fdf::BusType::Sdio) => Some(BusType::SDIO),
+                Some(fdf::BusType::Virtio) => Some(BusType::VirtIo),
+                Some(_) | None => None,
+            })
+            .unwrap_or(BusType::Unknown)
+    }
+
+    // Get the normalized bus path from a device's bus topology segments.
+    // For example, a PCI device at `[0x02, 0x00, 0x01]` (`02_00_1`) becomes `02001`,
+    // and `[0x00, 0x14, 0x00]` (`00_14_0`) becomes `0014`.
+    //
+    // Note: `BusPath` only produces deterministic bus IDs for PCI; non-PCI DFv2
+    // buses (`DeviceTree`, `Sdio`, `Usb`, `UsbPeripheral`) do not carry multi-byte
+    // bus addresses and fall back to `PATH_UNIQ_MARKER`.
+    //
+    // When no bus address segment can be normalized (or trimming trailing zeroes
+    // leaves an empty string), the function returns a value unlikely to conflict
+    // with any existing bus path by starting at `ffffff` and decrementing on each
+    // call.
+    pub(crate) fn normalized_bus_path(&self) -> String {
+        static PATH_UNIQ_MARKER: AtomicU32 = AtomicU32::new(0xffffff);
+        self.0
+            .iter()
+            .filter_map(|info| {
+                let addr = info.address.as_ref()?;
+                let s = Self::format_address(info.bus, addr)?;
+                (s.len() >= 7
+                    && s.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.' || c == '_'))
+                .then(|| s.replace(&[':', '.', '_'], ""))
+            })
+            .next()
+            .map(|s| s.trim_end_matches('0').to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("{:06x}", PATH_UNIQ_MARKER.fetch_sub(1, Ordering::SeqCst)))
+    }
+
+    pub(crate) fn matches_pattern(&self, pattern: &glob::Pattern) -> bool {
+        let mut path = String::new();
+        for info in self.0 {
+            let Some(raw) =
+                info.address.as_ref().and_then(|addr| Self::format_address(info.bus, addr))
+            else {
+                continue;
+            };
+            let segment = raw.trim_matches('/');
+            if !segment.is_empty() {
+                path.push('/');
+                path.push_str(segment);
+            }
+        }
+        if path.is_empty() {
+            pattern.matches("")
+        } else {
+            pattern.matches(&path) || pattern.matches(&format!("{path}/"))
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -120,12 +212,12 @@ impl InterfaceNamingConfig {
     /// Returns a stable interface name for the specified interface.
     pub(crate) fn generate_stable_name(
         &mut self,
-        topological_path: &str,
+        bus_info: &[fdf::BusInfo],
         mac: &fidl_fuchsia_net_ext::MacAddress,
         device_class: DeviceClass,
     ) -> Result<(&str, InterfaceNamingIdentifier), NameGenerationError> {
-        let interface_naming_id = generate_identifier(mac, topological_path);
-        let info = DeviceInfoRef { topological_path, mac, device_class };
+        let interface_naming_id = generate_identifier(mac, bus_info);
+        let info = DeviceInfoRef { bus_info, mac, device_class };
 
         // Interfaces that are named using the NormalizedMac naming rule are
         // named to avoid MAC address final octet collisions. When a device
@@ -218,34 +310,6 @@ impl std::fmt::Display for BusType {
     }
 }
 
-// Extract the `BusType` for a device given the topological path.
-fn get_bus_type_for_topological_path(topological_path: &str) -> BusType {
-    let p = topological_path;
-
-    if p.contains("/PCI0") {
-        // A USB bus will require a bridge over a PCI controller, so a
-        // topological path for a USB bus should contain strings to represent
-        // PCI and USB.
-        if p.contains("/usb/") {
-            return BusType::USB;
-        }
-        return BusType::PCI;
-    } else if p.contains("/usb-peripheral/") {
-        // On VIM3 targets, the USB bus does not require a bridge over a PCI
-        // controller, so the bus path represents the USB type with a
-        // different string.
-        return BusType::USB;
-    } else if p.contains("/sdio/") || p.contains("/sdmmc-sdio/") {
-        // DFv1 topological paths use `/sdio/`, whereas DFv2 SDMMC drivers
-        // create child nodes under `/sdmmc-sdio/`.
-        return BusType::SDIO;
-    } else if p.contains("/virtio-net/") {
-        return BusType::VirtIo;
-    }
-
-    BusType::Unknown
-}
-
 fn deserialize_glob_pattern<'de, D>(deserializer: D) -> Result<glob::Pattern, D::Error>
 where
     D: Deserializer<'de>,
@@ -289,14 +353,13 @@ impl MatchingRule {
             MatchingRule::BusTypes(type_list) => {
                 // Match the interface if the interface under comparison
                 // matches any of the types included in the list.
-                let bus_type = get_bus_type_for_topological_path(info.topological_path);
+                let bus_type = BusTopology(info.bus_info).bus_type();
                 Ok(type_list.contains(&bus_type))
             }
             MatchingRule::TopologicalPath(pattern) => {
-                // Match the interface if the provided pattern finds any
-                // matches in the interface under comparison's
-                // topological path.
-                Ok(pattern.matches(info.topological_path))
+                // Match the interface if the provided pattern matches the
+                // interface's formatted bus address segments.
+                Ok(BusTopology(info.bus_info).matches_pattern(pattern))
             }
             MatchingRule::DeviceClasses(class_list) => {
                 // Match the interface if the interface under comparison
@@ -355,11 +418,9 @@ impl DynamicNameCompositionRule {
 
     fn get_name(&self, info: &DeviceInfoRef<'_>, attempt_num: u8) -> Result<String, anyhow::Error> {
         Ok(match *self {
-            DynamicNameCompositionRule::BusPath => {
-                get_normalized_bus_path_for_topo_path(info.topological_path)
-            }
+            DynamicNameCompositionRule::BusPath => BusTopology(info.bus_info).normalized_bus_path(),
             DynamicNameCompositionRule::BusType => {
-                get_bus_type_for_topological_path(info.topological_path).to_string()
+                BusTopology(info.bus_info).bus_type().to_string()
             }
             DynamicNameCompositionRule::DeviceClass => match info.device_class.into() {
                 crate::InterfaceType::WlanClient => INTERFACE_PREFIX_WLAN,
@@ -416,9 +477,9 @@ impl NamingRule {
         interfaces: &HashMap<InterfaceNamingIdentifier, String>,
         info: &DeviceInfoRef<'_>,
     ) -> Result<String, NameGenerationError> {
-        // When a bus type cannot be found for a path, use the USB
+        // When a bus type cannot be found for a device, use the USB
         // default naming policy which uses a MAC address.
-        let bus_type = get_bus_type_for_topological_path(&info.topological_path);
+        let bus_type = BusTopology(info.bus_info).bus_type();
 
         // Expand any `Default` rules into the `Static` and `Dynamic` rules in a single vector.
         // If this was being consumed once, we could avoid the call to `collect`. However, since we
@@ -602,17 +663,17 @@ pub struct ProvisioningRule {
 pub(super) struct DeviceInfoRef<'a> {
     pub(super) device_class: DeviceClass,
     pub(super) mac: &'a fidl_fuchsia_net_ext::MacAddress,
-    pub(super) topological_path: &'a str,
+    pub(super) bus_info: &'a [fdf::BusInfo],
 }
 
 impl<'a> DeviceInfoRef<'a> {
     pub(super) fn interface_type(&self) -> crate::InterfaceType {
-        let DeviceInfoRef { device_class, mac: _, topological_path: _ } = self;
+        let DeviceInfoRef { device_class, mac: _, bus_info: _ } = self;
         (*device_class).into()
     }
 
     pub(super) fn is_wlan_ap(&self) -> bool {
-        let DeviceInfoRef { device_class, mac: _, topological_path: _ } = self;
+        let DeviceInfoRef { device_class, mac: _, bus_info: _ } = self;
         match device_class {
             DeviceClass::WlanAp => true,
             DeviceClass::WlanClient
@@ -671,16 +732,107 @@ mod tests {
         }
     }
 
+    fn pci_bus(b: u8, d: u8, f: u8) -> Vec<fdf::BusInfo> {
+        vec![fdf::BusInfo {
+            bus: Some(fdf::BusType::Pci),
+            address: Some(fdf::DeviceAddress::ArrayIntValue(vec![b, d, f])),
+            ..Default::default()
+        }]
+    }
+
+    fn usb_over_pci_bus(b: u8, d: u8, f: u8, port: u8) -> Vec<fdf::BusInfo> {
+        vec![
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::Pci),
+                address: Some(fdf::DeviceAddress::ArrayIntValue(vec![b, d, f])),
+                ..Default::default()
+            },
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::Usb),
+                address: Some(fdf::DeviceAddress::IntValue(port)),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn usb_peripheral_dwc_bus() -> Vec<fdf::BusInfo> {
+        vec![
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::Platform),
+                address: Some(fdf::DeviceAddress::ArrayIntValue(vec![0x05, 0x00, 0x18])),
+                ..Default::default()
+            },
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::UsbPeripheral),
+                address: Some(fdf::DeviceAddress::IntValue(0)),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn sdio_platform_char_bus() -> Vec<fdf::BusInfo> {
+        vec![
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::Platform),
+                address: Some(fdf::DeviceAddress::ArrayCharIntValue(vec![
+                    "05".to_string(),
+                    "00".to_string(),
+                    "6".to_string(),
+                ])),
+                ..Default::default()
+            },
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::Sdio),
+                address: Some(fdf::DeviceAddress::IntValue(1)),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn sdio_dfv2_mmc_bus(func: u8) -> Vec<fdf::BusInfo> {
+        vec![
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::Platform),
+                address: Some(fdf::DeviceAddress::StringValue("mmc-ffe05000".to_string())),
+                ..Default::default()
+            },
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::Sdio),
+                address: Some(fdf::DeviceAddress::IntValue(func)),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn platform_eth_bus() -> Vec<fdf::BusInfo> {
+        vec![fdf::BusInfo {
+            bus: Some(fdf::BusType::Platform),
+            address: Some(fdf::DeviceAddress::StringValue("ethernet-phy-ff634000".to_string())),
+            ..Default::default()
+        }]
+    }
+
+    fn virtio_over_pci_bus(b: u8, d: u8, f: u8) -> Vec<fdf::BusInfo> {
+        vec![
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::Pci),
+                address: Some(fdf::DeviceAddress::ArrayIntValue(vec![b, d, f])),
+                ..Default::default()
+            },
+            fdf::BusInfo { bus: Some(fdf::BusType::Virtio), address: None, ..Default::default() },
+        ]
+    }
+
     // usb interfaces
     #[test_case(
-        "/dev/sys/platform/pt/PCI0/bus/00:14.0/00:14.0/xhci/usb/004/004/ifc-000/ax88179/ethernet",
+        usb_over_pci_bus(0, 0x14, 0, 4),
         [0x01, 0x01, 0x01, 0x01, 0x01, 0x01],
         crate::InterfaceType::WlanClient,
         "wlanx1";
         "usb_wlan"
     )]
     #[test_case(
-        "/dev/sys/platform/pt/PCI0/bus/00:15.0/00:15.0/xhci/usb/004/004/ifc-000/ax88179/ethernet",
+        usb_over_pci_bus(0, 0x15, 0, 4),
         [0x02, 0x02, 0x02, 0x02, 0x02, 0x02],
         crate::InterfaceType::Ethernet,
         "ethx2";
@@ -688,14 +840,14 @@ mod tests {
     )]
     // pci interfaces
     #[test_case(
-        "/dev/sys/platform/pt/PCI0/bus/00:14.0/00:14.0/ethernet",
+        pci_bus(0, 0x14, 0),
         [0x03, 0x03, 0x03, 0x03, 0x03, 0x03],
         crate::InterfaceType::WlanClient,
         "wlanp3";
         "pci_wlan"
     )]
     #[test_case(
-        "/dev/sys/platform/pt/PCI0/bus/00:15.0/00:14.0/ethernet",
+        pci_bus(0, 0x15, 0),
         [0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
         crate::InterfaceType::Ethernet,
         "ethp4";
@@ -703,28 +855,21 @@ mod tests {
     )]
     // platform interfaces (ethernet jack and sdio devices)
     #[test_case(
-        "/dev/sys/platform/05:00:6/aml-sd-emmc/sdio/broadcom-wlanphy",
+        sdio_platform_char_bus(),
         [0x05, 0x05, 0x05, 0x05, 0x05, 0x05],
         crate::InterfaceType::WlanClient,
         "wlans5";
         "platform_wlan"
     )]
     #[test_case(
-        "/sys/platform/mmc-ffe05000/aml-sd-emmc/sdmmc/sdmmc-sdio/sdmmc-sdio-1/wifi-1/brcmfmac-netdev/network-device",
+        sdio_dfv2_mmc_bus(1),
         [0x06, 0x06, 0x06, 0x06, 0x06, 0x59],
         crate::InterfaceType::WlanClient,
         "wlans59";
         "platform_wlan_dfv2_mmc"
     )]
     #[test_case(
-        "/sys/platform/aml-sdio/aml-sd-emmc/sdmmc/sdmmc-sdio/sdmmc-sdio-1/wifi/brcmfmac-netdev/network-device",
-        [0x06, 0x06, 0x06, 0x06, 0x06, 0x59],
-        crate::InterfaceType::WlanClient,
-        "wlans59";
-        "platform_wlan_dfv2_aml_sdio"
-    )]
-    #[test_case(
-        "/dev/sys/platform/04:02:7/aml-ethernet/Designware-MAC/ethernet",
+        platform_eth_bus(),
         [0x07, 0x07, 0x07, 0x07, 0x07, 0x07],
         crate::InterfaceType::Ethernet,
         "ethx7";
@@ -732,28 +877,32 @@ mod tests {
     )]
     // unknown interfaces
     #[test_case(
-        "/dev/sys/unknown",
+        vec![],
         [0x08, 0x08, 0x08, 0x08, 0x08, 0x08],
         crate::InterfaceType::WlanClient,
         "wlanx8";
         "unknown_wlan1"
     )]
     #[test_case(
-        "unknown",
+        vec![fdf::BusInfo {
+            bus: None,
+            address: Some(fdf::DeviceAddress::StringValue("unknown".to_string())),
+            ..Default::default()
+        }],
         [0x09, 0x09, 0x09, 0x09, 0x09, 0x09],
         crate::InterfaceType::WlanClient,
         "wlanx9";
         "unknown_wlan2"
     )]
     #[test_case(
-        "unknown",
+        vec![],
         [0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a],
         crate::InterfaceType::WlanAp,
         "apxa";
         "unknown_ap"
     )]
     #[test_case(
-        "/dev/sys/platform/pt/PC00/bus/00:1e.0/00_1e_0/virtio-net/network-device",
+        virtio_over_pci_bus(0, 0x1e, 0),
         [0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b],
         crate::InterfaceType::Ethernet,
         "ethvb";
@@ -761,13 +910,14 @@ mod tests {
     )]
     // NB: name generation for blackhole interfaces is never expected to be invoked.
     #[test_case(
-        "/dev/sys/platform/pt/PCI0/bus/00:15.0/00:15.0/xhci/usb/004/004/ifc-000/ax88179/ethernet",
+        usb_over_pci_bus(0, 0x15, 0, 4),
         [0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c],
         crate::InterfaceType::Blackhole,
         "blackholexc";
-        "usb_blackhole")]
+        "usb_blackhole"
+    )]
     fn test_generate_name(
-        topological_path: &'static str,
+        bus_info: Vec<fdf::BusInfo>,
         mac: [u8; 6],
         interface_type: crate::InterfaceType,
         want_name: &'static str,
@@ -777,14 +927,14 @@ mod tests {
             .generate_name(&DeviceInfoRef {
                 device_class: device_class_from_interface_type(interface_type),
                 mac: &fidl_fuchsia_net_ext::MacAddress { octets: mac },
-                topological_path,
+                bus_info: &bus_info,
             })
             .expect("failed to generate the name");
         assert_eq!(name, want_name);
     }
 
     struct StableNameTestCase {
-        topological_path: &'static str,
+        bus_info: Vec<fdf::BusInfo>,
         mac: [u8; 6],
         interface_type: crate::InterfaceType,
         want_name: &'static str,
@@ -793,22 +943,22 @@ mod tests {
 
     // Base case. Interface should be added to config.
     #[test_case([StableNameTestCase {
-        topological_path: "/dev/sys/platform/pt/PCI0/bus/00:14.0_/00:14.0/ethernet",
+        bus_info: pci_bus(0, 0x14, 0),
         mac: [0x01, 0x01, 0x01, 0x01, 0x01, 0x01],
         interface_type: crate::InterfaceType::WlanClient,
         want_name: "wlanp1",
         expected_size: 1 }];
         "single_interface"
     )]
-    // Test case that shares the same topo path and different MAC, but same
+    // Test case that shares the same bus topology and different MAC, but same
     // last octet. Expect to see second interface added with different name.
     #[test_case([StableNameTestCase {
-        topological_path: "/dev/sys/platform/pt/PCI0/bus/00:14.0_/00:14.0/ethernet",
+        bus_info: pci_bus(0, 0x14, 0),
         mac: [0x01, 0x01, 0x01, 0x01, 0x01, 0x01],
         interface_type: crate::InterfaceType::WlanClient,
         want_name: "wlanp1",
-        expected_size: 1}, StableNameTestCase {
-        topological_path: "/dev/sys/platform/pt/PCI0/bus/00:14.0_/00:14.0/ethernet",
+        expected_size: 1 }, StableNameTestCase {
+        bus_info: pci_bus(0, 0x14, 0),
         mac: [0xFE, 0x01, 0x01, 0x01, 0x01, 0x01],
         interface_type: crate::InterfaceType::WlanAp,
         want_name: "app1",
@@ -816,45 +966,45 @@ mod tests {
         "two_interfaces_same_topo_path_different_mac"
     )]
     #[test_case([StableNameTestCase {
-        topological_path: "/dev/sys/platform/pt/PCI0/bus/00:14.0_/00:14.0/ethernet",
+        bus_info: pci_bus(0, 0x14, 0),
         mac: [0x01, 0x01, 0x01, 0x01, 0x01, 0x01],
         interface_type: crate::InterfaceType::WlanClient,
         want_name: "wlanp1",
-        expected_size: 1}, StableNameTestCase {
-        topological_path: "/dev/sys/platform/pt/PCI0/bus/01:00.0/01:00.0/iwlwifi-wlan-softmac/wlan-ethernet/ethernet",
+        expected_size: 1 }, StableNameTestCase {
+        bus_info: pci_bus(1, 0, 0),
         mac: [0xFE, 0x01, 0x01, 0x01, 0x01, 0x01],
         interface_type: crate::InterfaceType::Ethernet,
         want_name: "ethp1",
         expected_size: 2 }];
         "two_distinct_interfaces"
     )]
-    // Test case that labels iwilwifi as ethernet, then changes the device
+    // Test case that labels iwlwifi as ethernet, then changes the device
     // class to wlan. The test should detect that the device class doesn't
     // match the interface name, and overwrite with the new interface name
     // that does match.
     #[test_case([StableNameTestCase {
-        topological_path: "/dev/sys/platform/pt/PCI0/bus/01:00.0/01:00.0/iwlwifi-wlan-softmac/wlan-ethernet/ethernet",
+        bus_info: pci_bus(1, 0, 0),
         mac: [0x01, 0x01, 0x01, 0x01, 0x01, 0x01],
         interface_type: crate::InterfaceType::Ethernet,
         want_name: "ethp1",
         expected_size: 1 }, StableNameTestCase {
-        topological_path: "/dev/sys/platform/pt/PCI0/bus/01:00.0/01:00.0/iwlwifi-wlan-softmac/wlan-ethernet/ethernet",
+        bus_info: pci_bus(1, 0, 0),
         mac: [0x01, 0x01, 0x01, 0x01, 0x01, 0x01],
         interface_type: crate::InterfaceType::WlanClient,
         want_name: "wlanp1",
         expected_size: 1 }];
         "two_interfaces_different_device_class"
     )]
-    // Recreating an SDIO WLAN interface with a new DFv2 child
-    // node (`wifi-1` -> `wifi-2`) and the same MAC address retries via
-    // NormalizedMac rather than duplicating the previous interface's name.
+    // Recreating an SDIO WLAN interface with a distinct SDIO function address
+    // and the same MAC address retries via NormalizedMac rather than
+    // duplicating the previous interface's name.
     #[test_case([StableNameTestCase {
-        topological_path: "/sys/platform/mmc-ffe05000/aml-sd-emmc/sdmmc/sdmmc-sdio/sdmmc-sdio-1/wifi-1/brcmfmac-netdev/network-device",
+        bus_info: sdio_dfv2_mmc_bus(1),
         mac: [0x01, 0x01, 0x01, 0x01, 0x01, 0x59],
         interface_type: crate::InterfaceType::WlanClient,
         want_name: "wlans59",
         expected_size: 1 }, StableNameTestCase {
-        topological_path: "/sys/platform/mmc-ffe05000/aml-sd-emmc/sdmmc/sdmmc-sdio/sdmmc-sdio-1/wifi-2/brcmfmac-netdev/network-device",
+        bus_info: sdio_dfv2_mmc_bus(2),
         mac: [0x01, 0x01, 0x01, 0x01, 0x01, 0x59],
         interface_type: crate::InterfaceType::WlanClient,
         want_name: "wlans5a",
@@ -864,39 +1014,35 @@ mod tests {
     fn test_generate_stable_name(test_cases: impl IntoIterator<Item = StableNameTestCase>) {
         let mut interface_naming_config = InterfaceNamingConfig::from_naming_rules(vec![]);
 
-        // query an existing interface with the same topo path and a different mac address
-        for (
-            _i,
-            StableNameTestCase { topological_path, mac, interface_type, want_name, expected_size },
-        ) in test_cases.into_iter().enumerate()
+        for StableNameTestCase { bus_info, mac, interface_type, want_name, expected_size } in
+            test_cases
         {
             let (name, _identifier) = interface_naming_config
                 .generate_stable_name(
-                    topological_path,
+                    &bus_info,
                     &fidl_fuchsia_net_ext::MacAddress { octets: mac },
                     device_class_from_interface_type(interface_type),
                 )
                 .expect("failed to get the interface name");
             assert_eq!(name, want_name);
-            // Ensure the number of interfaces we expect are present.
             assert_eq!(interface_naming_config.interfaces.len(), expected_size);
         }
     }
 
     #[test_case(
-        "/dev/pci-00:14.0-fidl/xhci/usb/004/004/ifc-000/ax88179/ethernet",
+        usb_over_pci_bus(0, 0x14, 0, 4),
         crate::InterfaceType::Ethernet,
         "ethx";
         "usb_ethernet"
     )]
     #[test_case(
-        "/sys/platform/mmc-ffe05000/aml-sd-emmc/sdmmc/sdmmc-sdio/sdmmc-sdio-1/wifi-1/brcmfmac-netdev/network-device",
+        sdio_dfv2_mmc_bus(1),
         crate::InterfaceType::WlanClient,
         "wlans";
         "sdio_wlan"
     )]
     fn test_get_default_naming_retries_255(
-        topological_path: &'static str,
+        bus_info: Vec<fdf::BusInfo>,
         interface_type: crate::InterfaceType,
         expected_prefix: &'static str,
     ) {
@@ -905,13 +1051,13 @@ mod tests {
             let octets = [n, 0x01, 0x01, 0x01, 0x01, 0x00];
 
             let interface_naming_id =
-                generate_identifier(&fidl_fuchsia_net_ext::MacAddress { octets }, topological_path);
+                generate_identifier(&fidl_fuchsia_net_ext::MacAddress { octets }, &bus_info);
 
             let name = config
                 .generate_name(&DeviceInfoRef {
                     device_class: device_class_from_interface_type(interface_type),
                     mac: &fidl_fuchsia_net_ext::MacAddress { octets },
-                    topological_path,
+                    bus_info: &bus_info,
                 })
                 .expect("failed to generate the name");
             assert_eq!(name, format!("{expected_prefix}{n:x}"));
@@ -924,7 +1070,7 @@ mod tests {
                 .generate_name(&DeviceInfoRef {
                     device_class: device_class_from_interface_type(interface_type),
                     mac: &fidl_fuchsia_net_ext::MacAddress { octets },
-                    topological_path,
+                    bus_info: &bus_info,
                 })
                 .is_err()
         );
@@ -932,7 +1078,7 @@ mod tests {
 
     #[test]
     fn test_get_usb_255_with_naming_rule() {
-        let topo_usb = "/dev/pci-00:14.0-fidl/xhci/usb/004/004/ifc-000/ax88179/ethernet";
+        let usb_bus = usb_over_pci_bus(0, 0x14, 0, 4);
 
         let naming_rule = NamingRule {
             matchers: HashSet::new(),
@@ -942,22 +1088,19 @@ mod tests {
             ],
         };
 
-        // test cases for 256 usb interfaces
         let mut config = InterfaceNamingConfig::from_naming_rules(vec![naming_rule]);
         for n in 0u8..255u8 {
             let octets = [n, 0x01, 0x01, 0x01, 0x01, 0x00];
             let interface_naming_id =
-                generate_identifier(&fidl_fuchsia_net_ext::MacAddress { octets }, topo_usb);
+                generate_identifier(&fidl_fuchsia_net_ext::MacAddress { octets }, &usb_bus);
 
             let info = DeviceInfoRef {
                 device_class: DeviceClass::Ethernet,
                 mac: &fidl_fuchsia_net_ext::MacAddress { octets },
-                topological_path: topo_usb,
+                bus_info: &usb_bus,
             };
 
             let name = config.generate_name(&info).expect("failed to generate the name");
-            // With only NormalizedMac as a NameCompositionRule, the name
-            // should simply be the NormalizedMac itself.
             assert_eq!(name, format!("{n:x}{n:x}"));
 
             assert_matches!(config.interfaces.insert(interface_naming_id, name), None);
@@ -969,7 +1112,7 @@ mod tests {
                 .generate_name(&DeviceInfoRef {
                     device_class: DeviceClass::Ethernet,
                     mac: &fidl_fuchsia_net_ext::MacAddress { octets },
-                    topological_path: topo_usb
+                    bus_info: &usb_bus,
                 })
                 .is_err()
         );
@@ -981,12 +1124,12 @@ mod tests {
         DeviceInfoRef {
             device_class: DeviceClass::Ethernet,
             mac: &fidl_fuchsia_net_ext::MacAddress { octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x1] },
-            topological_path: "",
+            bus_info: &[],
         }
     }
 
     #[test_case(
-        "/dev/sys/platform/pt/PCI0/bus/00:14.0_/00:14.0/ethernet",
+        pci_bus(0, 0x14, 0),
         vec![BusType::PCI],
         BusType::PCI,
         true,
@@ -994,7 +1137,7 @@ mod tests {
         "pci_match"
     )]
     #[test_case(
-        "/dev/sys/platform/pt/PCI0/bus/00:14.0_/00:14.0/ethernet",
+        pci_bus(0, 0x14, 0),
         vec![BusType::USB, BusType::SDIO],
         BusType::PCI,
         false,
@@ -1002,7 +1145,7 @@ mod tests {
         "pci_no_match"
     )]
     #[test_case(
-        "/dev/sys/platform/pt/PCI0/bus/00:14.0/00:14.0/xhci/usb/004/004/ifc-000/ax88179/ethernet",
+        usb_over_pci_bus(0, 0x14, 0, 4),
         vec![BusType::USB],
         BusType::USB,
         true,
@@ -1010,19 +1153,17 @@ mod tests {
         "pci_usb_match"
     )]
     #[test_case(
-        "/dev/sys/platform/05:00:18/usb-phy-composite/aml_usb_phy/dwc2/dwc2_phy/dwc2/usb-peripheral/function-000/usb-cdc-netdev/network-device",
+        usb_peripheral_dwc_bus(),
         vec![BusType::USB],
         BusType::USB,
         true,
         "050018";
         "dwc_usb_match"
     )]
-    // Same topological path as the case for USB, but with
-    // non-matching bus types. Ensure that even though PCI is
-    // present in the topological path, it does not match a PCI
-    // controller.
+    // Ensure that even though PCI is an ancestor bus for USB-over-PCI,
+    // it resolves to USB rather than matching a PCI rule.
     #[test_case(
-        "/dev/sys/platform/pt/PCI0/bus/00:14.0/00:14.0/xhci/usb/004/004/ifc-000/ax88179/ethernet",
+        usb_over_pci_bus(0, 0x14, 0, 4),
         vec![BusType::PCI, BusType::SDIO],
         BusType::USB,
         false,
@@ -1030,7 +1171,7 @@ mod tests {
         "usb_no_match"
     )]
     #[test_case(
-        "/dev/sys/platform/05:00:6/aml-sd-emmc/sdio/broadcom-wlanphy",
+        sdio_platform_char_bus(),
         vec![BusType::SDIO],
         BusType::SDIO,
         true,
@@ -1038,7 +1179,7 @@ mod tests {
         "sdio_match"
     )]
     #[test_case(
-        "/sys/platform/mmc-ffe05000/aml-sd-emmc/sdmmc/sdmmc-sdio/sdmmc-sdio-1/wifi-1/brcmfmac-netdev/network-device",
+        sdio_dfv2_mmc_bus(1),
         vec![BusType::SDIO],
         BusType::SDIO,
         true,
@@ -1046,15 +1187,7 @@ mod tests {
         "sdio_dfv2_mmc_match"
     )]
     #[test_case(
-        "/sys/platform/aml-sdio/aml-sd-emmc/sdmmc/sdmmc-sdio/sdmmc-sdio-1/wifi/brcmfmac-netdev/network-device",
-        vec![BusType::SDIO],
-        BusType::SDIO,
-        true,
-        "ffffff";
-        "sdio_dfv2_aml_sdio_match"
-    )]
-    #[test_case(
-        "/dev/sys/platform/pt/PC00/bus/00:1e.0/00_1e_0/virtio-net/network-device",
+        virtio_over_pci_bus(0, 0x1e, 0),
         vec![BusType::VirtIo],
         BusType::VirtIo,
         true,
@@ -1062,15 +1195,7 @@ mod tests {
         "virtio_match_alternate_location"
     )]
     #[test_case(
-        "/dev/sys/platform/pt/PC00/bus/<malformed>/00_1e_0/virtio-net/network-device",
-        vec![BusType::VirtIo],
-        BusType::VirtIo,
-        true,
-        "001e";
-        "virtio_matches_underscore_path"
-    )]
-    #[test_case(
-        "/dev/sys/platform/pt/PC00/bus/00:1e.1/00_1e_1/virtio-net/network-device",
+        virtio_over_pci_bus(0, 0x1e, 1),
         vec![BusType::VirtIo],
         BusType::VirtIo,
         true,
@@ -1078,7 +1203,11 @@ mod tests {
         "virtio_match_alternate_no_trim"
     )]
     #[test_case(
-        "/dev/sys/platform/pt/PC00/bus/<unrecognized_bus_path>/network-device",
+        vec![fdf::BusInfo {
+            bus: Some(fdf::BusType::Platform),
+            address: Some(fdf::DeviceAddress::StringValue("unrecognized-bus-path".to_string())),
+            ..Default::default()
+        }],
         vec![BusType::Unknown],
         BusType::Unknown,
         true,
@@ -1086,69 +1215,113 @@ mod tests {
         "unknown_bus_match_unrecognized"
     )]
     fn test_interface_matching_and_naming_by_bus_properties(
-        topological_path: &'static str,
+        bus_info: Vec<fdf::BusInfo>,
         bus_types: Vec<BusType>,
         expected_bus_type: BusType,
         want_match: bool,
         want_name: &'static str,
     ) {
-        let device_info = DeviceInfoRef {
-            topological_path: topological_path,
-            // `device_class` and `mac` have no effect on `BusType`
-            // matching, so we use arbitrary values.
-            ..default_device_info()
-        };
+        let device_info = DeviceInfoRef { bus_info: &bus_info, ..default_device_info() };
 
-        // Verify the `BusType` determined from the device's
-        // topological path.
-        let bus_type = get_bus_type_for_topological_path(&device_info.topological_path);
+        let bus_type = BusTopology(device_info.bus_info).bus_type();
         assert_eq!(bus_type, expected_bus_type);
 
-        // Create a matching rule for the provided `BusType` list.
         let matching_rule = MatchingRule::BusTypes(bus_types);
         let does_interface_match = matching_rule.does_interface_match(&device_info).unwrap();
         assert_eq!(does_interface_match, want_match);
 
-        let name = get_normalized_bus_path_for_topo_path(&device_info.topological_path);
+        let name = BusTopology(device_info.bus_info).normalized_bus_path();
         assert_eq!(name, want_name);
 
-        // Ensure that calling again will decrement this. It's unfortunate to need to encode this
-        // in the test itself, but each test runs separately, so we can't rely on static storage
-        // between test invocations.
         if want_name == "ffffff" {
-            let name = get_normalized_bus_path_for_topo_path(&device_info.topological_path);
+            let name = BusTopology(device_info.bus_info).normalized_bus_path();
             assert_eq!(name, "fffffe");
         }
     }
 
-    // Glob matches the number pattern of XX:XX in the path.
     #[test_case(
-        "/dev/sys/platform/pt/PCI0/bus/00:14.0_/00:14.0/ethernet",
-        r"*[0-9][0-9]:[0-9][0-9]*",
+        pci_bus(0, 0x14, 0),
+        r"*[0-9][0-9]_[0-9][0-9]*",
         true;
         "pattern_matches"
     )]
-    #[test_case("pattern/will/match/anything", r"*", true; "pattern_matches_any")]
-    // Glob checks for '00' after the colon but it will not find it.
     #[test_case(
-        "/dev/sys/platform/pt/PCI0/bus/00:14.0_/00:14.0/ethernet",
-        r"*[0-9][0-9]:00*",
+        virtio_over_pci_bus(0, 4, 0),
+        "**/00_04_0/**",
+        true;
+        "pci_bdf_glob_with_trailing_recursive_wildcard"
+    )]
+    #[test_case(
+        pci_bus(0, 4, 0),
+        "**/00_04_0",
+        true;
+        "pci_bdf_exact_leaf_glob"
+    )]
+    #[test_case(
+        vec![
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::DeviceTree),
+                address: Some(fdf::DeviceAddress::StringValue("pci0".to_string())),
+                ..Default::default()
+            },
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::Pci),
+                address: Some(fdf::DeviceAddress::ArrayIntValue(vec![0, 3, 0])),
+                ..Default::default()
+            },
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::Virtio),
+                address: None,
+                ..Default::default()
+            },
+        ],
+        "**/pci0/**/00_03_0/**",
+        true;
+        "devicetree_pci_root_matches"
+    )]
+    #[test_case(
+        virtio_over_pci_bus(0, 3, 0),
+        "**/pci0/**/00_03_0/**",
+        false;
+        "acpi_pci_does_not_match_devicetree_pci0"
+    )]
+    #[test_case(
+        platform_eth_bus(),
+        "**/ethernet-phy-*",
+        true;
+        "platform_eth_phy_prefix_matches"
+    )]
+    #[test_case(
+        vec![
+            fdf::BusInfo {
+                bus: Some(fdf::BusType::DeviceTree),
+                address: Some(fdf::DeviceAddress::StringValue("/netemul".to_string())),
+                ..Default::default()
+            },
+            fdf::BusInfo {
+                bus: None,
+                address: Some(fdf::DeviceAddress::StringValue("ep".to_string())),
+                ..Default::default()
+            },
+        ],
+        "/netemul/ep",
+        true;
+        "leading_slash_trimmed_between_segments"
+    )]
+    #[test_case(pci_bus(0, 0x14, 0), r"*", true; "pattern_matches_any")]
+    #[test_case(
+        pci_bus(0, 0x14, 0),
+        r"*[0-9][0-9]_00*",
         false;
         "no_matches"
     )]
     fn test_interface_matching_by_topological_path(
-        topological_path: &'static str,
+        bus_info: Vec<fdf::BusInfo>,
         glob_str: &'static str,
         want_match: bool,
     ) {
-        let device_info = DeviceInfoRef {
-            topological_path,
-            // `device_class` and `mac` have no effect on `TopologicalPath`
-            // matching, so we use arbitrary values.
-            ..default_device_info()
-        };
+        let device_info = DeviceInfoRef { bus_info: &bus_info, ..default_device_info() };
 
-        // Create a matching rule for the provided glob expression.
         let matching_rule = MatchingRule::TopologicalPath(glob::Pattern::new(glob_str).unwrap());
         let does_interface_match = matching_rule.does_interface_match(&device_info).unwrap();
         assert_eq!(does_interface_match, want_match);
@@ -1174,7 +1347,6 @@ mod tests {
         glob_str: &'static str,
         want_match: bool,
     ) {
-        // Create a matching rule for the provided glob expression.
         let provisioning_matching_rule = ProvisioningMatchingRule::InterfaceName {
             pattern: glob::Pattern::new(glob_str).unwrap(),
         };
@@ -1227,37 +1399,27 @@ mod tests {
     ) {
         let device_info = DeviceInfoRef { device_class, ..default_device_info() };
 
-        // Create a matching rule for the provided `DeviceClass` list.
         let matching_rule = MatchingRule::DeviceClasses(device_classes);
         let does_interface_match = matching_rule.does_interface_match(&device_info).unwrap();
         assert_eq!(does_interface_match, want_match);
     }
 
-    // The device information should not have any impact on whether the
-    // interface matches, but we use Ethernet and Wlan as base cases
-    // to ensure that all interfaces are accepted or all interfaces
-    // are rejected.
-    #[test_case(
-        DeviceClass::Ethernet,
-        "/dev/pci-00:15.0-fidl/xhci/usb/004/004/ifc-000/ax88179/ethernet"
-    )]
-    #[test_case(DeviceClass::WlanClient, "/dev/pci-00:14.0/ethernet")]
+    #[test_case(DeviceClass::Ethernet, usb_over_pci_bus(0, 0x15, 0, 4))]
+    #[test_case(DeviceClass::WlanClient, pci_bus(0, 0x14, 0))]
     fn test_interface_matching_by_any_matching_rule(
         device_class: DeviceClass,
-        topological_path: &'static str,
+        bus_info: Vec<fdf::BusInfo>,
     ) {
         let device_info = DeviceInfoRef {
             device_class,
             mac: &fidl_fuchsia_net_ext::MacAddress { octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x1] },
-            topological_path,
+            bus_info: &bus_info,
         };
 
-        // Create a matching rule that should match any interface.
         let matching_rule = MatchingRule::Any(true);
         let does_interface_match = matching_rule.does_interface_match(&device_info).unwrap();
         assert!(does_interface_match);
 
-        // Create a matching rule that should reject any interface.
         let matching_rule = MatchingRule::Any(false);
         let does_interface_match = matching_rule.does_interface_match(&device_info).unwrap();
         assert!(!does_interface_match);
@@ -1359,7 +1521,9 @@ mod tests {
 
     #[test_case(
         vec![NameCompositionRule::Static { value: String::from("x") }],
-        default_device_info(),
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        vec![],
         "x";
         "single_static"
     )]
@@ -1369,16 +1533,17 @@ mod tests {
             NameCompositionRule::Static { value: String::from("x") },
             NameCompositionRule::Static { value: String::from("100") },
         ],
-        default_device_info(),
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        vec![],
         "ethx100";
         "multiple_static"
     )]
     #[test_case(
         vec![NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::NormalizedMac }],
-        DeviceInfoRef {
-            mac: &fidl_fuchsia_net_ext::MacAddress { octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x1] },
-            ..default_device_info()
-        },
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        vec![],
         "1";
         "normalized_mac"
     )]
@@ -1387,22 +1552,25 @@ mod tests {
             NameCompositionRule::Static { value: String::from("eth") },
             NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::NormalizedMac },
         ],
-        DeviceInfoRef {
-            mac: &fidl_fuchsia_net_ext::MacAddress { octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x9] },
-            ..default_device_info()
-        },
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x9],
+        vec![],
         "eth9";
         "normalized_mac_with_static"
     )]
     #[test_case(
         vec![NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::DeviceClass }],
-        DeviceInfoRef { device_class: DeviceClass::Ethernet, ..default_device_info() },
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        vec![],
         "eth";
         "eth_device_class"
     )]
     #[test_case(
         vec![NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::DeviceClass }],
-        DeviceInfoRef { device_class: DeviceClass::WlanClient, ..default_device_info() },
+        DeviceClass::WlanClient,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        vec![],
         "wlan";
         "wlan_device_class"
     )]
@@ -1411,7 +1579,9 @@ mod tests {
             NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::DeviceClass },
             NameCompositionRule::Static { value: String::from("x") },
         ],
-        DeviceInfoRef { device_class: DeviceClass::Ethernet, ..default_device_info() },
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        vec![],
         "ethx";
         "device_class_with_static"
     )]
@@ -1421,11 +1591,9 @@ mod tests {
             NameCompositionRule::Static { value: String::from("x") },
             NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::NormalizedMac },
         ],
-        DeviceInfoRef {
-            device_class: DeviceClass::WlanClient,
-            mac: &fidl_fuchsia_net_ext::MacAddress { octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x8] },
-            ..default_device_info()
-        },
+        DeviceClass::WlanClient,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x8],
+        vec![],
         "wlanx8";
         "device_class_with_static_with_normalized_mac"
     )]
@@ -1435,11 +1603,9 @@ mod tests {
             NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::BusType },
             NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::BusPath },
         ],
-        DeviceInfoRef {
-            device_class: DeviceClass::Ethernet,
-            topological_path: "/dev/sys/platform/pt/PCI0/bus/00:14.0_/00:14.0/ethernet",
-            ..default_device_info()
-        },
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        pci_bus(0, 0x14, 0),
         "ethp0014";
         "device_class_with_pci_bus_type_with_bus_path"
     )]
@@ -1449,11 +1615,9 @@ mod tests {
             NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::BusType },
             NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::BusPath },
         ],
-        DeviceInfoRef {
-            device_class: DeviceClass::Ethernet,
-            topological_path: "/dev/sys/platform/pt/PCI0/bus/00:14.0/00:14.0/xhci/usb/004/004/ifc-000/ax88179/ethernet",
-            ..default_device_info()
-        },
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        usb_over_pci_bus(0, 0x14, 0, 4),
         "ethu0014";
         "device_class_with_pci_usb_bus_type_with_bus_path"
     )]
@@ -1463,69 +1627,64 @@ mod tests {
             NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::BusType },
             NameCompositionRule::Dynamic { rule: DynamicNameCompositionRule::BusPath },
         ],
-        DeviceInfoRef {
-            device_class: DeviceClass::Ethernet,
-            topological_path: "/dev/sys/platform/05:00:18/usb-phy-composite/aml_usb_phy/dwc2/dwc2_phy/dwc2/usb-peripheral/function-000/usb-cdc-netdev/network-device",
-            ..default_device_info()
-        },
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        usb_peripheral_dwc_bus(),
         "ethu050018";
         "device_class_with_dwc_usb_bus_type_with_bus_path"
     )]
     #[test_case(
         vec![NameCompositionRule::Default],
-        DeviceInfoRef {
-            device_class: DeviceClass::Ethernet,
-            topological_path: "/dev/sys/platform/pt/PCI0/bus/00:14.0/00:14.0/xhci/usb/004/004/ifc-000/ax88179/ethernet",
-            mac: &fidl_fuchsia_net_ext::MacAddress { octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x2] },
-        },
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x2],
+        usb_over_pci_bus(0, 0x14, 0, 4),
         "ethx2";
         "default_usb_pci"
     )]
     #[test_case(
         vec![NameCompositionRule::Default],
-        DeviceInfoRef {
-            device_class: DeviceClass::Ethernet,
-            topological_path: "/dev/sys/platform/05:00:18/usb-phy-composite/aml_usb_phy/dwc2/dwc2_phy/dwc2/usb-peripheral/function-000/usb-cdc-netdev/network-device",
-            mac: &fidl_fuchsia_net_ext::MacAddress { octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x3] },
-        },
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x3],
+        usb_peripheral_dwc_bus(),
         "ethx3";
         "default_usb_dwc"
     )]
     #[test_case(
         vec![NameCompositionRule::Default],
-        DeviceInfoRef {
-            device_class: DeviceClass::Ethernet,
-            topological_path: "/dev/sys/platform/05:00:6/aml-sd-emmc/sdio/broadcom-wlanphy",
-            ..default_device_info()
-        },
+        DeviceClass::Ethernet,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        sdio_platform_char_bus(),
         "eths1";
         "default_sdio_ethernet"
     )]
     #[test_case(
         vec![NameCompositionRule::Default],
-        DeviceInfoRef {
-            device_class: DeviceClass::WlanClient,
-            topological_path: "/dev/sys/platform/05:00:6/aml-sd-emmc/sdio/broadcom-wlanphy",
-            ..default_device_info()
-        },
+        DeviceClass::WlanClient,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        sdio_platform_char_bus(),
         "wlans1";
         "default_sdio_wlan"
     )]
     #[test_case(
         vec![NameCompositionRule::Default],
-        DeviceInfoRef {
-            device_class: DeviceClass::WlanClient,
-            topological_path: "/sys/platform/mmc-ffe05000/aml-sd-emmc/sdmmc/sdmmc-sdio/sdmmc-sdio-1/wifi-1/brcmfmac-netdev/network-device",
-            ..default_device_info()
-        },
+        DeviceClass::WlanClient,
+        [0x1, 0x1, 0x1, 0x1, 0x1, 0x1],
+        sdio_dfv2_mmc_bus(1),
         "wlans1";
         "default_sdio_wlan_dfv2"
     )]
     fn test_naming_rules(
         composition_rules: Vec<NameCompositionRule>,
-        info: DeviceInfoRef<'_>,
+        device_class: DeviceClass,
+        mac_octets: [u8; 6],
+        bus_info: Vec<fdf::BusInfo>,
         expected_name: &'static str,
     ) {
+        let info = DeviceInfoRef {
+            device_class,
+            mac: &fidl_fuchsia_net_ext::MacAddress { octets: mac_octets },
+            bus_info: &bus_info,
+        };
         let naming_rule = NamingRule { matchers: HashSet::new(), naming_scheme: composition_rules };
 
         let name = naming_rule.generate_name(&HashMap::new(), &info);
@@ -1533,19 +1692,28 @@ mod tests {
     }
 
     #[test]
+    fn test_get_normalized_bus_path_all_zeroes_falls_back_to_uniq_marker() {
+        let bus = pci_bus(0, 0, 0);
+        let first = BusTopology(&bus).normalized_bus_path();
+        let second = BusTopology(&bus).normalized_bus_path();
+        assert!(!first.is_empty());
+        assert_eq!(first.len(), 6);
+        assert!(u32::from_str_radix(&first, 16).is_ok());
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn test_generate_name_from_naming_rule_interface_name_exists_no_reattempt() {
-        let topo_usb = "/dev/pci-00:14.0-fidl/xhci/usb/004/004/ifc-000/ax88179/ethernet";
+        let usb_bus = usb_over_pci_bus(0, 0x14, 0, 4);
 
         let shared_interface_name = "x".to_owned();
         let mut interfaces = HashMap::new();
         assert_matches!(
             interfaces.insert(
-                InterfaceNamingIdentifier {
-                    mac: fidl_fuchsia_net_ext::MacAddress {
-                        octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x1]
-                    },
-                    topological_path: topo_usb.to_string()
-                },
+                generate_identifier(
+                    &fidl_fuchsia_net_ext::MacAddress { octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x1] },
+                    &usb_bus,
+                ),
                 shared_interface_name.clone(),
             ),
             None
@@ -1562,12 +1730,9 @@ mod tests {
         assert_eq!(name, shared_interface_name);
     }
 
-    // This test is different from `test_get_usb_255_with_naming_rule` as this
-    // test increments the last byte, ensuring that the offset is reset prior
-    // to each name being generated.
     #[test]
     fn test_generate_name_from_naming_rule_many_unique_macs() {
-        let topo_usb = "/dev/pci-00:14.0-fidl/xhci/usb/004/004/ifc-000/ax88179/ethernet";
+        let usb_bus = usb_over_pci_bus(0, 0x14, 0, 4);
 
         let naming_rule = NamingRule {
             matchers: HashSet::new(),
@@ -1576,17 +1741,16 @@ mod tests {
             }],
         };
 
-        // test cases for 256 usb interfaces
         let mut interfaces = HashMap::new();
 
         for n in 0u8..255u8 {
             let octets = [0x01, 0x01, 0x01, 0x01, 0x01, n];
             let interface_naming_id =
-                generate_identifier(&fidl_fuchsia_net_ext::MacAddress { octets }, topo_usb);
+                generate_identifier(&fidl_fuchsia_net_ext::MacAddress { octets }, &usb_bus);
             let info = DeviceInfoRef {
                 device_class: DeviceClass::Ethernet,
                 mac: &fidl_fuchsia_net_ext::MacAddress { octets },
-                topological_path: topo_usb,
+                bus_info: &usb_bus,
             };
 
             let name =
@@ -1600,12 +1764,11 @@ mod tests {
     #[test_case(true, "x"; "matches_first_rule")]
     #[test_case(false, "ethx1"; "fallback_default")]
     fn test_generate_name_from_naming_rules(match_first_rule: bool, expected_name: &'static str) {
-        // Use an Ethernet device that is determined to have a USB bus type
-        // from the topological path.
+        let usb_bus = usb_over_pci_bus(0, 0x14, 0, 4);
         let info = DeviceInfoRef {
             device_class: DeviceClass::Ethernet,
             mac: &fidl_fuchsia_net_ext::MacAddress { octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x1] },
-            topological_path: "/dev/sys/platform/pt/PCI0/bus/00:14.0/00:14.0/xhci/usb/004/004/ifc-000/ax88179/ethernet",
+            bus_info: &usb_bus,
         };
         let name = generate_name_from_naming_rules(
             &[
@@ -1613,8 +1776,6 @@ mod tests {
                     matchers: HashSet::from([MatchingRule::Any(match_first_rule)]),
                     naming_scheme: vec![NameCompositionRule::Static { value: String::from("x") }],
                 },
-                // Include an arbitrary rule that matches no interface
-                // to ensure that it has no impact on the test.
                 NamingRule {
                     matchers: HashSet::from([MatchingRule::Any(false)]),
                     naming_scheme: vec![NameCompositionRule::Static { value: String::from("y") }],
@@ -1646,7 +1807,7 @@ mod tests {
             &DeviceInfoRef {
                 device_class: DeviceClass::WlanClient,
                 mac: &fidl_fuchsia_net_ext::MacAddress { octets: [0x1, 0x1, 0x1, 0x1, 0x1, 0x1] },
-                topological_path: "",
+                bus_info: &[],
             },
             "wlans5009",
         );

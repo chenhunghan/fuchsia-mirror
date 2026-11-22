@@ -87,7 +87,7 @@ bool FlatlandView::Init(fidl::UnownedClientEnd<fuchsia_io::Directory> service_di
   }});
   if (create_view2_result.is_error()) {
     FX_LOGS(ERROR) << "Failed to call CreateView2: "
-                   << set_root_transform_result.error_value().FormatDescription();
+                   << create_view2_result.error_value().FormatDescription();
     return false;
   }
 

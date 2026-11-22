@@ -7,7 +7,7 @@
 //! ARM SMMUv2 Stream Match Register Group (`SMRn` + `S2CRn`) state and hardware programming.
 //!
 //! Each [`StreamMatchRegGroup`] manages one `(SMRn, S2CRn)` register pair in Global Register
-//! Space 0 (`GR0`) and can be linked into an `SmmuBti`'s intrusive doubly-linked list of stream
+//! Space 0 (`GR0`) and can be linked into an `SmmuV2Bti`'s intrusive doubly-linked list of stream
 //! match groups.
 
 use core::pin::Pin;
@@ -36,7 +36,7 @@ pub struct StreamMatchRegGroup {
 // SAFETY: The only `!Send` field of `StreamMatchRegGroup` is
 // `list_node: DoublyLinkedListNode<StreamMatchRegGroup>` (which contains
 // `UnsafeCell<NodeLinks<Self>>`). `StreamMatchRegGroup` and any intrusive list containing it are
-// only accessed or transferred across threads while holding the owning `Smmu` or `SmmuBti`
+// only accessed or transferred across threads while holding the owning `SmmuV2` or `SmmuV2Bti`
 // synchronization lock.
 unsafe impl Send for StreamMatchRegGroup {}
 
@@ -93,7 +93,7 @@ impl StreamMatchRegGroup {
 
     /// Returns the `GR0` MMIO bank handle associated with this group.
     #[inline]
-    pub const fn gr0_base(&self) -> SmmuMmio {
+    pub(in crate::arm_smmu) const fn gr0_base(&self) -> SmmuMmio {
         self.gr0_base
     }
 
@@ -120,7 +120,7 @@ impl StreamMatchRegGroup {
 
     /// Static helper that validates `smrg_ndx` is available in `smmu` and disables its hardware
     /// registers.
-    pub fn disable_at<S: SmmuController>(smmu: &S, smrg_ndx: u32) {
+    pub(in crate::arm_smmu) fn disable_at<S: SmmuController>(smmu: &S, smrg_ndx: u32) {
         debug_assert!(smrg_ndx < smmu.num_smrgs());
         debug_assert!(smmu.available_smrgs().test_bit(smrg_ndx));
         Self::disable_regs(smmu.gr0_base(), smrg_ndx);
@@ -133,8 +133,8 @@ impl StreamMatchRegGroup {
     /// [`StreamMatchRegGroup`] drops.
     ///
     /// Note: Exclusive access is statically enforced because every live [`StreamMatchRegGroup`] is
-    /// owned by `SmmuBti::smrg_list` (`#[guarded_by(lock)]`) or exclusively held during
-    /// `Smmu::init` before BTI publication, so obtaining `&mut self` requires holding the owning
+    /// owned by `SmmuV2Bti::smrg_list` (`#[guarded_by(lock)]`) or exclusively held during
+    /// `SmmuV2::init` before BTI publication, so obtaining `&mut self` requires holding the owning
     /// lock.
     pub fn disable(&mut self) {
         // Disable ourselves, and clear out the bookkeeping that indicates that we were enabled.
@@ -146,7 +146,7 @@ impl StreamMatchRegGroup {
     }
 
     /// Pinned wrapper for [`Self::disable`] when iterating over an intrusive list of
-    /// [`StreamMatchRegGroup`]s (`SmmuBti::smrg_list`).
+    /// [`StreamMatchRegGroup`]s (`SmmuV2Bti::smrg_list`).
     #[inline]
     pub fn disable_pinned(self: Pin<&mut Self>) {
         // SAFETY: `disable` only mutates `gr0_base`, `mode`, and `cb_ndx`; it does not move `self`
@@ -213,7 +213,7 @@ impl StreamMatchRegGroup {
 
     /// Validates `smrg_ndx`, allocates a [`UniquePtr<StreamMatchRegGroup>`], and disables its
     /// hardware registers (`SMRn` and `S2CRn`).
-    pub fn create_and_lockdown<S: SmmuController>(
+    pub(in crate::arm_smmu) fn create_and_lockdown<S: SmmuController>(
         smmu: &S,
         smrg_ndx: u32,
         stream_ids: SmrValue,
@@ -228,7 +228,7 @@ impl StreamMatchRegGroup {
 
     /// Validates `smrg_ndx`, allocates a [`UniquePtr<StreamMatchRegGroup>`], and adopts its
     /// pre-existing hardware register state.
-    pub fn create_and_adopt<S: SmmuController>(
+    pub(in crate::arm_smmu) fn create_and_adopt<S: SmmuController>(
         smmu: &S,
         smrg_ndx: u32,
         stream_ids: SmrValue,
@@ -236,9 +236,6 @@ impl StreamMatchRegGroup {
         Self::validate_ndx(smmu, smrg_ndx)?;
         let mut smrg = Self::create(smmu, smrg_ndx, stream_ids)?;
         if let Err(status) = smrg.adopt_register_state(smmu) {
-            // Temporary porting note: the C++ `CreateAndAdopt` returned the error without doing
-            // any of this, so a failed adoption tripped `~StreamMatchRegGroup`'s debug asserts.
-            //
             // `create` initialized `smrg.gr0_base` and `adopt_register_state` may have updated
             // `smrg.mode` / `smrg.cb_ndx` before returning an error. Reset these fields back to
             // their disabled/uninitialized sentinels before `smrg` is dropped so `Drop`'s debug
@@ -290,7 +287,7 @@ impl StreamMatchRegGroup {
     /// Enables this SMRG in translation mode pointing at `cb_ndx`.
     ///
     /// Note: Exclusive access is statically enforced because every live [`StreamMatchRegGroup`] is
-    /// stored in `SmmuBti::smrg_list` (`#[guarded_by(lock)]`), so obtaining `&mut self` requires
+    /// stored in `SmmuV2Bti::smrg_list` (`#[guarded_by(lock)]`), so obtaining `&mut self` requires
     /// holding the owning BTI's lock.
     pub fn enable_for_context_bank(&mut self, cb_ndx: u32) {
         debug_assert!((self.mode == S2crType::Invalid) == (self.cb_ndx == Self::INVALID_CB_NDX));
@@ -305,9 +302,11 @@ impl StreamMatchRegGroup {
             // of the hints (transient, instruction fetch, write allocation, etc.) to "default".
             //
             // Then configure the register to indicate translation mode, and direct it to our
-            // context bank. Finally, attempt to configure PRIVCFG to unconditionally flag all
-            // transactions as "Unprivileged". Whether or not this will actually change
-            // transactions depends on the IDR2.DIPANS bit.
+            // context bank. Finally, configure PRIVCFG to unconditionally flag all transactions
+            // as "Unprivileged". That encoding (0b10) is always available: IDR2.DIPANS only
+            // changes what the 0b01 encoding means, which we do not use (IHI 0062D.c, the
+            // description of SMMU_S2CRn.PRIVCFG). So, unlike SMMUv3 without ATTR_PERMS_OVR,
+            // there is no SMMUv2 on which a device keeps the privilege it presents.
             //
             // Forcing accesses to be unprivileged provides finer-grained access control in
             // translation mode when using VMSAv8-64 translation tables. Specifically, it is not
@@ -320,11 +319,6 @@ impl StreamMatchRegGroup {
                 .set_privcfg(S2crPrivCfg::Unprivileged)
                 .write_at(&self.gr0_base, self.smrg_ndx);
 
-            // Temporary porting note: the C++ `EnableForContextBank` passed the entire encoded
-            // `stream_ids_.value()` (`(MASK << 16) | ID`) to `set_ID` rather than just the ID.
-            // That tripped hwreg's field-range debug assert for any non-zero mask, and only
-            // produced the right register value in release builds because the stray bits landed
-            // exactly on the MASK field. Only the ID is written to the ID field here.
             Smr::from_value(0)
                 .set_valid(1)
                 .set_mask(u32::from(self.stream_ids.mask()))
@@ -336,7 +330,7 @@ impl StreamMatchRegGroup {
     }
 
     /// Pinned wrapper for [`Self::enable_for_context_bank`] when iterating over an intrusive list
-    /// of [`StreamMatchRegGroup`]s (`SmmuBti::smrg_list`).
+    /// of [`StreamMatchRegGroup`]s (`SmmuV2Bti::smrg_list`).
     #[inline]
     pub fn enable_for_context_bank_pinned(self: Pin<&mut Self>, cb_ndx: u32) {
         // SAFETY: `enable_for_context_bank` only mutates `mode` and `cb_ndx`; it does not move

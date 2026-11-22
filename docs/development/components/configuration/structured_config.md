@@ -18,17 +18,18 @@ define values, and generate a client library.
 
 ## Update build rules
 
-To prevent cyclic dependencies when generating client libraries, define a
-`fuchsia_component_manifest` rule that compiles the component manifest. Pass this compiled manifest
-GN label into the `fuchsia_component` rule.
+To prevent cyclic dependencies when generating client libraries, define a rule that compiles the
+component manifest (`fx_component_manifest` in Bazel or `fuchsia_component_manifest` in GN). Pass
+the label of this compiled manifest to the component rule (`fx_component` or `fuchsia_component`).
 
-```gn
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/cpp/BUILD.gn" region_tag="component" adjust_indentation="auto" %}
+```bazel
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/cpp/BUILD.bazel" region_tag="component" adjust_indentation="auto" %}
 ```
 
 ## Declare configuration schema
 
-You must declare a configuration schema in a component's manifest:
+You must declare a configuration schema in a component's manifest by adding
+[configuration capabilities][config-capabilities] to the `use` block:
 
 ```json5
 {
@@ -36,6 +37,16 @@ You must declare a configuration schema in a component's manifest:
 {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/rust/meta/config_example.cml" region_tag="config" %}
 }
 ```
+
+Each configuration capability entry in `use` specifies:
+
+* `config`: The capability name used when routing configuration from a parent or product assembly.
+* `key`: The field identifier generated in the component's structured configuration client library.
+* `type`: The value's data type and constraints.
+* `availability` (optional): Set to `"optional"` or `"transitional"` when the field has a `default`
+  value in the manifest.
+* `default` (optional): The fallback value used when the capability is routed from `void` (or
+  unrouted with `"transitional"` availability).
 
 Structured config supports the following types:
 
@@ -47,96 +58,30 @@ Structured config supports the following types:
 * `string` (requires `max_size` property)
 * `vector` (requires `element` and `max_count` properties)
 
-See the [CML reference doc][cml-ref-doc] for the complete syntax for a config
-schema.
+See the [CML reference doc][cml-ref-doc] and
+[Configuration capabilities][config-capabilities] for the complete syntax.
 
-Once your component has a configuration schema, you must define values for the
-declared fields, either using Software Assembly or GN.
+Once your component declares its configuration capabilities, values can be provided directly via
+`default` in the component manifest, routed from a parent component, or configured using Software
+Assembly.
 
 **Googlers only**: if your component is configured differently for eng and non-eng
 [build types][build-types], you must
 [add verification of your structured configuration][sc-verification] before you check it in.
 
-There are two ways to define config values: in a JSON5 file or inline in GN.
-
 ## Define configuration values using Software Assembly
 
 If your component's configuration varies between products, see the documentation
-for [Assembling Structured Configuration][sa-sc-docs]. For components whose
-configuration only varies between e.g. tests and production, see the next
-section.
+for [Assembling Structured Configuration][sa-sc-docs].
 
-## Define & package configuration values using GN
+## Package the component {#define-package-configuration-values-using-gn}
 
-The `fuchsia_structured_config_values` GN template validates the defined values
-against the config schema and compiles them into a `.cvf` file that must be
-packaged with your component.
-
-There are two ways to define config values in GN: in a JSON5 file or inline.
-
-### JSON5 file
-
-You can write a component's configuration values in a JSON5 file. Because JSON5 is a strict
-superset of JSON, existing JSON configuration files can also be reused for structured config.
-
-Each key in the JSON object must correspond to a config key in the schema and the value must be of
-a compatible JSON type:
-
-```json5
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/config_example_default_values.json5" adjust_indentation="auto" %}
-```
-
-Provide the path to the JSON5 file in a `fuchsia_structured_config_values` rule.
-
-```gn
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/rust/BUILD.gn" region_tag="config_values_json" adjust_indentation="auto" %}
-```
-
-### Inline values
-
-The `fuchsia_structured_config_values` template also supports defining configuration values inline:
+To package the component, add it to an `fx_package` (Bazel) or `fuchsia_package` (GN) rule:
 
 * {C++}
 
-  ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/cpp/BUILD.gn" region_tag="args_declare" adjust_indentation="auto" %}
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/cpp/BUILD.gn" region_tag="config_values_gn" adjust_indentation="auto" %}
-  ```
-
-* {Rust}
-
-  ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/rust/BUILD.gn" region_tag="args_declare" adjust_indentation="auto" %}
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/rust/BUILD.gn" region_tag="config_values_gn" adjust_indentation="auto" %}
-  ```
-
-By using `declare_args`, you can change configuration values on the command line at build time:
-
-* {C++}
-
-  ```
-  $ fx set core.x64 \
-    --with //examples/components/config \
-    --args='config_example_cpp_greeting="C++ CLI Override"'
-  ```
-
-* {Rust}
-
-  ```
-  $ fx set core.x64 \
-    --with //examples/components/config \
-    --args='config_example_rust_greeting="Rust CLI Override"'
-  ```
-
-### Package the component and values
-
-To package a component and a set of values together, add the `fuchsia_component` and `fuchsia_structured_config_values`
-rules as dependencies of a `fuchsia_package`.
-
-* {C++}
-
-  ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/cpp/BUILD.gn" region_tag="package" adjust_indentation="auto" %}
+  ```bazel
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/cpp/BUILD.bazel" region_tag="package" adjust_indentation="auto" %}
   ```
 
 * {Rust}
@@ -145,15 +90,15 @@ rules as dependencies of a `fuchsia_package`.
   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/rust/BUILD.gn" region_tag="package" adjust_indentation="auto" %}
   ```
 
-The build system verifies your component's configuration schema and value file. A component
-with a faulty configuration (for example: field mismatch, bad constraints, missing value file) will
-fail to build.
+The build system verifies your component's configuration schema. A component with a faulty
+configuration (for example: invalid type constraints or mismatched default values) will fail to
+build.
 
 ## Checking the configuration
 
-Component manager validates a component's configuration when the component is resolved.
+Component manager validates a component's configuration when the component is started.
 
-Use `ffx component show` to print out a components configuration key-value pairs. The component
+Use `ffx component show` to print out a component's configuration key-value pairs. The component
 does not have to be running for this to work.
 
 ```
@@ -161,23 +106,23 @@ $ ffx component show config_example
                 Moniker: /core/ffx-laboratory:config_example
         Component State: Resolved
                       ...
-          Configuration: greeting -> "World"
+          Configuration: delay_ms -> Uint64(100)
+                         greeting -> String("World")
                       ...
 ```
 
-A CVF file must match the component's configuration schema exactly. Components with partial or
-missing configurations will not resolve and therefore not start.
+Components with unresolved or invalid required configuration capabilities will fail to start.
 
 ## Reading the configuration
 
 Components read their resolved configuration values with a generated library. Generate a library
-using the following build templates:
+using the following build rules:
 
 * {C++}
 
-  ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/cpp/BUILD.gn" region_tag="binary" adjust_indentation="auto" %}
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/cpp/BUILD.gn" region_tag="library" adjust_indentation="auto" %}
+  ```bazel
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/cpp/BUILD.bazel" region_tag="binary" adjust_indentation="auto" %}
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/cpp/BUILD.bazel" region_tag="library" adjust_indentation="auto" %}
   ```
 
 * {Rust}
@@ -241,37 +186,24 @@ core/ffx-laboratory\:config_example:
 
 ## Runtime values from outside the component
 
-By default, components will only receive configuration values from a
-[`.cvf` file][cvf] returned by their resolver, usually from their package. In
-order to have those values replaced by another component, they must have a
-`mutability` property which opts them in to particular sources of mutation:
+Components receive configuration values routed as
+[configuration capabilities][config-capabilities] from their parent component, or fall back to
+their manifest `default` value when `availability` is `"optional"` (and routed from `void`) or
+`"transitional"` (and unrouted).
 
-```json5
-    config: {
-        greeting: {
-            // ...
-            mutability: [ /* ... */ ],
-        },
-    },
-```
-
-Note: Once a component opts-in to having a configuration value mutated, it
+Note: When a component receives configuration capabilities from external parent components, it
 must take care to [evolve][sc-evolution] its schema in coordination with any
 external providers of that configuration.
 
-[cvf]: /docs/reference/components/structured_config.md#configuration-value-files
 [sc-evolution]: /docs/development/components/configuration/evolving_structured_config.md
 
 ### Providing values from parent components
 
-Parent components can provide values to children launched in a collection when
-the child has opted in to receiving them.
+Parent components can define configuration capabilities in their `capabilities` block and offer
+them to static children via `offer` declarations, or offer them dynamically to children launched
+in a collection with `allowed_offers: "static_and_dynamic"`.
 
-Note: It is not yet possible to provide configuration values to statically
-declared children in CML. Please star https://fxbug.dev/42077231 for updates.
-
-First, the child must add a `mutability` property to the appropriate
-configuration field:
+First, the child declares the configuration capability in its `use` block:
 
 ```json5
 {
@@ -280,8 +212,8 @@ configuration field:
 }
 ```
 
-When launching the child with the `Realm` protocol, pass config values as
-overrides:
+When launching the child in a collection with the `Realm` protocol, pass a dynamic configuration
+capability offer in `CreateChildArgs`:
 
 * {C++}
 
@@ -299,9 +231,8 @@ See the [full example](/examples/components/config_from_parent) for details.
 
 #### Providing values with `ffx component`
 
-When creating a component with `ffx component create` or running it with
-`ffx component run`, you can override configuration values as if you're acting
-as the parent component.
+You can override configuration capability values for a component from the command line using
+`ffx component config set`.
 
 If you run the above configuration example without any overrides you can see it
 print the default configuration to its logs:
@@ -312,22 +243,23 @@ $ ffx component run /core/ffx-laboratory:hello-default-value fuchsia-pkg://fuchs
 [02655.273631][ffx-laboratory:hello-default-value] INFO: Hello, World! (from Rust)
 ```
 
-Passing `--config` allows you to override that greeting:
+Using `ffx component config set --reload` allows you to override that greeting and reload the
+component instance with the override in effect:
 
 ```
-$ ffx component run /core/ffx-laboratory:hello-from-parent fuchsia-pkg://fuchsia.com/rust_config_from_parent_example#meta/config_example.cm --config 'greeting="parent component"' --follow-logs
+$ ffx component config set --reload /core/ffx-laboratory:hello-default-value "greeting=parent component"
 ...
-[02622.752978][ffx-laboratory:hello-from-parent] INFO: Hello, parent component! (from Rust)`
+[02622.752978][ffx-laboratory:hello-default-value] INFO: Hello, parent component! (from Rust)
 ```
 
-Each configuration field is specified as `KEY=VALUE` where `KEY` must be a field
-in the component's config schema which has `mutability: [ "parent" ]` and
-`VALUE` is a string that can be parsed as JSON matching the type of the field.
+Each configuration field is specified as `KEY=VALUE` where `KEY` is the `key` of a configuration
+capability declared in the component's manifest and `VALUE` is a string matching the type of the
+field.
 
-### Testing with Realm Builder
+### Testing with Realm Builder {#testing-with-realm-builder}
 
-You can use [Realm Builder][rb-feature-matrix] to dynamically replace the configuration values of
-a component regardless of the configuration field's `mutability`.
+You can use [Realm Builder][rb-feature-matrix] to define and route configuration capabilities to a
+component in integration tests.
 
 TODO(https://fxbug.dev/42053123) Add a section covering use with subpackaged components.
 
@@ -343,42 +275,14 @@ TODO(https://fxbug.dev/42053123) Add a section covering use with subpackaged com
   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/integration_test/rust/lib.rs" region_tag="config_replace" adjust_indentation="auto" %}
   ```
 
-Realm Builder validates the replaced value against the component's configuration schema.
-
-When setting values dynamically, Realm Builder requires users to choose whether
-or not to load packaged configuration values for the launched component.
-
-To load a component's packaged values when providing a subset of values in code:
-
-* {C++}
-
-  ```cpp
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/integration_test/cpp/test.cc" region_tag="config_load" adjust_indentation="auto" %}
-  ```
-
-* {Rust}
-
-  ```rust
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/integration_test/rust/lib.rs" region_tag="config_load" adjust_indentation="auto" %}
-  ```
-
-To set all of a component's values in code without using packaged values:
-
-* {C++}
-
-  ```cpp
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/integration_test/cpp/test.cc" region_tag="config_empty" adjust_indentation="auto" %}
-  ```
-
-* {Rust}
-
-  ```rust
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/config/integration_test/rust/lib.rs" region_tag="config_empty" adjust_indentation="auto" %}
-  ```
+Realm Builder validates the capability value against the component's configuration schema. Any
+optional or transitional configuration capabilities that are not routed in the test realm (or are
+routed from `void`) resolve to the `default` values declared in the component's manifest.
 
 <!-- TODO(https://fxbug.dev/42055979): Link to fxbug.dev page when better documentation is available.  -->
 [build-types]: /docs/contribute/governance/rfcs/0115_build_types.md
-[cml-ref-doc]: https://fuchsia.dev/reference/cml#config
+[cml-ref-doc]: https://fuchsia.dev/reference/cml#use
+[config-capabilities]: /docs/concepts/components/v2/capabilities/configuration.md
 [sa-sc-docs]: assembling_structured_config.md
 [rb-feature-matrix]: /docs/development/testing/components/realm_builder.md#language-feature-matrix
 [sc-verification]: /docs/development/verification/build_integration.md#verifying-structured-configuration-files

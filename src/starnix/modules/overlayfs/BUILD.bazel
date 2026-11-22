@@ -32,7 +32,6 @@ rustc_library(
         "//src/starnix/lib/starnix_logging",
         "//src/starnix/lib/starnix_sync",
         "//src/starnix/lib/starnix_uapi",
-        "//src/starnix/lib/syncio",
         "//third_party/rust_crates/vendor:once_cell",
         "//third_party/rust_crates/vendor:rand",
     ],

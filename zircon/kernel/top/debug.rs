@@ -138,22 +138,16 @@ pub(super) unsafe extern "C" fn vpanic(
     panic_finish()
 }
 
-/// Spin the CPU for a period of (short) time.
-#[unsafe(no_mangle)]
-pub extern "C" fn spin(usecs: u32) {
-    let start: InstantBoot = current_boot_time();
-
-    let nsecs = DurationBoot(zx_usec(i64::from(usecs)));
-    while current_boot_time() - start < nsecs {}
-}
-
 /// Busy-waits for at least `usecs` microseconds without blocking.
 ///
 /// This does not yield the CPU, so it is usable with interrupts or preemption disabled. Prefer
 /// [`crate::kernel::thread::sleep_relative`] wherever blocking is acceptable.
 #[inline]
 pub fn spin_usecs(usecs: u32) {
-    spin(usecs);
+    let start: InstantBoot = current_boot_time();
+
+    let nsecs = DurationBoot(zx_usec(i64::from(usecs)));
+    while current_boot_time() - start < nsecs {}
 }
 
 /// Systemwide halt with a formatted panic message.
@@ -248,9 +242,8 @@ pub unsafe extern "C" fn assert_fail(
 }
 
 /// Chooses a stack guard value from hardware entropy if available.
-#[unsafe(no_mangle)]
 #[sanitize(safestack = "off")]
-pub extern "C" fn choose_stack_guard() -> usize {
+pub fn choose_stack_guard() -> usize {
     let mut guard: usize = 0;
     if hw_rng_get_entropy(guard.as_mut_bytes()) != size_of_val(&guard) {
         // We can't get a random value, so use a randomish value.
@@ -285,7 +278,6 @@ impl Display for CrashPanicFiller {
 ///
 /// The message ends with a marker on its own line, which tests use to check that
 /// a long formatted message reaches the console and crashlog untruncated.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_debug_crash_panic() -> ! {
+pub fn rust_debug_crash_panic() -> ! {
     panic!("rust_panic test message:\n{CrashPanicFiller}\nend of rust_panic test message");
 }

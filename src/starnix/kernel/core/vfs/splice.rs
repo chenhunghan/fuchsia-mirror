@@ -43,7 +43,8 @@ impl CopyOperand {
         fd: FdNumber,
         user_offset: OffsetPtr,
     ) -> Result<Self, Errno> {
-        let file = current_task.files().get(fd)?;
+        let file = current_task.get_file(fd)?;
+        crate::task::confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
         if !user_offset.is_null() && !file.is_seekable() {
             return error!(ESPIPE);
         }
@@ -185,8 +186,11 @@ pub fn splice(
 
     let non_blocking = flags & uapi::SPLICE_F_NONBLOCK != 0;
 
-    let file_in = current_task.files().get(fd_in)?;
-    let file_out = current_task.files().get(fd_out)?;
+    let file_in = current_task.get_file(fd_in)?;
+    let file_out = current_task.get_file(fd_out)?;
+    crate::task::confirm_fs_syscall_trace_if(|| {
+        file_in.fs.is_storage_backed() || file_out.fs.is_storage_backed()
+    });
 
     let pipe_in = file_in.downcast_file::<PipeFileObject>();
     let pipe_out = file_out.downcast_file::<PipeFileObject>();
@@ -408,8 +412,8 @@ pub fn tee(
 
     let non_blocking = flags & uapi::SPLICE_F_NONBLOCK != 0;
 
-    let file_in = current_task.files().get(fd_in)?;
-    let file_out = current_task.files().get(fd_out)?;
+    let file_in = current_task.get_file(fd_in)?;
+    let file_out = current_task.get_file(fd_out)?;
 
     if !file_in.can_read() || !file_out.can_write() {
         return error!(EBADF);

@@ -32,9 +32,9 @@ ffx log --filter network
 
 If you work on things such as bringup or don't have network access to the device,
 you can connect to a Fuchsia device through a serial console. In those
-cases, you can use [`log_listener`](#log_listener).
+cases, you can use [`log_listener`](#log-listener).
 
-### log_listener
+### log_listener {#log-listener}
 
 Note: For more information on the `log_listener` CLI, see
 [`log_listener`][log-listener-ref].
@@ -244,12 +244,12 @@ The `$execution` details of a recipe step, including the command run and
 details about the execution environment. This log is often helpful for
 reproducing the recipe step locally.
 
-[hermetic-integration-tests]: /docs/reference/testing/what-tests-to-write.md#hermetic_integration_tests
+[hermetic-integration-tests]: /docs/reference/testing/what-tests-to-write.md#hermetic-integration-tests
 [ffx-log-ref]: https://fuchsia.dev/reference/tools/sdk/ffx#ffx_log
 [debuglog]: /docs/reference/kernel_objects/debuglog.md
 [logs-storage-concepts]: /docs/concepts/components/diagnostics/README.md#log-storage
 [`log_listener`]: /src/diagnostics/log_listener/README.md
-[kernel-console]: /zircon/kernel/lib/debuglog/debuglog.cc
+[kernel-console]: /zircon/kernel/lib/debuglog/debuglog.rs
 [`netsvc`]: /src/bringup/bin/netsvc/debuglog.cc
 [`dlog`]: /src/bringup/bin/dlog/README.md
 [botanist]: /tools/botanist/cmd/main.go
@@ -260,5 +260,5 @@ reproducing the recipe step locally.
 [forwarded from the klog]: /docs/development/diagnostics/logs/recording.md#forwarding-klog-to-syslog
 [`fuchsia.diagnostics.ArchiveAccessor`]: /reference/fidl/fuchsia.diagnostics#ArchiveAccessor
 [assembly-diagnostics]: /reference/assembly/DiagnosticsConfig/index.md
-[test-dynamic-severity]: /docs/development/testing/run_fuchsia_tests.md#set_the_minimum_log_severity
+[test-dynamic-severity]: /docs/development/testing/run_fuchsia_tests.md#set-the-minimum-log-severity
 [`fuchsia.logger.LogSink`]: /reference/fidl/fuchsia.logger#LogSink

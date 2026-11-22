@@ -348,6 +348,11 @@ class TaskManagementResponseUpiu : public AbstractResponseUpiu {
   explicit TaskManagementResponseUpiu(void* data) : AbstractResponseUpiu(data) {}
 
   ~TaskManagementResponseUpiu() override = default;
+
+  TaskManagementServiceResponse GetServiceResponse() {
+    return static_cast<TaskManagementServiceResponse>(
+        betoh32(GetData<TaskManagementResponseUpiuData>()->output_param1));
+  }
 };
 
 struct TaskManagementRequestUpiuData {
@@ -378,8 +383,8 @@ class TaskManagementRequestUpiu
     GetHeader().set_trans_code(UpiuTransactionCodes::kTaskManagementRequest);
     GetHeader().function = static_cast<uint8_t>(function);
 
-    GetData<TaskManagementRequestUpiuData>()->input_param1 = lun;
-    GetData<TaskManagementRequestUpiuData>()->input_param2 = task_tag;
+    GetData<TaskManagementRequestUpiuData>()->input_param1 = htobe32(lun);
+    GetData<TaskManagementRequestUpiuData>()->input_param2 = htobe32(task_tag);
   }
 
   ~TaskManagementRequestUpiu() override = default;

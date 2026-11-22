@@ -4,6 +4,7 @@
 
 #include "block_device.h"
 
+#include <fidl/fuchsia.hardware.badblock/cpp/wire.h>
 #include <fidl/fuchsia.hardware.block.volume/cpp/fidl.h>
 #include <fidl/fuchsia.storage.block/cpp/wire.h>
 #include <lib/ddk/driver.h>
@@ -39,15 +40,7 @@ zx::result<> BlockDevice::Start(fdf::DriverContext context) {
   }
   parent_client->GetProto(&parent_);
 
-  zx::result<ddk::BadBlockProtocolClient> bad_block_client =
-      compat::ConnectBanjo<ddk::BadBlockProtocolClient>(incoming);
-  if (bad_block_client.is_ok()) {
-    bad_block_client->GetProto(&bad_block_);
-  } else {
-    FDF_LOG(WARNING, "Parent device does not support bad_block protocol");
-  }
-
-  if (!InitFtl()) {
+  if (!InitFtl(*incoming)) {
     FDF_LOG(ERROR, "Failed to initialize FTL");
     return zx::error(ZX_ERR_INTERNAL);
   }
@@ -281,10 +274,15 @@ zx_status_t BlockDevice::FormatInternal() {
   return status;
 }
 
-bool BlockDevice::InitFtl() {
+bool BlockDevice::InitFtl(const fdf::Namespace& incoming) {
   std::lock_guard<std::mutex> lock(mutex_);
+  zx::result bad_block_client = incoming.Connect<fuchsia_hardware_badblock::Service::BadBlock>();
+  fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock> bad_block =
+      bad_block_client.is_ok()
+          ? bad_block_client->borrow()
+          : fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock>(ZX_HANDLE_INVALID);
   std::unique_ptr<NandDriver> driver =
-      NandDriver::CreateWithCounters(&parent_, &bad_block_, &nand_counters_, 0);
+      NandDriver::CreateWithCounters(&parent_, bad_block, &nand_counters_, 0);
   const char* error = driver->Init();
   if (error) {
     FDF_LOG(ERROR, "Failed to init FTL driver: %s", error);

@@ -218,7 +218,6 @@ fuchsia_structured_config_rust_lib("recovery_android_config") {
 
 rustc_library("ota_lib") {
   sources = [
-    "src/config.rs",
     "src/ota.rs",
     "src/ota_lib.rs",
     "src/setup.rs",
@@ -233,7 +232,6 @@ rustc_library("ota_lib") {
   ]
   deps = [
     ":fdr_lib",
-    "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
     "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_rust",
     "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
@@ -263,7 +261,6 @@ rustc_library("ota_lib") {
 
 rustc_test("ota_lib_test") {
   sources = [
-    "src/config.rs",
     "src/ota.rs",
     "src/ota_lib.rs",
     "src/setup.rs",
@@ -274,7 +271,6 @@ rustc_test("ota_lib_test") {
   proc_macro_deps = [ "//third_party/rust_crates:async-trait" ]
   deps = [
            ":fdr_lib",
-           "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
            "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_rust",
            "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
            "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
@@ -310,10 +306,7 @@ rustc_test("ota_lib_test") {
            "//src/sys/pkg/lib/fuchsia-pkg-testing",
            "//src/sys/pkg/lib/fuchsia-repo",
            "//src/sys/pkg/testing/blobfs-ramdisk",
-           "//src/sys/pkg/testing/mock-boot-arguments:lib",
            "//third_party/rust_crates:assert_matches",
-           "//third_party/rust_crates:maplit",
-           "//third_party/rust_crates:pretty_assertions",
            "//third_party/rust_crates:url",
          ]
 }

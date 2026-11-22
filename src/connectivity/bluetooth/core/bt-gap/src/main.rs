@@ -4,8 +4,7 @@
 
 #![recursion_limit = "512"]
 
-use anyhow::{format_err, Context as _, Error};
-use async_helpers::hanging_get::asynchronous as hanging_get;
+use anyhow::{Context as _, Error, format_err};
 use fidl::endpoints::{ControlHandle, DiscoverableProtocolMarker, ProtocolMarker};
 use fidl_fuchsia_bluetooth::Appearance;
 use fidl_fuchsia_bluetooth_bredr::ProfileMarker;
@@ -18,16 +17,12 @@ use fuchsia_async as fasync;
 use fuchsia_component::client::connect_to_protocol;
 use fuchsia_component::server::ServiceFs;
 use futures::channel::mpsc;
-use futures::future::BoxFuture;
-use futures::{try_join, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt, try_join};
 use log::{error, info, warn};
-use std::collections::HashMap;
 
 use crate::generic_access_service::GenericAccessService;
 use crate::host_dispatcher::HostService::*;
 use crate::host_dispatcher::{HostDispatcher, HostService};
-use crate::services::host_watcher;
-use crate::watch_peers::PeerWatcher;
 
 mod build_config;
 mod generic_access_service;
@@ -109,8 +104,6 @@ struct BtGap {
     inspect: fuchsia_inspect::Inspector,
     /// The generic access service requests
     gas_requests: mpsc::Receiver<LocalServiceRequest>,
-    run_watch_peers: BoxFuture<'static, Result<(), Error>>,
-    run_watch_hosts: BoxFuture<'static, Result<(), Error>>,
 }
 
 impl BtGap {
@@ -128,49 +121,16 @@ impl BtGap {
 
         let (gas_channel_sender, gas_requests) = mpsc::channel(0);
 
-        // Initialize a HangingGetBroker to process watch_peers requests
-        let watch_peers_broker = hanging_get::HangingGetBroker::new(
-            HashMap::new(),
-            PeerWatcher::observe,
-            hanging_get::DEFAULT_CHANNEL_SIZE,
-        );
-        let watch_peers_publisher = watch_peers_broker.new_publisher();
-        let watch_peers_registrar = watch_peers_broker.new_registrar();
-
-        // Initialize a HangingGetBroker to process watch_hosts requests
-        let watch_hosts_broker = hanging_get::HangingGetBroker::new(
-            Vec::new(),
-            host_watcher::observe_hosts,
-            hanging_get::DEFAULT_CHANNEL_SIZE,
-        );
-        let watch_hosts_publisher = watch_hosts_broker.new_publisher();
-        let watch_hosts_registrar = watch_hosts_broker.new_registrar();
-
-        // Process the watch_peers broker in the background
-        let run_watch_peers = watch_peers_broker
-            .run()
-            .map(|()| Err::<(), Error>(format_err!("WatchPeers broker terminated unexpectedly")))
-            .boxed();
-        // Process the watch_hosts broker in the background
-        let run_watch_hosts = watch_hosts_broker
-            .run()
-            .map(|()| Err::<(), Error>(format_err!("WatchHosts broker terminated unexpectedly")))
-            .boxed();
-
         let hd = HostDispatcher::new(
             Appearance::Display,
             config,
             stash,
             inspect.root().create_child("system"),
             gas_channel_sender,
-            watch_peers_publisher,
-            watch_peers_registrar,
-            watch_hosts_publisher,
-            watch_hosts_registrar,
         );
 
         info!("bt-gap successfully initialized.");
-        Ok(BtGap { hd, inspect, gas_requests, run_watch_peers, run_watch_hosts })
+        Ok(BtGap { hd, inspect, gas_requests })
     }
 
     /// Run continuous tasks that are expected to live until bt-gap terminates
@@ -196,14 +156,7 @@ impl BtGap {
 
         let serve_fidl = serve_fidl(self.hd.clone(), self.inspect);
 
-        try_join!(
-            set_local_name,
-            serve_fidl,
-            run_generic_access_service,
-            self.run_watch_peers,
-            self.run_watch_hosts,
-        )
-        .map(|((), (), (), (), ())| ())
+        try_join!(set_local_name, serve_fidl, run_generic_access_service).map(|((), (), ())| ())
     }
 }
 

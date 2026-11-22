@@ -51,7 +51,6 @@ static_library("ddk") {
     "include/lib/ddk/debug.h",
     "include/lib/ddk/device.h",
     "include/lib/ddk/driver.h",
-    "include/lib/ddk/hw/arch_ops.h",
     "include/lib/ddk/hw/inout.h",
     "include/lib/ddk/io-buffer.h",
     "include/lib/ddk/metadata.h",
@@ -87,7 +86,6 @@ library_headers("ddk-deprecated-binding-headers") {
     ":*",
     "//src/devices/board/drivers/astro:*",
     "//src/devices/board/drivers/nelson:*",
-    "//src/devices/board/drivers/qemu-arm64:*",
     "//src/devices/board/drivers/sherlock:*",
     "//src/devices/board/drivers/x86/*",
     "//src/devices/board/lib/acpi/*",
@@ -111,7 +109,6 @@ library_headers("ddk-driver-headers") {
   visibility = [
     ":*",
     "//src/connectivity/ethernet/drivers/third_party/igc:*",
-    "//zircon/third_party/dev/ethernet/e1000:*",
   ]
   public_deps = [ "//sdk/lib/async" ]
 }
@@ -186,19 +183,13 @@ library_headers("ddk-deprecated-mmio-headers") {
   visibility = [
     ":*",
     "//src/devices/bus/lib/virtio:*",
-    "//zircon/third_party/dev/ethernet/e1000:*",
   ]
 }
 
 library_headers("ddk-hw-headers") {
-  public = [
-    "include/lib/ddk/hw/arch_ops.h",
-    "include/lib/ddk/hw/inout.h",
-  ]
+  public = [ "include/lib/ddk/hw/inout.h" ]
   visibility = [
     ":*",
-    "//src/devices/block/drivers/ufs:*",
     "//src/graphics/display/drivers/intel-display:*",
-    "//src/graphics/magma/lib/magma/platform:*",
   ]
 }

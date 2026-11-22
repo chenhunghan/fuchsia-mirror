@@ -109,13 +109,17 @@
   mov %rax, %gs:ZX_TLS_UNSAFE_SP_OFFSET
 #endif
 
-  // Now the full C++ ABI is available.  This could theoretically be a tail
-  // call since it's obliged never to return, but it's nice to have the
-  // caller in a backtrace (and the call implicitly adjusts the stack
-  // alignment as the ABI requires).
+  // Now the full C++ ABI is available. Apply our own relocations before
+  // anything that might depend on them. The PhysMain arguments are safe in
+  // call-saved %r12 and %rbx.
+  call ApplyRelocationsToSelf
+
+  // This could theoretically be a tail call since it's obliged never to
+  // return, but it's nice to have the caller in a backtrace (and the call
+  // implicitly adjusts the stack alignment as the ABI requires).
   mov %r12, %rdi
   mov %rbx, %rsi
-  call PhysMain
+  call CppPhysMain
 
   // Trap forever just in case it does return.
 0:ud2

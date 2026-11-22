@@ -892,6 +892,13 @@ impl RelativePath {
         Self { rep: ".".into() }
     }
 
+    /// Converts a single [`Name`] segment into a [`RelativePath`] without reallocating or
+    /// re-interning its underlying [`FlyStr`].
+    #[inline]
+    pub fn from_name(name: Name) -> Self {
+        Self { rep: name.0 }
+    }
+
     pub fn is_dot(&self) -> bool {
         self.rep == "."
     }
@@ -1015,10 +1022,12 @@ impl From<RelativePath> for String {
 
 impl From<Vec<Name>> for RelativePath {
     fn from(segments: Vec<Name>) -> Self {
-        if segments.is_empty() {
-            Self::dot()
-        } else {
-            Self { rep: segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("/").into() }
+        match segments.len() {
+            0 => Self::dot(),
+            1 => Self { rep: segments.into_iter().next().unwrap().0 },
+            _ => Self {
+                rep: segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("/").into(),
+            },
         }
     }
 }
@@ -1112,6 +1121,16 @@ impl BorrowedSeparatedPath<'_> {
     /// Converts this [BorrowedSeparatedPath] to the owned type.
     pub fn to_owned(&self) -> SeparatedPath {
         SeparatedPath { dirname: self.dirname.clone(), basename: self.basename.clone() }
+    }
+
+    /// Converts this [BorrowedSeparatedPath] into a [RelativePath], avoiding intermediate segment
+    /// allocations and re-interning when `dirname` is `.`.
+    pub fn to_relative_path(&self) -> RelativePath {
+        if self.dirname.is_dot() {
+            RelativePath::from_name(self.basename.clone())
+        } else {
+            RelativePath { rep: format!("{}/{}", self.dirname, self.basename).into() }
+        }
     }
 }
 
@@ -2129,6 +2148,25 @@ mod tests {
         assert_eq!(path, long_path);
         assert!(!path.extend("a".parse().unwrap()));
         assert_eq!(path, long_path);
+    }
+
+    #[test]
+    fn test_relative_path_from_name_and_separated_path() {
+        let foo: Name = "foo".parse().unwrap();
+        let bar: Name = "bar".parse().unwrap();
+
+        assert_eq!(RelativePath::from_name(foo.clone()), "foo".parse().unwrap());
+        assert_eq!(RelativePath::from(Vec::<Name>::new()), RelativePath::dot());
+        assert_eq!(RelativePath::from(vec![foo.clone()]), "foo".parse().unwrap());
+        assert_eq!(RelativePath::from(vec![foo.clone(), bar.clone()]), "foo/bar".parse().unwrap());
+
+        let dot = RelativePath::dot();
+        let dot_sep = BorrowedSeparatedPath { dirname: &dot, basename: &foo };
+        assert_eq!(dot_sep.to_relative_path(), "foo".parse().unwrap());
+
+        let dir: RelativePath = "dir/sub".parse().unwrap();
+        let nested_sep = BorrowedSeparatedPath { dirname: &dir, basename: &bar };
+        assert_eq!(nested_sep.to_relative_path(), "dir/sub/bar".parse().unwrap());
     }
 
     #[test]

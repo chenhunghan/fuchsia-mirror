@@ -1,10 +1,12 @@
 // Copyright 2021 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+@available(added=HEAD)
 library fuchsia.netemul;
 
 using fuchsia.component;
 using fuchsia.component.decl;
+using fuchsia.hardware.network;
 using fuchsia.io;
 using fuchsia.netemul.network;
 using fuchsia.url;
@@ -79,32 +81,17 @@ closed protocol Sandbox {
                     ///
                     /// `capabilities` must be unique.
                     1: capabilities vector<@generated_name("Capability") strict union {
-                        /// The `devfs` instance offered by netemul, where
-                        /// virtual devices are mounted.
-                        1: netemul_devfs @generated_name("DevfsDep") table {
-                            /// The name of the capability being offered.
-                            ///
-                            /// Required.
-                            1: name fuchsia.component.name;
-                            /// The subdirectory of `/dev` visible to the
-                            /// component.
-                            ///
-                            /// If not set, the entire contents of `/dev` will
-                            /// be visible to the component.
-                            2: subdir string:fuchsia.component.MAX_PATH_LENGTH;
-                        };
-
                         /// The network context offered by netemul, shared
                         /// between all the managed realms in a given sandbox.
-                        3: netemul_network_context Empty;
+                        1: netemul_network_context Empty;
                         /// The [`fuchsia.logger/LogSink`] offered by netemul.
                         ///
                         /// Decorates logs produced by components in the managed
                         /// realm and forwards them to syslog.
-                        4: log_sink Empty;
+                        2: log_sink Empty;
                         /// A dependency on a capability exposed by another
                         /// child component in the same test realm.
-                        5: child_dep table {
+                        3: child_dep table {
                             /// The name of the child exposing the needed
                             /// capability.
                             ///
@@ -134,7 +121,7 @@ closed protocol Sandbox {
 
                         /// A dependency on a storage capability offered by
                         /// netemul.
-                        6: storage_dep table {
+                        4: storage_dep table {
                             /// The variant of the storage capability.
                             ///
                             /// Required.
@@ -172,7 +159,11 @@ closed protocol Sandbox {
 
                         /// A dependency on the capability to register a tracing
                         /// provider.
-                        7: tracing_provider Empty;
+                        5: tracing_provider Empty;
+                        /// The [`fuchsia.net.tun/Control`] offered by netemul,
+                        /// shared between all the managed realms in a given
+                        /// sandbox.
+                        6: netemul_network_tun Empty;
                     }>:MAX;
                 };
 
@@ -216,9 +207,9 @@ closed protocol Sandbox {
 ///  * netemul-provided capabilities to allow networking
 ///  * logging
 ///
-/// `ManagedRealm` also provides a `devfs` instance: a directory standing for a
-/// virtual device filesystem that can be controlled through the [`AddDevice`]
-/// and [`RemoveDevice`] methods.
+/// `ManagedRealm` also exposes `fuchsia.hardware.network.Service` and
+/// `fuchsia.driver.token.NodeBusTopology` from `netemul-services`, controlled
+/// through the [`AddDevice`] and [`RemoveDevice`] methods.
 ///
 /// The lifetime of a `ManagedRealm` and all its children are tied to its
 /// channel. Upon closure, all children of the realm will be destroyed.
@@ -261,38 +252,32 @@ closed protocol ManagedRealm {
         child_name fuchsia.component.name:optional;
         req zx.Handle:CHANNEL;
     });
-    /// Mounts new virtual device `device` on netemul's `devfs` instance within
-    /// this realm.
+    /// Publishes a virtual network `device` as `instance_name` in
+    /// `fuchsia.hardware.network.Service` within this realm.
     ///
-    /// This `devfs` instance is available to components that have the
-    /// [`Capability.netemul_devfs`] capability.
-    ///
-    /// + request `path` relative path from `devfs` root to the virtual device
+    /// + request `instance_name` service instance name for the virtual device
     ///     to be added to the realm.
-    /// + request `device` virtual device server.
-    /// * error `ZX_ERR_ALREADY_EXISTS` if `device.path` is already in use.
-    /// * error `ZX_ERR_INVALID_ARGS` if an element of `path` exceeds
-    ///     [`fuchsia.io/MAX_FILENAME`] bytes in length.
+    /// + request `device` virtual network device handle.
+    /// * error `ZX_ERR_ALREADY_EXISTS` if `instance_name` is already in use.
+    /// * error `ZX_ERR_INVALID_ARGS` if `instance_name` is not a valid
+    ///     single-component filename within [`fuchsia.io/MAX_NAME_LENGTH`]
+    ///     bytes.
     strict AddDevice(resource struct {
-        path string:MAX;
-        device client_end:fuchsia.netemul.network.DeviceProxy;
+        instance_name string:MAX;
+        device client_end:fuchsia.hardware.network.Device;
     }) -> () error zx.Status;
-    /// Removes virtual device mounted at `path`.
+    /// Removes virtual network device published at `instance_name`.
     ///
-    /// + request `path` the path to virtual device to be removed from the
-    ///     realm, relative to `devfs` root.
-    /// * error `ZX_ERR_NOT_FOUND` if `path` is not currently bound to a device.
-    /// * error `ZX_ERR_INVALID_ARGS` if an element of `path` exceeds
-    ///     [`fuchsia.io/MAX_FILENAME`] bytes in length.
+    /// + request `instance_name` the service instance name of the virtual
+    ///     device to be removed from the realm.
+    /// * error `ZX_ERR_NOT_FOUND` if `instance_name` is not currently bound to
+    ///     a device.
+    /// * error `ZX_ERR_INVALID_ARGS` if `instance_name` is not a valid
+    ///     single-component filename within [`fuchsia.io/MAX_NAME_LENGTH`]
+    ///     bytes.
     strict RemoveDevice(struct {
-        path string:MAX;
+        instance_name string:MAX;
     }) -> () error zx.Status;
-    /// Connects to netemul's `devfs` instance for this realm.
-    ///
-    /// + request `devfs` request handle to the `devfs` directory.
-    strict GetDevfs(resource struct {
-        devfs server_end:fuchsia.io.Directory;
-    });
     /// Starts the specified child component in this realm. Starting an already
     /// running child component is a no-op and returns success.
     ///

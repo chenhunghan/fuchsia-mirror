@@ -13,7 +13,7 @@
 #include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/syslog/cpp/macros.h>
 
-// An implementation of the Echo protocol. Protocols are implemented in LLCPP by
+// An implementation of the Echo protocol. Protocols are implemented in C++ wire bindings by
 // creating a subclass of the fidl::WireServer class for the protocol.
 class EchoImpl final : public fidl::WireServer<fuchsia_examples::Echo> {
  public:

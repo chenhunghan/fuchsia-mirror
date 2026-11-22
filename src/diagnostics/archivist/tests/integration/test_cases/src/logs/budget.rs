@@ -114,6 +114,7 @@ async fn test_budget(reader_format: LogFormat) {
     assert_ne!(msg_b.moniker_tag, "puppet-victim");
 
     // Victim logs should have been rolled out.
+    #[allow(clippy::needless_collect)]
     let messages =
         observed_logs.filter(|log| log.moniker_tag == "puppet-victim").collect::<Vec<_>>();
     assert!(messages.is_empty());

@@ -16,7 +16,7 @@ Shac script implementations live in Fuchsia’s `//scripts/shac` directory.
   specific but does not have a `language.star` file, then create one. If it’s generic,
   use `title.star` (where title is the name of the check function).
 
-### Simple Example
+### Simple example {:#simple-example}
 
 The following example is a static analyzer on all files that creates a
 non-blocking, gerrit warning comment on changes where the string “http://”

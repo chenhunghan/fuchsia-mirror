@@ -12,19 +12,18 @@ rustc_test("bin") {
   output_name = "netsvc_integration_test"
   deps = [
     "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
+    "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token_rust",
     "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
     "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
     "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
     "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
     "//sdk/fidl/fuchsia.net.tun:fuchsia.net.tun_rust",
-    "//sdk/fidl/fuchsia.sysinfo:fuchsia.sysinfo_rust",
     "//sdk/rust/zx",
     "//src/connectivity/lib/net-declare",
     "//src/connectivity/lib/net-types",
     "//src/connectivity/lib/packet-formats",
     "//src/connectivity/lib/ping",
     "//src/connectivity/network/testing/netemul/fidl:fuchsia.netemul_rust",
-    "//src/connectivity/network/testing/netemul/network-context/fidl:network_rust",
     "//src/connectivity/network/testing/netemul/rust:lib",
     "//src/connectivity/network/tests/integration/common:netstack_testing_common",
     "//src/connectivity/network/tests/integration/macros:netstack_testing_macros",
@@ -38,7 +37,6 @@ rustc_test("bin") {
     "//third_party/rust_crates:assert_matches",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:test-case",
-    "//third_party/rust_crates:zerocopy",
   ]
   sources = [ "src/lib.rs" ]
   configs += [ "//build/config/rust/lints:deny_unused_results" ]
@@ -51,9 +49,6 @@ fuchsia_test_component("netsvc-integration-test") {
     ":bin",
     "//src/bringup/bin/device-name-provider:component",
     "//src/bringup/bin/netsvc:test-component",
-
-    # netemul-sandbox-v2 is used to create hermetic test realms.
-    "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
   ]
 }
 
@@ -63,7 +58,10 @@ fuchsia_test_with_expectations_package("integration") {
   expectations = "expects/netsvc-integration-test.json5"
 
   # We inject a network stack to be able to communicate with netsvc.
-  subpackages = [ "//src/connectivity/network/netstack3:package-debug" ]
+  subpackages = [
+    "//src/connectivity/network/netstack3:package-debug",
+    "//src/connectivity/network/testing/netemul/service:package",
+  ]
 
   if (current_cpu == "riscv64") {
     expectations = "expects/netsvc-integration-test-riscv.json5"

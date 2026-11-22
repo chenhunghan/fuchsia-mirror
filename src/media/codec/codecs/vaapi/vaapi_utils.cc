@@ -4,7 +4,7 @@
 
 #include "vaapi_utils.h"
 
-#include <fuchsia/media/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
 #include <lib/fdio/directory.h>
 #include <lib/zx/channel.h>
 #include <zircon/assert.h>
@@ -319,65 +319,65 @@ static bool SupportsJPEGDecoder() {
   return SupportsProfile(VAProfileJPEGBaseline, VAEntrypointVLD, attribs);
 }
 
-std::vector<fuchsia::mediacodec::CodecDescription> GetDeprecatedCodecList() {
-  std::vector<fuchsia::mediacodec::CodecDescription> descriptions;
+std::vector<fuchsia_mediacodec::CodecDescription> GetDeprecatedCodecList() {
+  std::vector<fuchsia_mediacodec::CodecDescription> descriptions;
 
   if (SupportsJPEGDecoder()) {
-    fuchsia::mediacodec::CodecDescription description;
-    description.codec_type = fuchsia::mediacodec::CodecType::DECODER;
-    description.mime_type = "video/x-motion-jpeg";
+    fuchsia_mediacodec::CodecDescription description;
+    description.codec_type(fuchsia_mediacodec::CodecType::kDecoder);
+    description.mime_type("video/x-motion-jpeg");
     descriptions.push_back(std::move(description));
   }
 
   if (!H264DecoderDescriptions().empty()) {
-    fuchsia::mediacodec::CodecDescription description;
-    description.codec_type = fuchsia::mediacodec::CodecType::DECODER;
-    description.mime_type = "video/h264";
+    fuchsia_mediacodec::CodecDescription description;
+    description.codec_type(fuchsia_mediacodec::CodecType::kDecoder);
+    description.mime_type("video/h264");
     descriptions.push_back(std::move(description));
   }
 
   if (!VP9DecoderDescriptions().empty()) {
-    fuchsia::mediacodec::CodecDescription description;
-    description.codec_type = fuchsia::mediacodec::CodecType::DECODER;
-    description.mime_type = "video/vp9";
+    fuchsia_mediacodec::CodecDescription description;
+    description.codec_type(fuchsia_mediacodec::CodecType::kDecoder);
+    description.mime_type("video/vp9");
     descriptions.push_back(std::move(description));
   }
 
   if (SupportsH264Encoder()) {
-    fuchsia::mediacodec::CodecDescription description;
-    description.codec_type = fuchsia::mediacodec::CodecType::ENCODER;
-    description.mime_type = "video/h264";
+    fuchsia_mediacodec::CodecDescription description;
+    description.codec_type(fuchsia_mediacodec::CodecType::kEncoder);
+    description.mime_type("video/h264");
     descriptions.push_back(std::move(description));
   }
 
   return descriptions;
 }
 
-using ProfileMapType = std::map<fuchsia::media::CodecProfile, VAProfile>;
+using ProfileMapType = std::map<fuchsia_media::CodecProfile, VAProfile>;
 static ProfileMapType GetCodecProfileTranslation() {
   static const fbl::NoDestructor<ProfileMapType> kCodecProfileToVaProfileMap({
-      {fuchsia::media::CodecProfile::H264PROFILE_BASELINE, VAProfileH264Baseline},
-      {fuchsia::media::CodecProfile::H264PROFILE_MAIN, VAProfileH264Main},
-      {fuchsia::media::CodecProfile::H264PROFILE_HIGH, VAProfileH264High},
-      {fuchsia::media::CodecProfile::VP9PROFILE_PROFILE0, VAProfileVP9Profile0},
-      {fuchsia::media::CodecProfile::VP9PROFILE_PROFILE1, VAProfileVP9Profile1},
-      {fuchsia::media::CodecProfile::VP9PROFILE_PROFILE2, VAProfileVP9Profile2},
-      {fuchsia::media::CodecProfile::VP9PROFILE_PROFILE3, VAProfileVP9Profile3},
+      {fuchsia_media::CodecProfile::kH264ProfileBaseline, VAProfileH264Baseline},
+      {fuchsia_media::CodecProfile::kH264ProfileMain, VAProfileH264Main},
+      {fuchsia_media::CodecProfile::kH264ProfileHigh, VAProfileH264High},
+      {fuchsia_media::CodecProfile::kVp9ProfileProfile0, VAProfileVP9Profile0},
+      {fuchsia_media::CodecProfile::kVp9ProfileProfile1, VAProfileVP9Profile1},
+      {fuchsia_media::CodecProfile::kVp9ProfileProfile2, VAProfileVP9Profile2},
+      {fuchsia_media::CodecProfile::kVp9ProfileProfile3, VAProfileVP9Profile3},
   });
 
   return *kCodecProfileToVaProfileMap;
 }
 
-using VaProfileMapType = std::map<VAProfile, fuchsia::media::CodecProfile>;
+using VaProfileMapType = std::map<VAProfile, fuchsia_media::CodecProfile>;
 static VaProfileMapType GetVaProfileTranslation() {
   static const fbl::NoDestructor<VaProfileMapType> kVaProfileToMap({
-      {VAProfileH264Baseline, fuchsia::media::CodecProfile::H264PROFILE_BASELINE},
-      {VAProfileH264Main, fuchsia::media::CodecProfile::H264PROFILE_MAIN},
-      {VAProfileH264High, fuchsia::media::CodecProfile::H264PROFILE_HIGH},
-      {VAProfileVP9Profile0, fuchsia::media::CodecProfile::VP9PROFILE_PROFILE0},
-      {VAProfileVP9Profile1, fuchsia::media::CodecProfile::VP9PROFILE_PROFILE1},
-      {VAProfileVP9Profile2, fuchsia::media::CodecProfile::VP9PROFILE_PROFILE2},
-      {VAProfileVP9Profile3, fuchsia::media::CodecProfile::VP9PROFILE_PROFILE3},
+      {VAProfileH264Baseline, fuchsia_media::CodecProfile::kH264ProfileBaseline},
+      {VAProfileH264Main, fuchsia_media::CodecProfile::kH264ProfileMain},
+      {VAProfileH264High, fuchsia_media::CodecProfile::kH264ProfileHigh},
+      {VAProfileVP9Profile0, fuchsia_media::CodecProfile::kVp9ProfileProfile0},
+      {VAProfileVP9Profile1, fuchsia_media::CodecProfile::kVp9ProfileProfile1},
+      {VAProfileVP9Profile2, fuchsia_media::CodecProfile::kVp9ProfileProfile2},
+      {VAProfileVP9Profile3, fuchsia_media::CodecProfile::kVp9ProfileProfile3},
   });
 
   return *kVaProfileToMap;
@@ -385,7 +385,7 @@ static VaProfileMapType GetVaProfileTranslation() {
 
 // TODO(https://fxbug.dev/42073599): Remove [[maybe_unused]] once used, or potentially remove the
 // method if no longer expect to need to convert the other direction.
-[[maybe_unused]] static VAProfile CodecProfileToVaProfile(fuchsia::media::CodecProfile profile) {
+[[maybe_unused]] static VAProfile CodecProfileToVaProfile(fuchsia_media::CodecProfile profile) {
   const auto& profile_map = GetCodecProfileTranslation();
   const auto& profile_itr = profile_map.find(profile);
 
@@ -396,7 +396,7 @@ static VaProfileMapType GetVaProfileTranslation() {
   return VAProfileNone;
 }
 
-static fuchsia::media::CodecProfile VaProfileToCodecProfile(VAProfile profile) {
+static fuchsia_media::CodecProfile VaProfileToCodecProfile(VAProfile profile) {
   const auto& profile_map = GetVaProfileTranslation();
   const auto& profile_itr = profile_map.find(profile);
 
@@ -404,26 +404,26 @@ static fuchsia::media::CodecProfile VaProfileToCodecProfile(VAProfile profile) {
     return profile_itr->second;
   }
 
-  return fuchsia::media::CodecProfile::Unknown();
+  return fuchsia_media::CodecProfile::Unknown();
 }
 
-std::vector<fuchsia::mediacodec::DetailedCodecDescription> GetCodecDescriptions() {
-  std::vector<fuchsia::mediacodec::DetailedCodecDescription> codec_descriptions;
+std::vector<fuchsia_mediacodec::DetailedCodecDescription> GetCodecDescriptions() {
+  std::vector<fuchsia_mediacodec::DetailedCodecDescription> codec_descriptions;
 
   fit::function<void(const std::string&, const std::vector<ProfileDescription>&)>
       add_decoder_profiles = [&codec_descriptions](
                                  const std::string& mime_type,
                                  const std::vector<ProfileDescription>& profile_descriptions) {
-        fuchsia::mediacodec::DetailedCodecDescription codec_description;
-        codec_description.set_codec_type(fuchsia::mediacodec::CodecType::DECODER);
-        codec_description.set_mime_type(mime_type);
-        codec_description.set_is_hw(true);
+        fuchsia_mediacodec::DetailedCodecDescription codec_description;
+        codec_description.codec_type(fuchsia_mediacodec::CodecType::kDecoder);
+        codec_description.mime_type(mime_type);
+        codec_description.is_hw(true);
 
         // Iterate over each of the |ProfileDescription| and add the corresponding
         // |DecoderProfileDescription| to the list of supported profiles.
-        std::vector<fuchsia::mediacodec::DecoderProfileDescription> decoder_descriptions;
+        std::vector<fuchsia_mediacodec::DecoderProfileDescription> decoder_descriptions;
         for (const auto& profile_description : profile_descriptions) {
-          fuchsia::mediacodec::DecoderProfileDescription decoder_description;
+          fuchsia_mediacodec::DecoderProfileDescription decoder_description;
 
           auto codec_profile = VaProfileToCodecProfile(profile_description.profile);
           if (codec_profile.IsUnknown()) {
@@ -432,23 +432,23 @@ std::vector<fuchsia::mediacodec::DetailedCodecDescription> GetCodecDescriptions(
                                               profile_description.profile)));
             continue;
           }
-          decoder_description.set_profile(codec_profile);
+          decoder_description.profile(codec_profile);
 
           if (profile_description.min_width.has_value() &&
               profile_description.min_height.has_value()) {
-            decoder_description.set_min_image_size(
-                {profile_description.min_width.value(), profile_description.min_height.value()});
+            decoder_description.min_image_size(fuchsia_math::SizeU(
+                profile_description.min_width.value(), profile_description.min_height.value()));
           }
 
           if (profile_description.max_width.has_value() &&
               profile_description.max_height.has_value()) {
-            decoder_description.set_max_image_size(
-                {profile_description.max_width.value(), profile_description.max_height.value()});
+            decoder_description.max_image_size(fuchsia_math::SizeU(
+                profile_description.max_width.value(), profile_description.max_height.value()));
           }
 
           // VA-API currently does not support encrypted inputs.
-          decoder_description.set_allow_encryption(false);
-          decoder_description.set_require_encryption(false);
+          decoder_description.allow_encryption(false);
+          decoder_description.require_encryption(false);
 
           decoder_descriptions.push_back(std::move(decoder_description));
         }
@@ -461,10 +461,9 @@ std::vector<fuchsia::mediacodec::DetailedCodecDescription> GetCodecDescriptions(
           return;
         }
 
-        fuchsia::mediacodec::ProfileDescriptions decoder_profile_descriptions;
-        decoder_profile_descriptions.set_decoder_profile_descriptions(
-            std::move(decoder_descriptions));
-        codec_description.set_profile_descriptions(std::move(decoder_profile_descriptions));
+        codec_description.profile_descriptions(
+            fuchsia_mediacodec::ProfileDescriptions::WithDecoderProfileDescriptions(
+                std::move(decoder_descriptions)));
 
         codec_descriptions.push_back(std::move(codec_description));
       };
@@ -473,39 +472,39 @@ std::vector<fuchsia::mediacodec::DetailedCodecDescription> GetCodecDescriptions(
   add_decoder_profiles("video/vp9", VP9DecoderDescriptions());
 
   if (SupportsJPEGDecoder()) {
-    fuchsia::mediacodec::DetailedCodecDescription jpeg_description;
-    jpeg_description.set_codec_type(fuchsia::mediacodec::CodecType::DECODER);
-    jpeg_description.set_mime_type("video/x-motion-jpeg");
-    jpeg_description.set_is_hw(true);
+    fuchsia_mediacodec::DetailedCodecDescription jpeg_description;
+    jpeg_description.codec_type(fuchsia_mediacodec::CodecType::kDecoder);
+    jpeg_description.mime_type("video/x-motion-jpeg");
+    jpeg_description.is_hw(true);
 
-    fuchsia::mediacodec::DecoderProfileDescription decoder_description;
-    decoder_description.set_profile(::fuchsia::media::CodecProfile::MJPEG_BASELINE);
-    decoder_description.set_min_image_size({1, 1});
+    fuchsia_mediacodec::DecoderProfileDescription decoder_description;
+    decoder_description.profile(fuchsia_media::CodecProfile::kMjpegBaseline);
+    decoder_description.min_image_size(fuchsia_math::SizeU(1, 1));
     // TBV whether we can successfully decode a max-dimensions jpeg via HW.
-    decoder_description.set_max_image_size({65535, 65535});
+    decoder_description.max_image_size(fuchsia_math::SizeU(65535, 65535));
 
-    ::std::vector<::fuchsia::mediacodec::DecoderProfileDescription> decoder_descriptions;
+    std::vector<fuchsia_mediacodec::DecoderProfileDescription> decoder_descriptions;
     decoder_descriptions.emplace_back(std::move(decoder_description));
-    fuchsia::mediacodec::ProfileDescriptions descriptions;
-    descriptions.set_decoder_profile_descriptions(std::move(decoder_descriptions));
-    jpeg_description.set_profile_descriptions(std::move(descriptions));
+    jpeg_description.profile_descriptions(
+        fuchsia_mediacodec::ProfileDescriptions::WithDecoderProfileDescriptions(
+            std::move(decoder_descriptions)));
     codec_descriptions.emplace_back(std::move(jpeg_description));
   }
 
   if (SupportsH264Encoder()) {
-    fuchsia::mediacodec::DetailedCodecDescription h264_description;
-    h264_description.set_codec_type(fuchsia::mediacodec::CodecType::ENCODER);
-    h264_description.set_mime_type("video/h264");
-    h264_description.set_is_hw(true);
+    fuchsia_mediacodec::DetailedCodecDescription h264_description;
+    h264_description.codec_type(fuchsia_mediacodec::CodecType::kEncoder);
+    h264_description.mime_type("video/h264");
+    h264_description.is_hw(true);
 
-    fuchsia::mediacodec::EncoderProfileDescription encoder_description;
-    encoder_description.set_profile(::fuchsia::media::CodecProfile::H264PROFILE_HIGH);
+    fuchsia_mediacodec::EncoderProfileDescription encoder_description;
+    encoder_description.profile(fuchsia_media::CodecProfile::kH264ProfileHigh);
 
-    ::std::vector<::fuchsia::mediacodec::EncoderProfileDescription> encoder_descriptions;
+    std::vector<fuchsia_mediacodec::EncoderProfileDescription> encoder_descriptions;
     encoder_descriptions.emplace_back(std::move(encoder_description));
-    fuchsia::mediacodec::ProfileDescriptions descriptions;
-    descriptions.set_encoder_profile_descriptions(std::move(encoder_descriptions));
-    h264_description.set_profile_descriptions(std::move(descriptions));
+    h264_description.profile_descriptions(
+        fuchsia_mediacodec::ProfileDescriptions::WithEncoderProfileDescriptions(
+            std::move(encoder_descriptions)));
     codec_descriptions.emplace_back(std::move(h264_description));
   }
 

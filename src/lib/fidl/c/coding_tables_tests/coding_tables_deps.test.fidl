@@ -3,12 +3,12 @@
 // found in the LICENSE file.
 library fidl.test.example.codingtablesdeps;
 
-type MyXUnionA = flexible union {
+type MyUnionA = flexible union {
     1: a uint64;
-    2: b MyXUnionB;
+    2: b MyUnionB;
 };
 
-type MyXUnionB = flexible union {
+type MyUnionB = flexible union {
     1: foo uint32;
     2: bar bool;
 };

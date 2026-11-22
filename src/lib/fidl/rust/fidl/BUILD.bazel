@@ -2,7 +2,21 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+test_suite(
+    name = "tests",
+    tests = [":fidl_rust_lib_tests_pkg"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [":fidl_rust_lib_tests_host"],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 SRCS = [
     "src/client.rs",
@@ -38,6 +52,7 @@ rustc_library(
         "//src:__subpackages__",
         "//third_party/tcpdump/tests:__subpackages__",
         "//tools:__subpackages__",
+        "//vendor/google:__subpackages__",
     ],  # @bazel2gn:raw_overwrite:[ "//*" ]
     deps = [
         "//sdk/rust/zx-status",
@@ -62,6 +77,7 @@ rustc_test(
     name = "fidl_rust_lib_tests_bin",
     srcs = SRCS,
     edition = "2024",
+    tags = ["manual"],
     deps = [
         "//sdk/rust/zx-status",
         "//sdk/rust/zx-types",
@@ -82,6 +98,16 @@ rustc_test(
         ],
         "//conditions:default": ["//src/lib/fuchsia-emulated-handle"],
     }),
+)
+
+fx_unittest_package(
+    name = "fidl_rust_lib_tests_pkg",
+    unit_tests = [":fidl_rust_lib_tests_bin"],
+)
+
+wrap_host_rust_test(
+    name = "fidl_rust_lib_tests_host",
+    binary_name = "fidl_rust_lib_tests_bin",
 )
 
 package(default_applicable_licenses = ["//:license"])

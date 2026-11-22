@@ -88,7 +88,7 @@ pub(crate) mod for_tests {
                 .unwrap();
 
             let http_client = realm_builder
-                .add_child("http-client", "#meta/http-client.cm", ChildOptions::new())
+                .add_child("http-client", "http-client#meta/http-client.cm", ChildOptions::new())
                 .await
                 .unwrap();
             realm_builder
@@ -211,6 +211,28 @@ pub(crate) mod for_tests {
                 .unwrap();
 
             realm_builder
+                .add_capability(
+                    cm_rust::ConfigurationDecl {
+                        name: "fuchsia.pkgresolver.DeliveryBlobType".parse().unwrap(),
+                        value: u32::from(fuchsia_pkg_testing::DeliveryBlobType::Type1).into(),
+                    }
+                    .into(),
+                )
+                .await
+                .unwrap();
+            realm_builder
+                .add_route(
+                    Route::new()
+                        .capability(Capability::configuration(
+                            "fuchsia.pkgresolver.DeliveryBlobType",
+                        ))
+                        .from(Ref::self_())
+                        .to(&pkg_resolver),
+                )
+                .await
+                .unwrap();
+
+            realm_builder
                 .add_route(
                     Route::new()
                         .capability(Capability::configuration(
@@ -224,9 +246,6 @@ pub(crate) mod for_tests {
                         ))
                         .capability(Capability::configuration(
                             "fuchsia.pkgresolver.BlobNetworkHeaderTimeoutSeconds",
-                        ))
-                        .capability(Capability::configuration(
-                            "fuchsia.pkgresolver.DeliveryBlobType",
                         ))
                         .capability(Capability::configuration(
                             "fuchsia.pkgresolver.TufMetadataTimeoutSeconds",

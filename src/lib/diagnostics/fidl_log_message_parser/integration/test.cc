@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fuchsia/diagnostics/cpp/fidl.h>
-#include <fuchsia/logger/cpp/fidl.h>
-#include <lib/sys/cpp/service_directory.h>
+#include <fidl/fuchsia.diagnostics/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
+#include <lib/component/incoming/cpp/protocol.h>
 #include <lib/syslog/cpp/log_settings.h>
 #include <lib/syslog/cpp/macros.h>
 
@@ -27,27 +27,37 @@ void WriteLogs() {
   FX_LOGS(ERROR) << "Hello error";      // Line 27
 }
 
-std::vector<fuchsia::logger::LogMessage> GetLogs() {
+std::vector<fuchsia_logger::LogMessage> GetLogs() {
   // Synchronously get the logs from ArchiveAccessor.
+  zx::result accessor_end = component::Connect<fuchsia_diagnostics::ArchiveAccessor>();
+  EXPECT_TRUE(accessor_end.is_ok()) << accessor_end.status_string();
+  fidl::SyncClient accessor(std::move(*accessor_end));
 
-  fuchsia::diagnostics::ArchiveAccessorSyncPtr accessor;
-  auto services = sys::ServiceDirectory::CreateFromNamespace();
-  services->Connect(accessor.NewRequest());
-  fuchsia::diagnostics::BatchIteratorSyncPtr iterator;
+  auto [iterator_client, iterator_server] =
+      fidl::Endpoints<fuchsia_diagnostics::BatchIterator>::Create();
+  fidl::SyncClient iterator(std::move(iterator_client));
 
-  auto params = fuchsia::diagnostics::StreamParameters();
-  params.set_stream_mode(fuchsia::diagnostics::StreamMode::SNAPSHOT);
-  params.set_data_type(fuchsia::diagnostics::DataType::LOGS);
-  params.set_format(fuchsia::diagnostics::Format::FXT);
-  params.set_client_selector_configuration(
-      fuchsia::diagnostics::ClientSelectorConfiguration::WithSelectAll(true));
+  fuchsia_diagnostics::StreamParameters params;
+  params.stream_mode(fuchsia_diagnostics::StreamMode::kSnapshot)
+      .data_type(fuchsia_diagnostics::DataType::kLogs)
+      .format(fuchsia_diagnostics::Format::kFxt)
+      .client_selector_configuration(
+          fuchsia_diagnostics::ClientSelectorConfiguration::WithSelectAll(true));
 
-  EXPECT_EQ(ZX_OK, accessor->StreamDiagnostics(std::move(params), iterator.NewRequest()));
+  EXPECT_TRUE(accessor
+                  ->StreamDiagnostics({{
+                      .stream_parameters = std::move(params),
+                      .result_stream = std::move(iterator_server),
+                  }})
+                  .is_ok());
 
-  fuchsia::diagnostics::BatchIterator_GetNext_Result result;
-  std::vector<fuchsia::logger::LogMessage> ret;
-  EXPECT_EQ(ZX_OK, iterator->GetNext(&result));
-  for (auto& content : result.response().batch) {
+  auto get_next_result = iterator->GetNext();
+  if (!get_next_result.is_ok()) {
+    ADD_FAILURE() << "GetNext failed: " << get_next_result.error_value();
+    return {};
+  }
+  std::vector<fuchsia_logger::LogMessage> ret;
+  for (auto& content : get_next_result->batch()) {
     auto result = diagnostics::fidl_log_message_parser::ConvertFormattedContentToLogMessages(
         std::move(content));
     if (result.is_error()) {
@@ -83,29 +93,29 @@ TEST(fidl_log_message_parser, ConversionWorks) {
 
   ASSERT_EQ(logs.size(), EXPECTED_LOGS);
 
-  EXPECT_GT(logs[0].time.get(), 0u);
-  EXPECT_GT(logs[0].pid, 0u);
-  EXPECT_GT(logs[0].tid, 0u);
-  EXPECT_EQ(logs[0].msg, "[test.cc(25)] Hello info");
-  ASSERT_EQ(logs[0].tags.size(), 1u);
-  EXPECT_EQ(logs[0].tags[0], TAG);
-  EXPECT_EQ(logs[0].severity, static_cast<int8_t>(fuchsia::logger::LogLevelFilter::INFO));
+  EXPECT_GT(logs[0].time().get(), 0u);
+  EXPECT_GT(logs[0].pid(), 0u);
+  EXPECT_GT(logs[0].tid(), 0u);
+  EXPECT_EQ(logs[0].msg(), "[test.cc(25)] Hello info");
+  ASSERT_EQ(logs[0].tags().size(), 1u);
+  EXPECT_EQ(logs[0].tags()[0], TAG);
+  EXPECT_EQ(logs[0].severity(), static_cast<int8_t>(fuchsia_logger::LogLevelFilter::kInfo));
 
-  EXPECT_GT(logs[1].time.get(), 0u);
-  EXPECT_GT(logs[1].pid, 0u);
-  EXPECT_GT(logs[1].tid, 0u);
-  EXPECT_EQ(logs[1].msg,
+  EXPECT_GT(logs[1].time().get(), 0u);
+  EXPECT_GT(logs[1].pid(), 0u);
+  EXPECT_GT(logs[1].tid(), 0u);
+  EXPECT_EQ(logs[1].msg(),
             "[src/lib/diagnostics/fidl_log_message_parser/integration/test.cc(26)] Hello warning");
-  ASSERT_EQ(logs[1].tags.size(), 1u);
-  EXPECT_EQ(logs[1].tags[0], TAG);
-  EXPECT_EQ(logs[1].severity, static_cast<int8_t>(fuchsia::logger::LogLevelFilter::WARN));
+  ASSERT_EQ(logs[1].tags().size(), 1u);
+  EXPECT_EQ(logs[1].tags()[0], TAG);
+  EXPECT_EQ(logs[1].severity(), static_cast<int8_t>(fuchsia_logger::LogLevelFilter::kWarn));
 
-  EXPECT_GT(logs[2].time.get(), 0u);
-  EXPECT_GT(logs[2].pid, 0u);
-  EXPECT_GT(logs[2].tid, 0u);
-  EXPECT_EQ(logs[2].msg,
+  EXPECT_GT(logs[2].time().get(), 0u);
+  EXPECT_GT(logs[2].pid(), 0u);
+  EXPECT_GT(logs[2].tid(), 0u);
+  EXPECT_EQ(logs[2].msg(),
             "[src/lib/diagnostics/fidl_log_message_parser/integration/test.cc(27)] Hello error");
-  ASSERT_EQ(logs[2].tags.size(), 1u);
-  EXPECT_EQ(logs[2].tags[0], TAG);
-  EXPECT_EQ(logs[2].severity, static_cast<int8_t>(fuchsia::logger::LogLevelFilter::ERROR));
+  ASSERT_EQ(logs[2].tags().size(), 1u);
+  EXPECT_EQ(logs[2].tags()[0], TAG);
+  EXPECT_EQ(logs[2].severity(), static_cast<int8_t>(fuchsia_logger::LogLevelFilter::kError));
 }

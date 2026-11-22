@@ -17,8 +17,6 @@ cc_test_executable("archive_unittest_exe") {
   sources = [ "archive_unittest.cc" ]
 
   deps = [
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
-    "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/testing:gmatchers",
     "//src/developer/forensics/testing:gpretty_printers",
@@ -37,6 +35,8 @@ cc_test_executable("cobalt_unittest_exe") {
   sources = [ "cobalt_unittest.cc" ]
 
   deps = [
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
     "//src/developer/forensics/testing:gpretty_printers",
     "//src/developer/forensics/testing:gtest_with_syslog_main",
     "//src/developer/forensics/testing:unit_test_fixture",
@@ -55,9 +55,8 @@ cc_test_executable("component_unittest_exe") {
   sources = [ "component_unittest.cc" ]
 
   deps = [
-    "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_hlcpp",
     "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/developer/forensics/testing:gtest_with_syslog_main",
     "//src/developer/forensics/utils/component",
     "//src/lib/testing/loop_fixture",
@@ -113,23 +112,25 @@ cc_test_executable("log_format_unittest_exe") {
   sources = [ "log_format_unittest.cc" ]
 
   deps = [
-    "//sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp",
+    "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/testing:gpretty_printers",
+    "//src/developer/forensics/testing:log_message",
     "//src/developer/forensics/utils:logs",
     "//src/lib/fxl/test:gtest_main",
     "//third_party/googletest:gtest",
   ]
 }
 
-cc_test_executable("previous_boot_file_unittest_exe") {
+cc_test_executable("numbered_entries_unittest_exe") {
   testonly = true
 
-  sources = [ "previous_boot_file_unittest.cc" ]
+  sources = [ "numbered_entries_unittest.cc" ]
 
   deps = [
     "//src/developer/forensics/testing:gtest_with_syslog_main",
-    "//src/developer/forensics/utils:previous_boot_file",
+    "//src/developer/forensics/utils:numbered_entries",
+    "//src/lib/files",
     "//third_party/googletest:gmock",
     "//third_party/googletest:gtest",
   ]
@@ -180,7 +181,7 @@ cc_test_executable("utc_clock_ready_watcher_unittest_exe") {
   sources = [ "utc_clock_ready_watcher_unittest.cc" ]
 
   deps = [
-    "//sdk/fidl/fuchsia.time:fuchsia.time_hlcpp",
+    "//sdk/fidl/fuchsia.time:fuchsia.time_cpp",
     "//src/developer/forensics/testing:gtest_with_syslog_main",
     "//src/developer/forensics/testing:unit_test_fixture",
     "//src/developer/forensics/utils:utc_time_provider",
@@ -196,7 +197,8 @@ cc_test_executable("utc_time_provider_unittest_exe") {
   sources = [ "utc_time_provider_unittest.cc" ]
 
   deps = [
-    "//sdk/fidl/fuchsia.time:fuchsia.time_hlcpp",
+    "//sdk/fidl/fuchsia.time:fuchsia.time_cpp",
+    "//src/developer/forensics/feedback_data:constants",
     "//src/developer/forensics/testing:gtest_with_syslog_main",
     "//src/developer/forensics/testing:unit_test_fixture",
     "//src/developer/forensics/utils:utc_clock_ready_watcher",
@@ -272,12 +274,11 @@ fuchsia_unittest_component("log_format_unittest") {
   deps = [ ":log_format_unittest_exe" ]
 }
 
-fuchsia_component("previous_boot_file_unittest") {
-  testonly = true
-
-  manifest = "meta/previous_boot_file_unittest.cml"
-
-  deps = [ ":previous_boot_file_unittest_exe" ]
+fuchsia_unittest_component("numbered_entries_unittest") {
+  deps = [
+    ":numbered_entries_unittest_exe",
+    "//src/sys/test_runners:tmp_storage",
+  ]
 }
 
 fuchsia_unittest_component("promise_timeout_unittest") {
@@ -323,7 +324,7 @@ fuchsia_test_package("feedback-utils-tests") {
     ":inspect_node_manager_unittest",
     ":instrumented_binding_set_unittest",
     ":log_format_unittest",
-    ":previous_boot_file_unittest",
+    ":numbered_entries_unittest",
     ":promise_timeout_unittest",
     ":purge_memory_unittest",
     ":time_unittest",

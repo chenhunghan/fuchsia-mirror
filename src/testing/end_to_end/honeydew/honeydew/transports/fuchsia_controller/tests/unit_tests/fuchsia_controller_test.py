@@ -49,8 +49,7 @@ _MOCK_ARGS: dict[str, Any] = {
         subtools_search_path=None,
         proxy_timeout_secs=None,
         ssh_keepalive_timeout=None,
-        emu_instance_dir=None,
-        ssh_private_keys=None,
+        ssh_private_keys=["/tmp/fuchsia_ed25519"],
         ssh_public_keys=None,
         shared_data=_SHARED_DATA,
     ),
@@ -115,6 +114,9 @@ class FuchsiaControllerTests(unittest.TestCase):
     def test_create_context(self) -> None:
         """Test case for fuchsia_controller_transport.create_context()."""
         self.fuchsia_controller_obj_with_device_ip.create_context()
+        self.assertIsNone(
+            self.fuchsia_controller_obj_with_device_ip.ctx._directory
+        )
 
     @mock.patch.object(
         fc_transport.FuchsiaController,
@@ -189,12 +191,12 @@ class FuchsiaControllerTests(unittest.TestCase):
         )
 
     @mock.patch.object(
-        fuchsia_controller,
-        "Context",
+        fuchsia_controller.Context,
+        "strict",
         autospec=True,
     )
     def test_create_context_with_ssh_auth_sock(
-        self, mock_fc_context: mock.Mock
+        self, mock_fc_context_strict: mock.Mock
     ) -> None:
         """Test case for fuchsia_controller_transport.create_context() with ssh_auth_sock."""
         ssh_auth_sock = "/tmp/ssh_auth_sock"
@@ -208,7 +210,6 @@ class FuchsiaControllerTests(unittest.TestCase):
             subtools_search_path=None,
             proxy_timeout_secs=None,
             ssh_keepalive_timeout=None,
-            emu_instance_dir=None,
             ssh_private_keys=None,
             ssh_public_keys=None,
             ssh_auth_sock=ssh_auth_sock,
@@ -219,34 +220,29 @@ class FuchsiaControllerTests(unittest.TestCase):
             ffx_config_data=ffx_config_data,
         )
 
-        mock_fc_context.assert_called_with(
+        mock_fc_context_strict.assert_called_with(
             config={
-                "log.level": "debug",
-                "log.dir": "/tmp/logs",
+                "log": {"dir": "/tmp/logs", "level": "debug"},
                 "shared_data": _SHARED_DATA,
-                "connectivity.enable_usb": "false",
-                "connectivity.usb_driver_autostart": "false",
-                "ssh.auth-sock": ssh_auth_sock,
+                "connectivity": {
+                    "enable_usb": False,
+                    "usb_driver_autostart": False,
+                },
+                "ssh": {"auth-sock": ssh_auth_sock},
             },
             target=_INPUT_ARGS["target_name"],
         )
 
     @mock.patch.object(
         fuchsia_controller.Context,
-        "target_wait",
-        autospec=True,
-    )
-    @mock.patch.object(
-        fuchsia_controller,
-        "Context",
+        "strict",
         autospec=True,
     )
     def test_create_context_with_identities_only(
         self,
-        mock_fc_context: mock.Mock,
-        mock_target_wait: mock.Mock,
+        mock_fc_context_strict: mock.Mock,
     ) -> None:
-        """Verify create_context() with identities_only passed in ffx_config_data."""
+        """Verify create_context() with identities_only and SSH keys passed in ffx_config_data."""
         ffx_config_data = ffx_config.FfxConfigData(
             logs_dir="/tmp/logs",
             binary_path="/bin/ffx",
@@ -255,11 +251,10 @@ class FuchsiaControllerTests(unittest.TestCase):
             usb_socket_path=None,
             usb_driver_autostart=False,
             subtools_search_path=None,
-            proxy_timeout_secs=None,
-            ssh_keepalive_timeout=None,
-            emu_instance_dir=None,
-            ssh_private_keys=None,
-            ssh_public_keys=None,
+            proxy_timeout_secs=30,
+            ssh_keepalive_timeout=60,
+            ssh_private_keys=["/tmp/fuchsia_ed25519"],
+            ssh_public_keys=["/tmp/fuchsia_ed25519.pub"],
             identities_only=True,
             shared_data=_SHARED_DATA,
         )
@@ -268,35 +263,42 @@ class FuchsiaControllerTests(unittest.TestCase):
             ffx_config_data=ffx_config_data,
         )
 
-        mock_fc_context.assert_called_with(
+        mock_fc_context_strict.assert_called_with(
             config={
-                "log.level": "debug",
-                "log.dir": "/tmp/logs",
+                "log": {"dir": "/tmp/logs", "level": "debug"},
                 "shared_data": _SHARED_DATA,
-                "connectivity.enable_usb": "false",
-                "connectivity.usb_driver_autostart": "false",
-                "ssh.identities-only": "true",
+                "proxy": {"timeout_secs": 30},
+                "connectivity": {
+                    "enable_usb": False,
+                    "usb_driver_autostart": False,
+                },
+                "ssh": {
+                    "keepalive_timeout": 60,
+                    "priv": ["/tmp/fuchsia_ed25519"],
+                    "pub": ["/tmp/fuchsia_ed25519.pub"],
+                    "identities-only": True,
+                },
             },
             target=_INPUT_ARGS["target_name"],
         )
 
     @mock.patch.object(
-        fuchsia_controller,
-        "Context",
+        fuchsia_controller.Context,
+        "strict",
         side_effect=fuchsia_controller.FcTransportStatus(
             fuchsia_controller.FcTransportStatus.FC_ERR_INVALID_ARGS
         ),
         autospec=True,
     )
     def test_create_context_creation_error(
-        self, mock_fc_context: mock.Mock
+        self, mock_fc_context_strict: mock.Mock
     ) -> None:
         """Verify create_context() when the fuchsia controller Context creation
         raises an error."""
         with self.assertRaises(fc_errors.FuchsiaControllerError):
             self.fuchsia_controller_obj_with_device_ip.create_context()
 
-        mock_fc_context.assert_called()
+        mock_fc_context_strict.assert_called()
 
     @mock.patch.object(
         fuchsia_controller.Context,
@@ -405,31 +407,31 @@ class FuchsiaControllerTests(unittest.TestCase):
         mock_target_wait.assert_called()
 
     @mock.patch.object(
-        fuchsia_controller,
-        "Context",
+        fuchsia_controller.Context,
+        "strict",
         side_effect=RuntimeError("internal error"),
         autospec=True,
     )
     def test_create_context_raises_on_runtime_error(
-        self, mock_fc_context: mock.Mock
+        self, mock_fc_context_strict: mock.Mock
     ) -> None:
         """Test create_context() wraps RuntimeError"""
         with self.assertRaises(fc_errors.FuchsiaControllerError):
             self.fuchsia_controller_obj_with_device_ip.create_context()
 
-        mock_fc_context.assert_called()
+        mock_fc_context_strict.assert_called()
 
     @mock.patch.object(
-        fuchsia_controller,
-        "Context",
+        fuchsia_controller.Context,
+        "strict",
         side_effect=signals.TestAbortAll("abort"),
         autospec=True,
     )
     def test_create_context_propagates_unexpected_exceptions(
-        self, mock_fc_context: mock.Mock
+        self, mock_fc_context_strict: mock.Mock
     ) -> None:
         """Test create_context() propagates non-FC exceptions"""
         with self.assertRaises(signals.TestAbortAll):
             self.fuchsia_controller_obj_with_device_ip.create_context()
 
-        mock_fc_context.assert_called()
+        mock_fc_context_strict.assert_called()

@@ -32,10 +32,7 @@ fx_cc_test_binary(
         "exception.cc",
         "exception_to_string.cc",
     ],
-    # GN uses the //build/config:all_source config to define _ALL_SOURCE.
-    copts = [
-        "-D_ALL_SOURCE",
-    ],  # @bazel2gn:raw_overwrite:[ "//build/config:all_source" ]
+    build_flags = ["//build/config:all_source"],
     deps = [
         "//zircon/system/ulib/fbl",
         "//zircon/system/ulib/test-exceptions",

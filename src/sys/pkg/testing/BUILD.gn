@@ -16,7 +16,6 @@ if (is_fuchsia) {
     testonly = true
     public_deps = [
       "blobfs-ramdisk:hermetic_tests",
-      "mock-boot-arguments:hermetic_tests",
       "mock-crash-reporter:hermetic_tests",
       "mock-health-verification:hermetic_tests",
       "mock-installer:hermetic_tests",

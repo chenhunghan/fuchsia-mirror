@@ -1,0 +1,61 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":errors_test",
+        ":exception_utils_test",
+        ":ip_utils_test",
+        ":job_test",
+        ":ssh_connection_test",
+    ],
+    visibility = ["//src/testing:__pkg__"],
+)
+
+# LINT.IfChange(e2e_libs_tests)
+host_py_test(
+    name = "errors_test",
+    srcs = ["errors_test.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = ["//src/testing/end_to_end/libs"],
+)
+
+host_py_test(
+    name = "exception_utils_test",
+    srcs = ["exception_utils_test.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = ["//src/testing/end_to_end/libs"],
+)
+
+host_py_test(
+    name = "ip_utils_test",
+    testonly = True,
+    srcs = ["ip_utils_test.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = ["//src/testing/end_to_end/libs"],
+)
+
+host_py_test(
+    name = "job_test",
+    testonly = True,
+    srcs = ["job_test.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = ["//src/testing/end_to_end/libs"],
+)
+
+host_py_test(
+    name = "ssh_connection_test",
+    testonly = True,
+    srcs = ["ssh_connection_test.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = ["//src/testing/end_to_end/libs"],
+)
+# LINT.ThenChange(BUILD.gn:e2e_libs_tests)

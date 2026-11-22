@@ -13,7 +13,7 @@ type HostInfo = table {
     /// This field is always present.
     1: id bt.HostId;
 
-    /// The Bluetooth technologies that are supported by this adapter.
+    /// The Bluetooth technologies that are supported by this controller.
     ///
     /// This field is always present.
     2: technology TechnologyType;
@@ -35,7 +35,7 @@ type HostInfo = table {
     /// host is in the discoverable mode.
     5: local_name bt.DeviceName;
 
-    /// Whether or not the local adapter is currently discoverable over BR/EDR and
+    /// Whether or not this host is currently discoverable over BR/EDR and
     /// LE physical channels.
     6: discoverable bool;
 
@@ -64,7 +64,7 @@ closed protocol HostWatcher {
     /// over this host. Any previously assigned active host will be disabled and all of its pending
     /// procedures will be terminated.
     ///
-    /// * error This can fail if a host with `id` was not found.
+    /// * error `ZX_ERR_NOT_FOUND` if a host with `id` was not found.
     strict SetActive(struct {
         id bt.HostId;
     }) -> () error zx.Status;

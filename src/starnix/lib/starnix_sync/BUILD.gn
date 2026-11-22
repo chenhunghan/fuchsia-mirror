@@ -2,16 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
 import("//src/starnix/lib/starnix_sync/build/args.gni")
 
 group("tests") {
   testonly = true
   deps = [ ":starnix_sync-tests" ]
-}
-
-fuchsia_unittest_package("starnix_sync-tests") {
-  deps = [ ":starnix_sync_lib_test" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -129,4 +124,10 @@ rustc_test("starnix_sync_lib_test") {
     "//third_party/rust_crates:smallvec",
     "//third_party/rust_crates:test-case",
   ]
+}
+
+fuchsia_unittest_package("starnix_sync-tests") {
+  package_name = "starnix_sync-tests-gn"
+  component_name = "starnix_sync-tests"
+  deps = [ ":starnix_sync_lib_test" ]
 }

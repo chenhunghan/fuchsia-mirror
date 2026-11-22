@@ -16,12 +16,15 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <optional>
 #include <ostream>
+#include <ranges>
 #include <string>
 #include <thread>
 #include <vector>
@@ -49,6 +52,14 @@ constexpr size_t PAGE_SIZE = 0x1000;
 #define MREMAP_DONTUNMAP 4
 #endif
 
+#ifndef MAP_SHARED_VALIDATE
+#define MAP_SHARED_VALIDATE 0x03
+#endif
+
+#ifndef MAP_SYNC
+#define MAP_SYNC 0x080000
+#endif
+
 namespace {
 
 #if __x86_64__
@@ -64,6 +75,47 @@ TEST(MmapTest, UnmapPartialMapped) {
 
   EXPECT_EQ(munmap(mmap_addr, page_size), 0) << strerror(errno);
   EXPECT_EQ(munmap(mmap_addr + page_size, page_size), 0) << strerror(errno);
+}
+
+// Splits a private anonymous region of `kPages` pages into mappings of two pages each by
+// alternating their protection, fills it with a non-zero byte, unmaps pages [unmap_start,
+// unmap_end) and maps them again at the same address. The pages that were unmapped must read
+// back as zero, and all other pages must keep their contents.
+void CheckUnmapOfFragmentedRegion(size_t unmap_start, size_t unmap_end) {
+  constexpr size_t kPages = 16;
+  constexpr uint8_t kFill = 0xab;
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  uint8_t* base = static_cast<uint8_t*>(mmap(nullptr, kPages * page_size, PROT_READ | PROT_WRITE,
+                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  ASSERT_NE(base, MAP_FAILED) << strerror(errno);
+  auto unmap_all = fit::defer([&] { munmap(base, kPages * page_size); });
+  memset(base, kFill, kPages * page_size);
+  for (size_t page = 2; page < kPages; page += 4) {
+    ASSERT_EQ(mprotect(base + (page * page_size), 2 * page_size, PROT_READ), 0) << strerror(errno);
+  }
+
+  uint8_t* hole = base + (unmap_start * page_size);
+  const size_t hole_size = (unmap_end - unmap_start) * page_size;
+  ASSERT_EQ(munmap(hole, hole_size), 0) << strerror(errno);
+  ASSERT_EQ(
+      mmap(hole, hole_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0),
+      hole)
+      << strerror(errno);
+
+  const std::vector<uint8_t> zero_page(page_size, 0);
+  const std::vector<uint8_t> filled_page(page_size, kFill);
+  for (size_t page = 0; page < kPages; ++page) {
+    const std::vector<uint8_t>& expected =
+        page >= unmap_start && page < unmap_end ? zero_page : filled_page;
+    ASSERT_EQ(memcmp(base + (page * page_size), expected.data(), page_size), 0) << "page " << page;
+  }
+}
+
+TEST(MmapTest, UnmapWholeFragmentedRegionZeroesIt) { CheckUnmapOfFragmentedRegion(0, 16); }
+
+TEST(MmapTest, UnmapPartOfFragmentedRegionZeroesOnlyThatPart) {
+  // Start and end in the middle of two-page mappings.
+  CheckUnmapOfFragmentedRegion(3, 13);
 }
 
 TEST(MmapTest, Map32Test) {
@@ -702,6 +754,35 @@ TEST_F(MMapProcTest, PrivateMemoryOnFork) {
   });
 
   SAFE_SYSCALL(munmap(mapped, kSize));
+}
+
+alignas(65536) static const char kElfRodataTestBlock[65536] = {'E', 'L', 'F', 'R'};
+
+TEST_F(MMapProcTest, ReadOnlyElfSegmentReportsMayWriteAndSupportsCowMprotect) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  ASSERT_LE(page_size, sizeof(kElfRodataTestBlock));
+  const uintptr_t rodata_addr = reinterpret_cast<uintptr_t>(&kElfRodataTestBlock[0]);
+  ASSERT_EQ(rodata_addr % page_size, 0u);
+
+  std::string smaps;
+  ASSERT_TRUE(files::ReadFileToString(proc_path() + "/self/smaps", &smaps));
+  auto rodata_mapping = test_helper::find_memory_mapping_ext(rodata_addr, smaps);
+  ASSERT_NE(rodata_mapping, std::nullopt);
+  EXPECT_EQ(rodata_mapping->perms, "r--p");
+  EXPECT_TRUE(rodata_mapping->ContainsFlag("mr"));
+  EXPECT_TRUE(rodata_mapping->ContainsFlag("mw"));
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    void* page = reinterpret_cast<void*>(rodata_addr);
+    ASSERT_THAT(mprotect(page, page_size, PROT_READ | PROT_WRITE), SyscallSucceeds());
+    volatile char* bytes = reinterpret_cast<volatile char*>(page);
+    EXPECT_EQ(bytes[0], 'E');
+    bytes[0] = 'M';
+    EXPECT_EQ(bytes[0], 'M');
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+  EXPECT_EQ(*reinterpret_cast<const volatile char*>(&kElfRodataTestBlock[0]), 'E');
 }
 
 TEST_F(MMapProcTest, SmapsRssSplitMappings) {
@@ -1681,6 +1762,137 @@ TEST_F(MapGrowsdownTest, PartialZeroBelowGrowsdown) {
   EXPECT_TRUE(helper.WaitForChildren());
 }
 
+TEST(MmapTest, MapGrowsdownPrivateAnonymousSucceeds) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  EXPECT_THAT(test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0),
+              SyscallResultIsOk());
+}
+
+TEST(MmapTest, MapGrowsdownSharedAnonymousFails) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  ASSERT_THAT(test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                            MAP_SHARED | MAP_ANONYMOUS, -1, 0),
+              SyscallResultIsOk());
+  EXPECT_THAT(test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                            MAP_SHARED | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0),
+              SyscallResultIsErrno(EINVAL));
+}
+
+TEST(MmapTest, MapGrowsdownSharedValidateAnonymousFails) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  EXPECT_THAT(test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                            MAP_SHARED_VALIDATE | MAP_ANONYMOUS, -1, 0),
+              SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(
+      test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                    MAP_SHARED_VALIDATE | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0),
+      SyscallResultIsErrno(EINVAL));
+}
+
+// Files of different types that support `mmap()`, each one page long.
+class MappableFiles {
+ public:
+  // Creates the files. Call with `ASSERT_NO_FATAL_FAILURE`.
+  void Create() {
+    const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+
+    memfd_.reset(test_helper::MemFdCreate("mappable_files", 0));
+    ASSERT_TRUE(memfd_.is_valid()) << strerror(errno);
+    ASSERT_THAT(ftruncate(memfd_.get(), static_cast<off_t>(page_size)), SyscallSucceeds());
+
+    ASSERT_TRUE(temp_file_.is_valid());
+    ASSERT_THAT(ftruncate(temp_file_.fd(), static_cast<off_t>(page_size)), SyscallSucceeds());
+
+    dev_zero_.reset(open("/dev/zero", O_RDWR));
+    ASSERT_TRUE(dev_zero_.is_valid()) << strerror(errno);
+  }
+
+  // Returns the files' descriptors, labeled for `SCOPED_TRACE`.
+  std::vector<std::pair<const char*, int>> fds() const {
+    return {
+        {"memfd", memfd_.get()}, {"temp file", temp_file_.fd()}, {"/dev/zero", dev_zero_.get()}};
+  }
+
+  const test_helper::ScopedTempFD& temp_file() const { return temp_file_; }
+
+ private:
+  fbl::unique_fd memfd_;
+  test_helper::ScopedTempFD temp_file_;
+  fbl::unique_fd dev_zero_;
+};
+
+// Checks that `type` mappings of `MappableFiles` succeed, but fail with `MAP_GROWSDOWN`.
+void ExpectFileBackedMapGrowsdownFails(int type) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  MappableFiles files;
+  ASSERT_NO_FATAL_FAILURE(files.Create());
+
+  for (const auto& [label, fd] : files.fds()) {
+    SCOPED_TRACE(label);
+    EXPECT_THAT(
+        test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ | PROT_WRITE, type, fd, 0),
+        SyscallResultIsOk());
+    EXPECT_THAT(test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                              type | MAP_GROWSDOWN, fd, 0),
+                SyscallResultIsErrno(EINVAL));
+  }
+}
+
+TEST(MmapTest, MapGrowsdownSharedFileBackedFails) {
+  ASSERT_NO_FATAL_FAILURE(ExpectFileBackedMapGrowsdownFails(MAP_SHARED));
+}
+
+TEST(MmapTest, MapGrowsdownSharedValidateFileBackedFails) {
+  ASSERT_NO_FATAL_FAILURE(ExpectFileBackedMapGrowsdownFails(MAP_SHARED_VALIDATE));
+}
+
+TEST(MmapTest, MapGrowsdownPrivateFileBackedFails) {
+  ASSERT_NO_FATAL_FAILURE(ExpectFileBackedMapGrowsdownFails(MAP_PRIVATE));
+}
+
+TEST(MmapTest, MapGrowsdownReadOnlyFileChecksAccessFirst) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  MappableFiles files;
+  ASSERT_NO_FATAL_FAILURE(files.Create());
+
+  fbl::unique_fd ro_fd(open(files.temp_file().name().c_str(), O_RDONLY));
+  ASSERT_TRUE(ro_fd.is_valid()) << strerror(errno);
+  EXPECT_THAT(test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                            MAP_SHARED | MAP_GROWSDOWN, ro_fd.get(), 0),
+              SyscallResultIsErrno(EACCES));
+  EXPECT_THAT(test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ,
+                                            MAP_SHARED | MAP_GROWSDOWN, ro_fd.get(), 0),
+              SyscallResultIsErrno(EINVAL));
+}
+
+TEST(MmapTest, SharedValidateUnsupportedFlagErrorPrecedence) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  MappableFiles files;
+  ASSERT_NO_FATAL_FAILURE(files.Create());
+  const int memfd = files.fds()[0].second;
+  constexpr int kUnsupportedFlags = MAP_SHARED_VALIDATE | MAP_SYNC;
+
+  // An unsupported flag is only reported once the other arguments are valid.
+  EXPECT_THAT(
+      test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ, kUnsupportedFlags, -1, 0),
+      SyscallResultIsErrno(EBADF));
+  EXPECT_THAT(test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ,
+                                            kUnsupportedFlags | MAP_ANONYMOUS, -1, 0),
+              SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ,
+                                            (kUnsupportedFlags & ~MAP_TYPE) | 0x07, memfd, 0),
+              SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(test_helper::ScopedMMap::MMap(nullptr, 0, PROT_READ, kUnsupportedFlags, memfd, 0),
+              SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(
+      test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ, kUnsupportedFlags, memfd, 1),
+      SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(
+      test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ, kUnsupportedFlags, memfd, 0),
+      SyscallResultIsErrno(EOPNOTSUPP));
+}
+
 TEST(Mprotect, ProtGrowsdownOnNonGrowsdownMapping) {
   size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
   void* rv = mmap(nullptr, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -2428,8 +2640,15 @@ TEST_F(MMapProcTest, PrivateFileMappingMremapMovePreservesCowModified) {
 }
 
 // Verify that when part of an unmodified private file mapping is moved to a second location via
-// `mremap()` and then modified, both the moved mapping and the original mapping reflect the
-// copy-on-write modified state and can coalesce again.
+// `mremap()` and then modified:
+// - If the mapping was already promoted onto a shared copy-on-write child VMO before `mremap()`
+//   (via `mprotect(PROT_READ | PROT_WRITE)` on a `PROT_READ` mapping), modifying the moved piece
+//   updates the copy-on-write modified state on the stationary pieces too so they coalesce again on
+//   Starnix.
+// - If the mapping was created writable (`PROT_READ | PROT_WRITE`) so copy-on-write child VMO
+//   creation is deferred until the first write, modifying the moved piece only promotes that piece
+//   while the non-contiguous stationary pieces stay backed by the file VMO and remain separate when
+//   the moved piece is remapped back into the gap.
 TEST_F(MMapProcTest, PrivateFileMappingMremapModifyMovedUpdatesOriginalCowModified) {
   const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
 
@@ -2451,41 +2670,97 @@ TEST_F(MMapProcTest, PrivateFileMappingMremapModifyMovedUpdatesOriginalCowModifi
     }
   };
 
-  auto mapping = test_helper::ScopedMMap::MMap(
-      /* addr = */ nullptr, page_size * 3, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd.get(),
-      /* offset = */ 0);
-  ASSERT_THAT(mapping, SyscallResultIsOk());
-  uintptr_t src_addr = reinterpret_cast<uintptr_t>(mapping->mapping());
+  auto expect_split_mappings = [&](uintptr_t addr) {
+    std::string maps;
+    EXPECT_TRUE(files::ReadFileToString(proc_path() + "/self/maps", &maps));
+    for (size_t i = 0; i < 3; ++i) {
+      auto report = test_helper::find_memory_mapping(addr + i * page_size, maps);
+      EXPECT_NE(report, std::nullopt);
+      if (report.has_value()) {
+        EXPECT_EQ(report->start, addr + i * page_size);
+        EXPECT_EQ(report->end, addr + (i + 1) * page_size);
+        EXPECT_EQ(report->perms, "rw-p");
+      }
+    }
+  };
 
-  // Move the middle page of the unmodified mapping to `dst_addr`, leaving `page 0` and `page 2`
-  // at `src_addr` separated by an unmapped gap.
-  void* dst_addr = mmap(/* addr = */ nullptr, page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,
-                        /* fd = */ -1, /* offset = */ 0);
-  ASSERT_NE(dst_addr, MAP_FAILED) << strerror(errno);
-  auto cleanup_dst = fit::defer([&] { SAFE_SYSCALL(munmap(dst_addr, page_size)); });
+  {
+    // Map `PROT_READ` and promote to `PROT_READ | PROT_WRITE` via `mprotect()` so all 3 pages share
+    // an unmodified copy-on-write child VMO before `mremap()` splits the mapping.
+    auto mapping = test_helper::ScopedMMap::MMap(
+        /* addr = */ nullptr, page_size * 3, PROT_READ, MAP_PRIVATE, fd.get(),
+        /* offset = */ 0);
+    ASSERT_THAT(mapping, SyscallResultIsOk());
+    uintptr_t src_addr = reinterpret_cast<uintptr_t>(mapping->mapping());
+    SAFE_SYSCALL(
+        mprotect(reinterpret_cast<void*>(src_addr), page_size * 3, PROT_READ | PROT_WRITE));
 
-  void* moved = mremap(reinterpret_cast<void*>(src_addr + page_size), page_size, page_size,
-                       MREMAP_MAYMOVE | MREMAP_FIXED, dst_addr);
-  ASSERT_EQ(moved, dst_addr) << strerror(errno);
+    // Move the middle page of the unmodified mapping to `dst_addr`, leaving `page 0` and `page 2`
+    // at `src_addr` separated by an unmapped gap.
+    void* dst_addr = mmap(/* addr = */ nullptr, page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,
+                          /* fd = */ -1, /* offset = */ 0);
+    ASSERT_NE(dst_addr, MAP_FAILED) << strerror(errno);
+    auto cleanup_dst = fit::defer([&] { SAFE_SYSCALL(munmap(dst_addr, page_size)); });
 
-  // Modify the moved mapping at `dst_addr`, then move it back into the middle gap: the moved
-  // page retains its modification (without altering the underlying file), and on Starnix both the
-  // moved piece and the stationary pieces share the same copy-on-write state and coalesce back into
-  // a single 3-page mapping.
-  reinterpret_cast<volatile uint8_t*>(dst_addr)[0] = 0xAB;
-  void* restored = mremap(dst_addr, page_size, page_size, MREMAP_MAYMOVE | MREMAP_FIXED,
-                          reinterpret_cast<void*>(src_addr + page_size));
-  ASSERT_EQ(restored, reinterpret_cast<void*>(src_addr + page_size)) << strerror(errno);
-  cleanup_dst.cancel();
-  if (test_helper::IsStarnix()) {
-    expect_single_mapping(src_addr, page_size * 3, "rw-p");
+    void* moved = mremap(reinterpret_cast<void*>(src_addr + page_size), page_size, page_size,
+                         MREMAP_MAYMOVE | MREMAP_FIXED, dst_addr);
+    ASSERT_EQ(moved, dst_addr) << strerror(errno);
+
+    // Modify the moved mapping at `dst_addr`, then move it back into the middle gap: the moved
+    // page retains its modification (without altering the underlying file), and on Starnix both the
+    // moved piece and the stationary pieces share the same copy-on-write state and coalesce back
+    // into a single 3-page mapping.
+    reinterpret_cast<volatile uint8_t*>(dst_addr)[0] = 0xAB;
+    void* restored = mremap(dst_addr, page_size, page_size, MREMAP_MAYMOVE | MREMAP_FIXED,
+                            reinterpret_cast<void*>(src_addr + page_size));
+    ASSERT_EQ(restored, reinterpret_cast<void*>(src_addr + page_size)) << strerror(errno);
+    cleanup_dst.cancel();
+    if (test_helper::IsStarnix()) {
+      expect_single_mapping(src_addr, page_size * 3, "rw-p");
+    } else {
+      expect_split_mappings(src_addr);
+    }
+    EXPECT_EQ(reinterpret_cast<volatile uint8_t*>(src_addr + page_size)[0], 0xAB);
+
+    uint8_t file_byte = 0xFF;
+    ASSERT_THAT(pread(fd.get(), &file_byte, 1, static_cast<off_t>(page_size)),
+                SyscallSucceedsWithValue(1));
+    EXPECT_EQ(file_byte, 0);
   }
-  EXPECT_EQ(reinterpret_cast<volatile uint8_t*>(src_addr + page_size)[0], 0xAB);
 
-  uint8_t file_byte = 0xFF;
-  ASSERT_THAT(pread(fd.get(), &file_byte, 1, static_cast<off_t>(page_size)),
-              SyscallSucceedsWithValue(1));
-  EXPECT_EQ(file_byte, 0);
+  {
+    // Map directly with `PROT_READ | PROT_WRITE` so copy-on-write child VMO creation is deferred
+    // until the first write. Moving the middle page before any write and then modifying it promotes
+    // only the moved page, leaving the non-contiguous stationary pages backed by the file VMO so
+    // the 3 pages remain separate mappings when the middle page is moved back.
+    auto mapping = test_helper::ScopedMMap::MMap(
+        /* addr = */ nullptr, page_size * 3, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd.get(),
+        /* offset = */ 0);
+    ASSERT_THAT(mapping, SyscallResultIsOk());
+    uintptr_t src_addr = reinterpret_cast<uintptr_t>(mapping->mapping());
+
+    void* dst_addr = mmap(/* addr = */ nullptr, page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,
+                          /* fd = */ -1, /* offset = */ 0);
+    ASSERT_NE(dst_addr, MAP_FAILED) << strerror(errno);
+    auto cleanup_dst = fit::defer([&] { SAFE_SYSCALL(munmap(dst_addr, page_size)); });
+
+    void* moved = mremap(reinterpret_cast<void*>(src_addr + page_size), page_size, page_size,
+                         MREMAP_MAYMOVE | MREMAP_FIXED, dst_addr);
+    ASSERT_EQ(moved, dst_addr) << strerror(errno);
+
+    reinterpret_cast<volatile uint8_t*>(dst_addr)[0] = 0xCD;
+    void* restored = mremap(dst_addr, page_size, page_size, MREMAP_MAYMOVE | MREMAP_FIXED,
+                            reinterpret_cast<void*>(src_addr + page_size));
+    ASSERT_EQ(restored, reinterpret_cast<void*>(src_addr + page_size)) << strerror(errno);
+    cleanup_dst.cancel();
+    expect_split_mappings(src_addr);
+    EXPECT_EQ(reinterpret_cast<volatile uint8_t*>(src_addr + page_size)[0], 0xCD);
+
+    uint8_t file_byte = 0xFF;
+    ASSERT_THAT(pread(fd.get(), &file_byte, 1, static_cast<off_t>(page_size)),
+                SyscallSucceedsWithValue(1));
+    EXPECT_EQ(file_byte, 0);
+  }
 }
 
 // Verify that modifying a private file mapping does not mark a second independent private mapping
@@ -3113,13 +3388,10 @@ TEST(MmapTest, MmapMinAddr) {
     GTEST_SKIP() << "Need CAP_SYS_ADMIN to run MmapTest.MmapMinAddr";
   }
 
-  const char kMmapMinAddr[] = "/proc/sys/vm/mmap_min_addr";
-  std::string original_value;
-  EXPECT_TRUE(files::ReadFileToString(kMmapMinAddr, &original_value));
-
-  // Restore the original value after the test.
-  auto cleanup = fit::defer(
-      [original_value, kMmapMinAddr]() { files::WriteFile(kMmapMinAddr, original_value); });
+  constexpr char kMmapMinAddr[] = "/proc/sys/vm/mmap_min_addr";
+  // Write 10MB to mmap_min_addr and restore the original value after the test.
+  auto mmap_min_addr = test_helper::ScopedSysctl::Create(kMmapMinAddr, "10485760\n");
+  ASSERT_THAT(mmap_min_addr, SyscallResultIsOk());
 
   // Tries to mmap at `target_addr` as an unprivileged process.
   // Returns 0 on success, and the error number on failure.
@@ -3145,9 +3417,6 @@ TEST(MmapTest, MmapMinAddr) {
   };
 
   constexpr size_t k5Mb = 5242880;
-
-  // Write 10MB to mmap_min_addr.
-  EXPECT_TRUE(files::WriteFile(kMmapMinAddr, "10485760\n"));
 
   // mmap at 5MB should fail because 5MB < 10MB.
   EXPECT_EQ(try_mmap_unprivileged(k5Mb), EPERM);
@@ -3412,6 +3681,232 @@ TEST(MmapTest, SplitPrivateReadAndWriteFileMappingIsolatedAcrossFork) {
     ASSERT_TRUE(helper.WaitForChildren());
     EXPECT_EQ(read_page[0], 'c');
     EXPECT_EQ(write_page[0], 'b');
+  }
+}
+
+TEST(MmapTest, MremapGrowInPlaceMergedPrivateAnonymousSubrange) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  // Use 8 MiB PROT_NONE outer guards so ASLR neighbors cannot interfere and so post-fork user-mode
+  // faults in libc/TLS do not batch-materialize `[page1, page3)` before `mremap` runs.
+  constexpr size_t kGuardSize = size_t{8} * 1024 * 1024;
+  const size_t reserved_size = (2 * kGuardSize) + (3 * page_size);
+
+  auto reserved = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, reserved_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  auto* page1 = static_cast<uint8_t*>(reserved.mapping()) + kGuardSize;
+  uint8_t* page2 = page1 + page_size;
+  uint8_t* page3 = page1 + (2 * page_size);
+  SAFE_SYSCALL(munmap(page1, 3 * page_size));
+
+  ASSERT_EQ(mmap(page1, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                 -1, 0),
+            page1)
+      << strerror(errno);
+  memset(page1, 0x11, page_size);
+
+  ASSERT_EQ(mmap(page2, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                 -1, 0),
+            page2)
+      << strerror(errno);
+  memset(page2, 0x22, page_size);
+
+  // Verify a forked child whose coalesced [page1, page3) VMA has not yet been faulted in grows
+  // `page2` in place and returns `page2` rather than `page1`.
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_EQ(mremap(page2, page_size, 2 * page_size, MREMAP_MAYMOVE), page2) << strerror(errno);
+    volatile uint8_t* child_page1 = page1;
+    volatile uint8_t* child_page2 = page2;
+    volatile uint8_t* child_page3 = page3;
+    EXPECT_EQ(child_page1[0], 0x11);
+    EXPECT_EQ(child_page2[0], 0x22);
+    EXPECT_EQ(child_page3[0], 0x00);
+    child_page1[0] = 0x44;
+    child_page3[0] = 0x33;
+    EXPECT_EQ(child_page1[0], 0x44);
+    EXPECT_EQ(child_page3[0], 0x33);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+  EXPECT_FALSE(IsMapped(reinterpret_cast<uintptr_t>(page3)));
+
+  // Grow `page2` from 1 page to 2 pages in place in the parent (eagerly mapped).
+  ASSERT_EQ(mremap(page2, page_size, 2 * page_size, MREMAP_MAYMOVE), page2) << strerror(errno);
+  EXPECT_EQ(page1[0], 0x11);
+  EXPECT_EQ(page2[0], 0x22);
+  EXPECT_EQ(page3[0], 0x00);
+  EXPECT_EQ(page3[page_size - 1], 0x00);
+  memset(page3, 0x33, page_size);
+
+  // Growing [page2, page4) to 3 pages must relocate because page 4 is inside the upper PROT_NONE
+  // guard, leaving `page1` mapped and intact while moving `page2` and `page3`.
+  auto* relocated =
+      static_cast<uint8_t*>(mremap(page2, 2 * page_size, 3 * page_size, MREMAP_MAYMOVE));
+  ASSERT_NE(relocated, MAP_FAILED) << strerror(errno);
+  auto cleanup_relocated = fit::defer([&] { SAFE_SYSCALL(munmap(relocated, 3 * page_size)); });
+  EXPECT_NE(relocated, page2);
+  EXPECT_NE(relocated, page1);
+
+  EXPECT_TRUE(IsMapped(reinterpret_cast<uintptr_t>(page1)));
+  EXPECT_FALSE(IsMapped(reinterpret_cast<uintptr_t>(page2)));
+  EXPECT_FALSE(IsMapped(reinterpret_cast<uintptr_t>(page3)));
+  EXPECT_EQ(page1[0], 0x11);
+  EXPECT_EQ(relocated[0], 0x22);
+  EXPECT_EQ(relocated[page_size], 0x33);
+  EXPECT_EQ(relocated[2 * page_size], 0x00);
+}
+
+TEST(MmapTest, MremapGrowInPlaceFileSubrange) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+
+  for (bool is_shared : {true, false}) {
+    SCOPED_TRACE(is_shared ? "MAP_SHARED" : "MAP_PRIVATE");
+
+    test_helper::ScopedTempFD temp_file;
+    ASSERT_TRUE(temp_file);
+    std::string contents(page_size, 'a');
+    contents.append(page_size, 'b');
+    contents.append(page_size, 'c');
+    ASSERT_THAT(pwrite(temp_file.fd(), contents.data(), contents.size(), 0),
+                SyscallSucceedsWithValue(static_cast<ssize_t>(contents.size())));
+
+    auto reserved = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+        nullptr, 5 * page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    auto* page1 = static_cast<char*>(reserved.mapping()) + page_size;
+    char* page2 = page1 + page_size;
+    SAFE_SYSCALL(munmap(page1, 3 * page_size));
+
+    if (is_shared) {
+      ASSERT_EQ(
+          mmap(page1, page_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, temp_file.fd(), 0),
+          page1)
+          << strerror(errno);
+      ASSERT_EQ(mmap(page2, page_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+                     temp_file.fd(), static_cast<off_t>(page_size)),
+                page2)
+          << strerror(errno);
+    } else {
+      ASSERT_EQ(mmap(page1, 2 * page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED,
+                     temp_file.fd(), 0),
+                page1)
+          << strerror(errno);
+      page1[0] = '1';
+      page2[0] = '2';
+    }
+
+    ASSERT_EQ(mremap(page2, page_size, 2 * page_size, MREMAP_MAYMOVE), page2) << strerror(errno);
+
+    EXPECT_EQ(page1[0], is_shared ? 'a' : '1');
+    EXPECT_EQ(page1[1], 'a');
+    EXPECT_EQ(page2[0], is_shared ? 'b' : '2');
+    EXPECT_EQ(page2[1], 'b');
+    EXPECT_EQ(page2[page_size], 'c');
+
+    volatile char* vpage2 = page2;
+    vpage2[page_size] = '3';
+    char file_byte = 0;
+    ASSERT_THAT(pread(temp_file.fd(), &file_byte, 1, static_cast<off_t>(2 * page_size)),
+                SyscallSucceedsWithValue(1));
+    EXPECT_EQ(file_byte, is_shared ? '3' : 'c');
+    EXPECT_EQ(vpage2[page_size], '3');
+  }
+}
+
+uintptr_t FindHighestMappablePage(size_t page_size) {
+  auto in_address_space = [page_size](uintptr_t addr) {
+    if (msync(reinterpret_cast<void*>(addr), page_size, MS_ASYNC) == 0) {
+      return true;
+    }
+    void* mapped = mmap(reinterpret_cast<void*>(addr), page_size, PROT_NONE,
+                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    if (mapped != MAP_FAILED) {
+      SAFE_SYSCALL(munmap(mapped, page_size));
+      return true;
+    }
+    return errno == EEXIST;
+  };
+
+  // Pages from the stack up to the top of the address space are mappable, and none are above it.
+  int stack_var = 0;
+  auto pages = std::views::iota(reinterpret_cast<uintptr_t>(&stack_var) / page_size,
+                                std::numeric_limits<uintptr_t>::max() / page_size);
+  auto first_unmappable = std::ranges::partition_point(
+      pages, [&](uintptr_t page) { return in_address_space(page * page_size); });
+  return (*first_unmappable - 1) * page_size;
+}
+
+TEST(MmapTest, MremapGrowAtTopOfAddressSpace) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  const uintptr_t top_addr = FindHighestMappablePage(page_size);
+  ASSERT_NE(top_addr + page_size, uintptr_t{0});
+  void* top_page = reinterpret_cast<void*>(top_addr);
+
+  // Confirm the page immediately above `top_addr` is outside the user address space.
+  // Starnix arch32 reports EINVAL from the underlying VMAR bounds check, while Linux and 64-bit
+  // Starnix report ENOMEM.
+  ASSERT_EQ(mmap(reinterpret_cast<void*>(top_addr + page_size), page_size, PROT_NONE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0),
+            MAP_FAILED);
+  EXPECT_THAT(errno, testing::AnyOf(ENOMEM, EINVAL));
+
+  for (bool is_file : {false, true}) {
+    SCOPED_TRACE(is_file ? "MAP_SHARED file" : "MAP_PRIVATE | MAP_ANONYMOUS");
+
+    std::optional<test_helper::ScopedTempFD> temp_file;
+    int fd = -1;
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE;
+    if (is_file) {
+      temp_file.emplace();
+      ASSERT_TRUE(*temp_file);
+      std::string contents(page_size, 'a');
+      contents.append(page_size, 'b');
+      ASSERT_THAT(pwrite(temp_file->fd(), contents.data(), contents.size(), 0),
+                  SyscallSucceedsWithValue(static_cast<ssize_t>(contents.size())));
+      fd = temp_file->fd();
+      flags = MAP_SHARED | MAP_FIXED_NOREPLACE;
+    }
+
+    void* mapped = mmap(top_page, page_size, PROT_READ | PROT_WRITE, flags, fd, 0);
+    if (!is_file && mapped == MAP_FAILED && errno == EEXIST) {
+      GTEST_SKIP() << "The highest mappable page is already mapped (e.g. stack ASLR offset 0).";
+    }
+    ASSERT_EQ(mapped, top_page) << strerror(errno);
+    auto cleanup_top = fit::defer([&] { SAFE_SYSCALL(munmap(top_page, page_size)); });
+
+    auto* bytes = static_cast<char*>(mapped);
+    if (!is_file) {
+      memset(bytes, 'a', page_size);
+    }
+
+    // Without MREMAP_MAYMOVE, expanding past the top of the address space must fail with ENOMEM
+    // and leave the original mapping intact.
+    EXPECT_EQ(mremap(top_page, page_size, 2 * page_size, 0), MAP_FAILED);
+    EXPECT_EQ(errno, ENOMEM);
+    EXPECT_TRUE(IsMapped(top_addr));
+    EXPECT_EQ(bytes[0], 'a');
+
+    // With MREMAP_MAYMOVE, expanding past the top of the address space must relocate instead of
+    // failing.
+    auto* relocated =
+        static_cast<char*>(mremap(top_page, page_size, 2 * page_size, MREMAP_MAYMOVE));
+    ASSERT_NE(relocated, MAP_FAILED) << strerror(errno);
+    cleanup_top.cancel();
+    auto cleanup_relocated = fit::defer([&] { SAFE_SYSCALL(munmap(relocated, 2 * page_size)); });
+    EXPECT_NE(relocated, top_page);
+    EXPECT_FALSE(IsMapped(top_addr));
+
+    EXPECT_EQ(relocated[0], 'a');
+    EXPECT_EQ(relocated[page_size - 1], 'a');
+    EXPECT_EQ(relocated[page_size], is_file ? 'b' : '\0');
+    EXPECT_EQ(relocated[(2 * page_size) - 1], is_file ? 'b' : '\0');
+
+    if (is_file) {
+      volatile char* vrelocated = relocated;
+      vrelocated[page_size] = 'c';
+      char file_byte = 0;
+      ASSERT_THAT(pread(temp_file->fd(), &file_byte, 1, static_cast<off_t>(page_size)),
+                  SyscallSucceedsWithValue(1));
+      EXPECT_EQ(file_byte, 'c');
+    }
   }
 }
 

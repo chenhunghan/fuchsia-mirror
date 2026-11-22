@@ -4,10 +4,10 @@
 
 """Rule for prebuilt packages for platform testing."""
 
-load("@fuchsia_rules_common//packages:prebuilt_package.bzl", "unpack_prebuilt_package_impl")
+load("@fuchsia_rules_common//packages:prebuilt_package.bzl", "unpack_prebuilt_package_common_impl")
 
 def _prebuilt_package_impl(ctx):
-    return unpack_prebuilt_package_impl(
+    return unpack_prebuilt_package_common_impl(
         ctx,
         package_tool = ctx.executable._package_tool,
     )

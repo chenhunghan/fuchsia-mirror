@@ -9,7 +9,7 @@
 
 mod package;
 mod retained;
+mod upgradable;
 mod writing;
 
-pub use package::{AddBlobsError, PackageIndex, UpgradablePackagesInitialized};
-pub use writing::StopError;
+pub use package::{AddBlobsError, CleanupGuard, PackageIndex, UpgradablePackagesInitialized};

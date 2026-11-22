@@ -26,7 +26,6 @@ fuchsia_cc_driver("driver") {
 fuchsia_driver_component("component") {
   component_name = "driver-test-realm-fake-driver"
   deps = [ ":driver" ]
-  info = "meta/component-info.json"
   manifest = "meta/component.cml"
 }
 

@@ -9,6 +9,7 @@
 #define ZIRCON_KERNEL_LIB_INIT_INCLUDE_LK_INIT_H_
 
 #include <lib/special-sections/special-sections.h>
+#include <limits.h>
 #include <sys/types.h>
 
 /*

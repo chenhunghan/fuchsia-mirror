@@ -6,13 +6,13 @@
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load(
+    "@fuchsia_rules_common//components:component.bzl",
+    "component_common",
+)
+load(
     "@fuchsia_rules_common//components:component_manifest.bzl",
     "compile_component_manifest",
     "merge_component_manifests",
-)
-load(
-    "@fuchsia_rules_common//components:fuchsia_component_common.bzl",
-    "fuchsia_component_common",
 )
 load(
     "@fuchsia_rules_common//components:providers.bzl",
@@ -154,9 +154,16 @@ def _compile_fx_manifest(ctx, output_name = None, include_sources_info = True):
     # profile variants, matching `cm()` in //tools/cmc/build/cml.gni.
     # LINT.IfChange(debugdata_merge)
     debugdata_shard = None
-    if ctx.attr._is_profile[BuildSettingInfo].value:
+    if (
+        ctx.attr._profile_tag[BuildSettingInfo].value or
+        ctx.attr._profile_rust_tag[BuildSettingInfo].value
+    ):
         debugdata_shard = ctx.file._profile_shard
-    elif ctx.attr._is_coverage[BuildSettingInfo].value:
+    elif (
+        ctx.attr._coverage_tag[BuildSettingInfo].value or
+        ctx.attr._coverage_cts_tag[BuildSettingInfo].value or
+        ctx.attr._coverage_rust_tag[BuildSettingInfo].value
+    ):
         debugdata_shard = ctx.file._coverage_shard
 
     include_paths = [".", "sdk/lib"]
@@ -209,7 +216,11 @@ def _compile_fx_manifest(ctx, output_name = None, include_sources_info = True):
     return res
 
 def _fx_component_manifest_impl(ctx):
-    return _compile_fx_manifest(ctx)
+    component_name = ctx.attr.component_name or ctx.label.name
+    return _compile_fx_manifest(
+        ctx,
+        output_name = "cml/{}/{}.cm".format(ctx.label.name, component_name),
+    )
 
 _FX_COMPONENT_MANIFEST_ATTRS = {
     "manifest": attr.label(
@@ -238,19 +249,33 @@ Each feature has an allowlist of targets that may use it in
         executable = True,
         cfg = "exec",
     ),
-    "_is_coverage": attr.label(
-        default = "//build/bazel/config/variables:is_coverage",
-    ),
-    "_is_profile": attr.label(
-        default = "//build/bazel/config/variables:is_profile",
+    "_profile_shard": attr.label(
+        default = "//build/config/profile:instrumentation_data.cml",
+        allow_single_file = [".cml"],
     ),
     "_coverage_shard": attr.label(
         default = "//sdk/lib/sys/testing:coverage.shard.cml",
         allow_single_file = [".cml"],
     ),
-    "_profile_shard": attr.label(
-        default = "//build/config/profile:instrumentation_data.cml",
-        allow_single_file = [".cml"],
+    "_profile_tag": attr.label(
+        default = "//build/bazel/config/variant_features:profile",
+        providers = [BuildSettingInfo],
+    ),
+    "_profile_rust_tag": attr.label(
+        default = "//build/bazel/config/variant_features:profile-rust",
+        providers = [BuildSettingInfo],
+    ),
+    "_coverage_tag": attr.label(
+        default = "//build/bazel/config/variant_features:coverage",
+        providers = [BuildSettingInfo],
+    ),
+    "_coverage_cts_tag": attr.label(
+        default = "//build/bazel/config/variant_features:coverage-cts",
+        providers = [BuildSettingInfo],
+    ),
+    "_coverage_rust_tag": attr.label(
+        default = "//build/bazel/config/variant_features:coverage-rust",
+        providers = [BuildSettingInfo],
     ),
 }
 
@@ -410,7 +435,7 @@ _COMMON_COMPONENT_ATTRS = {
     "test_realm": None,
 
     # TODO(https://fxbug.dev/520207779): Determine whether we need these attributes for platform
-    # packages and update the implementation and `fuchsia_component_common()`'s documentation of
+    # packages and update the implementation and `component_common()`'s documentation of
     # these attributes as appropriate.
     "moniker": None,
     "is_driver": None,
@@ -446,7 +471,7 @@ def _fx_component_impl(
         )
         compiled_manifest = ":" + check_includes_name
 
-    fuchsia_component_common(
+    component_common(
         name = name,
         compiled_manifest = compiled_manifest,
         deps = deps,
@@ -484,7 +509,7 @@ is suitable to be included in a package. The component can include any
 number of dependencies which will be included in the final package.
 """,
     implementation = _fx_component_impl,
-    inherit_attrs = fuchsia_component_common,
+    inherit_attrs = component_common,
     attrs = _component_attrs(is_test_component = False),
 )
 
@@ -497,7 +522,7 @@ listed in the `test_components` attribute of `fx_package()` (and not in
 `components`).
 """,
     implementation = _fx_component_impl,
-    inherit_attrs = fuchsia_component_common,
+    inherit_attrs = component_common,
     attrs = _component_attrs(is_test_component = True) | {
         "test_type": attr.string(
             doc = """The non-hermetic test realm type to run the test component in (e.g. `"starnix"` or `"system"`).

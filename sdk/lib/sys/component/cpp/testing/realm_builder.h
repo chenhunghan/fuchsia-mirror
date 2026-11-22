@@ -5,12 +5,18 @@
 #ifndef LIB_SYS_COMPONENT_CPP_TESTING_REALM_BUILDER_H_
 #define LIB_SYS_COMPONENT_CPP_TESTING_REALM_BUILDER_H_
 
+#include <fidl/fuchsia.component.decl/cpp/fidl.h>
+#include <fidl/fuchsia.component.runner/cpp/fidl.h>
+#include <fidl/fuchsia.component.test/cpp/fidl.h>
+#include <fidl/fuchsia.component/cpp/fidl.h>
+#include <fidl/fuchsia.io/cpp/fidl.h>
 #include <fuchsia/component/cpp/fidl.h>
 #include <fuchsia/component/decl/cpp/fidl.h>
 #include <fuchsia/component/runner/cpp/fidl.h>
 #include <fuchsia/component/test/cpp/fidl.h>
 #include <fuchsia/io/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
+#include <lib/fidl/cpp/client.h>
 #include <lib/fidl/cpp/interface_handle.h>
 #include <lib/sys/component/cpp/testing/internal/local_component_runner.h>
 #include <lib/sys/component/cpp/testing/realm_builder_types.h>
@@ -25,6 +31,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -57,6 +64,16 @@ class RealmRoot final {
   // |on_teardown_complete| will be invoked when Component Manager has completed
   // the realm teardown.
   void Teardown(ScopedChild::TeardownCallback on_teardown_complete) ZX_AVAILABLE_SINCE(10);
+
+  // Natural bindings overload of |Teardown|.
+  template <typename Callback,
+            typename = std::enable_if_t<std::conjunction_v<
+                std::negation<
+                    std::is_invocable_r<void, Callback, fit::result<fuchsia::component::Error>>>,
+                std::is_invocable_r<void, Callback, fit::result<fuchsia_component::Error>>>>>
+  void Teardown(Callback&& on_teardown_complete) ZX_AVAILABLE_SINCE(NEXT) {
+    root_.Teardown(dispatcher_, std::forward<Callback>(on_teardown_complete));
+  }
 
   // Returns reference to underlying |ScopedChild| object. Note that this object
   // will be destroyed if |Teardown| is invoked. In that scenario, using this
@@ -102,29 +119,6 @@ class Realm final {
   Realm& AddChild(const std::string& child_name, const std::string& url,
                   const ChildOptions& options = kDefaultChildOptions);
 
-  // This method signature is DEPRECATED.
-  //
-  // Add a component instance implementation by raw pointer to a
-  // LocalComponent-derived instance. This component implementation can only be
-  // started once.
-  //
-  // The caller is expected to keep the pointer valid for the lifetime of the
-  // component instance (typically the lifetime of the constructed RealmRoot,
-  // unless the component is intentionally stopped earlier). If not, calling
-  // FIDL bindings handled by the LocalComponent would cause undefined behavior.
-  //
-  // |Start()| will be called (asynchronously) sometime after calling
-  // |RealmBuilder::Build()|. Use |ChildOptions| |StartupMode::EAGER| to request
-  // component manager start the component automatically.
-  //
-  // Names must be unique. Duplicate names will result in a panic.
-  //
-  // TODO(https://fxbug.dev/296292544): Remove this method when build support
-  // for API level 16 is removed.
-  Realm& AddLocalChild(const std::string& child_name, LocalComponent* local_impl,
-                       const ChildOptions& options = kDefaultChildOptions)
-      ZX_REMOVED_SINCE(1, 9, 17, "Use AddLocalChild(..., LocalComponentFactory, ...) instead.");
-
   // Add a component by implementing a factory function that creates and returns
   // a new instance of a |LocalComponentImpl|-derived class. The factory
   // function will be called whenever the local child is started.
@@ -156,6 +150,11 @@ class Realm final {
                               fuchsia::component::decl::Component& decl,
                               const ChildOptions& options = kDefaultChildOptions);
 
+  // Natural bindings overload of |AddChildRealmFromDecl|.
+  Realm AddChildRealmFromDecl(const std::string& child_name, fuchsia_component_decl::Component decl,
+                              const ChildOptions& options = kDefaultChildOptions)
+      ZX_AVAILABLE_SINCE(NEXT);
+
   // Route a capability from one child to another.
   Realm& AddRoute(Route route);
 
@@ -177,11 +176,18 @@ class Realm final {
   // Adds Configuration Capabilities to the root realm.
   Realm& AddConfiguration(std::vector<ConfigCapability> configurations);
 
-  // Adds a capability to the root realm.
+  // Adds a capability to the realm.
   Realm& AddCapability(fuchsia::component::decl::Capability capability);
+  Realm& AddCapability(fuchsia_component_decl::Capability capability) ZX_AVAILABLE_SINCE(NEXT);
+
+  // Adds a dictionary capability with |name| to the realm.
+  Realm& AddDictionary(std::string_view name) ZX_AVAILABLE_SINCE(NEXT);
 
   Realm& AddCollection(fuchsia::component::decl::Collection collection);
+  Realm& AddCollection(fuchsia_component_decl::Collection collection) ZX_AVAILABLE_SINCE(NEXT);
+
   Realm& AddEnvironment(fuchsia::component::decl::Environment environment);
+  Realm& AddEnvironment(fuchsia_component_decl::Environment environment) ZX_AVAILABLE_SINCE(NEXT);
 
   // Fetches the Component decl of the given child. This operation is only
   // supported for:
@@ -212,14 +218,17 @@ class Realm final {
   // * An automatically generated realm (such as the root)
   void ReplaceComponentDecl(const std::string& child_name,
                             fuchsia::component::decl::Component decl);
+  void ReplaceComponentDecl(const std::string& child_name, fuchsia_component_decl::Component decl)
+      ZX_AVAILABLE_SINCE(NEXT);
 
   // Updates the Component decl of this Realm.
   void ReplaceRealmDecl(fuchsia::component::decl::Component decl);
+  void ReplaceRealmDecl(fuchsia_component_decl::Component decl) ZX_AVAILABLE_SINCE(NEXT);
 
   friend class RealmBuilder;
 
  private:
-  explicit Realm(fuchsia::component::test::RealmSyncPtr realm_proxy,
+  explicit Realm(fidl::SyncClient<fuchsia_component_test::Realm> realm_proxy,
                  std::shared_ptr<internal::LocalComponentRunner::Builder> runner_builder,
                  std::vector<std::string> scope = {});
 
@@ -227,8 +236,18 @@ class Realm final {
 
   Realm& AddLocalChildImpl(const std::string& child_name, LocalComponentKind local_impl,
                            const ChildOptions& options = kDefaultChildOptions);
+  Realm AddChildRealmFromDeclImpl(const std::string& child_name,
+                                  fuchsia_component_decl::Component decl,
+                                  const ChildOptions& options);
+  Realm& AddCapabilityImpl(fuchsia_component_decl::Capability capability);
+  Realm& AddDictionaryImpl(std::string_view name);
+  Realm& AddCollectionImpl(fuchsia_component_decl::Collection collection);
+  Realm& AddEnvironmentImpl(fuchsia_component_decl::Environment environment);
+  void ReplaceComponentDeclImpl(const std::string& child_name,
+                                fuchsia_component_decl::Component decl);
+  void ReplaceRealmDeclImpl(fuchsia_component_decl::Component decl);
 
-  fuchsia::component::test::RealmSyncPtr realm_proxy_;
+  fidl::SyncClient<fuchsia_component_test::Realm> realm_proxy_;
   std::shared_ptr<internal::LocalComponentRunner::Builder> runner_builder_;
   std::vector<std::string> scope_;
 };
@@ -240,6 +259,7 @@ class RealmBuilder final {
   // |svc| must outlive the RealmBuilder object and created Realm object.
   // If it's nullptr, then the current process' "/svc" namespace entry is used.
   static RealmBuilder Create(std::shared_ptr<sys::ServiceDirectory> svc = nullptr);
+  static RealmBuilder Create(fidl::ClientEnd<fuchsia_io::Directory> svc) ZX_AVAILABLE_SINCE(NEXT);
 
   // Same as above but the Realm will contain the contents of the manifest
   // located in the test package at the path indicated by the fragment-only URL
@@ -247,6 +267,9 @@ class RealmBuilder final {
   // https://fuchsia.dev/fuchsia-src/reference/components/url#relative-fragment-only).
   static RealmBuilder CreateFromRelativeUrl(std::string_view fragment_only_url,
                                             std::shared_ptr<sys::ServiceDirectory> svc = nullptr);
+  static RealmBuilder CreateFromRelativeUrl(std::string_view fragment_only_url,
+                                            fidl::ClientEnd<fuchsia_io::Directory> svc)
+      ZX_AVAILABLE_SINCE(NEXT);
 
   RealmBuilder(RealmBuilder&&) = default;
   RealmBuilder& operator=(RealmBuilder&&) = default;
@@ -259,22 +282,9 @@ class RealmBuilder final {
   RealmBuilder& AddChild(const std::string& child_name, const std::string& url,
                          const ChildOptions& options = kDefaultChildOptions);
 
-  // This method signature is DEPRECATED. Use the LocalComponentFactory
-  // implementation of AddLocalChild instead.
-  //
-  // Add a component by raw pointer to a LocalComponent-derived instance.
-  // See |Realm.AddLocalChild| for more details.
-  //
-  // TODO(https://fxbug.dev/296292544): Remove this method when build support
-  // for API level 16 is removed.
-  RealmBuilder& AddLocalChild(const std::string& child_name, LocalComponent* local_impl,
-                              const ChildOptions& options = kDefaultChildOptions)
-      ZX_REMOVED_SINCE(1, 9, 17, "Use AddLocalChild(..., LocalComponentFactory, ...) instead.");
-
   // Add a component by LocalComponentFactory.
   //
   // See |Realm.AddLocalChild| for more details.
-
   RealmBuilder& AddLocalChild(const std::string& child_name, LocalComponentFactory local_impl,
                               const ChildOptions& options = kDefaultChildOptions);
 
@@ -290,6 +300,9 @@ class RealmBuilder final {
   Realm AddChildRealmFromDecl(const std::string& child_name,
                               fuchsia::component::decl::Component& decl,
                               const ChildOptions& options = kDefaultChildOptions);
+  Realm AddChildRealmFromDecl(const std::string& child_name, fuchsia_component_decl::Component decl,
+                              const ChildOptions& options = kDefaultChildOptions)
+      ZX_AVAILABLE_SINCE(NEXT);
 
   // Route a capability for the root realm being constructed.
   // See |Realm.AddRoute| for more details.
@@ -311,6 +324,19 @@ class RealmBuilder final {
 
   // Adds a capability to the root realm.
   RealmBuilder& AddCapability(fuchsia::component::decl::Capability capability);
+  RealmBuilder& AddCapability(fuchsia_component_decl::Capability capability)
+      ZX_AVAILABLE_SINCE(NEXT);
+
+  // Adds a dictionary capability with |name| to the root realm.
+  RealmBuilder& AddDictionary(std::string_view name) ZX_AVAILABLE_SINCE(NEXT);
+
+  // Adds a collection to the root realm.
+  RealmBuilder& AddCollection(fuchsia_component_decl::Collection collection)
+      ZX_AVAILABLE_SINCE(NEXT);
+
+  // Adds an environment to the root realm.
+  RealmBuilder& AddEnvironment(fuchsia_component_decl::Environment environment)
+      ZX_AVAILABLE_SINCE(NEXT);
 
   // Replaces the value of a given configuration field for the root realm.
   RealmBuilder& SetConfigValue(const std::string& name, const std::string& key, ConfigValue value);
@@ -326,9 +352,12 @@ class RealmBuilder final {
   // See |Realm.GetRealmDecl| for more details.
   void ReplaceComponentDecl(const std::string& child_name,
                             fuchsia::component::decl::Component decl);
+  void ReplaceComponentDecl(const std::string& child_name, fuchsia_component_decl::Component decl)
+      ZX_AVAILABLE_SINCE(NEXT);
 
   // Updates the Component decl of this root realm.
   void ReplaceRealmDecl(fuchsia::component::decl::Component decl);
+  void ReplaceRealmDecl(fuchsia_component_decl::Component decl) ZX_AVAILABLE_SINCE(NEXT);
 
   // Set the name of the collection that the realm will be added to.
   // By default this is set to |kDefaultCollection|.
@@ -362,19 +391,19 @@ class RealmBuilder final {
   Realm& root();
 
  private:
-  RealmBuilder(std::shared_ptr<sys::ServiceDirectory> svc,
-               fuchsia::component::test::BuilderSyncPtr builder_proxy,
-               fuchsia::component::test::RealmSyncPtr test_realm_proxy);
+  RealmBuilder(fidl::ClientEnd<fuchsia_io::Directory> svc,
+               fidl::SyncClient<fuchsia_component_test::Builder> builder_proxy,
+               fidl::SyncClient<fuchsia_component_test::Realm> test_realm_proxy);
 
-  static RealmBuilder CreateImpl(std::optional<std::string_view> fragment_only_url = std::nullopt,
-                                 std::shared_ptr<sys::ServiceDirectory> svc = nullptr);
+  static RealmBuilder CreateImpl(std::optional<std::string_view> fragment_only_url,
+                                 fidl::ClientEnd<fuchsia_io::Directory> svc);
 
   bool realm_commited_ = false;
   bool start_on_build_ = true;
   std::string realm_collection_ = kDefaultCollection;
   std::optional<std::string> realm_name_ = std::nullopt;
-  std::shared_ptr<sys::ServiceDirectory> svc_;
-  fuchsia::component::test::BuilderSyncPtr builder_proxy_;
+  fidl::ClientEnd<fuchsia_io::Directory> svc_;
+  fidl::SyncClient<fuchsia_component_test::Builder> builder_proxy_;
   std::shared_ptr<internal::LocalComponentRunner::Builder> runner_builder_;
   Realm root_;
 };

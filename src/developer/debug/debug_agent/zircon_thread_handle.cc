@@ -6,6 +6,8 @@
 
 #include <lib/zx/clock.h>
 
+#include <algorithm>
+#include <chrono>
 #include <map>
 
 #include "src/developer/debug/debug_agent/zircon_arch.h"
@@ -19,7 +21,8 @@ namespace debug_agent {
 namespace {
 
 debug_ipc::ThreadRecord::BlockedReason ThreadStateBlockedReasonToEnum(uint32_t state) {
-  FX_DCHECK(ZX_THREAD_STATE_BASIC(state) == ZX_THREAD_STATE_BLOCKED);
+  FX_DCHECK(ZX_THREAD_STATE_BASIC(state) ==  // NOLINT(bugprone-signed-bitwise)
+            ZX_THREAD_STATE_BLOCKED);
 
   switch (state) {
     case ZX_THREAD_STATE_BLOCKED_EXCEPTION:
@@ -52,14 +55,24 @@ ThreadHandle::State ThreadStateToEnums(uint32_t input) {
     debug_ipc::ThreadRecord::State enum_state;
   };
   static const Mapping mappings[] = {
-      {ZX_THREAD_STATE_NEW, debug_ipc::ThreadRecord::State::kNew},
-      {ZX_THREAD_STATE_RUNNING, debug_ipc::ThreadRecord::State::kRunning},
-      {ZX_THREAD_STATE_SUSPENDED, debug_ipc::ThreadRecord::State::kSuspended},
-      {ZX_THREAD_STATE_BLOCKED, debug_ipc::ThreadRecord::State::kBlocked},
-      {ZX_THREAD_STATE_DYING, debug_ipc::ThreadRecord::State::kDying},
-      {ZX_THREAD_STATE_DEAD, debug_ipc::ThreadRecord::State::kDead}};
+      {.int_state = ZX_THREAD_STATE_NEW, .enum_state = debug_ipc::ThreadRecord::State::kNew},
+      {
+          .int_state = ZX_THREAD_STATE_RUNNING,
+          .enum_state = debug_ipc::ThreadRecord::State::kRunning,
+      },
+      {
+          .int_state = ZX_THREAD_STATE_SUSPENDED,
+          .enum_state = debug_ipc::ThreadRecord::State::kSuspended,
+      },
+      {
+          .int_state = ZX_THREAD_STATE_BLOCKED,
+          .enum_state = debug_ipc::ThreadRecord::State::kBlocked,
+      },
+      {.int_state = ZX_THREAD_STATE_DYING, .enum_state = debug_ipc::ThreadRecord::State::kDying},
+      {.int_state = ZX_THREAD_STATE_DEAD, .enum_state = debug_ipc::ThreadRecord::State::kDead},
+  };
 
-  const uint32_t basic_state = ZX_THREAD_STATE_BASIC(input);
+  const uint32_t basic_state = ZX_THREAD_STATE_BASIC(input);  // NOLINT(bugprone-signed-bitwise)
   for (const Mapping& mapping : mappings) {
     if (mapping.int_state == basic_state) {
       if (mapping.enum_state == debug_ipc::ThreadRecord::State::kBlocked)
@@ -118,12 +131,51 @@ bool ZirconThreadHandle::WaitForSuspension(TickTimePoint deadline) const {
       return true;
 
     zx_signals_t observed;
-    status = thread_.wait_one(ZX_THREAD_SUSPENDED, zx::deadline_after(poll_time), &observed);
-    if (status == ZX_OK && (observed & ZX_THREAD_SUSPENDED))
+    status = thread_.wait_one(ZX_THREAD_SUSPENDED,  // NOLINT(bugprone-signed-bitwise)
+                              zx::deadline_after(poll_time), &observed);
+    if (status == ZX_OK && (observed & ZX_THREAD_SUSPENDED))  // NOLINT(bugprone-signed-bitwise)
       return true;
 
   } while (status == ZX_ERR_TIMED_OUT && std::chrono::steady_clock::now() < deadline);
   return false;
+}
+
+bool ZirconThreadHandle::WaitForSuspensionSignal(TickTimePoint deadline) const {
+  // TickTimePoint uses steady_clock, which matches zircon's monotonic nanosecond timeline. Poll in
+  // short slices so a killed thread stuck in ZX_EXCP_THREAD_EXITING doesn't stall the message loop
+  // for the full deadline, and re-verify GetState() because dying threads keep ZX_THREAD_SUSPENDED
+  // asserted until ZX_THREAD_TERMINATED.
+  const zx::time final_deadline(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(deadline.time_since_epoch()).count());
+  constexpr zx::duration kPollInterval = zx::msec(10);
+
+  while (true) {
+    debug_ipc::ThreadRecord::State state = GetState().state;
+    if (state == debug_ipc::ThreadRecord::State::kSuspended) {
+      return true;
+    }
+    if (state == debug_ipc::ThreadRecord::State::kDying ||
+        state == debug_ipc::ThreadRecord::State::kDead) {
+      return false;
+    }
+
+    zx::time slice_deadline = std::min(zx::deadline_after(kPollInterval), final_deadline);
+    zx_signals_t observed = 0;
+    zx_status_t status = thread_.wait_one(
+        ZX_THREAD_SUSPENDED | ZX_THREAD_TERMINATED,  // NOLINT(bugprone-signed-bitwise)
+        slice_deadline, &observed);
+    if (status == ZX_OK) {
+      if (observed & ZX_THREAD_TERMINATED) {  // NOLINT(bugprone-signed-bitwise)
+        return false;
+      }
+      if (observed & ZX_THREAD_SUSPENDED) {  // NOLINT(bugprone-signed-bitwise)
+        return GetState().state == debug_ipc::ThreadRecord::State::kSuspended;
+      }
+    }
+    if (status != ZX_ERR_TIMED_OUT || zx::clock::get_monotonic() >= final_deadline) {
+      return GetState().state == debug_ipc::ThreadRecord::State::kSuspended;
+    }
+  }
 }
 
 debug_ipc::ThreadRecord ZirconThreadHandle::GetThreadRecord(zx_koid_t process_koid) const {
@@ -218,12 +270,12 @@ bool ZirconThreadHandle::InstallHWBreakpoint(uint64_t address) {
   std::optional<DebugRegisters> regs = GetDebugRegisters();
   if (!regs)
     return false;
-  DEBUG_LOG(Thread) << "Before installing HW breakpoint:" << std::endl << regs->ToString();
+  DEBUG_LOG(Thread) << "Before installing HW breakpoint:\n" << regs->ToString();
 
   if (!regs->SetHWBreakpoint(address))
     return false;
 
-  DEBUG_LOG(Thread) << "After installing HW breakpoint: " << std::endl << regs->ToString();
+  DEBUG_LOG(Thread) << "After installing HW breakpoint:\n" << regs->ToString();
   return SetDebugRegisters(*regs);
 }
 
@@ -231,12 +283,12 @@ bool ZirconThreadHandle::UninstallHWBreakpoint(uint64_t address) {
   std::optional<DebugRegisters> regs = GetDebugRegisters();
   if (!regs)
     return false;
-  DEBUG_LOG(Thread) << "Before uninstalling HW breakpoint:" << std::endl << regs->ToString();
+  DEBUG_LOG(Thread) << "Before uninstalling HW breakpoint:\n" << regs->ToString();
 
   if (!regs->RemoveHWBreakpoint(address))
     return false;
 
-  DEBUG_LOG(Thread) << "After uninstalling HW breakpoint: " << std::endl << regs->ToString();
+  DEBUG_LOG(Thread) << "After uninstalling HW breakpoint:\n" << regs->ToString();
   return SetDebugRegisters(*regs);
 }
 
@@ -249,14 +301,14 @@ std::optional<WatchpointInfo> ZirconThreadHandle::InstallWatchpoint(
   if (!regs)
     return std::nullopt;
 
-  DEBUG_LOG(Thread) << "Before installing watchpoint for range " << range.ToString() << std::endl
+  DEBUG_LOG(Thread) << "Before installing watchpoint for range " << range.ToString() << '\n'
                     << regs->ToString();
 
   auto result = regs->SetWatchpoint(type, range, arch::GetHardwareWatchpointCount());
   if (!result)
     return std::nullopt;
 
-  DEBUG_LOG(Thread) << "After installing watchpoint: " << std::endl << regs->ToString();
+  DEBUG_LOG(Thread) << "After installing watchpoint:\n" << regs->ToString();
 
   if (!SetDebugRegisters(*regs))
     return std::nullopt;
@@ -268,13 +320,13 @@ bool ZirconThreadHandle::UninstallWatchpoint(const debug::AddressRange& range) {
   if (!regs)
     return false;
 
-  DEBUG_LOG(Thread) << "Before uninstalling watchpoint: " << std::endl << regs->ToString();
+  DEBUG_LOG(Thread) << "Before uninstalling watchpoint:\n" << regs->ToString();
 
   // x64 doesn't support ranges.
   if (!regs->RemoveWatchpoint(range, arch::GetHardwareWatchpointCount()))
     return false;
 
-  DEBUG_LOG(Thread) << "After uninstalling watchpoint: " << std::endl << regs->ToString();
+  DEBUG_LOG(Thread) << "After uninstalling watchpoint:\n" << regs->ToString();
   return SetDebugRegisters(*regs);
 }
 

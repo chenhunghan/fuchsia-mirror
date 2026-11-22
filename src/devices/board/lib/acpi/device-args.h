@@ -5,7 +5,6 @@
 #ifndef SRC_DEVICES_BOARD_LIB_ACPI_DEVICE_ARGS_H_
 #define SRC_DEVICES_BOARD_LIB_ACPI_DEVICE_ARGS_H_
 
-#include <fuchsia/hardware/pciroot/c/banjo.h>
 #include <lib/ddk/device.h>
 
 #include <vector>
@@ -40,9 +39,6 @@ struct DeviceArgs {
   BusType bus_type_ = BusType::kUnknown;
   uint32_t bus_id_ = UINT32_MAX;
 
-  // PCI metadata
-  std::vector<pci_bdf_t> bdfs_;
-
   // True when discovery already determined the device is enabled, so ReportCurrentResources skips
   // re-evaluating _STA.
   bool sta_enabled_ = false;
@@ -58,10 +54,7 @@ struct DeviceArgs {
     bus_id_ = bus_id;
     return *this;
   }
-  DeviceArgs& SetPciMetadata(std::vector<pci_bdf_t> bdfs) {
-    bdfs_ = std::move(bdfs);
-    return *this;
-  }
+
   DeviceArgs& SetStaEnabled(bool enabled) {
     sta_enabled_ = enabled;
     return *this;

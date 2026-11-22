@@ -444,18 +444,13 @@ TEST_F(LeakSanitizerTest, TlsReference) {
 // fixed. The issue was that lsan would report leaks in libc++'s std::thread that weren't actual
 // leaks. This was because it was possible for the newly spawned thread to be suspended before
 // actually running any user code, meaning the memory snapshot would occur while the std::thread
-// allocations were accessible via the new thread's pthread arguments, but not through the thread
-// register. The fix ensures that the start_arg of all pthread structs are checked, so this should
-// no longer leak.
+// allocations were only reachable via the new thread's initial argument registers rather than
+// through a live thread pointer. Scanning all suspended threads' general registers ensures that
+// the initial thread argument is still reached, so this should no longer leak.
 //
 // Below is a minimal reproducer for this issue. As a final test, to ensure this is fixed, we'll
 // rerun the test a large number of times such that we have enough confidence the bug is fixed.
-//
-// TODO(https://fxbug.dev/368713672): This test occasionally flakes in CI due to
-// `lsan-thread-race-test` occasionally hitting a page fault when scanning over TCB data in
-// __sanitizer_memory_snapshot. Until we're able to reproduce it locally, let's temporarily disable
-// this test so we don't keep getting flakes.
-TEST_F(LeakSanitizerTest, DISABLED_LeakedThreadFix) {
+TEST_F(LeakSanitizerTest, LeakedThreadFix) {
   const char* root_dir = getenv("TEST_ROOT_DIR");
   if (!root_dir) {
     root_dir = "/pkg";
@@ -464,7 +459,7 @@ TEST_F(LeakSanitizerTest, DISABLED_LeakedThreadFix) {
   file /= "bin/lsan-thread-race-test";
   const char* argv[] = {file.c_str(), nullptr};
 
-  // Before, it was almost guaranteed the issue would reporoduce a couple dozen times in 100 runs.
+  // Before, it was almost guaranteed the issue would reproduce a couple dozen times in 100 runs.
   // This takes roughly 2-3 seconds to run in an uninstrumented debug build on x64 and arm64.
   constexpr size_t kTestRuns = 100;
   for (size_t i = 0; i < kTestRuns; ++i) {

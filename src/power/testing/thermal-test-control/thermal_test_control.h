@@ -5,53 +5,69 @@
 #ifndef SRC_POWER_TESTING_THERMAL_TEST_CONTROL_THERMAL_TEST_CONTROL_H_
 #define SRC_POWER_TESTING_THERMAL_TEST_CONTROL_THERMAL_TEST_CONTROL_H_
 
-#include <fuchsia/thermal/cpp/fidl.h>
-#include <lib/fidl/cpp/binding.h>
-#include <lib/sys/cpp/component_context.h>
+#include <fidl/fuchsia.thermal/cpp/fidl.h>
+#include <fidl/test.thermal/cpp/fidl.h>
+#include <lib/async/dispatcher.h>
+#include <lib/fit/function.h>
 
-#include <test/thermal/cpp/fidl.h>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
 
-class ClientStateWatcher : public fuchsia::thermal::ClientStateWatcher {
+class ClientStateWatcher : public fidl::Server<fuchsia_thermal::ClientStateWatcher> {
  public:
-  ClientStateWatcher();
+  ClientStateWatcher(async_dispatcher_t* dispatcher,
+                     fidl::ServerEnd<fuchsia_thermal::ClientStateWatcher> watcher,
+                     fit::function<void(fidl::UnbindInfo)> close_handler);
 
  private:
   friend class ThermalTestControl;
 
-  void Bind(fidl::InterfaceRequest<fuchsia::thermal::ClientStateWatcher> watcher,
-            fit::function<void(zx_status_t)> error_handler);
-  void Watch(fuchsia::thermal::ClientStateWatcher::WatchCallback callback) override;
+  void Watch(WatchCompleter::Sync& completer) override;
   void SetThermalState(uint64_t thermal_state);
   void MaybeSendThermalState();
 
-  fidl::Binding<fuchsia::thermal::ClientStateWatcher> watcher_binding_;
-  fuchsia::thermal::ClientStateWatcher::WatchCallback hanging_get_;
+  std::optional<WatchCompleter::Async> hanging_get_;
   std::optional<uint64_t> client_thermal_state_;
   std::optional<uint64_t> pending_client_state_;
+
+  // Declared last so that the connection is torn down before the pending request it may reply to.
+  fidl::ServerBinding<fuchsia_thermal::ClientStateWatcher> watcher_binding_;
 };
 
-class ThermalTestControl : public fuchsia::thermal::ClientStateConnector,
-                           public ::test::thermal::ClientStateControl {
+class ThermalTestControl : public fidl::Server<fuchsia_thermal::ClientStateConnector>,
+                           public fidl::Server<test_thermal::ClientStateControl> {
  public:
-  explicit ThermalTestControl(std::unique_ptr<sys::ComponentContext> context);
+  explicit ThermalTestControl(async_dispatcher_t* dispatcher);
+
+  // Handlers that bind connections to this instance on the dispatcher given to the constructor.
+  // The component publishes them in its outgoing directory; tests may publish them anywhere.
+  fidl::ProtocolHandler<fuchsia_thermal::ClientStateConnector> connector_handler();
+  fidl::ProtocolHandler<test_thermal::ClientStateControl> control_handler();
 
  private:
   // fuchsia.thermal.ClientStateConnector impl
-  void Connect(std::string client_type,
-               fidl::InterfaceRequest<fuchsia::thermal::ClientStateWatcher> watcher) override;
+  void Connect(fidl::Server<fuchsia_thermal::ClientStateConnector>::ConnectRequest& request,
+               fidl::Server<fuchsia_thermal::ClientStateConnector>::ConnectCompleter::Sync&
+                   completer) override;
 
-  // fuchsia.thermal.ClientStateControl impl
-  void IsClientTypeConnected(std::string client_type,
-                             IsClientTypeConnectedCallback callback) override;
-  void SetThermalState(std::string client_type, uint64_t state,
-                       SetThermalStateCallback callback) override;
+  // test.thermal.ClientStateControl impl
+  void IsClientTypeConnected(
+      fidl::Server<test_thermal::ClientStateControl>::IsClientTypeConnectedRequest& request,
+      fidl::Server<test_thermal::ClientStateControl>::IsClientTypeConnectedCompleter::Sync&
+          completer) override;
+  void SetThermalState(
+      fidl::Server<test_thermal::ClientStateControl>::SetThermalStateRequest& request,
+      fidl::Server<test_thermal::ClientStateControl>::SetThermalStateCompleter::Sync& completer)
+      override;
 
-  bool IsClientTypeConnectedInternal(std::string client_type);
+  bool IsClientTypeConnectedInternal(const std::string& client_type) const;
 
-  std::unique_ptr<sys::ComponentContext> context_;
+  async_dispatcher_t* dispatcher_;
 
-  fidl::Binding<fuchsia::thermal::ClientStateConnector> client_state_connector_binding_;
-  fidl::Binding<test::thermal::ClientStateControl> test_controller_binding_;
+  fidl::ServerBindingGroup<fuchsia_thermal::ClientStateConnector> client_state_connector_bindings_;
+  fidl::ServerBindingGroup<test_thermal::ClientStateControl> test_controller_bindings_;
   std::map<std::string, std::unique_ptr<ClientStateWatcher>> watchers_;
 };
 

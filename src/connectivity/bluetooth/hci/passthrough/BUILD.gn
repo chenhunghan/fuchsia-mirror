@@ -51,7 +51,6 @@ fuchsia_driver_component("driver") {
     ":bt_hci_passthrough_bind",
     ":fuchsia_driver",
   ]
-  info = "meta/driver-info.json"
 }
 
 fuchsia_driver_package("passthrough") {

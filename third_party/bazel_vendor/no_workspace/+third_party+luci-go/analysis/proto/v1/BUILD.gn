@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/go/go_library.gni")
+import("//third_party/protobuf/proto_library.gni")
+
+_protos = [
+  "common",
+  "sources",
+  "test_variants",
+]
+
+proto_library("analysis_proto") {
+  sources = []
+  foreach(name, _protos) {
+    sources += [ "${name}.proto" ]
+  }
+  proto_in_dir = "//third_party/luci-go"
+  import_protobuf_full = true
+  generate_python = false
+  generate_cc = false
+  generate_go = true
+}
+
+go_library("analysis_proto_go") {
+  name = "go.chromium.org/luci/analysis/proto/v1"
+  here = rebase_path(".", "//")
+  source_dir = "$root_gen_dir/go-proto-gen/src/$here"
+  non_go_deps = [ ":analysis_proto" ]
+  sources = []
+
+  foreach(name, _protos) {
+    sources += [ "${name}.pb.go" ]
+  }
+  deps = [
+    # TODO(https://fxbug.dev/42149829): Remove this when we're on protoc 3.14.0 or higher.
+    "//third_party/golibs:github.com/golang/protobuf",
+    "//third_party/golibs:google.golang.org/protobuf",
+  ]
+}

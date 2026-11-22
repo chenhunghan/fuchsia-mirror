@@ -2,13 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-fuchsia_component("test_graphical_presenter") {
-  manifest = "meta/test_graphical_presenter.cml"
-  deps = [ ":bin" ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -53,4 +46,19 @@ rustc_binary("bin") {
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
   ]
+}
+
+fuchsia_component_manifest("test_graphical_presenter_manifest") {
+  component_name = "test_graphical_presenter"
+  manifest = "meta/test_graphical_presenter.cml"
+}
+
+fuchsia_component("test_graphical_presenter") {
+  cm_label = ":test_graphical_presenter_manifest"
+  visibility = [
+    ":*",
+    "//src/virtualization/bin/vmm/device/tests:*",
+    "//src/virtualization/tests/lib:*",
+  ]
+  deps = [ ":bin" ]
 }

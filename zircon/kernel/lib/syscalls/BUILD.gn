@@ -16,6 +16,7 @@ group("syscalls") {
 
 group("tests") {
   testonly = true
+  deps = [ "macros:tests" ]
 }
 
 group("kernel-tests") {

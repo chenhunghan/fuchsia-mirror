@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":mos_tool_test"],
+    visibility = ["//build:__pkg__"],
+)
+
+rustc_binary_host_tool(
+    name = "mos_tool",
+    srcs = ["src/main.rs"],
+    binary_name = "mos-tool",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/developer/ffx/lib/pbms:lib",
+        "//src/lib/assembly/artifact_cache",
+        "//src/lib/assembly/util",
+        "//src/lib/fuchsia",
+        "//src/lib/gcs",
+        "//src/lib/structured_ui",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+host_rustc_test(
+    name = "mos_tool_test",
+    crate = ":mos_tool",
+)

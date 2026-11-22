@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/python:py_zipapp_binary.bzl", "py_zipapp_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "power_utils",
+    testonly = True,
+    srcs = ["power_utils.cc"],
+    hdrs = ["power_utils.h"],
+    visibility = ["//src/tests/end_to_end:__subpackages__"],
+    alwayslink = True,
+)
+
+py_zipapp_binary(
+    name = "monsoon_measure_power",
+    testonly = True,
+    srcs = ["monsoon_measure_power.py"],
+    main = "monsoon_measure_power.py",
+    visibility = ["//src/tests/end_to_end/lib/power:__pkg__"],
+    deps = ["//third_party/PyMonsoon"],
+)

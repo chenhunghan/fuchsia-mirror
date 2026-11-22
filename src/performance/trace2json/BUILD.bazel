@@ -1,0 +1,100 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/host_tests:host_cc_test.bzl", "host_cc_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//build/bazel/rules/idk:idk_host_tool.bzl", "idk_cc_binary_host_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":trace2json_tests"],
+    visibility = ["//src/performance:__pkg__"],
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = [
+        "convert.cc",
+        "trace_parser.cc",
+    ],
+    hdrs = [
+        "convert.h",
+        "trace_parser.h",
+    ],
+    deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/performance/lib/trace_converters:chromium",
+        "//third_party/rapidjson",
+        "//third_party/re2",
+        "//third_party/zlib:zfstream",
+        "//zircon/system/ulib/trace-reader",
+    ],
+    alwayslink = True,
+)
+
+# Host binary is provided to GN via bazel_host_tool("bin") in BUILD.gn.
+# @bazel2gn:skip
+idk_cc_binary_host_tool(
+    name = "bin",
+    srcs = ["main.cc"],
+    api_area = "Diagnostics",
+    category = "partner",
+    idk_name = "trace2json",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":lib",
+        "//src/lib/fxl:cli",
+    ],
+)
+
+# Keep test data file list in sync with BUILD.gn.
+# LINT.IfChange
+host_test_data_files(
+    name = "test_data",
+    testonly = True,
+    srcs = [
+        "//src/performance/trace2json/test_data:example_benchmark.fxt",
+        "//src/performance/trace2json/test_data:example_benchmark_expected.json",
+        "//src/performance/trace2json/test_data:multi_category.fxt",
+        "//src/performance/trace2json/test_data:multi_category_expected.json",
+        "//src/performance/trace2json/test_data:multi_category_filtered_expected.json",
+        "//src/performance/trace2json/test_data:no_magic.fxt",
+        "//src/performance/trace2json/test_data:simple_trace.fxt",
+        "//src/performance/trace2json/test_data:simple_trace.fxt.gz",
+        "//src/performance/trace2json/test_data:simple_trace_exact_filtered_expected.json",
+        "//src/performance/trace2json/test_data:simple_trace_expected.json",
+        "//src/performance/trace2json/test_data:simple_trace_expected.json.gz",
+        "//src/performance/trace2json/test_data:simple_trace_filtered_expected.json",
+        "//src/performance/trace2json/test_data:simple_trace_multi_filtered_expected.json",
+        "//src/performance/trace2json/test_data:simple_trace_no_events_expected.json",
+        "//src/performance/trace2json/test_data:simple_trace_split_main_expected.json",
+        "//src/performance/trace2json/test_data:simple_trace_split_system_expected.jsonlines",
+    ],
+    dest_dir = "test_data/trace2json",
+)
+# LINT.ThenChange(BUILD.gn)
+
+# Host-only C++ test using host_test_data_files in runtime_dir.
+host_cc_test(
+    name = "trace2json_tests",
+    srcs = [
+        "convert_test.cc",
+        "trace_parser_test.cc",
+    ],
+    # convert_test.cc uses angled workspace-root `#include <src/lib/files/file.h>`.
+    copts = ["-I."],
+    test_data = [":test_data"],
+    deps = [
+        ":lib",
+        "//src/lib/files",
+        "//src/lib/fxl/test:gtest_main",
+        "//third_party/re2",
+        "@com_google_googletest//:gtest",
+    ],
+)

@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_SYSTEM_LOG_RECORDER_LOG_COLLECTOR_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_SYSTEM_LOG_RECORDER_LOG_COLLECTOR_H_
 
-#include <fuchsia/diagnostics/cpp/fidl.h>
+#include <fidl/fuchsia.diagnostics/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fit/function.h>
 #include <lib/fit/result.h>
@@ -26,7 +26,8 @@ namespace forensics::feedback_data::system_log_recorder {
 
 // Collects a snapshot of system logs from Archivist and returns them as a VMO. Does NOT
 // continuously stream logs after the snapshot has been collected.
-class LogCollector {
+class LogCollector : public fidl::AsyncEventHandler<fuchsia_diagnostics::ArchiveAccessor>,
+                     public fidl::AsyncEventHandler<fuchsia_diagnostics::BatchIterator> {
  public:
   enum class Error : uint8_t {
     kStreamError,
@@ -51,6 +52,13 @@ class LogCollector {
   // Can only be called once.
   void Start(Callback callback);
 
+  void on_fidl_error(fidl::UnbindInfo error) override;
+
+  void handle_unknown_event(
+      fidl::UnknownEventMetadata<fuchsia_diagnostics::ArchiveAccessor> metadata) override;
+  void handle_unknown_event(
+      fidl::UnknownEventMetadata<fuchsia_diagnostics::BatchIterator> metadata) override;
+
  private:
   void GetNext();
   void OnError(Error error);
@@ -62,7 +70,7 @@ class LogCollector {
   Callback callback_;
   bool started_;
 
-  fuchsia::diagnostics::ArchiveAccessorPtr archive_accessor_;
+  fidl::Client<fuchsia_diagnostics::ArchiveAccessor> archive_accessor_;
   std::unique_ptr<diagnostics::fidl_log_message_parser::LogBatchIterator> iterator_;
 };
 

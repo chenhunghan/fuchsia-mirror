@@ -25,7 +25,7 @@ pub async fn generate_cpu_stats_driver() -> Result<CpuStatsDriver> {
     let items_proxy = connect_to_protocol::<fboot::ItemsMarker>()?;
     let proxy = connect_to_protocol::<fkernel::StatsMarker>()?;
 
-    match items_proxy.get(zbi::Type::CpuTopology.into(), ZBI_TOPOLOGY_NODE_SIZE as u32).await {
+    match items_proxy.get(zbi::Type::CPU_TOPOLOGY.into(), ZBI_TOPOLOGY_NODE_SIZE as u32).await {
         Ok((Some(vmo), length)) => match vmo_to_topology(vmo, length) {
             Ok(topology) => Ok(CpuStatsDriver { proxy, topology: Some(topology) }),
             Err(err) => Err(format_err!("Parsing VMO failed with error {}", err)),

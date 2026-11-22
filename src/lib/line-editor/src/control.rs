@@ -159,6 +159,30 @@ pub(crate) fn write_bytes<W: Write>(writer: &mut W, bytes: &[u8]) -> std::io::Re
     writer.write_all(bytes)
 }
 
+/// Returns the visible terminal column width of `prompt`, excluding ANSI
+/// Control Sequence Introducer (`ESC [ ... <final>`) escape sequences such as
+/// SGR color codes in prompts.
+pub(crate) fn visible_column_width(prompt: &[u8]) -> usize {
+    let mut width = 0;
+    let mut rest = prompt;
+    while let Some((&b, tail)) = rest.split_first() {
+        if b == KEY_ESC && tail.first() == Some(&b'[') {
+            let params_and_final = &tail[1..];
+            let is_final = |b: &_| CSI_FINAL_BYTES.contains(b);
+            if let Some(end) = params_and_final.iter().position(is_final) {
+                let is_param = |b: &_| CSI_PARAM_OR_INTERMEDIATE_BYTES.contains(b);
+                if params_and_final[..end].iter().all(is_param) {
+                    rest = &params_and_final[end + 1..];
+                    continue;
+                }
+            }
+        }
+        width += 1;
+        rest = tail;
+    }
+    width
+}
+
 const QUERY_CURSOR_POSITION: ControlSequenceBuilder =
     ControlSequenceBuilder::new().arg(STATUS_REPORT_CURSOR_POSITION).cmd(CMD_DEVICE_STATUS_REPORT);
 

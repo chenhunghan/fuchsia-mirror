@@ -5,6 +5,7 @@
 use diagnostics_data::{BuilderArgs, LogsData, LogsDataBuilder, Severity, Timestamp};
 use fdomain_client::fidl::DiscoverableProtocolMarker as _;
 use ffx_config::EnvironmentContext;
+use ffx_target::TargetConnector;
 use fho::{FhoEnvironment, TryFromEnv};
 use fidl::endpoints::{DiscoverableProtocolMarker as _, Responder as _};
 use fidl_fuchsia_developer_remotecontrol::{
@@ -26,9 +27,8 @@ use moniker::Moniker;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use target_behavior::DirectConnector;
 use target_connector::Connector;
-use target_holders::RemoteControlProxyHolder;
+use target_holders::{RemoteControlProxyHolder, target_interface};
 
 const NODENAME: &str = "Rust";
 
@@ -248,12 +248,12 @@ impl TestEnvironment {
             .unwrap(),
             &["some", "test"],
         );
-        let target_env = target_behavior::target_interface(&fho_env);
+        let target_env = target_interface(&fho_env);
         let conn = ffx_target::Connection::from_fdomain_client(client.clone());
         let resolution = ffx_target::Resolution::mock(|| unreachable!());
         resolution.set_connection_for_test(Some(conn)).await;
-        let connector = DirectConnector::from_resolution_for_test(resolution);
-        target_env.set_behavior_for_test(connector);
+        let connector = TargetConnector::from_resolution_for_test(resolution);
+        target_env.set_connector_for_test(connector);
 
         Self { fho_env, state, event_rcv: Some(event_rcv), disconnect_snd }
     }

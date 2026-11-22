@@ -26,6 +26,30 @@ has_bazel2gn_skip_comment = pcl.has_bazel2gn_skip_comment
 
 VG_ROOT = "vendor/" + "google"
 VG_SUBPKGS = "//" + VG_ROOT + ":__subpackages__"
+VENDOR_ROOT = VG_ROOT.split("/")[0]
+VENDOR_SUBPKGS = f"//{VENDOR_ROOT}:__subpackages__"
+
+
+# Check whether a package path belongs to the primary internal vendor tree.
+def is_vg_pkg(p):
+    p = (p or "").strip("/")
+    return p == VG_ROOT or p.startswith(VG_ROOT + "/")
+
+
+# Check whether a package path belongs to another vendor sub-repository outside VG_ROOT.
+def is_other_vendor_pkg(p):
+    p = (p or "").strip("/")
+    return (
+        p == VENDOR_ROOT or p.startswith(VENDOR_ROOT + "/")
+    ) and not is_vg_pkg(p)
+
+
+# Check whether a package path belongs to any repository under VENDOR_ROOT.
+def is_any_vendor_pkg(p):
+    p = (p or "").strip("/")
+    return p == VENDOR_ROOT or p.startswith(VENDOR_ROOT + "/")
+
+
 EXCLUDED_GLOBAL_VIS_PREFIXES = tuple(
     f"{d.strip('/')}/" for d in sorted(pcl.EXCLUDED_GLOBAL_DIRS)
 )
@@ -59,6 +83,7 @@ TEST_OR_BENCH_CALLER_SUFFIXES = (
 )
 
 CONVERTIBLE_GN_TEMPLATES = {
+    "fostr_fidl",
     "static_library",
     "source_set",
     "shared_library",
@@ -93,7 +118,10 @@ CONVERTIBLE_GN_TEMPLATES = {
     "config",
     "bind_library",
     "cml_shard",
+    "expect_includes",
 }
+
+SHARD_RULES = frozenset({"cml_shard", "expect_includes"})
 
 GN_PACKAGE_TEMPLATES = {
     "fuchsia_package",
@@ -109,7 +137,6 @@ BAZEL_GN_SYNCED_TEST_RULES = {
 BAZEL_NON_GN_SYNCED_RULES = {
     "cc_test",
     "cml_shard",
-    "expect_includes",
     "fx_cc_test_binary",
     "fx_packaged_binary",
     "fx_test_component",
@@ -129,12 +156,14 @@ BAZEL_NON_GN_SYNCED_RULES = {
     "cc_binary_host_tool",
     "go_binary_host_tool",
     "py_binary_host_tool",
+    "py_zipapp_binary",
     "rustc_binary_host_tool",
     "idk_cc_binary_host_tool",
     "idk_go_binary_host_tool",
     "idk_rustc_binary_host_tool",
     "wrap_host_rust_test",
     "go_test",
+    "golden_test",
 }
 
 GN_IMPORT_RE = re.compile(r'\bimport\(\s*"([^"]+\.gni)"\s*\)')
@@ -170,13 +199,34 @@ GN_TARGET_PARAM_VARS = {
 # Keep origin/main fetch cache short so end-of-turn run_checks sees recent upstream commits.
 FETCH_TTL_SECS = 15
 
+# Match visibility and FIDL binding allowlist assignments (e.g. `visibility`,
+# `*_visibility`, `visibility_*`, `fidl_rust_next_allowlist`, `*_fidl*_allowlist`).
+_VIS_OR_ALLOWLIST_VAR_PAT = (
+    r"(?:[A-Za-z0-9_]*_)?visibility(?:_[A-Za-z0-9_]+)?"
+    r"|fidl_rust_next_allowlist"
+    r"|[A-Za-z0-9_]*_fidls?_[A-Za-z0-9_]*allowlist"
+)
 _NON_DEP_LIST_RE = re.compile(
-    r"\b(?:visibility|packages|assert_no_deps|_?excluded_[A-Za-z0-9_]*)\s*\+?=\s*\[[^\]]*\]",
+    r"\b(?:"
+    + _VIS_OR_ALLOWLIST_VAR_PAT
+    + r"|packages|assert_no_deps|_?excluded_[A-Za-z0-9_]*)\s*\+?=\s*\[[^\]]*\]",
     re.DOTALL,
 )
 _GN_NON_DEP_VAR_RE = re.compile(
-    r"\b(?:visibility|packages|assert_no_deps|_?excluded_[A-Za-z0-9_]*)\s*\+?=\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+    r"\b(?:"
+    + _VIS_OR_ALLOWLIST_VAR_PAT
+    + r"|packages|assert_no_deps|_?excluded_[A-Za-z0-9_]*)\s*\+?=\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
 )
+
+
+# Return True when `rel_path` is a dedicated visibility allowlist `.gni`/`.bzl` file.
+def is_visibility_allowlist_file(rel_path):
+    base = os.path.basename(rel_path or "")
+    return base in ("visibility.gni", "visibility.bzl") or base.endswith(
+        ("_visibility.gni", "_visibility.bzl")
+    )
+
+
 _GN_MEMBERSHIP_CHECK_RE = re.compile(
     r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*"
     r"(?:\+\s*\[[^\]]+\]\s*-\s*\[[^\]]+\]\s*[!=]=\s*\1\b"
@@ -192,6 +242,15 @@ _SUITE_LIST_RE = re.compile(
 )
 _BAZEL_TEST_SUITE_OPEN_RE = re.compile(
     r'\bbazel_test_suite\s*\(\s*"[^"]*"\s*\)\s*\{'
+)
+# GN target declaration headers (`group("tests") {`) and scalar artifact-name attributes,
+# whose string literals name a local target/output rather than a dependency label.
+_GN_TARGET_DECL_HEADER_RE = re.compile(
+    r'(\b(?!template\b)[A-Za-z_]\w*\s*\(\s*")([^"]*)("\s*\)\s*\{)'
+)
+_GN_SCALAR_NAME_ATTR_RE = re.compile(
+    r"(\b(?:output_name|package_name|component_name|crate_name|binary_name|"
+    r'library_name|test_component_name|sdk_name)\s*=\s*")([^"]*)(")'
 )
 
 
@@ -220,13 +279,21 @@ def get_distinct_areas(rdep_pkgs, pkg_path="", with_slash_prefix=False):
 
 def sanitize_rdep_pkg(p):
     p = p.strip("/")
-    return VG_ROOT if (p == VG_ROOT or p.startswith(VG_ROOT + "/")) else p
+    if is_vg_pkg(p):
+        return VG_ROOT
+    if is_other_vendor_pkg(p):
+        return VENDOR_ROOT
+    return p
 
 
 def is_test_support_package(pkg_path):
     p = (pkg_path or "").strip("/")
+    if p.endswith(("/BUILD.bazel", "/BUILD.gn", "/BUILD")):
+        p = os.path.dirname(p).strip("/")
     return (
-        p.startswith(("src/testing/", "src/lib/testing/", "testing/"))
+        p == "testing"
+        or p.startswith(("src/testing/", "src/lib/testing/", "testing/"))
+        or p.endswith("/testing")
         or "/testing/" in p
     )
 
@@ -242,11 +309,14 @@ def recommend_narrow_visibility(rdep_pkgs, pkg_path=""):
     )
     if not raw_pkgs:
         return []
-    has_vg = any(p == VG_ROOT or p.startswith(VG_ROOT + "/") for p in raw_pkgs)
-    pkgs = [
-        p for p in raw_pkgs if p != VG_ROOT and not p.startswith(VG_ROOT + "/")
-    ]
-    vendor_entries = [VG_SUBPKGS] if has_vg else []
+    has_other_vendor = any(is_other_vendor_pkg(p) for p in raw_pkgs)
+    has_vg = any(is_vg_pkg(p) for p in raw_pkgs)
+    pkgs = [p for p in raw_pkgs if not is_any_vendor_pkg(p)]
+    vendor_entries = (
+        [VENDOR_SUBPKGS]
+        if has_other_vendor
+        else ([VG_SUBPKGS] if has_vg else [])
+    )
     if not pkgs:
         return vendor_entries
     if len(pkgs) <= 5:
@@ -333,14 +403,17 @@ def recommend_area_rollup_visibility(rdep_pkgs, pkg_path=""):
     )
     if not raw_pkgs:
         return []
-    has_vg = any(p == VG_ROOT or p.startswith(VG_ROOT + "/") for p in raw_pkgs)
-    pkgs = [
-        p for p in raw_pkgs if p != VG_ROOT and not p.startswith(VG_ROOT + "/")
-    ]
+    has_other_vendor = any(is_other_vendor_pkg(p) for p in raw_pkgs)
+    has_vg = any(is_vg_pkg(p) for p in raw_pkgs)
+    pkgs = [p for p in raw_pkgs if not is_any_vendor_pkg(p)]
     by_area = {}
     for p in pkgs:
         by_area.setdefault(get_pkg_area(p), []).append(p)
-    result = {VG_SUBPKGS} if has_vg else set()
+    result = (
+        {VENDOR_SUBPKGS}
+        if has_other_vendor
+        else ({VG_SUBPKGS} if has_vg else set())
+    )
     for area, group in sorted(by_area.items()):
         if area in BANNED_UMBRELLA_SUBPKGS:
             result.update(recommend_narrow_visibility(group, pkg_norm))
@@ -420,8 +493,7 @@ def has_only_test_or_bench_rdeps(rdep_pkgs, pkg_path=""):
         for p in rdep_pkgs
         if p.strip("/")
         and p.strip("/") != pkg_norm
-        and p.strip("/") != VG_ROOT
-        and not p.strip("/").startswith(VG_ROOT + "/")
+        and not is_any_vendor_pkg(p.strip("/"))
     ]
     return bool(pkgs) and all(is_test_or_bench_caller_pkg(p) for p in pkgs)
 
@@ -667,14 +739,21 @@ def get_preserved_gn_visibility(
             if p.strip("/") and p.strip("/") != pkg_norm
         }
     )
-    has_vg = any(p == VG_ROOT or p.startswith(VG_ROOT + "/") for p in pkgs)
+    has_other_vendor = any(is_other_vendor_pkg(p) for p in pkgs)
+    has_vg = any(is_vg_pkg(p) for p in pkgs)
     valid_scopes = []
     for sp, kind in gn_scopes:
         if sp == pkg_norm and kind == "pkg":
             continue
-        if sp == VG_ROOT or sp.startswith(VG_ROOT + "/"):
-            if has_vg:
+        if is_vg_pkg(sp):
+            if has_other_vendor:
+                valid_scopes.append((VENDOR_ROOT, "subpackages"))
+            elif has_vg:
                 valid_scopes.append((VG_ROOT, "subpackages"))
+            continue
+        if is_other_vendor_pkg(sp):
+            if has_other_vendor or has_vg:
+                valid_scopes.append((VENDOR_ROOT, "subpackages"))
             continue
         if kind == "subpackages":
             if (
@@ -714,7 +793,13 @@ def get_preserved_gn_visibility(
         if kind == "subpackages":
             if not any(sp != o and sp.startswith(o + "/") for o in sub_roots):
                 preserved.add(
-                    VG_SUBPKGS if sp == VG_ROOT else f"//{sp}:__subpackages__"
+                    VG_SUBPKGS
+                    if sp == VG_ROOT
+                    else (
+                        VENDOR_SUBPKGS
+                        if sp == VENDOR_ROOT
+                        else f"//{sp}:__subpackages__"
+                    )
                 )
         elif not any(sp == o or sp.startswith(o + "/") for o in sub_roots):
             preserved.add(f"//{sp}:__pkg__")
@@ -806,19 +891,255 @@ def recommend_visibility(
     return narrow
 
 
+# Discover all git repositories in the checkout, including nested Jiri sub-repositories
+# under VENDOR_ROOT (up to 3 levels deep, such as nested driver or third_party repos
+# that parent git grep commands skip when a child directory has its own .git).
 def discover_git_repos(workdir):
     """Discovers all git repositories in the checkout (root and vendor sub-repositories)."""
     repos = [workdir]
-    sub_root = os.path.join(workdir, VG_ROOT.split("/")[0])
-    if os.path.isdir(sub_root):
+    sub_root = os.path.join(workdir, VENDOR_ROOT)
+    if not os.path.isdir(sub_root):
+        return repos
+    try:
+        d1_entries = sorted(os.listdir(sub_root))
+    except OSError:
+        return repos
+    for d1 in d1_entries:
+        if d1.startswith("."):
+            continue
+        d1_path = os.path.join(sub_root, d1)
+        if not os.path.isdir(d1_path):
+            continue
+        d1_has_git = os.path.exists(os.path.join(d1_path, ".git"))
+        if d1_has_git:
+            repos.append(d1_path)
         try:
-            for entry in sorted(os.listdir(sub_root)):
-                sub = os.path.join(sub_root, entry)
-                if os.path.exists(os.path.join(sub, ".git")):
-                    repos.append(sub)
+            d2_entries = sorted(os.listdir(d1_path))
+        except OSError:
+            continue
+        for d2 in d2_entries:
+            if d2.startswith(".") or d2 in ("out", "__pycache__"):
+                continue
+            d2_path = os.path.join(d1_path, d2)
+            if not os.path.isdir(d2_path):
+                continue
+            if os.path.exists(os.path.join(d2_path, ".git")):
+                repos.append(d2_path)
+                continue
+            if d2 == "third_party" or not d1_has_git:
+                try:
+                    d3_entries = sorted(os.listdir(d2_path))
+                except OSError:
+                    continue
+                for d3 in d3_entries:
+                    if d3.startswith("."):
+                        continue
+                    d3_path = os.path.join(d2_path, d3)
+                    if os.path.isdir(d3_path) and os.path.exists(
+                        os.path.join(d3_path, ".git")
+                    ):
+                        repos.append(d3_path)
+    return repos
+
+
+# Collect top-level relative subtrees that may host nested Jiri git sub-repositories.
+def _subrepo_search_rel_roots(workdir):
+    candidates = ["third_party", "build/secondary", VG_ROOT.split("/")[0]]
+    seen = set()
+    rel_roots = []
+    for rel in candidates:
+        if rel not in seen and os.path.isdir(os.path.join(workdir, rel)):
+            seen.add(rel)
+            rel_roots.append(rel)
+    skip_top = {".git", ".hg", ".jiri_root", "out", "prebuilt"} | seen
+    try:
+        for entry in sorted(os.listdir(workdir)):
+            if entry in skip_top or entry.startswith("."):
+                continue
+            sub = os.path.join(workdir, entry)
+            if (
+                os.path.isdir(sub)
+                and not os.path.islink(sub)
+                and os.path.exists(os.path.join(sub, ".git"))
+            ):
+                rel_roots.append(entry)
+    except OSError:
+        pass
+    return rel_roots
+
+
+# Check whether a Bazel file sits inside a nested standalone Bazel workspace root.
+def _is_nested_bazel_workspace_file(workdir, abs_path):
+    if not abs_path.endswith((".bazel", ".bzl", "/BUILD")):
+        return False
+    norm_root = os.path.normpath(workdir)
+    cur = os.path.normpath(os.path.dirname(abs_path))
+    markers = ("MODULE.bazel", "REPO.bazel", "WORKSPACE", "WORKSPACE.bazel")
+    while cur and cur != norm_root and cur.startswith(norm_root + os.sep):
+        if any(os.path.isfile(os.path.join(cur, m)) for m in markers):
+            return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return False
+
+
+# Discover nested git repositories up to max_depth under subtrees when rg is unavailable.
+def _discover_nested_git_dirs(workdir, rel_roots, max_depth=3):
+    repos = []
+    skip_names = {
+        ".git",
+        ".hg",
+        ".jiri_root",
+        "out",
+        "bazel_vendor",
+        "cargo_vendor",
+    }
+    for rel_root in rel_roots:
+        top = os.path.join(workdir, rel_root)
+        base_depth = rel_root.strip("/").count("/")
+        for root, dirs, files in os.walk(top, followlinks=False):
+            rel = os.path.relpath(root, workdir).replace("\\", "/").strip("/")
+            if rel == "third_party/rust_crates/vendor":
+                dirs[:] = []
+                continue
+            if ".git" in dirs or ".git" in files:
+                repos.append(root)
+            if rel.count("/") - base_depth >= max_depth:
+                dirs[:] = []
+            else:
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if d not in skip_names and not d.startswith(".")
+                ]
+    return repos
+
+
+# Search nested Jiri git sub-repositories (e.g. under third_party/) skipped by root git grep.
+def grep_subrepo_files(workdir, pattern_args, file_globs):
+    rel_roots = _subrepo_search_rel_roots(workdir)
+    if not rel_roots or not pattern_args:
+        return set()
+    hits = set()
+    rg_bin = shutil.which(
+        "rg",
+        path=os.environ.get("PATH", "")
+        + os.pathsep
+        + os.path.expanduser("~/.cargo/bin"),
+    )
+    used_rg = False
+    if rg_bin:
+        rg_cmd = (
+            [
+                rg_bin,
+                "-l",
+                "--no-ignore",
+                "--no-ignore-parent",
+                "--no-require-git",
+                "--fixed-strings",
+            ]
+            + [arg for g in file_globs for arg in ("-g", g)]
+            + [
+                "-g",
+                "!.git/**",
+                "-g",
+                "!out/**",
+                "-g",
+                "!third_party/bazel_vendor/**",
+                "-g",
+                "!third_party/rust_crates/vendor/**",
+            ]
+            + list(pattern_args)
+            + rel_roots
+        )
+        try:
+            proc = subprocess.run(
+                rg_cmd,
+                cwd=workdir,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            if proc.returncode in (0, 1):
+                used_rg = True
+                for line in proc.stdout.splitlines():
+                    rel = re.sub(r"^\./", "", line.strip())
+                    if rel:
+                        abs_p = os.path.join(workdir, rel)
+                        if not _is_nested_bazel_workspace_file(workdir, abs_p):
+                            hits.add(abs_p)
         except OSError:
             pass
-    return repos
+    if not used_rg:
+        for sub_repo in _discover_nested_git_dirs(workdir, rel_roots):
+            try:
+                proc = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        sub_repo,
+                        "grep",
+                        "--untracked",
+                        "-l",
+                        "--fixed-strings",
+                    ]
+                    + list(pattern_args)
+                    + ["--"]
+                    + list(file_globs),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+                for line in proc.stdout.splitlines():
+                    if line.strip():
+                        abs_p = os.path.join(sub_repo, line.strip())
+                        if not _is_nested_bazel_workspace_file(workdir, abs_p):
+                            hits.add(abs_p)
+            except OSError:
+                pass
+    return hits
+
+
+# Search matching files across root git repositories and nested Jiri sub-repositories.
+def grep_checkout_files(workdir, pattern_args, file_globs):
+    hits = set()
+    if not pattern_args:
+        return hits
+    for repo in discover_git_repos(workdir):
+        if not os.path.exists(os.path.join(repo, ".git")):
+            continue
+        try:
+            proc = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    repo,
+                    "grep",
+                    "--untracked",
+                    "-l",
+                    "--fixed-strings",
+                ]
+                + list(pattern_args)
+                + ["--"]
+                + list(file_globs),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            for line in proc.stdout.splitlines():
+                if line.strip():
+                    abs_p = os.path.join(repo, line.strip())
+                    if not _is_nested_bazel_workspace_file(workdir, abs_p):
+                        hits.add(abs_p)
+        except OSError:
+            pass
+    hits.update(grep_subrepo_files(workdir, pattern_args, file_globs))
+    return hits
 
 
 def sso_https_git_config_args(repo):
@@ -833,6 +1154,8 @@ def sso_https_git_config_args(repo):
         return []
     if not url.startswith("sso://"):
         return []
+    if VG_ROOT in repo or VG_ROOT in url:
+        return []
     host = url[len("sso://") :].split("/", 1)[0].strip()
     if not host:
         return []
@@ -842,9 +1165,52 @@ def sso_https_git_config_args(repo):
     ]
 
 
+# Probe whether a repository's git directory accepts non-empty file writes before
+# running `git fetch`, preventing 0-byte `.git/FETCH_HEAD` truncation and repeated
+# failing network fetches when a FUSE/casfs mount rejects write().
+def _is_repo_git_dir_writable(repo):
+    try:
+        gdir = subprocess.check_output(
+            ["git", "-C", repo, "rev-parse", "--absolute-git-dir"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if not gdir or not os.path.isdir(gdir):
+        return False
+    probe_bytes = b"planter-write-probe\n"
+    fd = None
+    probe_path = None
+    try:
+        fd, probe_path = tempfile.mkstemp(
+            dir=gdir, prefix=".planter-fetch-probe."
+        )
+        if os.write(fd, probe_bytes) != len(probe_bytes):
+            raise OSError("short write during git fetch writability probe")
+        os.close(fd)
+        fd = None
+        os.unlink(probe_path)
+        return True
+    except OSError:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if probe_path and os.path.lexists(probe_path):
+            try:
+                os.unlink(probe_path)
+            except OSError:
+                pass
+        return False
+
+
 def maybe_refresh_repo_origin_main(repo, ttl_secs=FETCH_TTL_SECS):
     """Refreshes origin/main at most once per TTL unless PLANTER_SKIP_FETCH is set."""
     if os.environ.get("PLANTER_SKIP_FETCH", "").strip() not in ("", "0"):
+        return
+    if os.environ.get("PLANTER_BUILD_DRY_RUN", "").strip() not in ("", "0"):
         return
     if os.environ.get("PLANTER_AGENT_ROLE", "").strip() == "evolver":
         return
@@ -865,10 +1231,14 @@ def maybe_refresh_repo_origin_main(repo, ttl_secs=FETCH_TTL_SECS):
                 return
     except (OSError, ValueError):
         pass
+    if not _is_repo_git_dir_writable(repo):
+        return
 
     fetch_ok = False
     try:
         cfg_args = sso_https_git_config_args(repo)
+        fetch_env = os.environ.copy()
+        fetch_env["GIT_TERMINAL_PROMPT"] = "0"
         proc = subprocess.run(
             ["git", "-C", repo]
             + cfg_args
@@ -882,6 +1252,7 @@ def maybe_refresh_repo_origin_main(repo, ttl_secs=FETCH_TTL_SECS):
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=fetch_env,
             timeout=30,
             check=False,
         )
@@ -1243,6 +1614,15 @@ def discover_referencing_build_files(
             except OSError:
                 pass
 
+    # Include referencing build files in nested Jiri git sub-repositories (e.g. third_party/).
+    found.update(
+        grep_subrepo_files(
+            workdir,
+            pattern_args,
+            ("*BUILD.gn", "*BUILD.bazel", "*.gni", "*.bzl"),
+        )
+    )
+
     for p in pkg_list:
         p_clean = p.strip("/")
         parts = [seg for seg in p_clean.split("/") if seg]
@@ -1388,11 +1768,17 @@ def _extract_excluded_gn_labels(no_comments):
     return frozenset(excluded)
 
 
+def _blank_inner_group(m):
+    return m.group(1) + re.sub(r"[^\n]", " ", m.group(2)) + m.group(3)
+
+
 def strip_non_dep_lists(no_comments, is_gn):
     """Replaces non-dependency attributes/constructs with spaces while preserving offsets."""
     stripped = _NON_DEP_LIST_RE.sub(_blank_match, no_comments)
     if not is_gn:
         return stripped
+    stripped = _GN_TARGET_DECL_HEADER_RE.sub(_blank_inner_group, stripped)
+    stripped = _GN_SCALAR_NAME_ATTR_RE.sub(_blank_inner_group, stripped)
     stripped = _GN_NON_DEP_VAR_RE.sub(_blank_match, stripped)
     stripped = _GN_MEMBERSHIP_CHECK_RE.sub(_blank_match, stripped)
     for _ in range(3):
@@ -1790,35 +2176,9 @@ def _propagate_gni_downstream_scopes(
 def _gni_basename_importers(workdir, basename, grep_cache):
     if basename in grep_cache:
         return grep_cache[basename]
-    hits = []
-    for repo in discover_git_repos(workdir):
-        if not os.path.exists(os.path.join(repo, ".git")):
-            continue
-        try:
-            proc = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    repo,
-                    "grep",
-                    "--untracked",
-                    "-l",
-                    "--fixed-strings",
-                    "-e",
-                    basename,
-                    "--",
-                    "*BUILD.gn",
-                    "*.gni",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-        except OSError:
-            continue
-        for line in proc.stdout.splitlines():
-            if line.strip():
-                hits.append(os.path.join(repo, line.strip()))
+    hits = sorted(
+        grep_checkout_files(workdir, ["-e", basename], ("*BUILD.gn", "*.gni"))
+    )
     grep_cache[basename] = hits
     return hits
 
@@ -1848,7 +2208,7 @@ def _raw_gni_importers(
         workdir, os.path.basename(gni_rel), grep_cache
     ):
         imp_rel = os.path.relpath(imp_abs, workdir).strip("/")
-        if imp_rel == gni_rel or os.path.basename(imp_rel) == "visibility.gni":
+        if imp_rel == gni_rel or is_visibility_allowlist_file(imp_rel):
             continue
         try:
             with open(imp_abs, "r", encoding="utf-8", errors="ignore") as f:
@@ -2202,6 +2562,7 @@ def owning_bazel_target(
     default_target="",
     non_gn_synced_targets=(),
     test_rule_targets=(),
+    shard_targets=(),
 ):
     """Maps a referenced label name to the Bazel target that defines or generates it."""
     if sub in bazel_targets:
@@ -2230,6 +2591,7 @@ def owning_bazel_target(
             for t in bazel_targets
             if t not in non_gn_synced_targets
             and t not in test_rule_targets
+            and t not in shard_targets
             and t != "headers"
         ]
         if len(primary) == 1:
@@ -2323,6 +2685,7 @@ def parse_package_bazel_targets(tree, src_lines):
     non_gn_synced_targets = set()
     test_rule_targets = set()
     testonly_targets = set()
+    shard_targets = set()
     idk_targets = set()
     bazel2gn_skipped_targets = set()
     alias_map = {}
@@ -2375,6 +2738,8 @@ def parse_package_bazel_targets(tree, src_lines):
             bazel_targets.append(tname)
             if is_testonly:
                 testonly_targets.add(tname)
+            if func in SHARD_RULES:
+                shard_targets.add(tname)
             if func in ("fx_package", "fuchsia_package", "fx_unittest_package"):
                 package_targets.add(tname)
             if func in BAZEL_GN_SYNCED_TEST_RULES:
@@ -2404,9 +2769,31 @@ def parse_package_bazel_targets(tree, src_lines):
         "non_gn_synced_targets": non_gn_synced_targets,
         "test_rule_targets": test_rule_targets,
         "testonly_targets": testonly_targets,
+        "shard_targets": shard_targets,
         "idk_targets": idk_targets,
         "bazel2gn_skipped_targets": bazel2gn_skipped_targets,
         "alias_map": alias_map,
+    }
+
+
+# Return target names declared with cml_shard or expect_includes in BUILD.gn.
+def get_gn_shard_targets(workdir, pkg_path):
+    pkg_norm = (pkg_path or "").strip("/")
+    gn_file = os.path.join(workdir, pkg_norm, "BUILD.gn")
+    if not os.path.isfile(gn_file):
+        return set()
+    try:
+        with open(gn_file, "r", encoding="utf-8", errors="ignore") as f:
+            gn_clean = re.sub(r"#[^\n]*", "", f.read())
+    except OSError:
+        return set()
+    return {
+        m.group(1)
+        for m in re.finditer(
+            r'^\s*(?:cml_shard|expect_includes)\(\s*"([^"$]+)"\s*\)',
+            gn_clean,
+            flags=re.MULTILINE,
+        )
     }
 
 
@@ -2426,6 +2813,7 @@ def compute_package_rdeps(
     excluded_gn_only_out=None,
     importer_cache=None,
     grep_cache=None,
+    shard_targets=(),
 ):
     """Computes package-level and per-target reverse dependencies across the checkout."""
     pkg_norm = (pkg_path or "").strip("/")
@@ -2482,6 +2870,7 @@ def compute_package_rdeps(
                     )
                     if m.group(2) in bazel_targets
                 }
+                above_defined_targets = set()
                 for m in re.finditer(
                     r'^\s*([a-zA-Z0-9_]+)\(\s*"([^"]+)"\s*\)',
                     above_clean,
@@ -2490,6 +2879,7 @@ def compute_package_rdeps(
                     tmpl, t = m.group(1), m.group(2)
                     if tmpl == "template" or t in gn_forwarding_groups:
                         continue
+                    above_defined_targets.add(t)
                     if t not in bazel_targets:
                         gn_only_targets.add(t)
                     is_unmigrated_dep_target = (
@@ -2509,6 +2899,15 @@ def compute_package_rdeps(
                         gn_nonconvertible_targets.add(t)
                 non_gn_synced_targets.difference_update(below_synced_targets)
                 package_targets.difference_update(below_synced_targets)
+                # When a Bazel target named "tests" or "benchmarks" is synced below
+                # the sentinel (e.g. fx_package(name = "tests") generating
+                # fuchsia_test_package("tests")) and not defined above the sentinel,
+                # treat GN callers of :<name> as true rdeps rather than GN-only refs.
+                synced_only_targets = (
+                    below_synced_targets - above_defined_targets
+                )
+                gn_only_targets.difference_update(synced_only_targets)
+                gn_nonconvertible_targets.difference_update(synced_only_targets)
             else:
                 for m in re.finditer(
                     r'^\s*([a-zA-Z0-9_]+)\(\s*"([^"]+)"\s*\)',
@@ -2576,9 +2975,8 @@ def compute_package_rdeps(
             if pkg_prefix not in strp:
                 continue
             g_rel = os.path.relpath(fp, workdir).strip("/")
-            if (
-                not g_rel.endswith(".gni")
-                or os.path.basename(g_rel) == "visibility.gni"
+            if not g_rel.endswith(".gni") or is_visibility_allowlist_file(
+                g_rel
             ):
                 continue
             m_list = list(label_re.finditer(strp))
@@ -2684,6 +3082,23 @@ def compute_package_rdeps(
                                     )
                     except Exception:
                         pass
+            for abs_c in sorted(
+                grep_subrepo_files(
+                    workdir, gni_pat_args, ("*BUILD.gn", "*.gni")
+                )
+            ):
+                if abs_c in file_cache or not os.path.isfile(abs_c):
+                    continue
+                try:
+                    with open(
+                        abs_c, "r", encoding="utf-8", errors="ignore"
+                    ) as cf:
+                        raw_c = cf.read()
+                    if raw_c:
+                        nc = re.sub(r"#[^\n]*", "", raw_c)
+                        file_cache[abs_c] = (nc, strip_non_dep_lists(nc, True))
+                except OSError:
+                    pass
         return out
 
     gni_template_map = collect_gni_template_matches(abs_label_re)
@@ -2703,21 +3118,28 @@ def compute_package_rdeps(
         if caller_pkg == pkg_norm:
             continue
 
+        # Only GN/GNI files resolve cross-package labels via directory-relative paths
+        # (e.g. "tests" or "../sub:target"); Bazel cross-package labels always start
+        # with "//" (matched by `abs_label_re`), whereas bare strings in BUILD.bazel
+        # name local targets/files or attributes such as `name = "tests"`.
         rel_sub = None
-        if rel.endswith((".gn", ".gni")) and caller_pkg and pkg_norm:
-            try:
-                if os.path.commonpath([pkg_norm, caller_pkg]):
-                    cand_rel = os.path.relpath(pkg_norm, caller_pkg)
-                    if not cand_rel.startswith("../../.."):
-                        rel_sub = cand_rel
-            except ValueError:
-                pass
-        elif pkg_norm.startswith(caller_pkg + "/"):
-            rel_sub = pkg_norm[len(caller_pkg) + 1 :]
-        elif rel.endswith((".gn", ".gni")) and caller_pkg:
-            cand_rel = os.path.relpath(pkg_norm, caller_pkg)
-            if cand_rel and cand_rel != ".":
-                rel_sub = cand_rel
+        if rel.endswith((".gn", ".gni")) and pkg_norm:
+            if not caller_pkg:
+                rel_sub = pkg_norm
+            elif pkg_norm.startswith(caller_pkg + "/"):
+                rel_sub = pkg_norm[len(caller_pkg) + 1 :]
+            else:
+                try:
+                    if os.path.commonpath([pkg_norm, caller_pkg]):
+                        cand_rel = os.path.relpath(pkg_norm, caller_pkg)
+                        if (
+                            cand_rel
+                            and cand_rel != "."
+                            and not cand_rel.startswith("../../..")
+                        ):
+                            rel_sub = cand_rel
+                except ValueError:
+                    pass
         if (
             f"//{pkg_norm}" not in no_comments
             and (not rel_sub or rel_sub not in no_comments)
@@ -2735,8 +3157,10 @@ def compute_package_rdeps(
             else None
         )
 
-        if os.path.basename(rel) == "visibility.gni":
-            if abs_label_re.search(no_comments):
+        if is_visibility_allowlist_file(rel):
+            if abs_label_re.search(no_comments) or (
+                rel_label_re and rel_label_re.search(no_comments)
+            ):
                 visibility_only_packages.add(caller_pkg)
             continue
 
@@ -2797,11 +3221,18 @@ def compute_package_rdeps(
         if not all_matches:
             continue
 
-        dep_matches = (
+        # Exclude Bazel `:__pkg__` and `:__subpackages__` package-group specifiers,
+        # which only appear in visibility/allowlist lists and never name dependency targets.
+        raw_dep_matches = (
             list(abs_label_re.finditer(stripped))
             + (list(rel_label_re.finditer(stripped)) if rel_label_re else [])
             + gni_call_matches
         )
+        dep_matches = [
+            m
+            for m in raw_dep_matches
+            if m.group(1) not in ("__pkg__", "__subpackages__")
+        ]
         if not dep_matches:
             visibility_only_packages.add(caller_pkg)
             continue
@@ -2838,11 +3269,6 @@ def compute_package_rdeps(
                 for bt in gn_forwarding_groups[sub]:
                     per_target_rdeps[bt].add(norm_caller)
                 continue
-            if sub in gn_only_targets and sub not in bazel_targets:
-                if excluded_gn_only_out is not None:
-                    excluded_gn_only_out.add(f"//{caller_pkg} (:{sub})")
-                gn_only_ref_packages.add(caller_pkg)
-                continue
             is_pkg_target = sub in package_targets or (
                 sub == default_target
                 and len(bazel_targets) == 1
@@ -2854,6 +3280,7 @@ def compute_package_rdeps(
                 default_target,
                 non_gn_synced_targets,
                 test_rule_targets,
+                shard_targets=shard_targets,
             )
             if (
                 owner is None
@@ -2861,6 +3288,17 @@ def compute_package_rdeps(
                 and len(bazel_targets) == 1
             ):
                 owner = bazel_targets[0]
+            # Keep Bazel callers of macro-generated `<owner>_<suffix>` sub-targets even when
+            # `BUILD.gn` retains a same-named GN bridge target above the sentinel.
+            if (
+                sub in gn_only_targets
+                and sub not in bazel_targets
+                and (rel.endswith((".gn", ".gni")) or owner is None)
+            ):
+                if excluded_gn_only_out is not None:
+                    excluded_gn_only_out.add(f"//{caller_pkg} (:{sub})")
+                gn_only_ref_packages.add(caller_pkg)
+                continue
             if is_idk_generated_ref(sub, owner, idk_targets):
                 continue
             if is_gn_only_target_ref(

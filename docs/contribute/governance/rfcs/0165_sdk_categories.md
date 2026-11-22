@@ -162,7 +162,7 @@ API designers can make changes.
 [^1]: Currently, the set of partners is not public. As the project scales, we
       will likely need to revisit our approach to partnerships.
 
-## Implementation
+## Implementation {:#implementation}
 
 SDK categories have been implemented in the
 [GN rules for building SDKs.](https://fuchsia.googlesource.com/fuchsia/+/main/build/sdk/sdk_atom.gni)

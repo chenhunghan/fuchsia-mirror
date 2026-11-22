@@ -4,7 +4,7 @@
 
 from typing import Any, ClassVar, Final, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from shared.protocol.base import BaseRequest
 from shared.protocol.tracepoint import TracepointInfo
 from shared.protocol.watch_request import WatchAccessType
@@ -15,7 +15,9 @@ COMMAND_NAME: Final = "get-state"
 class ThreadInfo(BaseModel):
     """Information about a single thread."""
 
-    id: int
+    model_config = ConfigDict(extra="forbid")
+
+    thread_id: int
     name: str
 
 

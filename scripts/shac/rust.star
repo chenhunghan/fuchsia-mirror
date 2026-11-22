@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+"""Defines Rust-related shac checks."""
+
 load(
     "./common.star",
     "FORMATTER_MSG",
@@ -103,6 +105,65 @@ def _rustfmt(ctx):
             replacements = [formatted],
         )
 
+_RUSTC_THIRD_PARTY_GLOB = [
+    "/build/bazel/update-rustc-third-party/**",
+    "/scripts/shac/rust.star",
+    "/third_party/rust_crates/**",
+]
+
+def _verify_rustc_third_party(ctx):
+    """Checks that //third_party/rust_crates generated files are in sync."""
+    if not ctx.scm.affected_files(
+        glob = _RUSTC_THIRD_PARTY_GLOB,
+        include_deleted = True,
+    ):
+        return
+
+    fuchsia_dir = get_fuchsia_dir(ctx)
+    platform = cipd_platform_name(ctx)
+    res = os_exec(
+        ctx,
+        [
+            "%s/prebuilt/third_party/python3/%s/bin/python3" % (
+                fuchsia_dir,
+                platform,
+            ),
+            "%s/build/bazel/update-rustc-third-party/verify_rustc_third_party.py" % fuchsia_dir,
+            "--json",
+            "--fuchsia-dir",
+            fuchsia_dir,
+            "--cargo",
+            "%s/prebuilt/third_party/rust/%s/bin/cargo" % (
+                fuchsia_dir,
+                platform,
+            ),
+            "--rustc",
+            "%s/prebuilt/third_party/rust/%s/bin/rustc" % (
+                fuchsia_dir,
+                platform,
+            ),
+            "--buildifier",
+            "%s/prebuilt/third_party/buildifier/%s/buildifier" % (
+                fuchsia_dir,
+                platform,
+            ),
+        ],
+        ok_retcodes = [0, 1],
+    ).wait()
+
+    if res.retcode and not res.stdout:
+        fail("verify_rustc_third_party.py failed:\n%s" % res.stderr)
+
+    affected_files = ctx.scm.affected_files(glob = _RUSTC_THIRD_PARTY_GLOB)
+    for finding in json.decode(res.stdout):
+        filepath = finding["filepath"]
+        ctx.emit.finding(
+            level = "error",
+            filepath = filepath if filepath in affected_files else "",
+            message = finding["message"],
+        )
+
 def register_rust_checks():
     shac.register_check(shac.check(_clippy))
     shac.register_check(shac.check(_rustfmt, formatter = True))
+    shac.register_check(shac.check(_verify_rustc_third_party))

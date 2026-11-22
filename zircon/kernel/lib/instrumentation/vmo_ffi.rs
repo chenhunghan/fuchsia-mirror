@@ -35,14 +35,6 @@ zr::static_assert!(offset_of!(InstrumentationDataVmoFfi, scale) == 48);
 zr::static_assert!(offset_of!(InstrumentationDataVmoFfi, handle) == 56);
 
 unsafe extern "C" {
-    /// Populates `out` with the LLVM profdata instrumentation VMO descriptor (`LlvmProfdataVmo`).
-    ///
-    /// # Safety
-    ///
-    /// Must be called at most once, after the VM system is initialized, because `LlvmProfdataVmo`
-    /// initializes `gProfdataLiveData` and switches live coverage data to the mapped VMO.
-    pub(super) fn cpp_llvm_profdata_vmo(out: &mut MaybeUninit<InstrumentationDataVmoFfi>);
-
     /// Populates `out` with the SanitizerCoverage PC table VMO descriptor (`SancovGetPcVmo`).
     ///
     /// # Safety

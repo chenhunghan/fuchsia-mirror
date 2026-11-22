@@ -1,0 +1,17 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        "//examples/diagnostics/inspect/codelab/rust/part_1:tests",
+        "//examples/diagnostics/inspect/codelab/rust/part_2:tests",
+        "//examples/diagnostics/inspect/codelab/rust/part_3:tests",
+        "//examples/diagnostics/inspect/codelab/rust/part_4:tests",
+        "//examples/diagnostics/inspect/codelab/rust/part_5:tests",
+    ],
+    visibility = ["//examples:__pkg__"],
+)

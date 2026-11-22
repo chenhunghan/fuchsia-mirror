@@ -7,6 +7,7 @@
 #include <zircon/assert.h>
 
 #include <algorithm>
+#include <limits>
 
 #include "re2/re2.h"
 #include "src/lib/fxl/strings/split_string.h"
@@ -216,7 +217,8 @@ uint32_t DecodeUnicodeHex(std::string_view str) {
   unsigned long codepoint = strtoul(str.data(), &endptr, 16);
   ZX_ASSERT(codepoint != ULONG_MAX);
   ZX_ASSERT(endptr == &(*str.end()));
-  return codepoint;
+  ZX_ASSERT(codepoint <= std::numeric_limits<uint32_t>::max());
+  return static_cast<uint32_t>(codepoint);
 }
 
 static size_t Utf8SizeForCodepoint(uint32_t codepoint) {

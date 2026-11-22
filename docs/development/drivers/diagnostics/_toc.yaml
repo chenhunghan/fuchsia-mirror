@@ -14,3 +14,5 @@ toc:
   path: /docs/development/drivers/diagnostics/logging.md
 - title: "Add tracing to a driver"
   path: /docs/development/drivers/diagnostics/tracing.md
+- title: "Driver health checks"
+  path: /docs/development/drivers/diagnostics/driver-health-check.md

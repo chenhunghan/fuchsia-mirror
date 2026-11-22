@@ -25,6 +25,8 @@
 #include <kernel/scheduler.h>
 #include <ktl/utility.h>
 #else
+#include <utility>
+namespace ktl = std;
 #ifndef FFI_ALWAYS_INLINE
 #ifdef __clang__
 #define FFI_ALWAYS_INLINE [[gnu::always_inline]]
@@ -40,7 +42,7 @@ static_assert(std::atomic<int64_t>::is_always_lock_free);
 
 static_assert(!std::is_polymorphic_v<power_management::PowerDomain>);
 
-#if defined(_KERNEL) && defined(UNITTESTS_ENABLED)
+#ifndef _KERNEL
 namespace {
 
 class TestPowerLevelController final : public power_management::PowerLevelController {
@@ -153,7 +155,9 @@ FFI_ALWAYS_INLINE void cpp_power_management_set_power_domain_set(
   Scheduler::SetPowerDomainSet(ktl::move(*domain_set));
 }
 
-#ifdef UNITTESTS_ENABLED
+#endif
+
+#ifndef _KERNEL
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE power_management::PowerDomain* cpp_power_domain_create_for_test(
     uint32_t domain_id, uint64_t cpu_mask, power_management::EnergyModel* model) {
@@ -169,7 +173,6 @@ FFI_ALWAYS_INLINE power_management::PowerDomain* cpp_power_domain_create_for_tes
   }
   return fbl::ExportToRawPtr(&domain);
 }
-#endif
 #endif
 
 }  // extern "C"

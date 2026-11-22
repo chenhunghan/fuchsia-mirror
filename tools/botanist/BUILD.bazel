@@ -3,12 +3,16 @@
 # found in the LICENSE file.
 
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
 load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["targets/emu_net_allowlist/allowlist.txt"],
+    visibility = ["//src/tests/emulator_internet:__pkg__"],
+)
 
 go_library(
     name = "botanist_lib",
@@ -30,7 +34,6 @@ go_library(
         "//tools/lib/streams",
         "//tools/lib/subprocess",
         "//tools/net/netboot",
-        "//tools/net/tftp",
     ],
 )
 
@@ -55,13 +58,16 @@ go_library(
     srcs = [
         "targets/auxiliary.go",
         "targets/device.go",
+        "targets/emu_net_allowlist.go",
         "targets/emu_net_proxy.go",
+        "targets/emu_net_proxy_log.go",
         "targets/emulator.go",
         "targets/errors.go",
         "targets/gce.go",
         "targets/ip.go",
         "targets/target.go",
     ],
+    embedsrcs = ["targets/emu_net_allowlist/allowlist.txt"],
     importpath = "go.fuchsia.dev/fuchsia/tools/botanist/targets",
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//:__subpackages__"],
@@ -90,7 +96,6 @@ go_library(
         "//tools/net/netboot",
         "//tools/net/netutil",
         "//tools/net/sshutil",
-        "//tools/net/tftp",
         "//tools/testing/testrunner:constants",
     ],
 )
@@ -154,7 +159,7 @@ host_go_test(
     name = "botanist_cmd_tests",
     srcs = ["cmd/run_test.go"],
     embed = [":main"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools:__pkg__"],
 )
 
@@ -166,7 +171,7 @@ host_go_test(
         "pkg_test.go",
     ],
     embed = [":botanist_lib"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools:__pkg__"],
 )
 
@@ -177,7 +182,7 @@ host_go_test(
         "repo/repo_test.go",
     ],
     embed = [":repo"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools:__pkg__"],
 )
 
@@ -186,13 +191,15 @@ host_go_test(
     srcs = [
         "targets/auxiliary_test.go",
         "targets/device_test.go",
+        "targets/emu_net_proxy_adversarial_test.go",
+        "targets/emu_net_proxy_fuzz_test.go",
         "targets/emu_net_proxy_test.go",
         "targets/emulator_test.go",
         "targets/gce_test.go",
         "targets/target_test.go",
     ],
     embed = [":targets"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools:__pkg__"],
     deps = ["//third_party/golibs:github.com/google/go-cmp/cmp"],
 )

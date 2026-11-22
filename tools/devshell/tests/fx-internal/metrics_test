@@ -9,9 +9,27 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"/../../lib/vars.sh || exit $?
 
 BT_FILE_DEPS=(
+  "build/auth/apt.py"
+  "build/auth/auth_env.py"
+  "build/auth/gcloud.py"
+  "build/auth/gcloud_creds.py"
+  "build/auth/loas.py"
+  "build/auth/select_auth_method.py"
+  "build/profile/procfs.py"
+  "build/rbe/textpb.py"
+  "build/scripts/lock_utils.py"
   "prebuilt/third_party/jq/${HOST_PLATFORM}/bin/jq"
   "tools/devshell/jq.fx"
   "scripts/fx"
+  "tools/devshell/fx_cli/__init__.py"
+  "tools/devshell/fx_cli/builder.py"
+  "tools/devshell/fx_cli/fx_builtins.py"
+  "tools/devshell/fx_cli/locator.py"
+  "tools/devshell/fx_cli/main.py"
+  "tools/devshell/fx_cli/metadata.py"
+  "tools/devshell/fx_cli/metrics.py"
+  "tools/devshell/fx_cli/registry.py"
+  "tools/devshell/fx_host_tools.json"
   "tools/devshell/metrics"
   "tools/devshell/lib/fx-cmd-locator.sh"
   "tools/devshell/lib/fx-optional-features.sh"
@@ -47,8 +65,8 @@ BT_SET_UP() {
   fx="$(btf::setup_fx_with_metrics)"
   mycurl="$(btf::make_mock_binary curl)"
   btf::add_binary_to_path "${mycurl}"
-  btf::make_mock ${BT_TEMP_DIR}/${mock_py_path}
-  echo "1234567890000000" > "${BT_TEMP_DIR}/${mock_py_path}.mock_stdout"
+  mkdir -p "$(dirname "${BT_TEMP_DIR}/${mock_py_path}")"
+  ln -sf "$(command -v python3)" "${BT_TEMP_DIR}/${mock_py_path}"
   metrics_log="${BT_TEMP_DIR}/metrics_log"
   metrics_done="${BT_TEMP_DIR}/metrics_done"
   metrics_fifo="${BT_TEMP_DIR}/metrics_fifo"
@@ -798,6 +816,331 @@ TEST_is_abfs_user_property() {
   rm -f "${abfs_mount_dir}/.abfs.ws"
   BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"is_abfs":{"value":1}'
   BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"is_cog":{"value":0}'
+}
+
+TEST_track_build_event() {
+  set_up_environment "1" "1" "N" "1"
+  metrics-read-config
+  metrics_init
+
+  local build_dir="${BT_TEMP_DIR}/out/default"
+  mkdir -p "${build_dir}"
+  touch "${build_dir}/args.json"
+
+  local counter_script="${BT_TEMP_DIR}/tools/devshell/contrib/lib/count-ninja-actions.py"
+  mkdir -p "$(dirname "${counter_script}")"
+  cat > "${counter_script}" <<'EOF'
+import os
+import sys
+
+assert sys.flags.dont_write_bytecode == 1, f"expected -B, got {sys.flags}"
+assert sys.flags.no_site == 1, f"expected -S, got {sys.flags}"
+assert os.environ.get("PYTHONDONTWRITEBYTECODE") == "1"
+print("7")
+EOF
+
+  (track-build-event "1000000" "2000000" "0" "" "" "${build_dir}" 0 false false)
+  metrics_wait
+
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"name":"build"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"target_count":7'
+}
+
+TEST_metrics_service_pythondontwritebytecode() {
+  unset PYTHONDONTWRITEBYTECODE
+  local pycache_dir="${BT_TEMP_DIR}/metrics_pycache"
+  export PYTHONPYCACHEPREFIX="${pycache_dir}"
+  set_up_environment "1" "1" "N" "1"
+  metrics-read-config
+  metrics_init
+
+  local stats_json='{"t":1000000,"a":0,"sel":""}'
+  (track-test-event "1000000" "2000000" "0" "0" "${stats_json}" "${BT_TEMP_DIR}")
+  metrics_wait
+
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"name":"test"'
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${pycache_dir}"
+}
+
+TEST_metrics_sh_parity_guards() {
+  # 1. Non-migrated internal user exits 0 from metrics-read-config (set -e safe).
+  set_up_environment "N" "N" "N" "1"
+  BT_EXPECT metrics-read-config
+
+  # 2. Clearing debug logfile suppresses metrics-maybe-log instead of falling back.
+  set_up_environment "1" "N" "N" "0"
+  metrics-read-config
+  rm -f "${metrics_log}"
+  metrics-set-debug-logfile ""
+  BT_EXPECT metrics-maybe-log "suppressed-entry"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${metrics_log}"
+  metrics-set-debug-logfile "${metrics_log}"
+  BT_EXPECT metrics-maybe-log "logged-entry"
+  local ts_match_rc=0
+  grep -Eq '^[0-9]{8}_[0-9]{6}: logged-entry$' "${metrics_log}" || ts_match_rc=$?
+  BT_EXPECT_EQ "${ts_match_rc}" "0"
+
+  # 3. Failing _metrics_run does not abort set -e callers and still exports call stack.
+  local errexit_rc=0
+  (
+    set -o errexit
+    _metrics_run() { return 1; }
+    unset FUCHSIA_METRICS_CALL_STACK
+    metrics-read-and-validate 1
+    metrics-init build
+    [[ "${FUCHSIA_METRICS_CALL_STACK:-}" == "fx" ]]
+  ) || errexit_rc=$?
+  BT_EXPECT_EQ "${errexit_rc}" "0"
+
+  # 4. track-build-event closes inherited FDs so backgrounded calls don't hang pipes.
+  set_up_environment "1" "1" "N" "1"
+  metrics-read-config
+  local build_dir="${BT_TEMP_DIR}/out/pipe_test"
+  mkdir -p "${build_dir}"
+  local release="${BT_TEMP_DIR}/build_release"
+  local counter_outcome="${BT_TEMP_DIR}/counter_outcome"
+  local counter_script="${BT_TEMP_DIR}/tools/devshell/contrib/lib/count-ninja-actions.py"
+  mkdir -p "$(dirname "${counter_script}")"
+  cat > "${counter_script}" <<EOF
+import pathlib, time
+release = pathlib.Path("${release}")
+outcome = "timed out"
+for _ in range(200):
+    if release.is_file():
+        outcome = "released"
+        break
+    time.sleep(0.05)
+pathlib.Path("${counter_outcome}").write_text(outcome, encoding="utf-8")
+print("1")
+EOF
+  (
+    track-build-event "1000000" "2000000" "0" "" "" "${build_dir}" 0 false false &
+    echo "done"
+  ) | cat >/dev/null
+  touch "${release}"
+  BT_EXPECT wait_for_logged_event "build"
+  BT_EXPECT_FILE_CONTAINS "${counter_outcome}" "released"
+
+  # 5. _metrics_run reuses _METRICS_RESOLVED_PYTHON from _metrics_can_run without probing twice.
+  set_up_environment "1" "N" "N" "0"
+  local probe_count_file="${BT_TEMP_DIR}/find_python_count"
+  rm -f "${probe_count_file}"
+  (
+    eval "_orig_$(declare -f _metrics_find_python)"
+    _metrics_find_python() {
+      echo "1" >> "${probe_count_file}"
+      _orig__metrics_find_python "$@"
+    }
+    _METRICS_RESOLVED_PYTHON=""
+    metrics-read-config
+  )
+  BT_EXPECT_EQ "$(wc -l < "${probe_count_file}" | tr -d ' ')" "1"
+
+  # 6. _enable_testing redirects logging without force-enabling opted-out configs,
+  # tracks live on-disk config transitions without re-reading, and still rejects
+  # disallowed custom event subcommands when METRICS_LEVEL=0.
+  local test_cfg="${BT_TEMP_DIR}/enable_testing_cfg"
+  local test_log="${BT_TEMP_DIR}/enable_testing.log"
+  local testing_rc=0
+  (
+    export HOSTNAME="dev.example.com"
+    _enable_testing "${test_log}" 0 "${test_cfg}"
+    metrics-write-config 0 ""
+    metrics-init shell "ls"
+    [[ "${METRICS_LEVEL}" -eq 0 && "${METRICS_ENABLED}" -eq 0 ]] || exit 11
+    (track-command-execution "shell" "ls")
+    [[ ! -s "${test_log}" ]] || exit 12
+
+    # Disallowed custom event still returns exit 1 when METRICS_LEVEL=0.
+    local custom_rc=0
+    (track-subcommand-custom-event "disallowed" "act") || custom_rc=$?
+    [[ "${custom_rc}" -eq 1 ]] || exit 13
+
+    # Writing enabled config without calling metrics-read-config still reports.
+    metrics-write-config 1 "TESTING-UUID"
+    (track-command-execution "shell" "ls")
+    grep -q '"client_id":"TESTING-UUID"' "${test_log}" || exit 14
+
+    # Disabling on disk without re-calling metrics-read-config stops reporting.
+    metrics-read-config
+    rm -f "${test_log}"
+    metrics-write-config 0 ""
+    (track-command-execution "shell" "ls")
+    [[ ! -s "${test_log}" ]] || exit 15
+  ) || testing_rc=$?
+  BT_EXPECT_EQ "${testing_rc}" "0"
+
+  # 7. metrics-write-config and metrics-write-config-internal fail loudly when !_metrics_can_run.
+  local write_ext_err="${BT_TEMP_DIR}/write_ext_err"
+  local write_int_err="${BT_TEMP_DIR}/write_int_err"
+  local write_ext_rc=0
+  local write_int_rc=0
+  (
+    _metrics_can_run() { return 1; }
+    metrics-write-config 0 "" 2>"${write_ext_err}"
+  ) || write_ext_rc=$?
+  BT_EXPECT_EQ "${write_ext_rc}" "1"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${write_ext_err}" "ERROR:"
+  (
+    _metrics_can_run() { return 1; }
+    metrics-write-config-internal "SOME-UUID" 2>"${write_int_err}"
+  ) || write_int_rc=$?
+  BT_EXPECT_EQ "${write_int_rc}" "1"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${write_int_err}" "ERROR:"
+}
+
+_unset_agent_env_vars() {
+  local file var
+  for file in \
+    "${BT_TEMP_DIR}/tools/devshell/lib/agents.txt" \
+    "${BT_TEMP_DIR}/tools/devshell/lib/agent_session_ids.txt"; do
+    while IFS= read -r var || [[ -n "${var}" ]]; do
+      [[ -z "${var}" || "${var}" == \#* ]] && continue
+      unset "${var}"
+    done < "${file}"
+  done
+}
+
+TEST_python_fx_direct_command_internal_and_notice() {
+  local ffx
+  ffx="$(btf::make_installed_hosttools_mock ffx)"
+  cat >"${ffx}.mock_side_effects" <<'EOF'
+if [[ "${@: -1}" == "get" ]]; then
+  echo "some-device"
+fi
+EOF
+
+  # 1. Unconfigured internal user in human env sees Googler notice and logs no events.
+  set_up_environment "N" "N" "N" "1"
+  export HOSTNAME
+  local init_rc=0
+  (
+    _unset_agent_env_vars
+    FX_PYTHON_CLI=1 "${fx}" get-src-dir >/dev/null 2>"${metrics_notice}"
+  ) || init_rc=$?
+  BT_EXPECT_EQ "${init_rc}" "0"
+  expect_show_internal_notice
+  expect_not_send_analytics
+
+  # 2. Agent environment suppresses Googler notice.
+  rm -f "${metrics_notice}"
+  BT_EXPECT env FX_PYTHON_CLI=1 ANTIGRAVITY_AGENT=1 _FX_PROC_STATUS=/dev/null \
+    "${fx}" get-src-dir >/dev/null 2>"${metrics_notice}"
+  expect_not_show_notice
+  expect_not_send_analytics
+
+  # 3. Migrated Googler (analytics-status-internal=2, METRICS_UUID only) reports
+  # sanitized args, metrics_level=2, internal=1, invoke, and finish events.
+  cat >"${BT_TEMP_DIR}/tools/devshell/py_metrics_cmd.sh" <<'EOF'
+#!/bin/bash
+echo "stack=${FUCHSIA_METRICS_CALL_STACK:-}"
+exit 4
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/py_metrics_cmd.sh"
+  cat >"${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "py-metrics-cmd": {
+    "category": "Other",
+    "summary": "Python metrics e2e test helper",
+    "script": "//tools/devshell/py_metrics_cmd.sh"
+  }
+}
+EOF
+
+  set_up_environment "N" "N" "2" "1"
+  export HOSTNAME
+  local cmd_out="${BT_TEMP_DIR}/py_cmd_out"
+  local cmd_rc=0
+  (
+    _unset_agent_env_vars
+    FX_PYTHON_CLI=1 "${fx}" py-metrics-cmd "${BT_TEMP_DIR}/secret_arg" \
+      >"${cmd_out}" 2>"${metrics_notice}"
+  ) || cmd_rc=$?
+  BT_EXPECT_EQ "${cmd_rc}" "4"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${cmd_out}" "stack=fx"
+  expect_not_show_notice
+  BT_EXPECT wait_for_logged_event "invoke"
+  BT_EXPECT wait_for_logged_event "finish"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"name":"feature"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"name":"invoke"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"subcommand":"py-metrics-cmd"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"args":"$FUCHSIA_DIR/secret_arg"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"metrics_level":{"value":2}'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"internal":{"value":1}'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"shell":{"value":"bash"}'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"name":"finish"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"exit_status":"4"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${metrics_log}" '"is_remote":"0"'
+
+  # 4. Migrated Googler opted out (analytics-status-internal=0) ignores stale
+  # METRICS_ENABLED=1 and emits zero events or notices.
+  set_up_environment "1" "N" "0" "1"
+  export HOSTNAME
+  local optout_rc=0
+  (
+    _unset_agent_env_vars
+    FX_PYTHON_CLI=1 "${fx}" get-src-dir >/dev/null 2>"${metrics_notice}"
+  ) || optout_rc=$?
+  BT_EXPECT_EQ "${optout_rc}" "0"
+  expect_not_show_notice
+  expect_not_send_analytics
+}
+
+TEST_python_fx_direct_command_debug_log_override() {
+  local ffx
+  ffx="$(btf::make_installed_hosttools_mock ffx)"
+  cat >"${ffx}.mock_side_effects" <<'EOF'
+if [[ "${@: -1}" == "get" ]]; then
+  echo "some-device"
+fi
+EOF
+
+  # _METRICS_DEBUG_LOG_FILE in env promotes level=0 without dropping events
+  # and suppresses live curl calls when level > 0.
+  local orig_metrics_log="${metrics_log}"
+  local env_override_log="${BT_TEMP_DIR}/env_override.log"
+  local env_override_lvl2_log="${BT_TEMP_DIR}/env_override_lvl2.log"
+
+  set_up_environment "N" "N" "0" "1"
+  export HOSTNAME
+  metrics_log="${env_override_log}"
+  rm -f "${env_override_log}" "${mycurl}.mock_state"*
+  local env_lvl0_rc=0
+  (
+    _unset_agent_env_vars
+    unset _METRICS_DEBUG
+    FX_PYTHON_CLI=1 _METRICS_DEBUG_LOG_FILE="${env_override_log}" \
+      "${fx}" get-src-dir >/dev/null 2>"${metrics_notice}"
+  ) || env_lvl0_rc=$?
+  BT_EXPECT_EQ "${env_lvl0_rc}" "0"
+  BT_EXPECT wait_for_logged_event "invoke"
+  BT_EXPECT wait_for_logged_event "finish"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${env_override_log}" '"name":"feature"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${env_override_log}" '"name":"invoke"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${env_override_log}" '"name":"finish"'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${env_override_log}" ' RESULT=202'
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${mycurl}.mock_state"
+
+  metrics_log="${orig_metrics_log}"
+  set_up_environment "N" "N" "2" "1"
+  export HOSTNAME
+  metrics_log="${env_override_lvl2_log}"
+  rm -f "${env_override_lvl2_log}" "${orig_metrics_log}" "${mycurl}.mock_state"*
+  local env_lvl2_rc=0
+  (
+    _unset_agent_env_vars
+    unset _METRICS_DEBUG
+    FX_PYTHON_CLI=1 _METRICS_DEBUG_LOG_FILE="${env_override_lvl2_log}" \
+      "${fx}" get-src-dir >/dev/null 2>"${metrics_notice}"
+  ) || env_lvl2_rc=$?
+  BT_EXPECT_EQ "${env_lvl2_rc}" "0"
+  BT_EXPECT wait_for_logged_event "invoke"
+  BT_EXPECT wait_for_logged_event "finish"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${env_override_lvl2_log}" '"metrics_level":{"value":2}'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${env_override_lvl2_log}" ' RESULT=202'
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${orig_metrics_log}"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${mycurl}.mock_state"
+  metrics_log="${orig_metrics_log}"
 }
 
 BT_RUN_TESTS "$@"

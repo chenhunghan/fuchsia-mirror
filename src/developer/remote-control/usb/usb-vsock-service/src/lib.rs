@@ -21,7 +21,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use usb_vsock::{
     CID_HOST, Connection, ConnectionRequest, Header, Packet, PacketType, ProtocolVersion,
-    UsbPacketBuilder, VsockPacketIterator,
+    SyncMagic, UsbPacketBuilder, VsockPacketIterator,
 };
 use zx::{SocketOpts, Status};
 
@@ -74,7 +74,7 @@ impl UsbConnection {
     }
 
     async fn send_reset_sync(&mut self) {
-        let outgoing_magic = ProtocolVersion::LATEST.magic();
+        let outgoing_magic = SyncMagic::latest_reset().magic();
         let mut header = Header::new(PacketType::Sync);
         header.payload_len = (outgoing_magic.len() as u32).into();
         header.device_cid.set(self.vsock_service.current_cid());
@@ -100,128 +100,147 @@ impl UsbConnection {
             sent_reset_sync = true;
         }
         let mut data = [0; MTU];
-        while found_magic.is_none() {
-            let mut packets = match read_packet_stream(&mut self.usb_socket_reader, &mut data).await
-            {
-                Ok(None) => {
-                    debug!("Usb socket closed");
-                    return None;
-                }
-                Err(err) => {
-                    error!("Unexpected error on usb socket: {err}");
-                    return None;
-                }
-                Ok(Some(packets)) => packets,
-            };
+        'outer: loop {
+            while found_magic.is_none() {
+                let mut packets =
+                    match read_packet_stream(&mut self.usb_socket_reader, &mut data).await {
+                        Ok(None) => {
+                            debug!("Usb socket closed");
+                            return None;
+                        }
+                        Err(err) => {
+                            error!("Unexpected error on usb socket: {err}");
+                            return None;
+                        }
+                        Ok(Some(packets)) => packets,
+                    };
 
-            while let Some(packet) = packets.next() {
-                // note: we will deliberately warn and ignore for any vsock packets in the same
-                // usb packet as a sync packet, regardless of whether they were before or after.
-                match packet {
-                    Ok(Packet {
-                        header: Header { packet_type: PacketType::Sync, .. },
-                        payload,
-                    }) => {
-                        found_magic = Some(payload.to_owned());
-                    }
-                    Ok(packet) => {
-                        if !sent_reset_sync {
+                while let Some(packet) = packets.next() {
+                    // note: we will deliberately warn and ignore for any vsock packets in the same
+                    // usb packet as a sync packet, regardless of whether they were before or after.
+                    match packet {
+                        Ok(Packet {
+                            header: Header { packet_type: PacketType::Sync, .. },
+                            payload,
+                        }) => {
+                            found_magic = Some(payload.to_owned());
+                        }
+                        Ok(packet) => {
+                            if !sent_reset_sync {
+                                debug!(
+                                    "Got unexpected packet of type {:?} and length {} while waiting for sync packet; sending Sync to reset host link.",
+                                    packet.header.packet_type, packet.header.payload_len
+                                );
+                                self.send_reset_sync().await;
+                                sent_reset_sync = true;
+                            } else {
+                                debug!(
+                                    "Ignoring unexpected packet of type {:?} and length {} while waiting for sync packet.",
+                                    packet.header.packet_type, packet.header.payload_len
+                                );
+                            }
+                        }
+                        Err(err) => {
                             debug!(
-                                "Got unexpected packet of type {:?} and length {} while waiting for sync packet; sending Sync to reset host link.",
-                                packet.header.packet_type, packet.header.payload_len
-                            );
-                            self.send_reset_sync().await;
-                            sent_reset_sync = true;
-                        } else {
-                            debug!(
-                                "Ignoring unexpected packet of type {:?} and length {} while waiting for sync packet.",
-                                packet.header.packet_type, packet.header.payload_len
+                                "Got invalid vsock packet while waiting for sync packet: {err:?}"
                             );
                         }
-                    }
-                    Err(err) => {
-                        debug!("Got invalid vsock packet while waiting for sync packet: {err:?}");
                     }
                 }
             }
-        }
-        let found_magic =
-            found_magic.expect("read loop should not terminate until sync packet is read");
+            let magic = found_magic
+                .take()
+                .expect("read loop should not terminate until sync packet is read");
 
-        let incoming_version = ProtocolVersion::from_magic(&found_magic);
+            let (outgoing_version, outgoing_magic) = if let Some(incoming_magic) =
+                SyncMagic::from_magic(&magic)
+            {
+                if incoming_magic.is_reset() {
+                    debug!("Received reset sync packet while waiting for sync; ignoring.");
+                    continue 'outer;
+                }
+                let Some(negotiated) = incoming_magic.negotiate(ProtocolVersion::LATEST) else {
+                    // Guard for future versions where negotiation may fail.
+                    error!(
+                        "Could not negotiate protocol version: driver has {}, host wants {incoming_magic}",
+                        ProtocolVersion::LATEST
+                    );
+                    return None;
+                };
 
-        let outgoing_version = if let Some(incoming_version) = incoming_version {
-            let Some(outgoing_version) = ProtocolVersion::LATEST.negotiate(&incoming_version)
-            else {
-                error!(
-                    "Could not negotiate protocol version: driver has {}, host wants {incoming_version}",
+                negotiated
+            } else {
+                warn!(
+                    "Did not recognize protocol magic {magic:?}. Sending reset sync for version {}",
                     ProtocolVersion::LATEST
                 );
+                self.send_reset_sync().await;
+                sent_reset_sync = true;
+                continue 'outer;
+            };
+
+            let outgoing_magic = outgoing_magic.magic();
+
+            debug!("Read sync packet, sending it back and setting up a new link");
+            let mut header = Header::new(PacketType::Sync);
+            header.payload_len = (outgoing_magic.len() as u32).into();
+            header.device_cid.set(self.vsock_service.current_cid());
+            header.host_cid.set(CID_HOST);
+            let packet = Packet { header: &header, payload: &outgoing_magic };
+            packet.write_to_unchecked(&mut data);
+            if let Err(err) = self.usb_socket_writer.write(&data[..packet.size()]).await {
+                error!("Error writing vsock bridge magic string to the usb socket: {err:?}");
                 return None;
-            };
-
-            outgoing_version
-        } else {
-            warn!(
-                "Did not recognize protocol magic {found_magic:?}. Trying version {}",
-                ProtocolVersion::LATEST
-            );
-
-            ProtocolVersion::LATEST
-        };
-
-        let outgoing_magic = outgoing_version.magic();
-
-        debug!("Read sync packet, sending it back and setting up a new link");
-        let mut header = Header::new(PacketType::Sync);
-        header.payload_len = (outgoing_magic.len() as u32).into();
-        header.device_cid.set(self.vsock_service.current_cid());
-        header.host_cid.set(CID_HOST);
-        let packet = Packet { header: &header, payload: &outgoing_magic };
-        packet.write_to_unchecked(&mut data);
-        if let Err(err) = self.usb_socket_writer.write(&data[..packet.size()]).await {
-            error!("Error writing vsock bridge magic string to the usb socket: {err:?}");
-            return None;
-        }
-        // Now wait for confirmation packet with cid in it
-        loop {
-            let mut packets = match read_packet_stream(&mut self.usb_socket_reader, &mut data).await
-            {
-                Ok(None) => {
-                    debug!("Usb socket closed");
-                    return None;
-                }
-                Err(err) => {
-                    error!("Unexpected error on usb socket: {err}");
-                    return None;
-                }
-                Ok(Some(packets)) => packets,
-            };
-
-            while let Some(packet) = packets.next() {
-                // note: we will deliberately warn and ignore for any vsock packets in the same
-                // usb packet as a sync packet, regardless of whether they were before or after.
-                match packet {
-                    Ok(Packet {
-                        header: Header { packet_type: PacketType::Sync, device_cid, .. },
-                        payload,
-                    }) => {
-                        if payload != outgoing_magic {
-                            error!(
-                                "Host gave unsupported protocol version string {payload:?}. Giving up."
-                            );
+            }
+            // Now wait for confirmation packet with cid in it
+            loop {
+                let mut packets =
+                    match read_packet_stream(&mut self.usb_socket_reader, &mut data).await {
+                        Ok(None) => {
+                            debug!("Usb socket closed");
                             return None;
                         }
-                        return Some((outgoing_version, device_cid.get()));
-                    }
-                    Ok(packet) => {
-                        debug!(
-                            "Got unexpected packet of type {:?} and length {} while waiting for sync packet. Ignoring.",
-                            packet.header.packet_type, packet.header.payload_len
-                        );
-                    }
-                    Err(err) => {
-                        debug!("Got invalid vsock packet while waiting for sync packet: {err:?}");
+                        Err(err) => {
+                            error!("Unexpected error on usb socket: {err}");
+                            return None;
+                        }
+                        Ok(Some(packets)) => packets,
+                    };
+
+                while let Some(packet) = packets.next() {
+                    // note: we will deliberately warn and ignore for any vsock packets in the same
+                    // usb packet as a sync packet, regardless of whether they were before or after.
+                    match packet {
+                        Ok(Packet {
+                            header: Header { packet_type: PacketType::Sync, device_cid, .. },
+                            payload,
+                        }) => {
+                            if SyncMagic::from_magic(payload).is_some_and(|m| m.is_reset()) {
+                                debug!(
+                                    "Received reset sync packet while waiting for confirmation; restarting sync."
+                                );
+                                continue 'outer;
+                            }
+                            if payload != outgoing_magic {
+                                debug!(
+                                    "Received non-matching sync packet {payload:?} while waiting for confirmation; treating as new sync."
+                                );
+                                found_magic = Some(payload.to_owned());
+                                continue 'outer;
+                            }
+                            return Some((outgoing_version, device_cid.get()));
+                        }
+                        Ok(packet) => {
+                            debug!(
+                                "Got unexpected packet of type {:?} and length {} while waiting for sync packet. Ignoring.",
+                                packet.header.packet_type, packet.header.payload_len
+                            );
+                        }
+                        Err(err) => {
+                            debug!(
+                                "Got invalid vsock packet while waiting for sync packet: {err:?}"
+                            );
+                        }
                     }
                 }
             }
@@ -398,7 +417,7 @@ impl Driver for UsbVsockServiceDriver {
         Ok(Self { _scope: scope, _node: node })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }
 
 async fn run_connection(
@@ -522,11 +541,23 @@ mod tests {
             mpsc::Receiver<ConnectionRequest>,
         ),
     ) {
-        end_to_end_test_with_version(ProtocolVersion::V2(0x12345678), device_side, host_side).await;
+        let magic = SyncMagic::v2(std::num::NonZeroU32::new(0x12345678).unwrap());
+        end_to_end_test_with_version(
+            None,
+            magic,
+            ProtocolVersion::V2,
+            magic,
+            device_side,
+            host_side,
+        )
+        .await;
     }
 
     async fn end_to_end_test_with_version(
-        version: ProtocolVersion,
+        initial_sync_exchange: Option<(&[u8], &[u8])>,
+        incoming_magic: SyncMagic,
+        expected_version: ProtocolVersion,
+        expected_reply_magic: SyncMagic,
         device_side: impl AsyncFn(vsock_api::ConnectorProxy),
         host_side: impl AsyncFn(
             Arc<Connection<Vec<u8>, Socket>>,
@@ -565,11 +596,38 @@ mod tests {
         usb_callback_client.new_link(usb_packet_server).await.unwrap();
 
         let (incoming_tx, incoming_rx) = mpsc::channel(1);
-        let host_connection = Arc::new(Connection::new(version, None, incoming_tx));
+        let host_connection = Arc::new(Connection::new(expected_version, None, incoming_tx));
+
+        if let Some((first_payload, expected_first_reply)) = initial_sync_exchange {
+            let header = &mut Header::new(PacketType::Sync);
+            header.host_cid.set(CID_HOST);
+            header.device_cid.set(CID_ANY);
+            header.payload_len.set(first_payload.len() as u32);
+            let sync_packet = Packet { header, payload: first_payload };
+            let mut buf = [0; 1024];
+            sync_packet.write_to_unchecked(&mut buf);
+            assert_eq!(
+                sync_packet.size(),
+                usb_packet_writer.write(&buf[..sync_packet.size()]).await.unwrap()
+            );
+
+            let mut buf = vec![0; 4096];
+            let packet = read_packet_stream(&mut usb_packet_reader, &mut buf)
+                .await
+                .unwrap()
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert_eq!(packet.header.packet_type, PacketType::Sync);
+            assert_eq!(packet.payload, expected_first_reply);
+            assert_eq!(packet.header.device_cid.get(), 3);
+            assert_eq!(packet.header.host_cid.get(), CID_HOST);
+        }
 
         // send the initial sync packet with
         let header = &mut Header::new(PacketType::Sync);
-        let payload = version.magic();
+        let payload = incoming_magic.magic();
         header.host_cid.set(CID_HOST);
         header.device_cid.set(CID_ANY);
         header.payload_len.set(payload.len() as u32);
@@ -592,14 +650,14 @@ mod tests {
             .unwrap();
         trace!("received packet {packet:?}");
         assert_eq!(packet.header.packet_type, PacketType::Sync);
-        assert_eq!(packet.payload, version.magic());
+        assert_eq!(packet.payload, expected_reply_magic.magic());
         assert_eq!(packet.header.device_cid.get(), 3);
         assert_eq!(packet.header.host_cid.get(), CID_HOST);
 
         // send back a different cid just to make sure that works
         let device_cid = 300;
         let header = &mut Header::new(PacketType::Sync);
-        let payload = version.magic();
+        let payload = expected_reply_magic.magic();
         header.host_cid.set(CID_HOST);
         header.device_cid.set(device_cid);
         header.payload_len.set(payload.len() as u32);
@@ -733,10 +791,17 @@ mod tests {
         .await;
     }
 
-    #[fuchsia::test(allow_stalls = false)]
-    async fn test_downgrade_to_v1() {
+    async fn test_boom_zoom_with_version(
+        initial_sync_exchange: Option<(&[u8], &[u8])>,
+        incoming_magic: SyncMagic,
+        expected_version: ProtocolVersion,
+        expected_reply_magic: SyncMagic,
+    ) {
         end_to_end_test_with_version(
-            ProtocolVersion::V1,
+            initial_sync_exchange,
+            incoming_magic,
+            expected_version,
+            expected_reply_magic,
             async move |vsock_api_client| {
                 let (socket, data) = zx::Socket::create_stream();
                 let mut socket = Socket::from_socket(socket);
@@ -764,6 +829,38 @@ mod tests {
                 socket.read_exact(&mut buf).await.unwrap();
                 assert_eq!(&buf, b"zoom");
             },
+        )
+        .await;
+    }
+
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_downgrade_to_v1() {
+        let v1_magic = SyncMagic::v1();
+        test_boom_zoom_with_version(None, v1_magic, ProtocolVersion::V1, v1_magic).await;
+    }
+
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_downgrade_from_v9999() {
+        let v2_magic = SyncMagic::v2(std::num::NonZeroU32::new(0xabcdef01).unwrap());
+        let reset_magic = SyncMagic::latest_reset().magic();
+        test_boom_zoom_with_version(
+            Some((b"vsock:9999:12345678", &reset_magic)),
+            v2_magic,
+            ProtocolVersion::V2,
+            v2_magic,
+        )
+        .await;
+    }
+
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_second_sync_during_confirmation() {
+        let first_magic = SyncMagic::v2(std::num::NonZeroU32::new(0x11111111).unwrap()).magic();
+        let second_magic = SyncMagic::v2(std::num::NonZeroU32::new(0x22222222).unwrap());
+        test_boom_zoom_with_version(
+            Some((&first_magic, &first_magic)),
+            second_magic,
+            ProtocolVersion::V2,
+            second_magic,
         )
         .await;
     }

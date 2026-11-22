@@ -14,6 +14,16 @@
         {
             name: "realm_api_collection",
             durability: "transient",
+            allowed_offers: "static_and_dynamic",
+        },
+    ],
+    capabilities: [
+        // Non-default greeting offered dynamically to verify parent overrides.
+        {
+            config: "fuchsia.example.config.Greeting",
+            type: "string",
+            max_size: 512,
+            value: "parent component",
         },
     ],
     use: [

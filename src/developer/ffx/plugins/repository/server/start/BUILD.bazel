@@ -94,7 +94,6 @@ host_rustc_test(
         "//src/developer/ffx/fidl:fuchsia.developer.ffx_rust",
         "//src/developer/ffx/lib/discovery:lib",
         "//src/developer/ffx/lib/target:lib",
-        "//src/developer/ffx/lib/target/behavior:lib",
         "//src/developer/ffx/lib/target_net:testutil",
         "//src/lib/assembly/partitions_config",
         "//src/lib/fdomain/client",

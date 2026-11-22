@@ -18,7 +18,7 @@
         },
         {
             name: "http-client",
-            url: "fuchsia-pkg://fuchsia.com/omaha-client-fuchsia-tests#meta/http-client.cm",
+            url: "http-client#meta/http-client.cm",
         },
         {
             name: "shutdown_shim",

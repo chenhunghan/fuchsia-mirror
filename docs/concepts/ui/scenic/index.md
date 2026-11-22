@@ -99,7 +99,7 @@ measure performance.
 Scenic provides support for individual screenshots, as well as ongoing screen
 capture.
 
-## Scene graph API
+## Scene graph API {#scene-graph-api}
 
 Scenic implements a variety of FIDL protocols to fulfill the responsibilities
 above. Due to the central role the scene graph plays, the APIs for manipulating
@@ -146,7 +146,7 @@ Pipeline* library and continually forwards them to Scenic.
 Scenic is a client of the [*Vulkan graphics driver*](/src/graphics/lib/magma/)
 and the system *Display Driver*.
 
-## Sessions
+## Sessions {#sessions}
 
 Scenic's two composition protocols ([Flatland](flatland/index.md) and
 Gfx have commonalities which are discussed here; see the linked

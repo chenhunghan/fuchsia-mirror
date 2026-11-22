@@ -40,5 +40,4 @@ fuchsia_driver_component("fake-board-component") {
   component_name = "fake-board"
   dml_label = ":fake-board-dml"
   deps = [ ":fake-board-driver" ]
-  info = "meta/fake-board-info.json"
 }

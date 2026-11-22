@@ -3,9 +3,11 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
+#include <lib/fit/defer.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/xattr.h>
 
 #include <string>
 
@@ -20,7 +22,7 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "overlayfs_policy"; }
+extern std::string GetTestPolicyName() { return "overlayfs_policy"; }
 
 namespace {
 
@@ -348,6 +350,167 @@ TEST_F(OverlayFsTest, FileIsInaccessibleIfMounterGetattrDenied) {
     fbl::unique_fd fd(open((overlay_ + "/file").c_str(), O_RDONLY));
     ASSERT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
   }));
+}
+
+// Verify that `chmod()` on an upper file enforces `file { setattr }` against the mounter (`force`
+// is `false`), while privilege clearing on `write()` (`FORCE`) succeeds without mounter `setattr`.
+// Regression test for https://fxbug.dev/584299369 and https://fxbug.dev/584229686.
+TEST_F(OverlayFsTest, UpperSetattrChecksRespectForce) {
+  ASSERT_TRUE(files::WriteFile(upper_ + "/file", "upper_data"));
+  ASSERT_THAT(chmod((upper_ + "/file").c_str(), S_ISUID | S_ISGID | 0777), SyscallSucceeds());
+  ASSERT_THAT(
+      SetLabel(upper_ + "/file", "test_u:object_r:test_overlay_mounter_no_setattr_file_t:s0"),
+      SyscallResultIsOk());
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_NO_FATAL_FAILURE(Mount());
+
+  // `chmod()` propagates `force = false`, so the mounter's lack of `setattr` denies it.
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_overlayfs_caller_t:s0", [&] {
+    EXPECT_THAT(chmod((overlay_ + "/file").c_str(), 0755), SyscallFailsWithErrno(EACCES));
+
+    struct stat st{};
+    ASSERT_THAT(stat((overlay_ + "/file").c_str(), &st), SyscallSucceeds());
+    EXPECT_EQ(st.st_mode & static_cast<mode_t>(S_ISUID | S_ISGID | 0777),
+              static_cast<mode_t>(S_ISUID | S_ISGID | 0777));
+  }));
+
+  // Clearing `S_ISUID`/`S_ISGID` propagates `FORCE`, bypassing mounter `setattr` checks.
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    test_helper::UnsetCapability(CAP_FSETID);
+    EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_overlayfs_caller_t:s0", [&] {
+      fbl::unique_fd fd(open((overlay_ + "/file").c_str(), O_WRONLY));
+      ASSERT_THAT(fd.get(), SyscallSucceeds());
+      EXPECT_THAT(write(fd.get(), "X", 1), SyscallSucceedsWithValue(1));
+    }));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  struct stat st{};
+  ASSERT_THAT(stat((upper_ + "/file").c_str(), &st), SyscallSucceeds());
+  EXPECT_EQ(st.st_mode & static_cast<mode_t>(S_ISUID | S_ISGID), 0u);
+}
+
+// Verify that appending to an upper file clears S_ISUID, S_ISGID, and `security.capability` even
+// when the caller domain lacks `file { setattr }` and `capability { fsetid setfcap }` and the
+// mounter domain lacks `capability { fsetid }`.
+// Regression test for https://fxbug.dev/584229686 and https://fxbug.dev/584299369.
+TEST_F(OverlayFsTest, AppendClearsPrivilegesWithoutSetattrOrSetfcap) {
+  ASSERT_TRUE(files::WriteFile(upper_ + "/file", "upper_data"));
+  ASSERT_THAT(chmod((upper_ + "/file").c_str(), S_ISUID | S_ISGID | 0777), SyscallSucceeds());
+  ASSERT_THAT(test_helper::SetFileCapabilitiesV2(upper_ + "/file", 1ULL << CAP_NET_RAW),
+              SyscallSucceeds());
+  ASSERT_THAT(
+      SetLabel(upper_ + "/file", "test_u:object_r:test_overlay_mounter_append_only_file_t:s0"),
+      SyscallResultIsOk());
+
+  test_helper::UnsetCapability(CAP_FSETID);
+  auto restore_fsetid = fit::defer([] { test_helper::SetCapabilityEffective(CAP_FSETID); });
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_NO_FATAL_FAILURE(Mount());
+
+  test_helper::UnsetCapability(CAP_SETFCAP);
+  auto restore_setfcap = fit::defer([] { test_helper::SetCapabilityEffective(CAP_SETFCAP); });
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_overlayfs_caller_t:s0", [&] {
+    fbl::unique_fd fd(open((overlay_ + "/file").c_str(), O_WRONLY | O_APPEND));
+    ASSERT_THAT(fd.get(), SyscallSucceeds());
+    EXPECT_THAT(write(fd.get(), "X", 1), SyscallSucceedsWithValue(1));
+  }));
+
+  struct stat st{};
+  ASSERT_THAT(stat((upper_ + "/file").c_str(), &st), SyscallSucceeds());
+  EXPECT_EQ(st.st_mode & static_cast<mode_t>(S_ISUID | S_ISGID), 0u);
+  EXPECT_THAT(getxattr((upper_ + "/file").c_str(), "security.capability", nullptr, 0),
+              SyscallFailsWithErrno(ENODATA));
+}
+
+// Verify that copying up and modifying a lower file clears S_ISUID, S_ISGID, and
+// `security.capability` even when the caller domain lacks `capability { fsetid setfcap }` and the
+// mounter domain lacks `capability { fsetid }`.
+// Regression test for https://fxbug.dev/584299369.
+TEST_F(OverlayFsTest, CopyUpAndModifyClearsPrivilegesWithoutSetfcap) {
+  ASSERT_TRUE(files::WriteFile(lower_ + "/file", "lower_data"));
+  ASSERT_THAT(chmod((lower_ + "/file").c_str(), S_ISUID | S_ISGID | 0777), SyscallSucceeds());
+  ASSERT_THAT(test_helper::SetFileCapabilitiesV2(lower_ + "/file", 1ULL << CAP_NET_RAW),
+              SyscallSucceeds());
+  ASSERT_THAT(SetLabel(lower_ + "/file", "test_u:object_r:test_overlay_file_t:s0"),
+              SyscallResultIsOk());
+
+  test_helper::UnsetCapability(CAP_FSETID);
+  auto restore_fsetid = fit::defer([] { test_helper::SetCapabilityEffective(CAP_FSETID); });
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_NO_FATAL_FAILURE(Mount());
+
+  test_helper::UnsetCapability(CAP_SETFCAP);
+  auto restore_setfcap = fit::defer([] { test_helper::SetCapabilityEffective(CAP_SETFCAP); });
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_overlayfs_caller_t:s0", [&] {
+    EXPECT_TRUE(files::WriteFile(overlay_ + "/file", "new_data"));
+  }));
+
+  for (const std::string& base : {overlay_, upper_}) {
+    std::string path = base + "/file";
+    struct stat st{};
+    ASSERT_THAT(stat(path.c_str(), &st), SyscallSucceeds());
+    EXPECT_EQ(st.st_mode & static_cast<mode_t>(S_ISUID | S_ISGID), 0u);
+    EXPECT_THAT(getxattr(path.c_str(), "security.capability", nullptr, 0),
+                SyscallFailsWithErrno(ENODATA));
+  }
+}
+
+// Verify that modifying an upper file carrying `security.capability` fails with `EPERM` when the
+// mounter lacks SELinux `capability { setfcap }`, even if the caller holds it.
+TEST_F(OverlayFsTest, KillprivDeniedIfMounterLacksSetfcap) {
+  ASSERT_TRUE(files::WriteFile(upper_ + "/file", "upper_data"));
+  ASSERT_THAT(chmod((upper_ + "/file").c_str(), 0755), SyscallSucceeds());
+  ASSERT_THAT(test_helper::SetFileCapabilitiesV2(upper_ + "/file", 1ULL << CAP_NET_RAW),
+              SyscallSucceeds());
+  ASSERT_THAT(SetLabel(upper_ + "/file", "test_u:object_r:test_overlay_file_t:s0"),
+              SyscallResultIsOk());
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_NO_FATAL_FAILURE(MountWith("test_u:test_r:test_overlayfs_mounter_no_setfcap_t:s0"));
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_overlayfs_caller_t:s0", [&] {
+    EXPECT_THAT(truncate((overlay_ + "/file").c_str(), 2), SyscallFailsWithErrno(EPERM));
+  }));
+
+  struct stat st{};
+  ASSERT_THAT(stat((upper_ + "/file").c_str(), &st), SyscallSucceeds());
+  EXPECT_EQ(st.st_size, 10);
+  EXPECT_THAT(getxattr((upper_ + "/file").c_str(), "security.capability", nullptr, 0),
+              SyscallSucceeds());
+}
+
+// Verify that writing to an upper file carrying `security.capability` fails with `EACCES` when
+// the mounter lacks `file { setattr }`, even if the caller has `file { write setattr }`.
+TEST_F(OverlayFsTest, KillprivDeniedIfMounterLacksSetattr) {
+  ASSERT_TRUE(files::WriteFile(upper_ + "/file", "upper_data"));
+  ASSERT_THAT(chmod((upper_ + "/file").c_str(), 0777), SyscallSucceeds());
+  ASSERT_THAT(test_helper::SetFileCapabilitiesV2(upper_ + "/file", 1ULL << CAP_NET_RAW),
+              SyscallSucceeds());
+  ASSERT_THAT(
+      SetLabel(upper_ + "/file", "test_u:object_r:test_overlay_mounter_no_setattr_file_t:s0"),
+      SyscallResultIsOk());
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_NO_FATAL_FAILURE(Mount());
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_overlayfs_caller_t:s0", [&] {
+    fbl::unique_fd fd(open((overlay_ + "/file").c_str(), O_WRONLY));
+    ASSERT_THAT(fd.get(), SyscallSucceeds());
+    EXPECT_THAT(write(fd.get(), "X", 1), SyscallFailsWithErrno(EACCES));
+  }));
+
+  std::string contents;
+  ASSERT_TRUE(files::ReadFileToString(upper_ + "/file", &contents));
+  EXPECT_EQ(contents, "upper_data");
+  EXPECT_THAT(getxattr((upper_ + "/file").c_str(), "security.capability", nullptr, 0),
+              SyscallSucceeds());
 }
 
 }  // namespace

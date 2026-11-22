@@ -2,146 +2,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/test.gni")
 import("//build/testing/perf/test.gni")
-import(
-    "//src/connectivity/network/drivers/network-device/driver_source_split.gni")
-
-# TODO(https://fxbug.dev/42155349): Get rid of this target once std::shared_mutex
-# and std::shared_lock have thread analysis annotations.
-source_set("shared_lock") {
-  sources = [ "public/locks.h" ]
-}
-
-driver_source_split("device") {
-  sources = [
-    "definitions.h",
-    "device_interface.cc",
-    "device_interface.h",
-    "device_port.cc",
-    "device_port.h",
-    "diagnostics_service.cc",
-    "diagnostics_service.h",
-    "log.h",
-    "port_watcher.cc",
-    "port_watcher.h",
-    "public/network_device.h",
-    "rx_queue.cc",
-    "rx_queue.h",
-    "session.cc",
-    "session.h",
-    "simple_rx_buffer_estimator.cc",
-    "simple_rx_buffer_estimator.h",
-    "status_watcher.cc",
-    "status_watcher.h",
-    "tx_queue.cc",
-    "tx_queue.h",
-  ]
-
-  public_deps = [
-    ":shared_lock",
-    "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_cpp",
-    "//sdk/fidl/fuchsia.hardware.network.driver:fuchsia.hardware.network.driver_cpp",
-    "//sdk/lib/async:async-cpp",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
-    "//sdk/lib/fidl",
-    "//src/connectivity/lib/network-device/buffer_descriptor",
-    "//src/lib/debug:backtrace-request",
-    "//src/lib/vmo_store",
-    "//zircon/system/ulib/fbl",
-    "//zircon/system/ulib/fzl",
-    "//zircon/system/ulib/sync:sync-cpp",
-    "//zircon/system/ulib/trace",
-    "//zircon/system/ulib/zx",
-  ]
-
-  driver_deps =
-      [ "//src/connectivity/network/drivers/network-device/mac:mac_driver" ]
-  non_driver_deps = [ "//src/connectivity/network/drivers/network-device/mac" ]
-}
-
-driver_source_split("test_util") {
-  testonly = true
-  sources = [
-    "definitions.h",
-    "test_session.cc",
-    "test_session.h",
-    "test_util.cc",
-    "test_util.h",
-  ]
-  public_deps = [ "//src/lib/testing/predicates" ]
-  driver_deps = [ ":device_driver" ]
-  non_driver_deps = [ ":device" ]
-}
-
-test("test_bin") {
-  output_name = "network-device-lib-test"
-  sources = [
-    "data_structs-test.cc",
-    "network_device-test.cc",
-    "simple_rx_buffer_estimator-test.cc",
-    "status_watcher-test.cc",
-  ]
-
-  deps = [
-    ":device",
-    ":test_util",
-    "//sdk/lib/driver/testing/cpp",
-    "//src/connectivity/network/drivers/network-device/mac:test_util",
-    "//src/lib/fsl",
-    "//src/lib/fxl/test:gtest_main",
-    "//src/lib/testing/predicates",
-    "//third_party/googletest:gmock",
-    "//zircon/system/ulib/sync",
-    "//zircon/system/ulib/sync:sync-cpp",
-  ]
-}
-
-fuchsia_unittest_package("network-device-lib-test") {
-  deps = [ ":test_bin" ]
-  manifest = "meta/network-device-lib-test.cml"
-  test_specs = {
-    log_settings = {
-      max_severity = "ERROR"
-    }
-  }
-}
-
-test("microbenchmarks_bin") {
-  output_name = "network-device-microbenchmarks"
-  sources = [
-    "network_device-microbenchmarks.cc",
-    "test_session.cc",
-    "test_session.h",
-  ]
-
-  deps = [
-    ":device",
-    "//sdk/lib/driver/runtime/testing/cpp",
-    "//sdk/lib/driver/testing/cpp",
-    "//src/lib/fxl",
-    "//zircon/system/ulib/perftest",
-    "//zircon/system/ulib/sync:sync-cpp",
-  ]
-}
-
-fuchsia_unittest_package("network-device-microbenchmarks") {
-  deps = [ ":microbenchmarks_bin" ]
-  manifest = "meta/network-device-microbenchmarks.cml"
-}
 
 group("tests") {
   testonly = true
   deps = [
-    ":network-device-lib-test",
-    ":network-device-microbenchmarks",
+    ":network-device-lib-test-package",
+    ":network-device-microbenchmarks-package",
   ]
 }
 
 fuchsia_component_perf_test("network_device_microbenchmarks") {
-  package = ":network-device-microbenchmarks"
+  package = ":network-device-microbenchmarks-package"
+  package_name = "network-device-microbenchmarks-gn"
   component_name = "network-device-microbenchmarks"
   expected_metric_names_filepath = "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.network.device.txt"
   test_component_args = [
@@ -154,4 +27,273 @@ fuchsia_component_perf_test("network_device_microbenchmarks") {
 group("benchmarks") {
   testonly = true
   deps = [ ":network_device_microbenchmarks" ]
+}
+
+## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
+#
+#  ________  _________  ________  ________
+# |\   ____\|\___   ___\\   __  \|\   __  \
+# \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+#  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+#   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+#     ____\_\  \   \ \__\ \ \_______\ \__\
+#    |\_________\   \|__|  \|_______|\|__|
+#    \|_________|
+#
+#
+# AUTO-GENERATED - DO NOT EDIT
+#
+# The targets below are auto-generated based on the targets defined in the
+# BUILD.bazel file from the same directory. If you made changes to targets in
+# Bazel, instead of editing this file manually, run:
+#
+#   > fx bazel2gn
+#
+# Please do NOT edit this file directly. Instead, edit the BUILD.bazel file and
+# rerun bazel2gn.
+
+import("//build/tools/bazel2gn/bazel_migration.gni")
+
+static_library("shared_lock") {
+  public = [ "public/locks.h" ]
+  visibility = [
+    ":*",
+    "//src/connectivity/ethernet/drivers/ethernet/netdevice-migration:*",
+    "//src/connectivity/ethernet/drivers/third_party/igc:*",
+    "//src/connectivity/ethernet/drivers/virtio:*",
+  ]
+}
+_DEVICE_SRCS = [
+  "device_interface.cc",
+  "device_port.cc",
+  "diagnostics_service.cc",
+  "port_watcher.cc",
+  "rx_queue.cc",
+  "session.cc",
+  "simple_rx_buffer_estimator.cc",
+  "status_watcher.cc",
+  "tx_queue.cc",
+]
+
+# To avoid "Assignment had no effect" from GN.
+# It's possible this variable is only used in if conditions (e.g. is_host).
+not_needed([ "_DEVICE_SRCS" ])
+
+_DEVICE_HDRS = [
+  "data_structs.h",
+  "definitions.h",
+  "device_interface.h",
+  "device_port.h",
+  "diagnostics_service.h",
+  "event_hook.h",
+  "log.h",
+  "port_watcher.h",
+  "public/network_device.h",
+  "rx_queue.h",
+  "session.h",
+  "simple_rx_buffer_estimator.h",
+  "status_watcher.h",
+  "tx_queue.h",
+]
+
+# To avoid "Assignment had no effect" from GN.
+# It's possible this variable is only used in if conditions (e.g. is_host).
+not_needed([ "_DEVICE_HDRS" ])
+
+source_set("device_driver") {
+  sources = _DEVICE_SRCS
+  public = _DEVICE_HDRS
+  defines = [ "NETDEV_DRIVER" ]
+  visibility = [
+    ":*",
+    "//src/connectivity/network/drivers/network-device:*",
+  ]
+  public_deps = [
+    ":shared_lock",
+    "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_cpp",
+    "//sdk/fidl/fuchsia.hardware.network.driver:fuchsia.hardware.network.driver_cpp",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/driver/logging/cpp",
+    "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
+    "//sdk/lib/fidl",
+    "//src/connectivity/lib/network-device/buffer_descriptor",
+    "//src/connectivity/network/drivers/network-device/mac:mac_driver",
+    "//src/lib/debug:backtrace-request",
+    "//src/lib/vmo_store",
+    "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/fzl",
+    "//zircon/system/ulib/sync:sync-cpp",
+    "//zircon/system/ulib/trace",
+    "//zircon/system/ulib/zx",
+  ]
+}
+
+source_set("device") {
+  sources = _DEVICE_SRCS
+  public = _DEVICE_HDRS
+  visibility = [
+    ":*",
+    "//src/connectivity/network/tun/network-tun:*",
+    "//src/virtualization/bin/vmm/device/virtio_net:*",
+  ]
+  public_deps = [
+    ":shared_lock",
+    "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_cpp",
+    "//sdk/fidl/fuchsia.hardware.network.driver:fuchsia.hardware.network.driver_cpp",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/driver/logging/cpp",
+    "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
+    "//sdk/lib/fidl",
+    "//sdk/lib/syslog/cpp",
+    "//src/connectivity/lib/network-device/buffer_descriptor",
+    "//src/connectivity/network/drivers/network-device/mac",
+    "//src/lib/debug:backtrace-request",
+    "//src/lib/vmo_store",
+    "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/fzl",
+    "//zircon/system/ulib/sync:sync-cpp",
+    "//zircon/system/ulib/trace",
+    "//zircon/system/ulib/zx",
+  ]
+}
+_TEST_UTIL_SRCS = [
+  "test_session.cc",
+  "test_util.cc",
+]
+
+# To avoid "Assignment had no effect" from GN.
+# It's possible this variable is only used in if conditions (e.g. is_host).
+not_needed([ "_TEST_UTIL_SRCS" ])
+
+_TEST_UTIL_HDRS = [
+  "test_session.h",
+  "test_util.h",
+]
+
+# To avoid "Assignment had no effect" from GN.
+# It's possible this variable is only used in if conditions (e.g. is_host).
+not_needed([ "_TEST_UTIL_HDRS" ])
+
+source_set("test_util_driver") {
+  testonly = true
+  sources = _TEST_UTIL_SRCS
+  public = _TEST_UTIL_HDRS
+  defines = [ "NETDEV_DRIVER" ]
+  visibility = [
+    ":*",
+    "//src/connectivity/network/drivers/network-device:*",
+  ]
+  public_deps = [
+    ":device_driver",
+    "//sdk/lib/driver/logging/cpp",
+    "//src/lib/testing/predicates",
+  ]
+}
+
+source_set("test_util") {
+  testonly = true
+  sources = _TEST_UTIL_SRCS
+  public = _TEST_UTIL_HDRS
+  public_deps = [
+    ":device",
+    "//sdk/lib/driver/logging/cpp",
+    "//sdk/lib/syslog/cpp",
+    "//src/lib/testing/predicates",
+  ]
+}
+
+cc_test_executable("test_bin") {
+  sources = [
+    "data_structs-test.cc",
+    "network_device-test.cc",
+    "simple_rx_buffer_estimator-test.cc",
+    "status_watcher-test.cc",
+  ]
+  output_name = "network-device-lib-test"
+  deps = [
+    ":device",
+    ":test_util",
+    "//sdk/lib/driver/testing/cpp",
+    "//src/connectivity/network/drivers/network-device/mac:test_util",
+    "//src/lib/fsl",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/predicates",
+    "//third_party/googletest:gtest",
+    "//zircon/system/ulib/sync",
+    "//zircon/system/ulib/sync:sync-cpp",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+renamed_binary("test_bin_packaged") {
+  testonly = true
+  source = "$root_out_dir/network-device-lib-test"
+  source_deps = [ ":test_bin" ]
+  dest = "test/network-device-lib-test"
+}
+
+fuchsia_component_manifest("network-device-lib-test-manifest") {
+  testonly = true
+  component_name = "network-device-lib-test"
+  manifest = "meta/network-device-lib-test.cml"
+}
+
+fuchsia_test_component("network-device-lib-test-component") {
+  cm_label = ":network-device-lib-test-manifest"
+  deps = [ ":test_bin_packaged" ]
+}
+
+fuchsia_test_package("network-device-lib-test-package") {
+  package_name = "network-device-lib-test-gn"
+  test_components = [ ":network-device-lib-test-component" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+}
+
+cc_test_executable("microbenchmarks_bin") {
+  sources = [
+    "network_device-microbenchmarks.cc",
+    "test_session.cc",
+    "test_session.h",
+  ]
+  output_name = "network-device-microbenchmarks"
+  deps = [
+    ":device",
+    "//sdk/lib/driver/runtime/testing/cpp",
+    "//sdk/lib/driver/testing/cpp",
+    "//src/lib/fxl",
+    "//zircon/system/ulib/perftest",
+    "//zircon/system/ulib/sync:sync-cpp",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+renamed_binary("microbenchmarks_bin_packaged") {
+  testonly = true
+  source = "$root_out_dir/network-device-microbenchmarks"
+  source_deps = [ ":microbenchmarks_bin" ]
+  dest = "test/network-device-microbenchmarks"
+}
+
+fuchsia_component_manifest("network-device-microbenchmarks-manifest") {
+  testonly = true
+  component_name = "network-device-microbenchmarks"
+  manifest = "meta/network-device-microbenchmarks.cml"
+}
+
+fuchsia_test_component("network-device-microbenchmarks-component") {
+  cm_label = ":network-device-microbenchmarks-manifest"
+  deps = [ ":microbenchmarks_bin_packaged" ]
+}
+
+fuchsia_test_package("network-device-microbenchmarks-package") {
+  package_name = "network-device-microbenchmarks-gn"
+  test_components = [ ":network-device-microbenchmarks-component" ]
 }

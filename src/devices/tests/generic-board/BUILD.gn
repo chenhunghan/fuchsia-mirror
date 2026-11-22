@@ -40,7 +40,6 @@ fuchsia_rust_driver("generic-board-driver") {
 fuchsia_driver_component("generic-board-component") {
   component_name = "generic-board"
   manifest = "meta/generic-board.cml"
-  info = "meta/generic-board-info.json"
   deps = [ ":generic-board-driver" ]
 }
 

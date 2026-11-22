@@ -9,7 +9,11 @@
 #include <inttypes.h>
 #include <string.h>
 
+#include <tuple>
+
 #include <fbl/algorithm.h>
+
+#include "src/devices/pci/drivers/pci/bridge.h"
 
 namespace pci {
 
@@ -43,6 +47,15 @@ void UpstreamNode::ConfigureDownstreamDevices() {
   configure_downstream_devices(/*configuring_bridges=*/true);
   // Now configure device BARs and capabilities with the bridges configured ahead of time.
   configure_downstream_devices(/*configuring_bridges=*/false);
+}
+
+void UpstreamNode::PublishDownstream() {
+  for (auto* device : downstream_) {
+    std::ignore = device->Publish();
+    if (device->is_bridge()) {
+      static_cast<Bridge*>(device)->PublishDownstream();
+    }
+  }
 }
 
 void UpstreamNode::DisableDownstream() {

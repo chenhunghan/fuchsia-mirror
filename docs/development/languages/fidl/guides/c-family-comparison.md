@@ -323,6 +323,6 @@ Category                           | New C++ with wire types                   |
 
 <!-- xrefs -->
 [cpp-tutorial]: /docs/development/languages/fidl/tutorials/cpp
-[cpp-prefer-natural]: /docs/development/languages/fidl/tutorials/cpp/README.md#natural_and_wire_domain_objects
+[cpp-prefer-natural]: /docs/development/languages/fidl/tutorials/cpp/README.md#natural-and-wire-domain-objects
 [kvstore]: /docs/development/languages/fidl/examples/key_value_store
 [canvas]: /docs/development/languages/fidl/examples/canvas

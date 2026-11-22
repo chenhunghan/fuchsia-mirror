@@ -11,7 +11,7 @@
 #include "src/starnix/tests/selinux/userspace/util.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 
-extern std::string DoPrePolicyLoadWork() { return "audit_access_policy"; }
+extern std::string GetTestPolicyName() { return "audit_access_policy"; }
 
 namespace {
 constexpr char kAuditAccessTestContext[] = "test_u:test_r:test_audit_access_t:s0";

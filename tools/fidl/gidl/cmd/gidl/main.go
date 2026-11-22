@@ -6,12 +6,12 @@ package main
 
 import (
 	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/cpp"
+	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/cpp_wire"
 	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/driver_cpp"
-	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/driver_llcpp"
+	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/driver_cpp_wire"
 	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/dynfidl"
 	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/fuzzer_corpus"
 	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/hlcpp"
-	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/llcpp"
 	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/python"
 	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/reference"
 	"go.fuchsia.dev/fuchsia/tools/fidl/gidl/backend/rust"
@@ -27,20 +27,20 @@ var generators = map[ir.OutputType]map[ir.Language]cli.Generator{
 		ir.LanguageDynfidl:      dynfidl.GenerateConformanceTests,
 		ir.LanguageFuzzerCorpus: fuzzer_corpus.GenerateConformanceTests,
 		ir.LanguageHlcpp:        hlcpp.GenerateConformanceTests,
-		ir.LanguageLlcpp:        llcpp.GenerateConformanceTests,
+		ir.LanguageCppWire:      cpp_wire.GenerateConformanceTests,
 		ir.LanguagePython:       python.GenerateConformanceTests,
 		ir.LanguageRust:         rust.GenerateConformanceTests,
 		ir.LanguageRustCodec:    rust_codec.GenerateConformanceTests,
 		ir.LanguageRustNext:     rust_next.GenerateConformanceTests,
 	},
 	ir.OutputTypeBenchmark: {
-		ir.LanguageCpp:         cpp.GenerateBenchmarks,
-		ir.LanguageDriverCpp:   driver_cpp.GenerateBenchmarks,
-		ir.LanguageDriverLlcpp: driver_llcpp.GenerateBenchmarks,
-		ir.LanguageHlcpp:       hlcpp.GenerateBenchmarks,
-		ir.LanguageLlcpp:       llcpp.GenerateBenchmarks,
-		ir.LanguageReference:   reference.GenerateBenchmarks,
-		ir.LanguageRust:        rust.GenerateBenchmarks,
+		ir.LanguageCpp:           cpp.GenerateBenchmarks,
+		ir.LanguageDriverCpp:     driver_cpp.GenerateBenchmarks,
+		ir.LanguageDriverCppWire: driver_cpp_wire.GenerateBenchmarks,
+		ir.LanguageHlcpp:         hlcpp.GenerateBenchmarks,
+		ir.LanguageCppWire:       cpp_wire.GenerateBenchmarks,
+		ir.LanguageReference:     reference.GenerateBenchmarks,
+		ir.LanguageRust:          rust.GenerateBenchmarks,
 	},
 	ir.OutputTypeMeasureTape: {
 		ir.LanguageRust: rust.GenerateMeasureTapeTests,

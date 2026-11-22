@@ -6,16 +6,15 @@
 #include <lib/component/incoming/cpp/protocol.h>
 
 #include <iostream>
-
-#include <fbl/string.h>
-#include <fbl/vector.h>
+#include <string>
+#include <vector>
 
 #include "aemu.h"
 #include "common.h"
 
 namespace {
 
-fbl::String GetTestFilter() {
+std::string GetTestFilter() {
   zx::result sys_info = component::Connect<fuchsia_sysinfo::SysInfo>();
   if (sys_info.is_error()) {
     return "Unknown";
@@ -45,7 +44,7 @@ fbl::String GetTestFilter() {
     return "*Sherlock*";
   } else if (board_name == "nelson") {
     return "*Nelson*";
-  } else if (board_name == "NUC7i5DNB" || board_name == "NUC11TNBv5") {
+  } else if (board_name == "NUC11TNBv5") {
     return "*Nuc*";
   } else if (board_name == "Standard PC (Q35 + ICH9, 2009)") {
     // QEMU and AEMU with emulated Q35 boards have this board name.
@@ -85,7 +84,7 @@ int main(int argc, char** argv) {
     options.help = true;
   }
 
-  options.filter = fbl::StringPrintf("%s:%s", GetTestFilter().c_str(), options.filter.c_str());
+  options.filter = GetTestFilter() + ':' + options.filter;
 
   // Errors will always set help to true.
   if (options.help) {

@@ -24,14 +24,12 @@ rustc_binary(
     deps = select({
         "@platforms//os:fuchsia": [
             "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
-            "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
             "//sdk/rust/zx",
             "//src/connectivity/lib/network-device/rust",
-            "//src/lib/fdio/rust:fdio",
             "//src/lib/fidl/rust/fidl",
             "//src/lib/fuchsia",
             "//src/lib/fuchsia-async",
-            "//src/lib/fuchsia-fs",
+            "//src/lib/fuchsia-component",
             "//src/lib/network/fidl_fuchsia_net_ext",
             "//third_party/rust_crates/vendor:anyhow",
             "//third_party/rust_crates/vendor:clap",

@@ -94,6 +94,11 @@
             to: "#pkg-cache",
         },
         {
+            protocol: "fuchsia.scheduler.RoleManager",
+            from: "#role_manager",
+            to: "#pkg-cache",
+        },
+        {
             protocol: [
                 "fuchsia.storage.block.Mapper",
                 "fuchsia.storage.mapping.MappingProvider",

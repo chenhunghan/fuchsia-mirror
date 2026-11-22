@@ -4,13 +4,23 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
+import("//zircon/kernel/kernel_rust_mod.gni")
+
 source_set("tests") {
   testonly = true
-  sources = [ "asan_tests.cc" ]
+  sources = [ "asan_tests_ffi.cc" ]
+  deps = [ ":tests-rs" ]
+}
+
+kernel_rust_mod("tests-rs") {
+  testonly = true
+  sources = [ "asan_tests.rs" ]
   deps = [
-    "//zircon/kernel/lib/fbl",
-    "//zircon/kernel/lib/instrumentation",
-    "//zircon/kernel/lib/page",
-    "//zircon/kernel/lib/unittest",
+    "//src/lib/kalloc",
+    "//src/lib/zr",
+    "//zircon/kernel/lib/instrumentation/asan:asan-rs",
+    "//zircon/kernel/lib/page:page-rs",
+    "//zircon/kernel/lib/unittest:unittest-rs",
+    "//zircon/system/ulib/fbl/rust:fbl",
   ]
 }

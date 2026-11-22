@@ -53,10 +53,7 @@
     ],
     offer: [
         {
-            protocol: [
-                "fuchsia.diagnostics.LogStream",
-                "fuchsia.kernel.VmexResource",
-            ],
+            protocol: [ "fuchsia.kernel.VmexResource" ],
             from: "parent",
             to: "#kernel",
         },

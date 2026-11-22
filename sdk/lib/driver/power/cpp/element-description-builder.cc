@@ -5,6 +5,9 @@
 #include <fidl/fuchsia.hardware.power/cpp/fidl.h>
 #include <lib/driver/power/cpp/element-description-builder.h>
 #include <lib/zx/event.h>
+#include <zircon/assert.h>
+
+#include <utility>
 
 #if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
 
@@ -52,6 +55,16 @@ ElementDesc ElementDescBuilder::Build() {
     to_return.element_runner_server = std::move(endpoints.server);
   }
 
+  to_return.initial_lease_token_broker = std::exchange(this->initial_lease_token_, std::nullopt);
+
+  if (!to_return.initial_lease_token_broker.has_value() &&
+      to_return.element_config.initial_level.value_or(0) != 0) {
+    fuchsia_power_broker::LeaseToken client_token, broker_token;
+    ZX_ASSERT(fuchsia_power_broker::LeaseToken::create(0, &client_token, &broker_token) == ZX_OK);
+    to_return.initial_lease_token_broker = std::move(broker_token);
+    to_return.initial_lease_token_client = std::move(client_token);
+  }
+
   return to_return;
 }
 
@@ -78,6 +91,12 @@ ElementDescBuilder& ElementDescBuilder::SetElementControl(
 ElementDescBuilder& ElementDescBuilder::SetElementRunner(
     fidl::ClientEnd<fuchsia_power_broker::ElementRunner> element_runner) {
   element_runner_ = std::move(element_runner);
+  return *this;
+}
+
+ElementDescBuilder& ElementDescBuilder::SetInitialLeaseToken(
+    fuchsia_power_broker::LeaseToken broker_token) {
+  initial_lease_token_ = std::move(broker_token);
   return *this;
 }
 

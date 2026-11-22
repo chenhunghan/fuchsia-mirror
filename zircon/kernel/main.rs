@@ -18,12 +18,20 @@
 // TODO(https://fxbug.dev/581987928): Remove once compiler options can control atomic coverage
 // counter updates.
 #![feature(coverage_attribute)]
+// `AtomicU128` (and so this library feature) only exists on targets with 16-byte atomics.
+#![cfg_attr(target_has_atomic = "128", feature(integer_atomics))]
 #![feature(link_llvm_intrinsics)]
 #![feature(sanitize)]
 
 #[allow(unused_imports)]
 #[macro_use]
 extern crate ktrace_macro;
+// `libarch` uses `output_prefix_override` (`libarch.rlib`), so resolve its
+// `--extern` path in `cstore` before submodules load transitive dependents.
+use libarch as _;
+
+#[macro_use(assert, debug_assert)]
+extern crate zr;
 
 // Submodules in the kernel crate:
 
@@ -54,7 +62,7 @@ pub mod hypervisor;
 #[path = "kernel/mod.rs"]
 pub mod kernel;
 
-#[path = "lib/backtrace/backtrace.rs"]
+#[path = "lib/backtrace/src/mod.rs"]
 pub mod backtrace;
 
 #[path = "lib/cbuf/src/mod.rs"]
@@ -76,6 +84,9 @@ pub mod counters;
 #[path = "lib/crashlog/src/crashlog.rs"]
 pub mod crashlog;
 
+#[path = "lib/crypto/mod.rs"]
+pub mod crypto;
+
 #[path = "lib/debuglog/debuglog.rs"]
 pub mod debuglog_rs;
 
@@ -84,6 +95,9 @@ pub mod gparena;
 
 #[path = "lib/instrumentation/mod.rs"]
 pub mod instrumentation;
+
+#[path = "lib/io/console.rs"]
+pub mod io;
 
 #[path = "lib/jtrace/jtrace.rs"]
 pub mod jtrace;
@@ -110,14 +124,14 @@ pub mod mmu_rcu;
 #[path = "lib/object_cache/src/lib.rs"]
 pub mod object_cache;
 
+#[path = "lib/page-map/src/lib.rs"]
+pub mod page_map;
+
 #[path = "lib/page_cache/page_cache.rs"]
 pub mod page_cache;
 
 #[path = "lib/percpu_writer/allocator.rs"]
 pub mod percpu_writer;
-
-#[path = "lib/perfmon/src/mod.rs"]
-pub mod perfmon;
 
 #[path = "lib/persistent-debuglog/persistent_debuglog.rs"]
 pub mod persistent_debuglog_rs;
@@ -192,6 +206,10 @@ pub mod generic_riscv64;
 pub mod pdev_interrupt;
 
 #[cfg(target_arch = "aarch64")]
+#[path = "dev/hdcp/amlogic_s912/hdcp.rs"]
+pub mod amlogic_s912_hdcp;
+
+#[cfg(target_arch = "aarch64")]
 #[path = "dev/hw_rng/amlogic_rng/amlogic_rng.rs"]
 pub mod amlogic_rng;
 
@@ -240,6 +258,10 @@ pub mod power_moonflower;
 pub mod power_motmot;
 
 #[cfg(target_arch = "aarch64")]
+#[path = "dev/psci/psci.rs"]
+pub mod psci;
+
+#[cfg(target_arch = "aarch64")]
 #[path = "dev/timer/arm_generic/arm_generic_timer.rs"]
 pub mod arm_generic_timer;
 
@@ -264,6 +286,10 @@ pub mod console_tests_rust;
 #[cfg(ktest)]
 #[path = "lib/control-region/tests/kernel.rs"]
 pub mod control_region_tests;
+
+#[cfg(ktest)]
+#[path = "lib/io/tests/io_tests.rs"]
+pub mod io_tests;
 
 #[cfg(ktest)]
 #[path = "lib/libc/tests/string_file_tests.rs"]
@@ -306,9 +332,6 @@ pub mod test_mod;
 pub mod kernel_tests;
 
 // Force linking of extern crates that provide C entry points:
-// Only arch/arm64 depends on coresight today.
-#[cfg(target_arch = "aarch64")]
-use coresight as _;
 use flow_id as _;
 use init as _;
 use relaxed_atomic as _;

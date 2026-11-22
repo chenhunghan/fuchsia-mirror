@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use anyhow::{Error, Result, bail, format_err};
+use fidl::endpoints::ServiceMarker as _;
 use fidl_fuchsia_component_test as ftest;
 use fidl_fuchsia_wlan_phy as fidl_wlan_phy;
 use fidl_fuchsia_wlan_tap as fidl_wlan_tap;
@@ -131,6 +132,10 @@ async fn create_realm(mut options: RealmOptions) -> Result<CreatedRealm, Error> 
             }),
             ftest::Capability::Service(ftest::Service {
                 name: Some("fuchsia.wlan.tap.Service".to_string()),
+                ..Default::default()
+            }),
+            ftest::Capability::Service(ftest::Service {
+                name: Some(fidl_fuchsia_hardware_network::ServiceMarker::SERVICE_NAME.to_string()),
                 ..Default::default()
             }),
         ];
@@ -468,6 +473,7 @@ async fn create_wlan_components(
         .add_route(
             Route::new()
                 .capability(Capability::service::<fidl_wlan_tap::ServiceMarker>())
+                .capability(Capability::service::<fidl_fuchsia_hardware_network::ServiceMarker>())
                 .from(Ref::child(fuchsia_driver_test::COMPONENT_NAME))
                 .to(Ref::parent()),
         )

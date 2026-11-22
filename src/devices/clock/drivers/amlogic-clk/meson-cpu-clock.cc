@@ -265,7 +265,7 @@ zx::result<uint64_t> MesonCpuClock::QuerySupportedRate(const uint64_t max_rate) 
       }
     }
     for (const auto& entry : a5_sys_pll_params_table) {
-      if (entry.rate > fclk_rate && entry.rate <= max_rate) {
+      if (entry.rate > syspll_rate && entry.rate <= max_rate) {
         syspll_rate = zx::ok(entry.rate);
       }
     }

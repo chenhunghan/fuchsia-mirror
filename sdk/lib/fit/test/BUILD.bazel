@@ -1,0 +1,141 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fit-test-pkg"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":fit-cxx17_host_test",
+        ":fit-cxx20_host_test",
+        ":fit-cxx23_host_test",
+    ],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+_FIT_TEST_SRCS = [
+    "defer_tests.cc",
+    "examples/function_example1.cc",
+    "examples/function_example1.h",
+    "examples/function_example2.cc",
+    "examples/function_example2.h",
+    "function_examples.cc",
+    "function_tests.cc",
+    "function_traits_tests.cc",
+    "inline_any_multi_inheritance_tests.cc",
+    "inline_any_tests.cc",
+    "nullable_tests.cc",
+    "result_tests.cc",
+    "thread_checker_tests.cc",
+    "traits_tests.cc",
+    "unittest_utils.h",
+    "utility_internal_tests.cc",
+]
+
+_FIT_TEST_DEPS = [
+    "//sdk/lib/fit",
+    "//src/lib/fxl/test:gtest_main",
+]
+
+# Mirror GN's sdk_cpp_test("fit") across the supported SDK C++ versions
+# (17, 20, and 23).
+fx_cc_test_binary(
+    name = "fit-cxx17",
+    srcs = _FIT_TEST_SRCS,
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    build_flags = [
+        "//build/config:c++17",
+        "//build/config:test_exercising_sdk_headers",
+    ],
+    deps = _FIT_TEST_DEPS,
+)
+
+# Preserve GN sdk_cpp_unittest_package() component names so tests.json URLs
+# remain identical across the migration.
+fx_unittest_component(
+    name = "fit-cxx17-component",
+    binary = ":fit-cxx17",
+    component_name = "_sdk_cpp_unittest_package.fit-test-pkg.component-cxx17",
+)
+
+host_test(
+    name = "fit-cxx17_host_test",
+    binary = ":fit-cxx17",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_cc_test_binary(
+    name = "fit-cxx20",
+    srcs = _FIT_TEST_SRCS,
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    build_flags = [
+        "//build/config:c++20",
+        "//build/config:test_exercising_sdk_headers",
+    ],
+    deps = _FIT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fit-cxx20-component",
+    binary = ":fit-cxx20",
+    component_name = "_sdk_cpp_unittest_package.fit-test-pkg.component-cxx20",
+)
+
+host_test(
+    name = "fit-cxx20_host_test",
+    binary = ":fit-cxx20",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_cc_test_binary(
+    name = "fit-cxx23",
+    srcs = _FIT_TEST_SRCS,
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    build_flags = [
+        "//build/config:c++23",
+        "//build/config:test_exercising_sdk_headers",
+    ],
+    deps = _FIT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fit-cxx23-component",
+    binary = ":fit-cxx23",
+    component_name = "_sdk_cpp_unittest_package.fit-test-pkg.component-cxx23",
+)
+
+host_test(
+    name = "fit-cxx23_host_test",
+    binary = ":fit-cxx23",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_package(
+    name = "fit-test-pkg_package",
+    package_name = "fit",
+    test_components = [
+        ":fit-cxx17-component",
+        ":fit-cxx20-component",
+        ":fit-cxx23-component",
+    ],
+)
+
+fx_test(
+    name = "fit-test-pkg",
+    package = ":fit-test-pkg_package",
+)

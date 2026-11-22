@@ -309,7 +309,7 @@
             {
                 // We restrict access to ProcessResolver because it is a deprecated protocol
                 // that allows resolving binaries from universe packages.
-                source_moniker: "/core/process_resolver",
+                source_moniker: "/bootstrap/process_resolver",
                 source: "component",
                 source_name: "fuchsia.process.Resolver",
                 capability: "protocol",
@@ -325,12 +325,14 @@
                     // TODO(https://fxbug.dev/42057361): Scrutiny throws an routing error unless
                     // this is added. `process_resolver` does not have a `use` declaration for
                     // it's own capability.
-                    "/core/process_resolver",
+                    "/bootstrap",
+                    "/bootstrap/process_resolver",
                     "/core/driver_playground",
 
                     // debug-dash-launcher is used in engineering builds to launch dash shells. It
                     // uses ProcessResolver to allow #!resolve scripts to be include in the dash
                     // environment.
+                    "/bootstrap/debug-dash-launcher",
                     "/core/debug-dash-launcher",
                 ],
             },

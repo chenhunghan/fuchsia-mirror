@@ -7,35 +7,11 @@
 //! Common constants, permission flags, and operating mode enumerations for ARM SMMU drivers.
 
 #[cfg(is_kernel)]
-pub use crate::object::{
-    IOMMU_FLAG_PERM_EXECUTE, IOMMU_FLAG_PERM_READ, IOMMU_FLAG_PERM_WRITE, QueryAddressResult,
+pub use crate::iommu::{
+    ALL_PERM_FLAGS, BtiPageLeakReason, INVALID_PADDR, QueryAddressResult, RequireContiguousMapping,
 };
-
-/// Permission flag allowing device read access to a mapped region.
-#[cfg(not(is_kernel))]
-pub const IOMMU_FLAG_PERM_READ: u32 = 1 << 0;
-
-/// Permission flag allowing device write access to a mapped region.
-#[cfg(not(is_kernel))]
-pub const IOMMU_FLAG_PERM_WRITE: u32 = 1 << 1;
-
-/// Permission flag allowing device instruction-fetch/execute access to a mapped region.
-#[cfg(not(is_kernel))]
-pub const IOMMU_FLAG_PERM_EXECUTE: u32 = 1 << 2;
-
-/// Bitmask of all valid IOMMU permission flags.
-pub const ALL_PERM_FLAGS: u32 =
-    IOMMU_FLAG_PERM_READ | IOMMU_FLAG_PERM_WRITE | IOMMU_FLAG_PERM_EXECUTE;
-
-/// The sentinel value used to indicate that a physical address is invalid.
-///
-/// IOMMUs, just like CPU MMUs, work in memory units of pages which are at least
-/// 4KB in length and 4KB aligned. Page sizes can go up from there (16KB, 64KB,
-/// etc) but are always "page aligned" implying that a valid page address always
-/// has the lowest N bits cleared. This address is all 1s, meaning that it will
-/// never be a valid physical page address for any system unless the page size
-/// was a single byte (which just does not happen).
-pub const INVALID_PADDR: u64 = u64::MAX;
+#[cfg(all(is_kernel, ktest))]
+pub use crate::iommu::{IOMMU_FLAG_PERM_EXECUTE, IOMMU_FLAG_PERM_READ, IOMMU_FLAG_PERM_WRITE};
 
 /// We currently assume and only support 4k pages.
 pub const PAGE_SHIFT: u32 = 12;
@@ -56,41 +32,18 @@ pub const DEFAULT_TCR_T0SZ: u32 = 16;
 pub const DEFAULT_TTBR0_ADDR_SPACE_SZ: u64 = 1u64 << (64 - DEFAULT_TCR_T0SZ);
 
 /// Returns `true` if `val` is an exact multiple of [`PAGE_SIZE`].
+#[must_use]
 #[inline]
 pub const fn is_page_rounded(val: u64) -> bool {
     (val & PAGE_MASK) == 0
 }
 
 /// Rounds `val` up to the next multiple of [`PAGE_SIZE`] (wrapping on overflow).
+#[must_use]
 #[inline]
 pub const fn round_up_page_size(val: u64) -> u64 {
     val.wrapping_add(PAGE_MASK) & !PAGE_MASK
 }
-
-/// A strongly typed enum-style-bool which determines whether a request for a PMT
-/// mapping needs to be contiguous in device virtual address space.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RequireContiguousMapping {
-    /// The mapping does not need to be contiguous in device virtual address space.
-    No = 0,
-    /// The mapping must be contiguous in device virtual address space.
-    Yes = 1,
-}
-
-/// Result of querying a device virtual address range from a pinned memory token.
-#[cfg(not(is_kernel))]
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct QueryAddressResult {
-    /// Base device virtual address (IOVA or physical address in bypass mode).
-    pub device_vaddr: u64,
-    /// Contiguous byte length starting at `device_vaddr`.
-    pub size: usize,
-}
-
-zr::static_assert!(core::mem::size_of::<QueryAddressResult>() == 16);
-zr::static_assert!(core::mem::align_of::<QueryAddressResult>() == 8);
 
 /// Operating mode for an ARM SMMU instance (`kernel.arm-smmu-mode`).
 #[repr(u32)]
@@ -108,71 +61,8 @@ pub enum ArmSmmuMode {
 #[cfg(is_kernel)]
 pub use zx_types::{ZX_MAX_NAME_LEN, ZX_RSRC_KIND_MMIO};
 
-// Standalone host test builds (`arm_smmu_host_rs` in `tests/BUILD.gn`) do not link `zx_types`, so
-// we provide matching definitions and re-export them under the canonical names.
-/// Maximum object name length in bytes (`ZX_MAX_NAME_LEN`).
-#[cfg(not(is_kernel))]
-pub const MAX_OBJECT_NAME_LEN: usize = 32;
-/// MMIO resource kind discriminant (`ZX_RSRC_KIND_MMIO`).
-#[cfg(not(is_kernel))]
-pub const MMIO_RESOURCE_KIND: u32 = 0;
-#[cfg(not(is_kernel))]
-pub use self::{MAX_OBJECT_NAME_LEN as ZX_MAX_NAME_LEN, MMIO_RESOURCE_KIND as ZX_RSRC_KIND_MMIO};
-
 #[cfg(is_kernel)]
 pub use crate::dev_interrupt::{InterruptPolarity, InterruptTriggerMode};
-
-// In standalone host test builds (`cfg(not(is_kernel))`), `crate::dev_interrupt` is not mounted
-// in `tests/host_lib.rs`, so we define matching trigger-mode and polarity enums for the host
-// `InterruptsMock` seam.
-/// The trigger mode of an interrupt.
-#[cfg(not(is_kernel))]
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InterruptTriggerMode {
-    /// Edge-triggered interrupt (`IRQ_TRIGGER_MODE_EDGE`).
-    Edge = 0,
-    /// Level-triggered interrupt (`IRQ_TRIGGER_MODE_LEVEL`).
-    Level = 1,
-}
-
-/// The polarity of an interrupt.
-#[cfg(not(is_kernel))]
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InterruptPolarity {
-    /// Active-high / rising-edge polarity (`IRQ_POLARITY_ACTIVE_HIGH`).
-    High = 0,
-    /// Active-low / falling-edge polarity (`IRQ_POLARITY_ACTIVE_LOW`).
-    Low = 1,
-}
-
-#[cfg(is_kernel)]
-pub use crate::iommu::BtiPageLeakReason;
-
-// LINT.IfChange(BtiPageLeakReason)
-/// Reason why a BTI quarantined or leaked pinned memory pages.
-#[cfg(not(is_kernel))]
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BtiPageLeakReason {
-    /// The final handle to a BTI was closed while it still had quarantined PMTs.
-    /// User-mode no longer has any way to release the quarantine on these PMTs,
-    /// and they are now permanently leaked.
-    BtiOrphanedWithQuarantinedPmts = 0,
-    /// The final handle to a PMT was closed without it having been formally
-    /// unpinned, and after its BTI had become orphaned. Once again, user-mode
-    /// no longer has any way to release the quarantine on these PMTs, and they
-    /// are now permanently leaked.
-    PmtQuarantinedWhenBtiOrphaned = 1,
-    /// The final handle to a PMT was closed without it having been unpinned.
-    PmtQuarantined = 2,
-}
-// LINT.ThenChange(
-//   //zircon/kernel/dev/iommu/bti.rs:BtiPageLeakReason,
-//   //zircon/kernel/dev/iommu/bti_ffi.cc:BtiPageLeakReason,
-//   //zircon/kernel/dev/iommu/include/dev/iommu/bti.h:BtiPageLeakReason,
-// )
 
 zr::static_assert!(core::mem::size_of::<BtiPageLeakReason>() == 4);
 zr::static_assert!(core::mem::align_of::<BtiPageLeakReason>() == 4);

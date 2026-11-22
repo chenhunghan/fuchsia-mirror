@@ -8,6 +8,9 @@ import("//build/fidl/fidl.gni")
 import("//build/rust/rustc_library.gni")
 import("//tools/configc/build/config.gni")
 
+# DEPRECATED (https://fxbug.dev/575878080): Use configuration capabilities
+# instead of packaged configuration value files.
+#
 # Defines a configuration value file for a Fuchsia component.
 #
 # A config value file is produced from a component manifest that contains a
@@ -200,12 +203,18 @@ template("fuchsia_structured_config_values") {
                                "testonly",
                                "visibility",
                              ])
-      deps = [ ":$target_name($default_toolchain)" ]
+      deps = [
+        ":$target_name($default_toolchain)",
+        "//build/components:deprecated_structured_config_values_allowlist($host_toolchain)",
+      ]
     }
     not_needed(invoker, "*")
   }
 }
 
+# DEPRECATED (https://fxbug.dev/575932542): Use CML defaults or static
+# configuration capability components instead.
+#
 # Defines a configuration value manifest that provides configuration values.
 #
 # This accepts a component manifest that `uses` configuration capabilities. It
@@ -420,7 +429,10 @@ template("fuchsia_structured_config_values2") {
                                "testonly",
                                "visibility",
                              ])
-      deps = [ ":$target_name($default_toolchain)" ]
+      deps = [
+        ":$target_name($default_toolchain)",
+        "//build/components:deprecated_structured_config_values2_allowlist($host_toolchain)",
+      ]
     }
     not_needed(invoker, "*")
   }

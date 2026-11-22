@@ -12,4 +12,8 @@ fidl_library(
         "socketproxy.fidl",
     ],
     visibility = ["//visibility:public"],
+    deps = [
+        "//sdk/fidl/fuchsia.net.resources",
+        "//sdk/fidl/fuchsia.posix.socket",
+    ],
 )

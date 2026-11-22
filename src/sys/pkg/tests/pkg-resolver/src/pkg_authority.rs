@@ -6,14 +6,18 @@
 
 use fidl_fuchsia_pkg as fpkg;
 use fidl_fuchsia_pkg_rewrite_ext::{Rule, RuleConfig};
-use fuchsia_pkg_testing::{PackageBuilder, RepositoryBuilder};
+use fuchsia_pkg_testing::{DeliveryBlobType, PackageBuilder, RepositoryBuilder};
 use http_uri_ext::HttpUriExt as _;
 use lib::{EMPTY_REPO_PATH, MountsBuilder, TestEnvBuilder};
 use std::sync::Arc;
+use test_case::test_case;
 
+#[test_case(DeliveryBlobType::Type1)]
+#[test_case(DeliveryBlobType::Type2)]
 #[fuchsia::test]
-async fn lookup() {
+async fn lookup(delivery_blob_type: DeliveryBlobType) {
     let env = TestEnvBuilder::new()
+        .delivery_blob_type(delivery_blob_type)
         .mounts(
             MountsBuilder::new()
                 .dynamic_rewrite_rules(RuleConfig::Version1(vec![
@@ -29,6 +33,7 @@ async fn lookup() {
     let pkg = PackageBuilder::new("test-package").build().await.unwrap();
     let repo = Arc::new(
         RepositoryBuilder::from_template_dir(EMPTY_REPO_PATH)
+            .delivery_blob_type(delivery_blob_type)
             .add_package(&pkg)
             .build()
             .await
@@ -39,8 +44,11 @@ async fn lookup() {
     let repo_config = served_repository.make_repo_config(repo_url);
     let () = env.proxies.repo_manager.add(&repo_config.clone().into()).await.unwrap().unwrap();
 
-    let expected_blob_url_dir =
-        repo_config.mirrors()[0].blob_mirror_url().clone().extend_dir_with_path("1").unwrap();
+    let expected_blob_url_dir = repo_config.mirrors()[0]
+        .blob_mirror_url()
+        .clone()
+        .extend_dir_with_path(&u32::from(delivery_blob_type).to_string())
+        .unwrap();
 
     // Lookup without variant.
     let (blob_id, blob_url_dir) =

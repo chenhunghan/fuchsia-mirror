@@ -13,9 +13,11 @@
 
 #include <fcntl.h>
 #include <grp.h>
+#include <lib/fit/defer.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/stat.h>
@@ -30,7 +32,10 @@
 #include <fbl/unique_fd.h>
 #include <linux/capability.h>
 #include <linux/sched.h>
+#include <linux/securebits.h>
 
+#include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
+#include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
 namespace {
@@ -3015,5 +3020,97 @@ TEST(SchedSetattrGetattrTest, ForkInheritsAndResetsUtilClamp) {
     ASSERT_TRUE(child_fork_helper.WaitForChildren());
   });
 }
+
+struct SameUidSchedOp {
+  const char* name;
+  int (*modify)(pid_t target_pid, bool use_alternate);
+};
+
+class SameUidSchedCapTest : public ::testing::TestWithParam<SameUidSchedOp> {};
+
+// Verifies that modifying scheduling policy, parameters, CPU affinity, or nice
+// value of a same-UID target process whose permitted capability set is not a
+// subset of the caller's permitted capability set requires CAP_SYS_NICE.
+TEST_P(SameUidSchedCapTest, SameUidWithoutTargetPermittedCapabilitiesRequiresCapSysNice) {
+  if (!test_helper::HasSysAdmin() || !test_helper::HasCapability(CAP_NET_RAW) ||
+      !test_helper::HasCapability(CAP_SYS_NICE)) {
+    GTEST_SKIP() << "Not running with required capabilities, skipping test.";
+  }
+
+  const SameUidSchedOp& op = GetParam();
+  test_helper::ForkHelper fork_helper;
+  test_helper::Rendezvous ready = test_helper::MakeRendezvous();
+  test_helper::Rendezvous complete = test_helper::MakeRendezvous();
+
+  pid_t target_pid =
+      SpawnTarget(fork_helper, std::move(ready.poker), std::move(complete.holder), []() {
+        SAFE_SYSCALL(prctl(PR_SET_SECUREBITS, SECBIT_KEEP_CAPS));
+        Become(kUser1Uid, kUser1Uid);
+        // Retain CAP_NET_RAW in target's permitted set.
+        EXPECT_TRUE(test_helper::HasCapabilityPermitted(CAP_NET_RAW));
+      });
+
+  fork_helper.RunInForkedProcess([ready = std::move(ready.holder),
+                                  complete = std::move(complete.poker), target_pid, op]() mutable {
+    auto poke_complete = fit::defer([&complete] { complete.poke(); });
+    SAFE_SYSCALL(prctl(PR_SET_SECUREBITS, SECBIT_KEEP_CAPS));
+    Become(kUser1Uid, kUser1Uid);
+
+    // Start with CAP_NET_RAW retained in permitted, but CAP_SYS_NICE dropped from effective.
+    test_helper::UnsetCapabilityEffective(CAP_SYS_NICE);
+    ASSERT_TRUE(test_helper::HasCapabilityPermitted(CAP_NET_RAW));
+    ASSERT_FALSE(test_helper::HasCapabilityEffective(CAP_SYS_NICE));
+
+    ready.hold();
+
+    // 1. When caller's permitted set is a superset of target's permitted set
+    // (possessing CAP_NET_RAW), scheduling modification succeeds without CAP_SYS_NICE.
+    EXPECT_THAT(op.modify(target_pid, /*use_alternate=*/true), SyscallSucceeds());
+
+    // 2. Drop CAP_NET_RAW from caller's permitted set so caller's permitted set is
+    // no longer a superset of target's permitted set. Without CAP_SYS_NICE, modifying
+    // the more-capable same-UID target fails with EPERM.
+    test_helper::UnsetCapabilityEffective(CAP_NET_RAW);
+    test_helper::UnsetCapabilityPermitted(CAP_NET_RAW);
+    EXPECT_THAT(op.modify(target_pid, /*use_alternate=*/false), SyscallFailsWithErrno(EPERM));
+
+    // 3. With CAP_SYS_NICE in effective, scheduling modification succeeds even
+    // though caller's permitted set is not a superset of target's.
+    test_helper::SetCapabilityEffective(CAP_SYS_NICE);
+    EXPECT_THAT(op.modify(target_pid, /*use_alternate=*/false), SyscallSucceeds());
+  });
+}
+
+constexpr SameUidSchedOp kSameUidSchedOps[] = {
+    {"Setpriority",
+     [](pid_t pid, bool use_alternate) {
+       return setpriority(PRIO_PROCESS, pid, use_alternate ? 5 : 10);
+     }},
+    {"SchedSetscheduler",
+     [](pid_t pid, bool use_alternate) {
+       sched_param param{.sched_priority = 0};
+       return sched_setscheduler(pid, use_alternate ? SCHED_BATCH : SCHED_OTHER, &param);
+     }},
+    {"SchedSetparam",
+     [](pid_t pid, bool /*use_alternate*/) {
+       sched_param param{.sched_priority = 0};
+       return sched_setparam(pid, &param);
+     }},
+    {"SchedSetaffinity",
+     [](pid_t pid, bool /*use_alternate*/) {
+       cpu_set_t mask;
+       CPU_ZERO(&mask);
+       if (sched_getaffinity(0, sizeof(mask), &mask) != 0) {
+         return -1;
+       }
+       return sched_setaffinity(pid, sizeof(mask), &mask);
+     }},
+};
+
+INSTANTIATE_TEST_SUITE_P(SetPriorityTest, SameUidSchedCapTest,
+                         ::testing::ValuesIn(kSameUidSchedOps),
+                         [](const ::testing::TestParamInfo<SameUidSchedOp>& info) {
+                           return info.param.name;
+                         });
 
 }  // namespace

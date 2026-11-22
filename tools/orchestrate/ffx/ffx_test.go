@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -134,5 +135,53 @@ func TestFfxConfigOverridesInCmdContext(t *testing.T) {
 		if arg != expectedArgs[i] {
 			t.Errorf("Arg %d: got %s, want %s", i, arg, expectedArgs[i])
 		}
+	}
+}
+
+func TestFfxFlash(t *testing.T) {
+	tests := []struct {
+		name       string
+		target     string
+		pubKeyPath string
+		wantArgs   []string
+	}{
+		{
+			name:       "With target and pubkey",
+			target:     "id:serial123",
+			pubKeyPath: "path/to/pubkey",
+			wantArgs:   []string{"--target", "id:serial123", "target", "flash", "--product-bundle", "path/to/product", "--authorized-keys", "path/to/pubkey"},
+		},
+		{
+			name:       "Empty target omits --target",
+			target:     "",
+			pubKeyPath: "",
+			wantArgs:   []string{"target", "flash", "--product-bundle", "path/to/product"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			argsFile := filepath.Join(tmpDir, "args.txt")
+			fakeFfx := filepath.Join(tmpDir, "fake_ffx")
+			script := "#!/bin/bash\nprintf '%s\\n' \"$@\" > " + argsFile + "\n"
+			if err := os.WriteFile(fakeFfx, []byte(script), 0755); err != nil {
+				t.Fatalf("failed to create fake ffx: %v", err)
+			}
+
+			ffx := &Ffx{Dir: tmpDir, bin: fakeFfx}
+			if err := ffx.Flash(context.Background(), tc.target, "path/to/product", tc.pubKeyPath); err != nil {
+				t.Fatalf("Flash failed: %v", err)
+			}
+
+			data, err := os.ReadFile(argsFile)
+			if err != nil {
+				t.Fatalf("failed to read args file: %v", err)
+			}
+			gotArgs := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+			if !reflect.DeepEqual(gotArgs, tc.wantArgs) {
+				t.Errorf("got args %q, want %q", gotArgs, tc.wantArgs)
+			}
+		})
 	}
 }

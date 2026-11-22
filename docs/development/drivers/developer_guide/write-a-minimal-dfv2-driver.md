@@ -246,25 +246,6 @@ To create a Fuchsia component for the driver, do the following:
 
    (Source: [`skeleton_driver.cml`][skeleton-driver-cml])
 
-1. Create a new JSON file to provide the component's information
-   (for example, `component-info.json`) in the `meta` directory.
-
-1. Add the driver component's information in JSON format, for example:
-
-   ```json
-   {
-       "short_description": "Driver Framework example for a skeleton DFv2 driver",
-       "manufacturer": "",
-       "families": [],
-       "models": [],
-       "areas": [
-           "DriverFramework"
-       ]
-   }
-   ```
-
-   (Source: [`component-info.json`][component-info-json])
-
 1. In the `BUILD.gn` file, include the following line to import the component
    build rules:
 
@@ -282,7 +263,6 @@ To create a Fuchsia component for the driver, do the following:
         ":bind",
         ":driver"
      ]
-     info = "component-info.json"
    }
    ```
 
@@ -291,8 +271,6 @@ To create a Fuchsia component for the driver, do the following:
    See the rules for these fields below:
 
    - Set the `manifest` field to the location of the driver's `.cml` file.
-   - Set the `info` field to the location of the driver component
-     information JSON file.
    - Set the `deps` array to include the `fuchsia_driver` and
      `driver_bind_rules` targets from the `BUILD.gn` file.
 
@@ -461,9 +439,8 @@ guide.
 [skeleton-driver-cc]: https://cs.opensource.google/fuchsia/fuchsia/+/main:examples/drivers/skeleton/skeleton_driver.cc
 [build-gn]: https://cs.opensource.google/fuchsia/fuchsia/+/main:examples/drivers/skeleton/BUILD.gn
 [skeleton-driver-bind]: https://cs.opensource.google/fuchsia/fuchsia/+/main:examples/drivers/skeleton/meta/skeleton_driver.bind
-[node-properties]: /docs/development/drivers/tutorials/bind-rules-tutorial.md#looking_up_node_properties
+[node-properties]: /docs/development/drivers/tutorials/bind-rules-tutorial.md#looking-up-node-properties
 [skeleton-driver-cml]: https://cs.opensource.google/fuchsia/fuchsia/+/main:examples/drivers/skeleton/meta/skeleton_driver.cml
-[component-info-json]: https://cs.opensource.google/fuchsia/fuchsia/+/main:examples/drivers/skeleton/meta/component-info.json
 [structured-logger-h]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/logging/cpp/structured_logger.h
 [topology-fidl]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.driver.framework/topology.fidl
 [node-adds-args]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/component/cpp/node_add_args.h

@@ -5,9 +5,12 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_REBOOT_LOG_GRACEFUL_SHUTDOWN_INFO_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_REBOOT_LOG_GRACEFUL_SHUTDOWN_INFO_H_
 
-#include <fuchsia/hardware/power/statecontrol/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.power.statecontrol/cpp/fidl.h>
+#include <lib/zx/time.h>
 
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace forensics {
 namespace feedback {
@@ -63,8 +66,10 @@ enum class GracefulShutdownAction : std::uint8_t {
 struct GracefulShutdownInfo {
   GracefulShutdownAction action;
   std::vector<GracefulShutdownReason> reasons;
+  std::optional<zx::duration> uptime;
+  std::optional<zx::duration> runtime;
 
-  auto operator<=>(const GracefulShutdownInfo&) const = default;
+  bool operator==(const GracefulShutdownInfo&) const = default;
 };
 
 std::string ToString(GracefulShutdownAction action);
@@ -75,10 +80,10 @@ GracefulShutdownAction FromGracefulShutdownActionString(std::string_view action)
 // Extracts the ShutdownAction from |options| and returns the action as a GracefulShutdownAction.
 // Check-fails that |options| has the action set.
 GracefulShutdownAction ToGracefulShutdownAction(
-    const fuchsia::hardware::power::statecontrol::ShutdownOptions& options);
+    const fuchsia_hardware_power_statecontrol::ShutdownOptions& options);
 
 std::vector<GracefulShutdownReason> ToGracefulShutdownReasons(
-    const fuchsia::hardware::power::statecontrol::ShutdownOptions& options);
+    const fuchsia_hardware_power_statecontrol::ShutdownOptions& options);
 
 // The input is limited to values corresponding to |power::statecontrol::ShutdownReason|.
 std::vector<GracefulShutdownReason> FromLegacyTxtFile(std::string_view content);
@@ -99,27 +104,30 @@ std::vector<std::string> ToReasonStrings(const std::vector<GracefulShutdownReaso
 //
 // The format is expected to be:
 // {
-//   action: "action",
-//   reasons: [
+//   "action": "action",
+//   "reasons": [
 //     "Reason 1",
 //     "Reason 2"
-//   ]
+//   ],
+//   "uptime_ms": 1234,
+//   "runtime_ms": 1098
 // }
 GracefulShutdownInfo FromJson(const std::string& content);
 
 // The input is limited to GracefulShutdownActions that map to |power::statecontrol::ShutdownAction|
 // and GracefulShutdownReasons that map to |power::statecontrol::ShutdownReason|.
 std::string ToJson(GracefulShutdownAction action,
-                   const std::vector<GracefulShutdownReason>& reasons);
+                   const std::vector<GracefulShutdownReason>& reasons, zx::duration uptime,
+                   zx::duration runtime);
 
 // Converts the list of `GracefulShutdownReasons` into a single comma-separated string, like
 // "Reason 1,Reason 2,Reason 3".
 std::string ToRawStrings(const std::vector<GracefulShutdownReason>& reasons);
 
-// Writes the graceful shutdown action and reasons to `path`.
+// Writes the graceful shutdown info to `path`.
 void WriteGracefulShutdownInfo(GracefulShutdownAction action,
                                const std::vector<GracefulShutdownReason>& reasons,
-                               const std::string& path);
+                               zx::duration uptime, zx::duration runtime, const std::string& path);
 
 }  // namespace feedback
 }  // namespace forensics

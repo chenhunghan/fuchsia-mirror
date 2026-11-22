@@ -26,7 +26,6 @@ pub struct Supplicant {
 
 impl Supplicant {
     // IEEE Std 802.11-2016, 12.7.7.2
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_eapol_key_frame<B: SplitByteSlice>(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -87,7 +86,6 @@ impl Supplicant {
         Ok(())
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     fn extract_key_data<B: SplitByteSlice>(
         &self,
         frame: &eapol::KeyFrameRx<B>,
@@ -131,7 +129,6 @@ impl Supplicant {
     }
 
     // IEEE Std 802.11-2016, 12.7.7.3
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     fn create_message_2<B: SplitByteSlice>(
         &self,
         msg1: &eapol::KeyFrameRx<B>,

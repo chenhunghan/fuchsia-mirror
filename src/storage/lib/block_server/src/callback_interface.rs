@@ -83,9 +83,8 @@ const INTERNAL_REQUEST_FLAG: usize = 1 << 63;
 
 #[derive(Default)]
 struct InflightRequests {
-    /// Total number of in-flight requests submitted to `Interface::on_requests`.
-    count: usize,
-    /// Completion callbacks for internal requests (e.g. from `DefaultCallbackBlockService`).
+    /// Completion callbacks for internal requests (e.g. from `DefaultCallbackBlockService` or
+    /// simulated barrier/FUA operations).
     callbacks: HashMap<RequestId, Box<dyn FnOnce(Result<(), zx::Status>) + Send>>,
     /// Monotonically increasing counter for allocating internal request IDs.
     next_internal_id: usize,
@@ -110,7 +109,6 @@ pub struct SessionManager<I: Interface + ?Sized> {
     active_requests: ActiveRequests<Arc<Session<I>>>,
     key_registry: KeyRegistry,
     inflight_requests: Mutex<InflightRequests>,
-    no_inflight_requests_condvar: Condvar,
     inner: Mutex<SessionManagerInner<I>>,
     no_open_sessions_condvar: Condvar,
     block_service: OnceLock<Arc<dyn BlockService>>,
@@ -242,7 +240,6 @@ impl<I: Interface + ?Sized> SessionManager<I> {
             active_requests: ActiveRequests::default(),
             key_registry: KeyRegistry::default(),
             inflight_requests: Mutex::new(InflightRequests::default()),
-            no_inflight_requests_condvar: Condvar::new(),
             inner: Mutex::new(SessionManagerInner { open_sessions: HashMap::new() }),
             no_open_sessions_condvar: Condvar::new(),
             block_service: OnceLock::new(),
@@ -255,24 +252,13 @@ impl<I: Interface + ?Sized> SessionManager<I> {
 
     /// Reports the given task as complete with a given status.
     pub fn complete_request(&self, request_id: RequestId, status: Result<(), zx::Status>) {
-        let (callback, notify) = {
-            let mut inflight = self.inflight_requests.lock();
-            let callback = if request_id.0 & INTERNAL_REQUEST_FLAG != 0 {
-                inflight.callbacks.remove(&request_id)
-            } else {
-                None
-            };
-            inflight.count -= 1;
-            let notify = inflight.count == 0;
-            (callback, notify)
-        };
-        if let Some(callback) = callback {
-            callback(status);
+        if request_id.0 & INTERNAL_REQUEST_FLAG != 0 {
+            let callback = self.inflight_requests.lock().callbacks.remove(&request_id);
+            if let Some(callback) = callback {
+                callback(status);
+            }
         } else {
             self.complete_unsubmitted_request(request_id, status);
-        }
-        if notify {
-            self.no_inflight_requests_condvar.notify_all();
         }
     }
 
@@ -286,24 +272,13 @@ impl<I: Interface + ?Sized> SessionManager<I> {
             let req_id = RequestId(inflight.next_internal_id | INTERNAL_REQUEST_FLAG);
             inflight.next_internal_id += 1;
             inflight.callbacks.insert(req_id, callback);
-            inflight.count += 1;
             make_request(req_id)
         };
         self.interface.on_requests(&[req]);
     }
 
     fn submit_requests(&self, requests: &[Request]) {
-        self.inflight_requests.lock().count += requests.len();
         self.interface.on_requests(requests);
-    }
-
-    /// Waits for there to be no requests in-flight.
-    ///
-    /// NOTE: To void TOCTOUs, this must be called on the same thread which calls
-    /// [`Self::submit_requests`].
-    fn wait_for_no_inflight_requests(&self) {
-        let mut guard = self.inflight_requests.lock();
-        self.no_inflight_requests_condvar.wait_while(&mut guard, |inflight| inflight.count > 0);
     }
 
     /// Called instead of `[Self::complete_request]` when a request is completed before it was
@@ -472,10 +447,18 @@ impl<I: Interface + ?Sized> Session<I> {
         }
     }
 
-    /// Synchronously performs a device flush.
-    fn pre_flush(self: &Arc<Self>, request_id: RequestId) -> Result<(), zx::Status> {
+    /// Synchronously performs a device flush before submitting a `PRE_BARRIER` write.
+    fn pre_flush(
+        self: &Arc<Self>,
+        request_id: RequestId,
+        decoded_requests: &mut DecodedRequests,
+    ) -> Result<(), zx::Status> {
+        if !decoded_requests.is_empty() {
+            self.helper.session_manager().submit_requests(decoded_requests);
+            decoded_requests.clear();
+        }
         let trace_flow_id = {
-            let mut request = self.helper.session_manager().active_requests.request(request_id);
+            let request = self.helper.session_manager().active_requests.request(request_id);
             if let Some(id) = request.trace_flow_id {
                 fuchsia_trace::async_instant!(
                     fuchsia_trace::Id::from(id.get()),
@@ -484,18 +467,27 @@ impl<I: Interface + ?Sized> Session<I> {
                     "request_id" => request_id.0
                 );
             }
-            request.count += 1;
             request.trace_flow_id
         };
-        self.helper.session_manager().submit_requests(&[Request {
-            request_id,
-            operation: Operation::Flush,
-            trace_flow_id,
-            vmo: None,
-        }]);
-        self.helper.session_manager().wait_for_no_inflight_requests();
-        let status = self.helper.session_manager().active_requests.request(request_id).status;
-        match status {
+        let pair = Arc::new((Mutex::new(None), Condvar::new()));
+        let pair_clone = pair.clone();
+        self.helper.session_manager().submit_internal_request(
+            |internal_id| Request {
+                request_id: internal_id,
+                operation: Operation::Flush,
+                trace_flow_id,
+                vmo: None,
+            },
+            Box::new(move |status| {
+                let (lock, cvar) = &*pair_clone;
+                *lock.lock() = Some(status);
+                cvar.notify_one();
+            }),
+        );
+        let (lock, cvar) = &*pair;
+        let mut status = lock.lock();
+        cvar.wait_while(&mut status, |s| s.is_none());
+        match status.unwrap() {
             Ok(()) => Ok(()),
             Err(status) => {
                 // Respond for the unsubmitted request too.
@@ -505,25 +497,94 @@ impl<I: Interface + ?Sized> Session<I> {
         }
     }
 
-    /// Synchronously completes `decoded_requests`, and inserts a post-flush into `decoded_requests`
-    /// to be submitted later.
-    fn post_flush(self: &Arc<Self>, request_id: RequestId, decoded_requests: &mut DecodedRequests) {
+    /// Simulates a `FORCE_ACCESS` write by submitting `decoded_requests`, mapping and submitting
+    /// `request`'s write chunks via internal requests, waiting for them to complete, and queueing a
+    /// post-flush into `decoded_requests`.
+    fn force_access(
+        self: &Arc<Self>,
+        mut request: DecodedRequest,
+        decoded_requests: &mut DecodedRequests,
+    ) {
+        let manager = &self.helper.session_manager();
+        let request_id = request.request_id;
         if !decoded_requests.is_empty() {
-            self.helper.session_manager().submit_requests(decoded_requests);
+            manager.submit_requests(decoded_requests);
             decoded_requests.clear();
         }
-        self.helper.session_manager().wait_for_no_inflight_requests();
-        let request = self.helper.session_manager().active_requests.request(request_id);
+        // Account for the post-flush request that will be queued once all write chunks for this
+        // request complete.
+        manager.active_requests.request(request_id).count += 1;
+        let waiter = Arc::new((Mutex::new(0usize), Condvar::new()));
+
+        loop {
+            let result =
+                self.helper.map_request(request, &mut manager.active_requests.request(request_id));
+            match result {
+                Ok((DecodedRequest { request_id, operation, vmo, trace_flow_id }, remainder)) => {
+                    *waiter.0.lock() += 1;
+                    let session = self.clone();
+                    let waiter = waiter.clone();
+                    manager.submit_internal_request(
+                        |internal_id| Request {
+                            request_id: internal_id,
+                            operation,
+                            trace_flow_id,
+                            vmo,
+                        },
+                        Box::new(move |status| {
+                            session
+                                .helper
+                                .session_manager()
+                                .complete_unsubmitted_request(request_id, status);
+                            let (lock, cvar) = &*waiter;
+                            let mut rem = lock.lock();
+                            *rem -= 1;
+                            if *rem == 0 {
+                                cvar.notify_one();
+                            }
+                        }),
+                    );
+
+                    if let Some(r) = remainder {
+                        request = r;
+                    } else {
+                        break;
+                    }
+                }
+                Err(status) => {
+                    manager.complete_unsubmitted_request(request_id, Err(status));
+                    break;
+                }
+            }
+        }
+
+        let (lock, cvar) = &*waiter;
+        let mut remaining = lock.lock();
+        cvar.wait_while(&mut remaining, |rem| *rem > 0);
+        drop(remaining);
+        let request = manager.active_requests.request(request_id);
         match request.status {
-            Ok(()) => decoded_requests.push(Request {
-                request_id,
-                operation: Operation::Flush,
-                trace_flow_id: request.trace_flow_id,
-                vmo: None,
-            }),
+            Ok(()) => {
+                let trace_flow_id = request.trace_flow_id;
+                drop(request);
+                if let Some(id) = trace_flow_id {
+                    fuchsia_trace::async_instant!(
+                        fuchsia_trace::Id::from(id.get()),
+                        c"storage",
+                        c"block_server::SimulatedFUA",
+                        "request_id" => request_id.0
+                    );
+                }
+                decoded_requests.push(Request {
+                    request_id,
+                    operation: Operation::Flush,
+                    trace_flow_id,
+                    vmo: None,
+                });
+            }
             Err(status) => {
                 drop(request);
-                self.helper.session_manager().complete_unsubmitted_request(request_id, Err(status))
+                manager.complete_unsubmitted_request(request_id, Err(status));
             }
         }
     }
@@ -551,22 +612,21 @@ impl<I: Interface + ?Sized> Session<I> {
                         .device_flags()
                         .contains(fblock::DeviceFlag::BARRIER_SUPPORT)
                         && request.operation.take_write_flag(WriteFlags::PRE_BARRIER)
-                        && self.pre_flush(request_id).is_err()
+                        && self.pre_flush(request_id, &mut decoded_requests).is_err()
                     {
                         continue;
                     }
                     // Strip the FORCE_ACCESS flag if we don't support it, and simulate the FUA with
                     // a post-flush.
-                    let simulate_fua = !manager
+                    if !manager
                         .interface
                         .get_info()
                         .device_flags()
                         .contains(fblock::DeviceFlag::FUA_SUPPORT)
-                        && request.operation.take_write_flag(WriteFlags::FORCE_ACCESS);
-
-                    if simulate_fua {
-                        // Account for the additional request we need at the end.
-                        manager.active_requests.request(request_id).count += 1;
+                        && request.operation.take_write_flag(WriteFlags::FORCE_ACCESS)
+                    {
+                        self.force_access(request, &mut decoded_requests);
+                        continue;
                     }
 
                     loop {
@@ -601,10 +661,6 @@ impl<I: Interface + ?Sized> Session<I> {
                                 break;
                             }
                         }
-                    }
-
-                    if simulate_fua {
-                        self.post_flush(request_id, &mut decoded_requests);
                     }
                 }
                 Err(None) => {}
@@ -1212,6 +1268,298 @@ mod tests {
         close_fut.await.unwrap().unwrap();
 
         std::mem::drop(proxy);
+        server_task.await;
+    }
+
+    #[fuchsia::test]
+    async fn test_simulated_barrier_and_fua_do_not_wait_for_unrelated_inflight_requests() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let interface = Arc::new(MockInterface::new(tx));
+        let session_manager = Arc::new(SessionManager::new(interface.clone(), BLOCK_SIZE));
+
+        let sm_clone = session_manager.clone();
+        let (proxy, stream) = create_proxy_and_stream::<fblock::BlockMarker>();
+        let server_task = fasync::Task::spawn(async move {
+            let server = crate::BlockServer::new(BLOCK_SIZE, sm_clone);
+            server.handle_requests(stream).await.unwrap();
+        });
+
+        let (session_proxy, session_server_end) =
+            fidl::endpoints::create_proxy::<fblock::SessionMarker>();
+        proxy.open_session(session_server_end).unwrap();
+
+        let fifo_handle = session_proxy.get_fifo().await.unwrap().unwrap();
+        let fifo: zx::Fifo<BlockFifoResponse, BlockFifoRequest> = zx::Fifo::from(fifo_handle);
+
+        let vmo = zx::Vmo::create(8192).unwrap();
+        let vmo_id = session_proxy
+            .attach_vmo(vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let read_response = |fifo: &zx::Fifo<BlockFifoResponse, BlockFifoRequest>| {
+            let signals =
+                fifo.wait_one(zx::Signals::FIFO_READABLE, zx::MonotonicInstant::INFINITE).unwrap();
+            assert!(signals.contains(zx::Signals::FIFO_READABLE));
+            let mut resp = [BlockFifoResponse::default()];
+            fifo.read(&mut resp).unwrap();
+            resp[0]
+        };
+
+        // Submit an internal read request that stays in flight across all barrier/FUA scenarios.
+        let (internal_done_tx, internal_done_rx) = futures::channel::oneshot::channel();
+        session_manager.submit_internal_request(
+            |request_id| Request {
+                request_id,
+                operation: Operation::Read {
+                    device_block_offset: 0,
+                    block_count: 1,
+                    _unused: 0,
+                    vmo_offset: 0,
+                    options: block_protocol::ReadOptions::default(),
+                },
+                trace_flow_id: None,
+                vmo: Some(vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into()),
+            },
+            Box::new(move |status| {
+                let _ = internal_done_tx.send(status);
+            }),
+        );
+        let internal_req = rx.recv().unwrap();
+        assert!(matches!(internal_req.operation, Operation::Read { .. }));
+
+        // 1. Write two requests in a single FIFO batch: a plain write followed by a PRE_BARRIER
+        // write. `pre_flush` must submit `write_1` from `decoded_requests` followed immediately by
+        // `Flush`, and completing `Flush` alone (while `write_1` and `internal_req` are still in
+        // flight) must unblock `pre_flush` and submit `write_2_barrier` with `PRE_BARRIER`
+        // stripped.
+        let write_1 = BlockFifoRequest {
+            command: BlockFifoCommand {
+                opcode: fblock::BlockOpcode::Write.into_primitive(),
+                ..Default::default()
+            },
+            reqid: 1,
+            vmoid: vmo_id.id,
+            length: 1,
+            vmo_offset: 0,
+            dev_offset: 0,
+            ..Default::default()
+        };
+        let write_2_barrier = BlockFifoRequest {
+            command: BlockFifoCommand {
+                opcode: fblock::BlockOpcode::Write.into_primitive(),
+                flags: fblock::BlockIoFlag::PRE_BARRIER.bits(),
+                ..Default::default()
+            },
+            reqid: 2,
+            vmoid: vmo_id.id,
+            length: 1,
+            vmo_offset: 1,
+            dev_offset: 1,
+            ..Default::default()
+        };
+        fifo.write(&[write_1, write_2_barrier]).unwrap();
+
+        let submitted_write_1 = rx.recv().unwrap();
+        assert!(matches!(
+            submitted_write_1.operation,
+            Operation::Write { device_block_offset: 0, .. }
+        ));
+        let submitted_flush = rx.recv().unwrap();
+        assert_eq!(submitted_flush.operation, Operation::Flush);
+
+        // Complete `submitted_flush` BEFORE `submitted_write_1`: `pre_flush` only waits for its own
+        // `Flush` request, not other in-flight client or internal requests.
+        session_manager.complete_request(submitted_flush.request_id, Ok(()));
+
+        let submitted_write_2 = rx.recv().unwrap();
+        assert!(matches!(
+            submitted_write_2.operation,
+            Operation::Write {
+                device_block_offset: 1,
+                options,
+                ..
+            } if !options.flags.contains(WriteFlags::PRE_BARRIER)
+        ));
+        session_manager.complete_request(submitted_write_2.request_id, Ok(()));
+        let resp_2 = read_response(&fifo);
+        assert_eq!(resp_2.reqid, 2);
+        assert_eq!(resp_2.status, zx::sys::ZX_OK);
+
+        session_manager.complete_request(submitted_write_1.request_id, Ok(()));
+        let resp_1 = read_response(&fifo);
+        assert_eq!(resp_1.reqid, 1);
+        assert_eq!(resp_1.status, zx::sys::ZX_OK);
+
+        // 2. A `PRE_BARRIER` write whose pre-flush fails must fail immediately without submitting
+        // the write.
+        let write_3_barrier_fail = BlockFifoRequest {
+            command: BlockFifoCommand {
+                opcode: fblock::BlockOpcode::Write.into_primitive(),
+                flags: fblock::BlockIoFlag::PRE_BARRIER.bits(),
+                ..Default::default()
+            },
+            reqid: 3,
+            vmoid: vmo_id.id,
+            length: 1,
+            vmo_offset: 0,
+            dev_offset: 2,
+            ..Default::default()
+        };
+        fifo.write(&[write_3_barrier_fail]).unwrap();
+        let flush_3 = rx.recv().unwrap();
+        assert_eq!(flush_3.operation, Operation::Flush);
+        session_manager.complete_request(flush_3.request_id, Err(zx::Status::IO));
+        let resp_3 = read_response(&fifo);
+        assert_eq!(resp_3.reqid, 3);
+        assert_eq!(resp_3.status, zx::sys::ZX_ERR_IO);
+        assert!(rx.try_recv().is_err());
+
+        // 3. A `FORCE_ACCESS` write must strip `FORCE_ACCESS`, submit `Flush` upon write
+        // completion without waiting for `internal_req`, and complete once `Flush` succeeds.
+        let write_4_fua = BlockFifoRequest {
+            command: BlockFifoCommand {
+                opcode: fblock::BlockOpcode::Write.into_primitive(),
+                flags: fblock::BlockIoFlag::FORCE_ACCESS.bits(),
+                ..Default::default()
+            },
+            reqid: 4,
+            vmoid: vmo_id.id,
+            length: 1,
+            vmo_offset: 0,
+            dev_offset: 3,
+            ..Default::default()
+        };
+        fifo.write(&[write_4_fua]).unwrap();
+        let submitted_write_4 = rx.recv().unwrap();
+        assert!(matches!(
+            submitted_write_4.operation,
+            Operation::Write {
+                device_block_offset: 3,
+                options,
+                ..
+            } if !options.flags.contains(WriteFlags::FORCE_ACCESS)
+        ));
+        session_manager.complete_request(submitted_write_4.request_id, Ok(()));
+        let flush_4 = rx.recv().unwrap();
+        assert_eq!(flush_4.operation, Operation::Flush);
+        session_manager.complete_request(flush_4.request_id, Ok(()));
+        let resp_4 = read_response(&fifo);
+        assert_eq!(resp_4.reqid, 4);
+        assert_eq!(resp_4.status, zx::sys::ZX_OK);
+
+        // 4. A `FORCE_ACCESS` write whose write fails must fail without issuing a post-flush, and
+        // a `FORCE_ACCESS` write whose post-flush fails must propagate the flush error.
+        let write_5_fua_write_fail = BlockFifoRequest {
+            command: BlockFifoCommand {
+                opcode: fblock::BlockOpcode::Write.into_primitive(),
+                flags: fblock::BlockIoFlag::FORCE_ACCESS.bits(),
+                ..Default::default()
+            },
+            reqid: 5,
+            vmoid: vmo_id.id,
+            length: 1,
+            vmo_offset: 0,
+            dev_offset: 4,
+            ..Default::default()
+        };
+        fifo.write(&[write_5_fua_write_fail]).unwrap();
+        let submitted_write_5 = rx.recv().unwrap();
+        session_manager.complete_request(submitted_write_5.request_id, Err(zx::Status::IO));
+        let resp_5 = read_response(&fifo);
+        assert_eq!(resp_5.reqid, 5);
+        assert_eq!(resp_5.status, zx::sys::ZX_ERR_IO);
+        assert!(rx.try_recv().is_err());
+
+        let write_6_fua_flush_fail = BlockFifoRequest {
+            command: BlockFifoCommand {
+                opcode: fblock::BlockOpcode::Write.into_primitive(),
+                flags: fblock::BlockIoFlag::FORCE_ACCESS.bits(),
+                ..Default::default()
+            },
+            reqid: 6,
+            vmoid: vmo_id.id,
+            length: 1,
+            vmo_offset: 0,
+            dev_offset: 5,
+            ..Default::default()
+        };
+        fifo.write(&[write_6_fua_flush_fail]).unwrap();
+        let submitted_write_6 = rx.recv().unwrap();
+        session_manager.complete_request(submitted_write_6.request_id, Ok(()));
+        let flush_6 = rx.recv().unwrap();
+        assert_eq!(flush_6.operation, Operation::Flush);
+        session_manager.complete_request(flush_6.request_id, Err(zx::Status::NO_SPACE));
+        let resp_6 = read_response(&fifo);
+        assert_eq!(resp_6.reqid, 6);
+        assert_eq!(resp_6.status, zx::sys::ZX_ERR_NO_SPACE);
+
+        // 5. A `FORCE_ACCESS` write split across two non-contiguous mappings must issue the
+        // post-flush only after both mapped write chunks have completed.
+        let (mapped_session_proxy, mapped_session_server_end) =
+            fidl::endpoints::create_proxy::<fblock::SessionMarker>();
+        proxy
+            .open_session_with_options(
+                mapped_session_server_end,
+                &[
+                    fblock::BlockOffsetMapping { target_block_offset: 10, length: 1 },
+                    fblock::BlockOffsetMapping { target_block_offset: 20, length: 1 },
+                ],
+            )
+            .unwrap();
+        let mapped_fifo: zx::Fifo<BlockFifoResponse, BlockFifoRequest> =
+            zx::Fifo::from(mapped_session_proxy.get_fifo().await.unwrap().unwrap());
+        let mapped_vmo_id = mapped_session_proxy
+            .attach_vmo(vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let write_7_split_fua = BlockFifoRequest {
+            command: BlockFifoCommand {
+                opcode: fblock::BlockOpcode::Write.into_primitive(),
+                flags: fblock::BlockIoFlag::FORCE_ACCESS.bits(),
+                ..Default::default()
+            },
+            reqid: 7,
+            vmoid: mapped_vmo_id.id,
+            length: 2,
+            vmo_offset: 0,
+            dev_offset: 0,
+            ..Default::default()
+        };
+        mapped_fifo.write(&[write_7_split_fua]).unwrap();
+        let chunk_1 = rx.recv().unwrap();
+        let chunk_2 = rx.recv().unwrap();
+        assert!(matches!(
+            chunk_1.operation,
+            Operation::Write { device_block_offset: 10, block_count: 1, .. }
+        ));
+        assert!(matches!(
+            chunk_2.operation,
+            Operation::Write { device_block_offset: 20, block_count: 1, .. }
+        ));
+
+        session_manager.complete_request(chunk_1.request_id, Ok(()));
+        assert!(rx.try_recv().is_err());
+
+        session_manager.complete_request(chunk_2.request_id, Ok(()));
+        let flush_7 = rx.recv().unwrap();
+        assert_eq!(flush_7.operation, Operation::Flush);
+        session_manager.complete_request(flush_7.request_id, Ok(()));
+        let resp_7 = read_response(&mapped_fifo);
+        assert_eq!(resp_7.reqid, 7);
+        assert_eq!(resp_7.status, zx::sys::ZX_OK);
+
+        // Now complete the internal request as well.
+        session_manager.complete_request(internal_req.request_id, Ok(()));
+        assert_eq!(internal_done_rx.await.unwrap(), Ok(()));
+
+        drop(mapped_session_proxy);
+        drop(session_proxy);
+        drop(proxy);
+        fasync::unblock(move || session_manager.terminate()).await;
         server_task.await;
     }
 }

@@ -18,14 +18,13 @@
 #include <string_view>
 #include <thread>
 
-#include <zxtest/zxtest.h>
-
+#include "../test/unittest.h"
 #include "backtrace.h"
 
 namespace {
 
-// This is set by the build system to indicate whether or not zxtest and libc
-// can be relied on to have frame pointers.
+// This is set by the build system to indicate whether or not the test
+// framework and libc can be relied on to have frame pointers.
 constexpr bool kIncompleteFramePointers = INCOMPLETE_FRAME_POINTERS;
 
 constexpr size_t kMaxTestFrames = 32;
@@ -98,7 +97,7 @@ size_t BacktraceByUnwind(Backtrace buffer) {
     --count;
   }
 
-  EXPECT_GT(count, 0);
+  EXPECT_GT(count, 0u);
 
   auto caller = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
   EXPECT_EQ(caller, buffer.front());
@@ -160,9 +159,9 @@ class Collector {
     baseline_ = method_.getter(buffer_);
 
     if (method_.enabled) {
-      EXPECT_GT(baseline_, 0);
+      EXPECT_GT(baseline_, 0u);
     } else {
-      EXPECT_EQ(baseline_, 0);
+      EXPECT_EQ(baseline_, 0u);
     }
 
     // Now call down four frames: Foo -> Otter -> Outer -> Find
@@ -203,7 +202,7 @@ class Collector {
               0);
     void* ret;
     EXPECT_EQ(pthread_join(t, &ret), 0);
-    EXPECT_NULL(ret);
+    EXPECT_EQ(ret, nullptr);
   }
 
   void CollectCppThread() {
@@ -218,7 +217,7 @@ class Collector {
     if (method_.enabled) {
       EXPECT_EQ(count_, baseline_ + kFrameCount);
     } else {
-      EXPECT_EQ(count_, 0);
+      EXPECT_EQ(count_, 0u);
     }
   }
 

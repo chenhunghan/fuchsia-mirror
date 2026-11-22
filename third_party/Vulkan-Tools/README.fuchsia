@@ -2,6 +2,7 @@ Name: Vulkan-Tools
 URL: https://github.com/KhronosGroup/Vulkan-Tools
 Version: vulkan-sdk-1.4.350
 Revision: 1cb3a319969cf0d3e2315b0a87a27447f55b4167
+Security Critical: no
 
 License: Apache-2.0
 License File: src/LICENSE.txt

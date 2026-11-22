@@ -5,8 +5,8 @@
 import("//build/python/python_host_test.gni")
 
 if (is_host) {
-  python_host_test("screenshot_using_ffx_test") {
-    main_source = "screenshot_using_ffx_test.py"
+  python_host_test("screenshot_test") {
+    main_source = "screenshot_test.py"
     libraries = [
       "//src/testing/end_to_end/honeydew",
       "//third_party/pypng",
@@ -31,7 +31,7 @@ if (is_host) {
 group("tests") {
   testonly = true
   public_deps = [
-    ":screenshot_using_ffx_test($host_toolchain)",
+    ":screenshot_test($host_toolchain)",
     ":types_test($host_toolchain)",
   ]
 }

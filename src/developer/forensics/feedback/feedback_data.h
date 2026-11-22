@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_FEEDBACK_DATA_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_FEEDBACK_DATA_H_
 
-#include <fuchsia/process/lifecycle/cpp/fidl.h>
+#include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fit/defer.h>
 #include <lib/fit/function.h>
@@ -27,12 +27,11 @@
 
 namespace forensics::feedback {
 
-class FeedbackData {
+class FeedbackData : public fidl::AsyncEventHandler<fuchsia_process_lifecycle::Lifecycle> {
  public:
   struct Options {
     SnapshotConfig snapshot_config;
     SnapshotExclusionConfig snapshot_exclusion_config;
-    bool is_first_instance;
     bool limit_inspect_data;
     std::optional<zx::duration> delete_previous_boot_logs_time;
     zx::job root_job;
@@ -47,6 +46,9 @@ class FeedbackData {
 
   void ShutdownImminent(::fit::deferred_callback stop_respond);
 
+  // |fidl::AsyncEventHandler<fuchsia_process_lifecycle::Lifecycle>|
+  void on_fidl_error(fidl::UnbindInfo error) override;
+
  private:
   std::shared_ptr<sys::ServiceDirectory> SpawnSystemLogRecorder();
 
@@ -55,7 +57,8 @@ class FeedbackData {
   timekeeper::Clock* clock_;
   cobalt::Logger* cobalt_;
 
-  fuchsia::process::lifecycle::LifecyclePtr system_log_recorder_lifecycle_;
+  fidl::Client<fuchsia_process_lifecycle::Lifecycle> system_log_recorder_lifecycle_;
+  std::optional<::fit::deferred_callback> stop_respond_;
 
   InspectNodeManager inspect_node_manager_;
   feedback_data::InspectDataBudget inspect_data_budget_;

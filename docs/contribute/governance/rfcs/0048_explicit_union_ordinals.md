@@ -102,7 +102,7 @@ sparse_table Example {
 };
 ```
 
-## Implementation strategy
+## Implementation strategy {#implementation-strategy}
 
 To enable a soft transition, we need to disambiguate between the classic (32-bit
 hashed) ordinal syntax and the proposed (64-bit explicit) ordinal syntax. This
@@ -190,7 +190,7 @@ unions nearing their end-of-life.
     (i.e. bits, enum, struct, table), except for unions. It's therefore a case that
     stands out as being different than others.
 
-##### Footnote3
+##### Footnote3 {#footnote3}
 
 _From: apang@google.com<br />
 To: fidl users list<br />

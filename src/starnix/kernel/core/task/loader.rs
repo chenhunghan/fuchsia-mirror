@@ -245,10 +245,19 @@ impl elf_load::Mapper for Mapper {
         length: usize,
         vmar_flags: zx::VmarFlags,
     ) -> Result<usize, zx::Status> {
-        let memory = if self.elf_memory.as_vmo() == Some(vmo) {
-            self.elf_memory.clone()
+        let (memory, options) = if self.elf_memory.as_vmo() == Some(vmo) {
+            // Non-writable ELF segments map the read-only `elf_memory` VMO directly; mark them
+            // `LAZY_PRIVATE_FILE` so `mprotect(PROT_WRITE)` promotes them onto a copy-on-write
+            // child VMO.
+            (
+                self.elf_memory.clone(),
+                MappingOptions::ELF_BINARY | MappingOptions::LAZY_PRIVATE_FILE,
+            )
         } else {
-            Arc::new(MemoryObject::from(vmo.duplicate_handle(zx::Rights::SAME_RIGHTS)?))
+            (
+                Arc::new(MemoryObject::from(vmo.duplicate_handle(zx::Rights::SAME_RIGHTS)?)),
+                MappingOptions::ELF_BINARY,
+            )
         };
         self.mm
             .map_memory(
@@ -267,7 +276,7 @@ impl elf_load::Mapper for Mapper {
                 vmo_offset,
                 length,
                 ProtectionFlags::from_vmar_flags(vmar_flags),
-                MappingOptions::ELF_BINARY,
+                options,
                 MappingName::File(self.file.clone()),
             )
             .map_err(|e| {
@@ -760,6 +769,7 @@ pub fn load_executable(
         MappingOptions::DONT_SPLIT,
         MappingName::Vdso,
     )?;
+    mm.set_vdso_base(vdso_base_address);
 
     let auxv = {
         let creds = current_task.current_creds();
@@ -838,8 +848,6 @@ pub fn load_executable(
     mm_state.argv_end = stack.argv_end;
     mm_state.environ_start = stack.environ_start;
     mm_state.environ_end = stack.environ_end;
-
-    mm_state.vdso_base = vdso_base_address;
 
     let ptr_size: usize =
         if main_elf.arch_width.is_arch32() { size_of::<u32>() } else { size_of::<*const u8>() };

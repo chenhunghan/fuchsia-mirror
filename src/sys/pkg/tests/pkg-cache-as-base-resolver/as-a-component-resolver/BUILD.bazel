@@ -11,8 +11,7 @@ package(default_applicable_licenses = ["//:license"])
 # TODO(https://fxbug.dev/564213227): Packaged in BUILD.gn by
 # base-resolver-as-a-component-resolver-tests*, which remain above the BAZEL2GN
 # SENTINEL while blocked on GN-only
-# //src/storage/testing:storage_driver_test_realm and
-# //src/sys/pkg/bin/pkg-cache:production-component-and-config.
+# //src/storage/testing:storage_driver_test_realm.
 rustc_test(
     name = "integration_test_bin",
     srcs = ["integration_test.rs"],

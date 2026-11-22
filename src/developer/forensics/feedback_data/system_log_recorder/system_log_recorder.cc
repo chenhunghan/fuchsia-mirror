@@ -33,22 +33,6 @@ constexpr zx::duration kNoRateLimitDuration = zx::sec(60);
 // disabled for the first 60 seconds.
 constexpr zx::duration kPurgeMemoryDuration = zx::sec(150);
 
-// On a restart, |log_source_| re-subscribes to Archivist with `SNAPSHOT_THEN_SUBSCRIBE`. To avoid
-// duplicating logs that were already written to disk before the restart, `store_` ignores messages
-// with timestamps at or before the last persisted timestamp.
-std::optional<zx::time_boot> LastPersistedTimestamp(const bool is_restart,
-                                                    const std::string& logs_dir,
-                                                    const StorageSize total_log_size,
-                                                    Decoder* decoder) {
-  if (!is_restart) {
-    return std::nullopt;
-  }
-
-  const fit::result<ReaderError, ConcatenateResult> result =
-      Concatenate(logs_dir, total_log_size, decoder);
-  return result.is_ok() ? result->last_timestamp : std::nullopt;
-}
-
 }  // namespace
 
 SystemLogRecorder::SystemLogRecorder(async_dispatcher_t* archive_dispatcher,
@@ -66,11 +50,16 @@ SystemLogRecorder::SystemLogRecorder(async_dispatcher_t* archive_dispatcher,
       is_restart_(files::IsDirectory(write_parameters.logs_dir)),
       store_(write_parameters.total_log_size / write_parameters.max_num_files,
              write_parameters.max_write_size, redactor_.get(), std::move(encoder),
-             LastPersistedTimestamp(is_restart_, write_parameters.logs_dir,
-                                    write_parameters.total_log_size, decoder.get())),
+             // On a restart, |log_source_| re-subscribes to Archivist with
+             // `SNAPSHOT_THEN_SUBSCRIBE`. To avoid duplicating logs that were already written to
+             // disk before the restart, `store_` ignores messages with timestamps at or before the
+             // last persisted timestamp.
+             is_restart_ ? ApproximateLastTimestamp(write_parameters.logs_dir, decoder.get())
+                         : std::nullopt),
       log_source_(archive_dispatcher, std::move(services), &store_),
       writer_(write_dispatcher, std::in_place, write_parameters.logs_dir,
-              write_parameters.max_num_files, write_parameters.total_log_size, std::move(decoder)),
+              write_parameters.max_num_files, write_parameters.total_log_size, std::move(decoder),
+              write_parameters.previous_logs_dir),
       receiver_(this, archive_dispatcher),
       next_collection_id_(0) {}
 

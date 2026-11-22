@@ -31,20 +31,20 @@ library_headers("headers") {
     # <phys/handoff-prep/handoff-prep.h> has #include <lib/zbitl/image.h>
     "//src/lib/zbitl:headers",
 
-    # <phys/handoff-prep/handoff-prep.h> has #include <phys/address-space.h>
-    "//zircon/kernel/phys:address-space.header",
+    # <phys/handoff-prep/handoff-prep.h> has #include
+    # <phys/address-space/address-space.h>
+    "//zircon/kernel/phys/address-space:headers",
 
-    # <phys/handoff-prep/handoff-prep.h> has #include <phys/elf-image.h>
-    "//zircon/kernel/phys:elf-image",
+    # <phys/handoff-prep/handoff-prep.h> has #include <phys/elf/image.h>
+    "//zircon/kernel/phys/elf:headers",
 
-    # <phys/handoff-prep/handoff-prep.h> has #include <phys/new.h>
-    "//zircon/kernel/phys:new",
+    # <phys/handoff-prep/handoff-prep.h> has #include <phys/output/uart.h>
+    "//zircon/kernel/phys/output:headers",
 
-    # <phys/handoff-prep/handoff-prep.h> has #include <phys/uart/driver.h>
-    "//zircon/kernel/phys/uart:headers",
-
-    # <phys/handoff-prep/handoff-prep.h> has #include <phys/zbitl-allocation.h>
-    "//zircon/kernel/phys:zbitl-allocation",
+    # <phys/handoff-prep/handoff-prep.h> has #include
+    # <phys/allocation/zbitl-allocation.h> <phys/handoff-prep/handoff-prep.h>
+    # has #include <phys/allocation/new.h>
+    "//zircon/kernel/phys/allocation",
 
     # <phys/handoff-prep/handoff-prep.h> has #include <phys/handoff/handoff.h>
     # <phys/handoff-prep/handoff-prep.h> has #include <phys/handoff/ptr.h>
@@ -85,18 +85,14 @@ source_set("handoff-prep") {
     "//zircon/kernel/lib/instrumentation",
     "//zircon/kernel/lib/ktl",
     "//zircon/kernel/lib/libc",
-    "//zircon/kernel/phys:address-space-map",
-    "//zircon/kernel/phys:allocation",
     "//zircon/kernel/phys:boot-options",
-    "//zircon/kernel/phys:elf-image",
-    "//zircon/kernel/phys:new",
-    "//zircon/kernel/phys:stdio",
-    "//zircon/kernel/phys:symbolize",
-    "//zircon/kernel/phys:zbitl-allocation",
+    "//zircon/kernel/phys/address-space",
+    "//zircon/kernel/phys/allocation",
+    "//zircon/kernel/phys/elf",
     "//zircon/kernel/phys/handoff",
     "//zircon/kernel/phys/lib/memalloc",
-    "//zircon/kernel/phys/log",
-    "//zircon/kernel/phys/runtime:headers",
+    "//zircon/kernel/phys/output",
+    "//zircon/kernel/phys/runtime",
     "//zircon/system/ulib/explicit-memory",
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/region-alloc:headers",
@@ -116,8 +112,8 @@ phys_zbi_test("zbi-handoff-entropy-test") {
     "//zircon/kernel/lib/ktl",
     "//zircon/kernel/lib/libc",
     "//zircon/kernel/lib/unittest",
-    "//zircon/kernel/phys:stdio",
-    "//zircon/kernel/phys:symbolize",
+    "//zircon/kernel/phys/output",
+    "//zircon/kernel/phys/runtime",
     "//zircon/kernel/phys/test:phys-unittest",
     "//zircon/kernel/phys/test:test-main",
     "//zircon/system/ulib/explicit-memory",

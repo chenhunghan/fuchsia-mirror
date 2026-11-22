@@ -150,7 +150,7 @@ ChildRecords:
     USR:             'FF6E214FEF5362F72C78D116CF75A4D33C8E5D67'
     Path:            'GlobalNamespace'
   - Type:            Record
-    Name:            'FidlXUnionField'
+    Name:            'FidlUnionField'
     USR:             '13138785D8D8F6C240E8697080EF919F879E5D81'
     Path:            'GlobalNamespace'
   - Type:            Record
@@ -178,7 +178,7 @@ ChildRecords:
     USR:             '568DD1803AFDCC30A35AEB097EA31B8E629F3202'
     Path:            'GlobalNamespace'
   - Type:            Record
-    Name:            'FidlCodedXUnion'
+    Name:            'FidlCodedUnion'
     USR:             'CE19F0AB2A89A8BC9E344D01E0DE860434EED964'
     Path:            'GlobalNamespace'
   - Type:            Record

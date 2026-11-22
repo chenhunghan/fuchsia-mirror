@@ -1,0 +1,73 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    tests = [":ffx_emulator_start_test"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+ffx_plugin(
+    name = "ffx_emulator_start",
+    srcs = [
+        "src/editor.rs",
+        "src/lib.rs",
+        "src/pbm.rs",
+    ],
+    args_deps = [
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/core:lib",
+        "//src/developer/ffx/lib/emulator_instance:lib",
+        "//src/developer/ffx/plugins/emulator/common:ffx_emulator_common",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    sdk_category = "not-yet-specified",
+    visibility = ["//src/developer/ffx/plugins/emulator:__pkg__"],
+    deps = [
+        "//build/sdk/meta:rust",
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/emulator_instance:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/pbms:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/developer/ffx/plugins/emulator/common:ffx_emulator_common",
+        "//src/developer/ffx/plugins/emulator/configuration:ffx_emulator_config",
+        "//src/developer/ffx/plugins/emulator/engines:ffx_emulator_engines",
+        "//src/lib/gcs",
+        "//src/lib/structured_ui",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:url",
+        "//third_party/rust_crates/vendor:zip",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_emulator_start_test",
+    compile_data = [
+        "test_data/device_1.json.template",
+        "test_data/virtual_device.json",
+    ],
+    crate = ":ffx_emulator_start",
+    deps = [
+        "//src/lib/assembly/assembled_system",
+        "//src/lib/assembly/partitions_config",
+        "//src/lib/assembly/product_bundle",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:mockall",
+    ],
+)

@@ -239,6 +239,90 @@ class TestConsole(unittest.IsolatedAsyncioTestCase):
             recorder.emit_end()
             await printer_task
 
+    @mock.patch("console.termout.is_valid", return_value=True)
+    @mock.patch(
+        "console.statusinfo.shutil.get_terminal_size",
+        return_value=mock.MagicMock(columns=200),
+    )
+    async def test_build_echoes_each_invocation(
+        self,
+        _terminal_size_mock: mock.Mock,
+        _is_valid_mock: mock.Mock,
+    ) -> None:
+        """Test that every `fx build` invocation of a build is echoed.
+
+        Bazel targets are built by `fx build` invocations separate from the
+        GN one, which may not run at all if only Bazel tests are selected.
+        """
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            recorder = event.EventRecorder()
+            default_flags = args.parse_args(["--status", "--no-style"])
+            status_event = asyncio.Event()
+            printer_task = asyncio.create_task(
+                console.ConsoleOutput().console_printer(
+                    recorder, default_flags, status_event
+                )
+            )
+            status_event.set()
+
+            recorder.emit_init()
+            build_id = recorder.emit_build_start(["@@//src:foo_test"])
+            pid = recorder.emit_program_start(
+                "fx",
+                ["--dir", "out/x", "build", "--host", "@@//src:foo_test"],
+                parent=build_id,
+                quiet_mode=True,
+            )
+            await asyncio.sleep(0.1)
+
+            recorder.emit_program_termination(pid, return_code=0)
+            recorder.emit_end(id=build_id)
+            recorder.emit_end()
+            await printer_task
+
+        self.assertIn("Refreshing 1 target", output.getvalue())
+        self.assertNotIn("Refreshing 1 targets", output.getvalue())
+        self.assertIn(
+            "> fx --dir out/x build --host @@//src:foo_test", output.getvalue()
+        )
+        self.assertNotIn("BUG", output.getvalue())
+
+    @mock.patch("console.termout.is_valid", return_value=True)
+    @mock.patch(
+        "console.statusinfo.shutil.get_terminal_size",
+        return_value=mock.MagicMock(columns=80),
+    )
+    async def test_build_with_no_targets_has_status_title(
+        self,
+        _terminal_size_mock: mock.Mock,
+        _is_valid_mock: mock.Mock,
+    ) -> None:
+        """Test that a build with no targets still gets a status line title."""
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            recorder = event.EventRecorder()
+            default_flags = args.parse_args(["--status", "--no-style"])
+            status_event = asyncio.Event()
+            printer_task = asyncio.create_task(
+                console.ConsoleOutput().console_printer(
+                    recorder, default_flags, status_event
+                )
+            )
+            status_event.set()
+
+            recorder.emit_init()
+            build_id = recorder.emit_build_start([])
+            # Wait for the status line to render while the build is active.
+            await asyncio.sleep(0.1)
+
+            recorder.emit_end(id=build_id)
+            recorder.emit_end()
+            await printer_task
+
+        self.assertIn("Refreshing 0 targets", output.getvalue())
+        self.assertNotIn("BUG", output.getvalue())
+
     @mock.patch("console.termout.is_valid", return_value=False)
     async def test_host_vs_non_hermetic_output(
         self,

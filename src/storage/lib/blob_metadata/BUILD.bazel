@@ -2,9 +2,18 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":blob-metadata-tests",
+    ],
+    visibility = ["//src/storage:__pkg__"],
+)
 
 rustc_library(
     name = "blob_metadata",
@@ -24,10 +33,13 @@ rustc_library(
     deps = [
         "//src/storage/lib/delivery_blob",
         "//src/storage/type-fprint:fprint",
-        "//src/sys/pkg/lib/fuchsia-merkle",
-        "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:serde",
         "//third_party/rust_crates/vendor:static_assertions",
         "//third_party/rust_crates/vendor:zerocopy",
     ],
+)
+
+fx_unittest_package(
+    name = "blob-metadata-tests",
+    unit_tests = [":blob_metadata_test"],
 )

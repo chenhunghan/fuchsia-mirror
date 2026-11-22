@@ -14,12 +14,6 @@
 static_assert(sizeof(ThreadDispatcher::CoreThreadObservation) == 2 * sizeof(uintptr_t));
 static_assert(alignof(ThreadDispatcher::CoreThreadObservation) == alignof(uintptr_t));
 
-// Keep in sync with `DummyArchExceptionContext` in `thread_dispatcher.rs` tests.
-// LINT.IfChange(arch_exception_context)
-static_assert(sizeof(arch_exception_context_t) == 32);
-static_assert(alignof(arch_exception_context_t) == 8);
-// LINT.ThenChange(//zircon/kernel/object/thread_dispatcher.rs:arch_exception_context)
-
 // The blocked reason crosses the FFI as a raw uint32_t in both directions (SetBlockedReason and
 // rust_thread_dispatcher_set_blocked_reason), and the mapping to zx_thread_state_t lives on the
 // Rust side, so the C++ enum is held to the Rust numbering here.
@@ -36,16 +30,6 @@ static_assert(static_cast<uint32_t>(ThreadDispatcher::Blocked::INTERRUPT) == 8);
 static_assert(static_cast<uint32_t>(ThreadDispatcher::Blocked::PAGER) == 9);
 // LINT.ThenChange(//zircon/kernel/object/thread_dispatcher.rs:Blocked)
 extern "C" {
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE ThreadDispatcher* cpp_thread_dispatcher_current() {
-  return ThreadDispatcher::GetCurrent();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_thread_dispatcher_is_current(const ThreadDispatcher* thread) {
-  return thread == ThreadDispatcher::GetCurrent();
-}
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE uintptr_t
@@ -121,45 +105,15 @@ FFI_ALWAYS_INLINE void cpp_thread_dispatcher_set_user_entry(ThreadDispatcher* th
   thread->set_user_entry(*entry);
 }
 
-// Attaches |thread| to its lower level kernel thread. This takes out an additional reference on
-// the ThreadDispatcher, which the kernel Thread holds until it exits.
-//
-// Thread::SetUsermodeThread() is a Thread method, so this would otherwise belong beside the
-// other Thread shims in kernel/thread_ffi.cc. It lives here because it names a ThreadDispatcher,
-// and the Rust `kernel` module must not depend on the `object` module.
-//
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_thread_dispatcher_attach_to_core_thread(ThreadDispatcher* thread,
-                                                                   Thread* core_thread) {
-  core_thread->SetUsermodeThread(fbl::RefPtr<ThreadDispatcher>(thread));
+FFI_ALWAYS_INLINE void cpp_thread_dispatcher_set_is_initial_thread(ThreadDispatcher* thread,
+                                                                   bool is_initial_thread) {
+  thread->set_is_initial_thread(is_initial_thread);
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE int cpp_thread_start_routine_entry(void* thread) {
   return ThreadDispatcher::StartRoutine(thread);
-}
-
-zx_status_t cpp_sys_thread_raise_exception(uint32_t options, zx_excp_type_t type,
-                                           const zx_exception_context_t* user_context) {
-  if (options != ZX_EXCEPTION_TARGET_JOB_DEBUGGER || type != ZX_EXCP_USER || !user_context) {
-    return ZX_ERR_INVALID_ARGS;
-  }
-
-  arch_exception_context_t context = {};
-  context.user_synth_code = user_context->synth_code;
-  context.user_synth_data = user_context->synth_data;
-
-  auto thread = ThreadDispatcher::GetCurrent();
-  thread->process()->OnUserExceptionForJobDebugger(thread, &context);
-  return ZX_OK;
-}
-
-// TRANSITIONAL: while arch_exception_context_t remains a C++ type on x86_64 and arm64.
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_thread_handle_single_shot_exiting(ProcessDispatcher* process,
-                                                             ThreadDispatcher* thread) {
-  arch_exception_context_t context{};
-  thread->HandleSingleShotException(process->debug_exceptionate(), ZX_EXCP_THREAD_EXITING, context);
 }
 
 // TRANSITIONAL: while `core_thread_` remains a C++ field. The core thread spinlock already lives

@@ -4,4 +4,4 @@
 
 mod image_assembly_config;
 
-pub use image_assembly_config::{BoardDriverArguments, ImageAssemblyConfig, KernelConfig};
+pub use image_assembly_config::{DriverBoardInfo, ImageAssemblyConfig, KernelConfig, PlatformId};

@@ -3,7 +3,6 @@
 # found in the LICENSE file.
 
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
 load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
@@ -61,7 +60,6 @@ go_library(
         "//tools/lib/hostplatform",
         "//tools/lib/jsonutil",
         "//tools/lib/logger",
-        "//tools/metadata:proto_lib",
         "//tools/testing/runtests",
     ],
 )
@@ -75,9 +73,9 @@ go_library(
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//:__subpackages__"],
     deps = [
-        "//third_party/golibs:google.golang.org/protobuf/encoding/prototext",
         "//tools/build",
-        "//tools/metadata:proto_lib",
+        "//tools/lib/owners",
+        "//tools/metadata",
     ],
 )
 
@@ -109,7 +107,7 @@ go_library(
 go_binary_host_tool(
     name = "testsharder",
     embed = [":main"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
 )
 
 host_go_test(

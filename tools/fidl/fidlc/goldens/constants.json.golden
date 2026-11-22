@@ -20,7 +20,7 @@
         "Bits"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 38,
         "column": 6,
         "length": 4
@@ -44,7 +44,7 @@
         {
           "name": "B",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 39,
             "column": 5,
             "length": 1
@@ -70,7 +70,7 @@
         "BitsType"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 23,
         "column": 6,
         "length": 8
@@ -94,7 +94,7 @@
         {
           "name": "VALUE",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 24,
             "column": 5,
             "length": 5
@@ -114,7 +114,7 @@
         {
           "name": "SECOND_VALUE",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 25,
             "column": 5,
             "length": 12
@@ -130,7 +130,7 @@
         {
           "name": "THIRD_VALUE",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 26,
             "column": 5,
             "length": 11
@@ -150,7 +150,7 @@
     {
       "name": "test.constants/BOOL",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 13,
         "column": 7,
         "length": 4
@@ -183,7 +183,7 @@
     {
       "name": "test.constants/FLOAT32",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 11,
         "column": 7,
         "length": 7
@@ -216,7 +216,7 @@
     {
       "name": "test.constants/FLOAT64",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 12,
         "column": 7,
         "length": 7
@@ -249,7 +249,7 @@
     {
       "name": "test.constants/INT16",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 8,
         "column": 7,
         "length": 5
@@ -282,7 +282,7 @@
     {
       "name": "test.constants/INT32",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 9,
         "column": 7,
         "length": 5
@@ -315,7 +315,7 @@
     {
       "name": "test.constants/INT64",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 10,
         "column": 7,
         "length": 5
@@ -348,7 +348,7 @@
     {
       "name": "test.constants/INT8",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 7,
         "column": 7,
         "length": 4
@@ -381,7 +381,7 @@
     {
       "name": "test.constants/STRING",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 14,
         "column": 7,
         "length": 6
@@ -414,7 +414,7 @@
     {
       "name": "test.constants/UINT16",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 4,
         "column": 7,
         "length": 6
@@ -447,7 +447,7 @@
     {
       "name": "test.constants/UINT32",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 5,
         "column": 7,
         "length": 6
@@ -480,7 +480,7 @@
     {
       "name": "test.constants/UINT64",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 6,
         "column": 7,
         "length": 6
@@ -513,7 +513,7 @@
     {
       "name": "test.constants/UINT8",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 3,
         "column": 7,
         "length": 5
@@ -546,7 +546,7 @@
     {
       "name": "test.constants/bitsPrimitiveVal",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 29,
         "column": 7,
         "length": 16
@@ -575,7 +575,7 @@
     {
       "name": "test.constants/bitsVal",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 28,
         "column": 7,
         "length": 7
@@ -605,7 +605,7 @@
     {
       "name": "test.constants/enumPrimitiveVal",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 21,
         "column": 7,
         "length": 16
@@ -634,7 +634,7 @@
     {
       "name": "test.constants/enumVal",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 20,
         "column": 7,
         "length": 7
@@ -664,7 +664,7 @@
     {
       "name": "test.constants/orResult",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 31,
         "column": 7,
         "length": 8
@@ -693,7 +693,7 @@
     {
       "name": "test.constants/orResultPrimitiveVal",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 32,
         "column": 7,
         "length": 20
@@ -726,7 +726,7 @@
         "Enum"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 34,
         "column": 6,
         "length": 4
@@ -737,7 +737,7 @@
         {
           "name": "E",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 35,
             "column": 5,
             "length": 1
@@ -763,7 +763,7 @@
         "EnumType"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 16,
         "column": 6,
         "length": 8
@@ -774,7 +774,7 @@
         {
           "name": "VALUE",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 17,
             "column": 5,
             "length": 5
@@ -789,7 +789,7 @@
         {
           "name": "SECOND_VALUE",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 18,
             "column": 5,
             "length": 12
@@ -816,7 +816,7 @@
         "Struct"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
         "line": 42,
         "column": 6,
         "length": 6
@@ -839,7 +839,7 @@
           },
           "name": "int64_with_default",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 44,
             "column": 5,
             "length": 18
@@ -850,7 +850,7 @@
               "name": "allow_deprecated_struct_defaults",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
                 "line": 43,
                 "column": 5,
                 "length": 33
@@ -888,7 +888,7 @@
           },
           "name": "string_with_default",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 46,
             "column": 5,
             "length": 19
@@ -899,7 +899,7 @@
               "name": "allow_deprecated_struct_defaults",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
                 "line": 45,
                 "column": 5,
                 "length": 33
@@ -937,7 +937,7 @@
           },
           "name": "bool_with_default",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 48,
             "column": 5,
             "length": 17
@@ -948,7 +948,7 @@
               "name": "allow_deprecated_struct_defaults",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
                 "line": 47,
                 "column": 5,
                 "length": 33
@@ -987,7 +987,7 @@
           },
           "name": "enum_with_default",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 50,
             "column": 5,
             "length": 17
@@ -998,7 +998,7 @@
               "name": "allow_deprecated_struct_defaults",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
                 "line": 49,
                 "column": 5,
                 "length": 33
@@ -1033,7 +1033,7 @@
           },
           "name": "bits_with_default",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
             "line": 52,
             "column": 5,
             "length": 17
@@ -1044,7 +1044,7 @@
               "name": "allow_deprecated_struct_defaults",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/constants.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/constants.test.fidl",
                 "line": 51,
                 "column": 5,
                 "length": 33

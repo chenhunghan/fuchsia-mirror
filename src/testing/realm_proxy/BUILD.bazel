@@ -2,9 +2,25 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
+
+cml_shard(
+    name = "service/meta/realm_proxy.shard",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    shard = "service/meta/realm_proxy.shard.cml",
+    visibility = [
+        "//sdk/ctf/tests/examples/fidl/fuchsia.examples/testing/realm-factory:__pkg__",
+        "//sdk/ctf/tests/fidl/fuchsia.element/testing/realm-factory:__pkg__",
+        "//src/sys/pkg/tests/pkgdir/test_realm_proxy:__pkg__",
+    ],
+)
 
 rustc_library(
     name = "realm_proxy",

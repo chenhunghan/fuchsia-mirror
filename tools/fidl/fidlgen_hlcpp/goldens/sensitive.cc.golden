@@ -214,7 +214,7 @@ SensitiveUnion::SensitiveUnion(SensitiveUnion&& other) : tag_(other.tag_) {
       new (&field_)::std::string();
       field_ = std::move(other.field_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid):
       break;
   }
 }
@@ -228,7 +228,7 @@ SensitiveUnion& SensitiveUnion::operator=(SensitiveUnion&& other) {
         new (&field_)::std::string();
         field_ = std::move(other.field_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid):
         break;
     }
   }
@@ -251,10 +251,10 @@ void SensitiveUnion::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<::std::string>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &field_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -263,11 +263,11 @@ void SensitiveUnion::Encode(::fidl::Encoder* encoder, size_t offset,
           &field_,
           encoder->Alloc(::fidl::EncodingInlineSize<::std::string, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -276,18 +276,18 @@ void SensitiveUnion::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void SensitiveUnion::Decode(::fidl::Decoder* _decoder, SensitiveUnion* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::sensitive::SensitiveUnion::Tag::kField: {
@@ -331,15 +331,15 @@ void SensitiveUnion::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid);
 }
 
-void SensitiveUnion::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void SensitiveUnion::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::sensitive::SensitiveUnion::Tag::Invalid):
         break;
       case ::test::sensitive::SensitiveUnion::Tag::kField:
         new (&field_)::std::string();
@@ -645,7 +645,7 @@ NonSensitiveUnion::NonSensitiveUnion(NonSensitiveUnion&& other) : tag_(other.tag
       new (&sensitive_struct_field_)::test::sensitive::SensitiveStruct();
       sensitive_struct_field_ = std::move(other.sensitive_struct_field_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid):
       break;
   }
 }
@@ -663,7 +663,7 @@ NonSensitiveUnion& NonSensitiveUnion::operator=(NonSensitiveUnion&& other) {
         new (&sensitive_struct_field_)::test::sensitive::SensitiveStruct();
         sensitive_struct_field_ = std::move(other.sensitive_struct_field_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid):
         break;
     }
   }
@@ -691,10 +691,10 @@ void NonSensitiveUnion::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<::std::string>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &sensitive_field_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -703,21 +703,21 @@ void NonSensitiveUnion::Encode(::fidl::Encoder* encoder, size_t offset,
           &sensitive_field_,
           encoder->Alloc(::fidl::EncodingInlineSize<::std::string, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::sensitive::NonSensitiveUnion::Tag::kSensitiveStructField: {
       if (::fidl::EncodingInlineSize<::test::sensitive::SensitiveStruct>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &sensitive_struct_field_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -726,11 +726,11 @@ void NonSensitiveUnion::Encode(::fidl::Encoder* encoder, size_t offset,
           &sensitive_struct_field_,
           encoder->Alloc(::fidl::EncodingInlineSize<::test::sensitive::SensitiveStruct, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -739,18 +739,18 @@ void NonSensitiveUnion::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void NonSensitiveUnion::Decode(::fidl::Decoder* _decoder, NonSensitiveUnion* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::sensitive::NonSensitiveUnion::Tag::kSensitiveField: {
@@ -812,15 +812,15 @@ void NonSensitiveUnion::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid);
 }
 
-void NonSensitiveUnion::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void NonSensitiveUnion::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::sensitive::NonSensitiveUnion::Tag::Invalid):
         break;
       case ::test::sensitive::NonSensitiveUnion::Tag::kSensitiveField:
         new (&sensitive_field_)::std::string();

@@ -45,7 +45,6 @@ fuchsia_driver_component("asix-88772b") {
   ]
   component_name = "asix-88772b"
   deps = [ ":asix-88772b-driver" ]
-  info = "meta/asix-88772b-info.json"
   manifest = "meta/asix-88772b.cml"
 }
 

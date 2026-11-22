@@ -2,9 +2,273 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//src/lib/dso:fuchsia_dso.bzl",
+    "fuchsia_cc_dso",
+    "fuchsia_rust_dso",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":dso_runner_tests"],
+    visibility = ["//src/sys:__pkg__"],
+)
 
 exports_files(
     ["meta/dso_runner.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/component.rs",
+        "src/error.rs",
+        "src/loader.rs",
+        "src/main.rs",
+        "src/util.rs",
+    ],
+    binary_name = "dso_runner",
+    edition = "2024",
+    link_deps = [
+        "//sdk/lib/async-default",
+        "//src/devices/bin/driver_runtime",
+    ],
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+        "//third_party/rust_crates/vendor:derivative",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_rust",
+        "//sdk/lib/driver/runtime/rust",
+        "//sdk/lib/driver/runtime/rust/env",
+        "//sdk/lib/driver/runtime/rust/fdf_sys",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-sync",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/lib/elf_runner",
+        "//src/sys/lib/library_loader",
+        "//src/sys/lib/namespace",
+        "//src/sys/lib/runner",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fuchsia_cc_dso(
+    name = "simple_sync",
+    testonly = True,
+    srcs = ["test/simple_sync.cc"],
+    is_async = False,
+    deps = ["//zircon/system/ulib/zx"],
+)
+
+fuchsia_cc_dso(
+    name = "simple_async",
+    testonly = True,
+    srcs = ["test/simple_async.cc"],
+    is_async = True,
+    deps = [
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fuchsia_cc_dso(
+    name = "hanging_sync",
+    testonly = True,
+    srcs = ["test/hanging_sync.cc"],
+    is_async = False,
+    deps = [
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fuchsia_cc_dso(
+    name = "hanging_async",
+    testonly = True,
+    srcs = ["test/hanging_async.cc"],
+    is_async = True,
+    deps = ["//zircon/system/ulib/zx"],
+)
+
+fuchsia_cc_dso(
+    name = "waiting_sync",
+    testonly = True,
+    srcs = ["test/waiting_sync.cc"],
+    is_async = False,
+    deps = [
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fuchsia_cc_dso(
+    name = "waiting_async",
+    testonly = True,
+    srcs = ["test/waiting_async.cc"],
+    is_async = True,
+    deps = [
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp",
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fuchsia_cc_dso(
+    name = "error_sync",
+    testonly = True,
+    srcs = ["test/error_sync.cc"],
+    is_async = False,
+)
+
+fuchsia_cc_dso(
+    name = "error_async",
+    testonly = True,
+    srcs = ["test/error_async.cc"],
+    is_async = True,
+)
+
+# rustc_cdylib does not support testonly
+fuchsia_rust_dso(
+    name = "rust_sync",
+    srcs = ["test/rust_sync.rs"],
+    crate_root = "test/rust_sync.rs",
+    edition = "2024",
+)
+
+# rustc_cdylib does not support testonly
+fuchsia_rust_dso(
+    name = "rust_async",
+    srcs = ["test/rust_async.rs"],
+    crate_root = "test/rust_async.rs",
+    edition = "2024",
+)
+
+# rustc_cdylib does not support testonly
+fuchsia_rust_dso(
+    name = "rust_error_sync",
+    srcs = ["test/rust_error_sync.rs"],
+    crate_root = "test/rust_error_sync.rs",
+    edition = "2024",
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "dso_runner",
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    component_name = "dso_runner",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/vulkan:client.shard",
+    ],
+    manifest = "meta/dso_runner.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":component_manifest",
+    visibility = ["//src/sys/runners/dso/tests:__pkg__"],
+    deps = [":bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Preserves GN `output_name = "dso_runner_bin_test"` expected by
+    # `meta/dso_runner_tests.cml`.
+    crate_name = "dso_runner_bin_test",
+    link_deps = [
+        ":error_async",
+        ":error_sync",
+        ":hanging_async",
+        ":hanging_sync",
+        ":rust_async",
+        ":rust_error_sync",
+        ":rust_sync",
+        ":simple_async",
+        ":simple_sync",
+        ":waiting_async",
+        ":waiting_sync",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
+        "//src/lib/fdio/rust:fdio",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_test_packaged_bin",
+    testonly = True,
+    binary = ":bin_test",
+    binary_name = "dso_runner_bin_test",
+)
+
+fx_component_manifest(
+    name = "dso_runner_tests_manifest",
+    testonly = True,
+    component_name = "dso_runner_tests",
+    includes = [
+        "//sdk/lib/sys/testing:rust_test_runner.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/dso_runner_tests.cml",
+)
+
+fx_test_component(
+    name = "dso_runner_tests_component",
+    compiled_manifest = ":dso_runner_tests_manifest",
+    deps = [":bin_test_packaged_bin"],
+)
+
+fx_package(
+    name = "dso_runner_tests_package",
+    package_name = "dso_runner_tests",
+    test_components = [":dso_runner_tests_component"],
+)
+
+fx_test(
+    name = "dso_runner_tests",
+    package = ":dso_runner_tests_package",
 )

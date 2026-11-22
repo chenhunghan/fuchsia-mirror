@@ -3477,6 +3477,33 @@ void Flatland::ResetLayerImage(LayerId layer_id) {
   UnbindLayerImage(GetLayerObject(it->second));
 }
 
+void Flatland::NotifyExpectedPresent(NotifyExpectedPresentRequestView request,
+                                     NotifyExpectedPresentCompleter::Sync& completer) {
+  const zx::time expected_present_time(request->has_expected_present_time() &&
+                                               request->expected_present_time().get() > 0
+                                           ? request->expected_present_time().get()
+                                           : 0);
+  const zx::duration frame_interval(request->has_frame_interval() && request->frame_interval() > 0
+                                        ? request->frame_interval()
+                                        : 0);
+  NotifyExpectedPresent(expected_present_time, frame_interval);
+}
+
+void Flatland::NotifyExpectedPresent(zx::time expected_present_time, zx::duration frame_interval) {
+  if (!config_.use_flatland2) {
+    error_reporter_->ERROR() << "NotifyExpectedPresent called, but Flatland2 not enabled";
+    CloseConnection(FlatlandError::kBadOperation);
+    return;
+  }
+
+  const zx::time sanitized_time =
+      expected_present_time > zx::time(0) ? expected_present_time : zx::time(0);
+  const zx::duration sanitized_interval =
+      frame_interval > zx::duration(0) ? frame_interval : zx::duration(0);
+  flatland_presenter_->NotifyExpectedPresent(session_id_, sanitized_time, sanitized_interval,
+                                             config_.schedule_asap);
+}
+
 void Flatland::OnNextFrameBegin(uint32_t additional_present_credits,
                                 FuturePresentationInfos presentation_infos) {
   TRACE_DURATION("gfx", "Flatland::OnNextFrameBegin");

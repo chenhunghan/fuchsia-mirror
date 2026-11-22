@@ -1336,7 +1336,7 @@ class ArmDevicetreeSmmuItem : public DevicetreeItemBase<ArmDevicetreeSmmuItem, 2
                                const devicetree::PropertyDecoder& decoder);
   devicetree::ScanState OnScan();
 
-  size_t size_bytes() const { return ItemSize(smmu_cnt_ * sizeof(zbi_dcfg_arm_smmu_driver_t)); }
+  size_t size_bytes() const { return ItemSize(smmu_cnt_ * sizeof(zbi_dcfg_arm_smmu_v2_driver_t)); }
   fit::result<DataZbi::Error> AppendItems(DataZbi& zbi) const;
 
  private:
@@ -1359,7 +1359,7 @@ class ArmDevicetreeSmmuItem : public DevicetreeItemBase<ArmDevicetreeSmmuItem, 2
   }
 
   const Allocator* allocator_{nullptr};
-  std::span<zbi_dcfg_arm_smmu_driver_t> data_{};
+  std::span<zbi_dcfg_arm_smmu_v2_driver_t> data_;
   uint32_t pass_cnt_{0};
   uint32_t smmu_cnt_{0};
 };

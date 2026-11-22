@@ -4,6 +4,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <fidl/fuchsia.component.decl/cpp/fidl.h>
+#include <fidl/fuchsia.component/cpp/fidl.h>
+#include <fidl/fuchsia.io/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
 #include <fidl/test.placeholders/cpp/fidl.h>
 #include <fuchsia/component/cpp/fidl.h>
 #include <fuchsia/component/decl/cpp/fidl.h>
@@ -14,6 +18,7 @@
 #include <fuchsia/sys2/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async/dispatcher.h>
+#include <lib/component/incoming/cpp/protocol.h>
 #include <lib/fdio/namespace.h>
 #include <lib/fidl/cpp/binding_set.h>
 #include <lib/fidl/cpp/comparison.h>
@@ -50,6 +55,7 @@ namespace fdecl = fuchsia::component::decl;
 constexpr char kEchoServerUrl[] =
     "fuchsia-pkg://fuchsia.com/component_cpp_testing_realm_builder_tests#meta/echo_server.cm";
 constexpr char kEchoServerScUrl[] = "#meta/echo_server_sc.cm";
+constexpr char kEchoServerConfigCapUrl[] = "#meta/echo_server_config_cap.cm";
 constexpr char kEchoServerFragmentOnlyUrl[] = "#meta/echo_server.cm";
 constexpr char kEchoServiceServerUrl[] = "#meta/echo_service_server.cm";
 
@@ -209,6 +215,157 @@ TEST_F(RealmBuilderTest, SetConfigValueFails) {
       "");
 }
 
+TEST_F(RealmBuilderTest, ConfigCapabilityDefaultValuesOnly) {
+  static constexpr char kEchoServerConfigCap[] = "echo_server_config_cap";
+
+  auto realm_builder = RealmBuilder::Create();
+  realm_builder.AddChild(kEchoServerConfigCap, kEchoServerConfigCapUrl);
+  realm_builder.AddRoute(Route{.capabilities = {Protocol{fuchsia::logger::LogSink::Name_}},
+                               .source = ParentRef(),
+                               .targets = {ChildRef{kEchoServerConfigCap}}});
+  realm_builder.AddRoute(Route{.capabilities = {Protocol{test::placeholders::Echo::Name_}},
+                               .source = ChildRef{kEchoServerConfigCap},
+                               .targets = {ParentRef()}});
+  auto realm = realm_builder.Build(dispatcher());
+  auto echo = realm.component().ConnectSync<test::placeholders::Echo>();
+  fidl::StringPtr response;
+  ASSERT_EQ(echo->EchoString("hello", &response), ZX_OK);
+  EXPECT_EQ(response,
+            fidl::StringPtr(
+                "hello "
+                "[1][255][65535][4000000000][8000000000][-127][-32766][-2000000000][-4000000000]["
+                "hello][1,0,][1,2,][2,3,][3,4,][4,5,][-1,-2,][-2,-3,][-3,-4,][-4,-5,][foo,bar,]"));
+}
+
+TEST_F(RealmBuilderTest, RoutesAllConfigCapabilities) {
+  static constexpr char kEchoServerConfigCap[] = "echo_server_config_cap";
+
+  auto realm_builder = RealmBuilder::Create();
+  realm_builder.AddChild(kEchoServerConfigCap, kEchoServerConfigCapUrl);
+  std::vector<ConfigCapability> configurations;
+  configurations.push_back({.name = "fuchsia.config.MyFlag", .value = ConfigValue::Bool(false)});
+  configurations.push_back({.name = "fuchsia.config.MyUint8", .value = ConfigValue::Uint8(1)});
+  configurations.push_back({.name = "fuchsia.config.MyUint16", .value = ConfigValue::Uint16(1)});
+  configurations.push_back({.name = "fuchsia.config.MyUint32", .value = ConfigValue::Uint32(1)});
+  configurations.push_back({.name = "fuchsia.config.MyUint64", .value = ConfigValue::Uint64(1)});
+  configurations.push_back({.name = "fuchsia.config.MyInt8", .value = ConfigValue::Int8(-1)});
+  configurations.push_back({.name = "fuchsia.config.MyInt16", .value = ConfigValue::Int16(-1)});
+  configurations.push_back({.name = "fuchsia.config.MyInt32", .value = ConfigValue::Int32(-1)});
+  configurations.push_back({.name = "fuchsia.config.MyInt64", .value = ConfigValue::Int64(-1)});
+  configurations.push_back({.name = "fuchsia.config.MyString", .value = "foo"});
+  configurations.push_back(
+      {.name = "fuchsia.config.MyVectorOfFlag", .value = std::vector<bool>{false, true}});
+  configurations.push_back(
+      {.name = "fuchsia.config.MyVectorOfUint8", .value = std::vector<uint8_t>{1, 1}});
+  configurations.push_back(
+      {.name = "fuchsia.config.MyVectorOfUint16", .value = std::vector<uint16_t>{1, 1}});
+  configurations.push_back(
+      {.name = "fuchsia.config.MyVectorOfUint32", .value = std::vector<uint32_t>{1, 1}});
+  configurations.push_back(
+      {.name = "fuchsia.config.MyVectorOfUint64", .value = std::vector<uint64_t>{1, 1}});
+  configurations.push_back(
+      {.name = "fuchsia.config.MyVectorOfInt8", .value = std::vector<int8_t>{-1, 1}});
+  configurations.push_back(
+      {.name = "fuchsia.config.MyVectorOfInt16", .value = std::vector<int16_t>{-1, 1}});
+  configurations.push_back(
+      {.name = "fuchsia.config.MyVectorOfInt32", .value = std::vector<int32_t>{-1, 1}});
+  configurations.push_back(
+      {.name = "fuchsia.config.MyVectorOfInt64", .value = std::vector<int64_t>{-1, 1}});
+  configurations.push_back(
+      {.name = "fuchsia.config.MyVectorOfString", .value = std::vector<std::string>{"bar", "foo"}});
+  realm_builder.AddConfiguration(std::move(configurations));
+  realm_builder.AddRoute(Route{.capabilities =
+                                   {
+                                       Config{.name = "fuchsia.config.MyFlag"},
+                                       Config{.name = "fuchsia.config.MyUint8"},
+                                       Config{.name = "fuchsia.config.MyUint16"},
+                                       Config{.name = "fuchsia.config.MyUint32"},
+                                       Config{.name = "fuchsia.config.MyUint64"},
+                                       Config{.name = "fuchsia.config.MyInt8"},
+                                       Config{.name = "fuchsia.config.MyInt16"},
+                                       Config{.name = "fuchsia.config.MyInt32"},
+                                       Config{.name = "fuchsia.config.MyInt64"},
+                                       Config{.name = "fuchsia.config.MyString"},
+                                       Config{.name = "fuchsia.config.MyVectorOfFlag"},
+                                       Config{.name = "fuchsia.config.MyVectorOfUint8"},
+                                       Config{.name = "fuchsia.config.MyVectorOfUint16"},
+                                       Config{.name = "fuchsia.config.MyVectorOfUint32"},
+                                       Config{.name = "fuchsia.config.MyVectorOfUint64"},
+                                       Config{.name = "fuchsia.config.MyVectorOfInt8"},
+                                       Config{.name = "fuchsia.config.MyVectorOfInt16"},
+                                       Config{.name = "fuchsia.config.MyVectorOfInt32"},
+                                       Config{.name = "fuchsia.config.MyVectorOfInt64"},
+                                       Config{.name = "fuchsia.config.MyVectorOfString"},
+                                   },
+                               .source = SelfRef{},
+                               .targets = {ChildRef{kEchoServerConfigCap}}});
+  realm_builder.AddRoute(Route{.capabilities = {Protocol{test::placeholders::Echo::Name_}},
+                               .source = ChildRef{kEchoServerConfigCap},
+                               .targets = {ParentRef()}});
+  realm_builder.AddRoute(Route{.capabilities = {Protocol{fuchsia::logger::LogSink::Name_}},
+                               .source = ParentRef(),
+                               .targets = {ChildRef{kEchoServerConfigCap}}});
+  auto realm = realm_builder.Build(dispatcher());
+  auto echo = realm.component().ConnectSync<test::placeholders::Echo>();
+  fidl::StringPtr response;
+  ASSERT_EQ(echo->EchoString("hello", &response), ZX_OK);
+  EXPECT_EQ(response, fidl::StringPtr("hello "
+                                      "[0][1][1][1][1][-1][-1][-1][-1][foo][0,1,][1,1,][1,1,][1,1,]"
+                                      "[1,1,][-1,1,][-1,1,][-1,1,][-1,1,][bar,foo,]"));
+}
+
+TEST_F(RealmBuilderTest, MixDefaultAndRoutedConfigCapabilities) {
+  static constexpr char kEchoServerConfigCap[] = "echo_server_config_cap";
+
+  auto realm_builder = RealmBuilder::Create();
+  realm_builder.AddChild(kEchoServerConfigCap, kEchoServerConfigCapUrl);
+  std::vector<ConfigCapability> configurations;
+  configurations.push_back({.name = "fuchsia.config.MyFlag", .value = ConfigValue::Bool(false)});
+  configurations.push_back({.name = "fuchsia.config.MyUint8", .value = ConfigValue::Uint8(1)});
+  configurations.push_back({.name = "fuchsia.config.MyUint16", .value = ConfigValue::Uint16(1)});
+  configurations.push_back({.name = "fuchsia.config.MyUint32", .value = ConfigValue::Uint32(1)});
+  configurations.push_back({.name = "fuchsia.config.MyUint64", .value = ConfigValue::Uint64(1)});
+  configurations.push_back({.name = "fuchsia.config.MyInt8", .value = ConfigValue::Int8(-1)});
+  configurations.push_back({.name = "fuchsia.config.MyInt16", .value = ConfigValue::Int16(-1)});
+  configurations.push_back({.name = "fuchsia.config.MyInt32", .value = ConfigValue::Int32(-1)});
+  configurations.push_back({.name = "fuchsia.config.MyInt64", .value = ConfigValue::Int64(-1)});
+  configurations.push_back({.name = "fuchsia.config.MyString", .value = "foo"});
+  realm_builder.AddConfiguration(std::move(configurations));
+  realm_builder.AddRoute(Route{.capabilities =
+                                   {
+                                       Config{.name = "fuchsia.config.MyFlag"},
+                                       Config{.name = "fuchsia.config.MyUint8"},
+                                       Config{.name = "fuchsia.config.MyUint16"},
+                                       Config{.name = "fuchsia.config.MyUint32"},
+                                       Config{.name = "fuchsia.config.MyUint64"},
+                                       Config{.name = "fuchsia.config.MyInt8"},
+                                       Config{.name = "fuchsia.config.MyInt16"},
+                                       Config{.name = "fuchsia.config.MyInt32"},
+                                       Config{.name = "fuchsia.config.MyInt64"},
+                                       Config{.name = "fuchsia.config.MyString"},
+                                   },
+                               .source = SelfRef{},
+                               .targets = {ChildRef{kEchoServerConfigCap}}});
+  realm_builder.AddRoute(
+      Route{.capabilities = {Config{.name = "fuchsia.config.MyVectorOfFlag",
+                                    .availability = fdecl::Availability::OPTIONAL}},
+            .source = VoidRef{},
+            .targets = {ChildRef{kEchoServerConfigCap}}});
+  realm_builder.AddRoute(Route{.capabilities = {Protocol{test::placeholders::Echo::Name_}},
+                               .source = ChildRef{kEchoServerConfigCap},
+                               .targets = {ParentRef()}});
+  realm_builder.AddRoute(Route{.capabilities = {Protocol{fuchsia::logger::LogSink::Name_}},
+                               .source = ParentRef(),
+                               .targets = {ChildRef{kEchoServerConfigCap}}});
+  auto realm = realm_builder.Build(dispatcher());
+  auto echo = realm.component().ConnectSync<test::placeholders::Echo>();
+  fidl::StringPtr response;
+  ASSERT_EQ(echo->EchoString("hello", &response), ZX_OK);
+  EXPECT_EQ(response, fidl::StringPtr("hello "
+                                      "[0][1][1][1][1][-1][-1][-1][-1][foo][1,0,][1,2,][2,3,][3,4,]"
+                                      "[4,5,][-1,-2,][-2,-3,][-3,-4,][-4,-5,][foo,bar,]"));
+}
+
 TEST_F(RealmBuilderTest, RoutesProtocolFromRelativeChild) {
   static constexpr char kEchoServer[] = "echo_server";
 
@@ -246,29 +403,6 @@ TEST_F(RealmBuilderTest, RoutesProtocolFromDictionary) {
   ASSERT_EQ(echo->EchoString("hello", &response), ZX_OK);
   EXPECT_EQ(response, fidl::StringPtr("hello"));
 }
-
-// TODO(https://fxbug.dev/296292544): Remove when build support for API level 16 is removed.
-#if FUCHSIA_API_LEVEL_LESS_THAN(17)
-class LocalEchoServerByPtr : public test::placeholders::Echo, public LocalComponent {
- public:
-  explicit LocalEchoServerByPtr(async_dispatcher_t* dispatcher) : dispatcher_(dispatcher) {}
-
-  void EchoString(fidl::StringPtr value, EchoStringCallback callback) override {
-    callback(std::move(value));
-  }
-
-  void Start(std::unique_ptr<LocalComponentHandles> handles) override {
-    handles_ = std::move(handles);
-    ASSERT_EQ(handles_->outgoing()->AddPublicService(bindings_.GetHandler(this, dispatcher_)),
-              ZX_OK);
-  }
-
- private:
-  async_dispatcher_t* const dispatcher_;
-  fidl::BindingSet<test::placeholders::Echo> bindings_;
-  std::unique_ptr<LocalComponentHandles> handles_;
-};
-#endif
 
 class LocalEchoServer : public test::placeholders::Echo, public LocalComponentImpl {
  public:
@@ -313,52 +447,6 @@ class LocalEchoServer : public test::placeholders::Echo, public LocalComponentIm
   fidl::BindingSet<test::placeholders::Echo> bindings_;
   bool exit_after_serve_;
 };
-
-// TODO(https://fxbug.dev/296292544): Remove when build support for API level 16 is removed.
-#if FUCHSIA_API_LEVEL_LESS_THAN(17)
-// Tests and demonstrates that the deprecated AddLocalChild(LocalComponent*)
-// still works.
-//
-// The Realm does not manage the lifecycle of LocalComponents added by raw
-// pointer, which means the API cannot assume the pointer is always valid, and
-// in many existing use cases, the pointer does become invalid while the
-// Realm is still active.
-//
-// A mandatory assumption is that the pointer is valid when the Realm is built
-// and calls LocalComponent::Start(). After that, RealmBuilder will not
-// interact with the component.
-//
-// The component cannot be restarted.
-TEST_F(RealmBuilderTest, RoutesProtocolFromLocalComponentRawPointer) {
-  static constexpr char kEchoServer[] = "echo_server";
-  LocalEchoServerByPtr local_echo_server(dispatcher());
-  auto realm_builder = RealmBuilder::Create();
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-  realm_builder.AddLocalChild(kEchoServer, &local_echo_server);
-#pragma clang diagnostic pop
-  realm_builder.AddRoute(
-      Route{.capabilities = {Protocol{fidl::DiscoverableProtocolName<test_placeholders::Echo>}},
-            .source = ChildRef{kEchoServer},
-            .targets = {ParentRef()}});
-  auto realm = realm_builder.Build(dispatcher());
-  auto cleanup = fit::defer([&]() {
-    bool complete = false;
-    realm.Teardown([&](fit::result<fuchsia::component::Error> result) { complete = true; });
-    RunLoopUntil([&]() { return complete; });
-  });
-  auto echo_client = realm.component().Connect<test_placeholders::Echo>();
-  ASSERT_TRUE(echo_client.is_ok());
-  fidl::Client echo(std::move(*echo_client), dispatcher());
-  bool was_called = false;
-  echo->EchoString({"hello"}).Then([&](fidl::Result<test_placeholders::Echo::EchoString>& result) {
-    was_called = true;
-    ASSERT_TRUE(result.is_ok());
-    ASSERT_EQ(result->response(), "hello");
-  });
-  RunLoopUntil([&]() { return was_called; });
-}
-#endif
 
 // Demonstrates the recommended pattern for implementing a restartable
 // LocalComponentImpl. A new LocalComponentImpl is returned when requested.
@@ -1173,6 +1261,440 @@ TEST_F(RealmBuilderTest, PanicsWhenUsingHandlesFromConstructor) {
         RunLoop();
       },
       "LocalComponentImplBase::Exit\\(\\) cannot be called until RealmBuilder calls Initialize\\(\\)");
+
+  class UseCppSvcTooEarly : public LocalCppComponent {
+   public:
+    UseCppSvcTooEarly() { std::ignore = svc(); }
+
+    void OnStart() override {}
+  };
+
+  ASSERT_DEATH(
+      {
+        auto realm_builder = RealmBuilder::Create();
+        realm_builder.AddLocalChild(
+            "child", []() { return std::make_unique<UseCppSvcTooEarly>(); },
+            ChildOptions{.startup_mode = StartupMode::EAGER});
+        auto realm = realm_builder.Build(dispatcher());
+        RunLoop();
+      },
+      "LocalCppComponent::svc\\(\\) cannot be called until RealmBuilder calls Initialize\\(\\)");
+
+  class UseCppOutgoingTooEarly : public LocalCppComponent {
+   public:
+    UseCppOutgoingTooEarly() { std::ignore = outgoing(); }
+
+    void OnStart() override {}
+  };
+
+  ASSERT_DEATH(
+      {
+        auto realm_builder = RealmBuilder::Create();
+        realm_builder.AddLocalChild(
+            "child", []() { return std::make_unique<UseCppOutgoingTooEarly>(); },
+            ChildOptions{.startup_mode = StartupMode::EAGER});
+        auto realm = realm_builder.Build(dispatcher());
+        RunLoop();
+      },
+      "LocalCppComponent::outgoing\\(\\) cannot be called until RealmBuilder calls Initialize\\(\\)");
+}
+
+class LocalEchoServerCpp : public fidl::Server<test_placeholders::Echo>, public LocalCppComponent {
+ public:
+  explicit LocalEchoServerCpp(async_dispatcher_t* dispatcher) : dispatcher_(dispatcher) {}
+
+  void EchoString(EchoStringRequest& request, EchoStringCompleter::Sync& completer) override {
+    completer.Reply({{.response = request.value()}});
+  }
+
+  void OnStart() override {
+    zx::result result = outgoing()->AddUnmanagedProtocol<test_placeholders::Echo>(
+        bindings_.CreateHandler(this, dispatcher_, fidl::kIgnoreBindingClosure));
+    ASSERT_TRUE(result.is_ok()) << result.status_string();
+  }
+
+ private:
+  async_dispatcher_t* dispatcher_;
+  fidl::ServerBindingGroup<test_placeholders::Echo> bindings_;
+};
+
+class LocalEchoClientCpp : public LocalCppComponent {
+ public:
+  LocalEchoClientCpp(async_dispatcher_t* dispatcher, fit::closure on_success)
+      : dispatcher_(dispatcher), on_success_(std::move(on_success)) {}
+
+  void OnStart() override {
+    // Verify svc() + component::ConnectAt<Protocol>.
+    zx::result<fidl::ClientEnd<fuchsia_io::Directory>> svc_dir = svc();
+    ASSERT_TRUE(svc_dir.is_ok()) << svc_dir.status_string();
+    zx::result<fidl::ClientEnd<test_placeholders::Echo>> echo_from_svc =
+        component::ConnectAt<test_placeholders::Echo>(*svc_dir);
+    ASSERT_TRUE(echo_from_svc.is_ok()) << echo_from_svc.status_string();
+
+    // Verify LocalCppComponent::Connect<Protocol>().
+    zx::result<fidl::ClientEnd<test_placeholders::Echo>> echo_end =
+        Connect<test_placeholders::Echo>();
+    ASSERT_TRUE(echo_end.is_ok()) << echo_end.status_string();
+    connect_client_.Bind(std::move(*echo_end), dispatcher_);
+    svc_client_.Bind(std::move(*echo_from_svc), dispatcher_);
+    connect_client_->EchoString({{.value = "natural-hello"}})
+        .ThenExactlyOnce([this](fidl::Result<test_placeholders::Echo::EchoString>& result) {
+          ASSERT_TRUE(result.is_ok()) << result.error_value().FormatDescription();
+          ASSERT_EQ(result->response(), "natural-hello");
+
+          svc_client_->EchoString({{.value = "svc-hello"}})
+              .ThenExactlyOnce([this](fidl::Result<test_placeholders::Echo::EchoString>& second) {
+                ASSERT_TRUE(second.is_ok()) << second.error_value().FormatDescription();
+                ASSERT_EQ(second->response(), "svc-hello");
+                if (on_success_) {
+                  on_success_();
+                }
+                Exit();
+              });
+        });
+  }
+
+ private:
+  async_dispatcher_t* dispatcher_;
+  fidl::Client<test_placeholders::Echo> connect_client_;
+  fidl::Client<test_placeholders::Echo> svc_client_;
+  fit::closure on_success_;
+};
+
+TEST_F(RealmBuilderTest, RoutesProtocolBetweenLocalCppComponents) {
+  static constexpr char kEchoServer[] = "echo_server";
+  static constexpr char kEchoClient[] = "echo_client";
+
+  auto realm_builder = RealmBuilder::Create();
+  realm_builder.AddLocalChild(
+      kEchoServer, [this]() { return std::make_unique<LocalEchoServerCpp>(dispatcher()); });
+  bool client_succeeded = false;
+  realm_builder.AddLocalChild(
+      kEchoClient,
+      [this, &client_succeeded]() {
+        return std::make_unique<LocalEchoClientCpp>(
+            dispatcher(), [&client_succeeded]() { client_succeeded = true; });
+      },
+      ChildOptions{.startup_mode = StartupMode::EAGER});
+  realm_builder.AddRoute(
+      Route{.capabilities = {Protocol{fidl::DiscoverableProtocolName<test_placeholders::Echo>}},
+            .source = ChildRef{kEchoServer},
+            .targets = {ChildRef{kEchoClient}, ParentRef()}});
+
+  auto realm = realm_builder.Build(dispatcher());
+  auto cleanup = fit::defer([&]() {
+    bool complete = false;
+    realm.Teardown([&](fit::result<fuchsia_component::Error> result) {
+      EXPECT_TRUE(result.is_ok());
+      complete = true;
+    });
+    RunLoopUntil([&]() { return complete; });
+  });
+
+  RunLoopUntil([&]() { return client_succeeded; });
+}
+
+TEST_F(RealmBuilderTest, LocalCppComponentSvcReturnsErrorWhenUnrouted) {
+  class UnroutedClientCpp : public LocalCppComponent {
+   public:
+    explicit UnroutedClientCpp(fit::function<void(zx_status_t, zx_status_t)> on_done)
+        : on_done_(std::move(on_done)) {}
+
+    void OnStart() override {
+      zx::result svc_dir = svc();
+      zx::result echo_end = Connect<test_placeholders::Echo>();
+      on_done_(svc_dir.status_value(), echo_end.status_value());
+      Exit();
+    }
+
+   private:
+    fit::function<void(zx_status_t, zx_status_t)> on_done_;
+  };
+
+  std::optional<std::pair<zx_status_t, zx_status_t>> statuses;
+  auto realm_builder = RealmBuilder::Create();
+  realm_builder.AddLocalChild(
+      "unrouted",
+      [&statuses]() {
+        return std::make_unique<UnroutedClientCpp>(
+            [&statuses](zx_status_t svc_status, zx_status_t connect_status) {
+              statuses = std::make_pair(svc_status, connect_status);
+            });
+      },
+      ChildOptions{.startup_mode = StartupMode::EAGER});
+  auto realm = realm_builder.Build(dispatcher());
+  auto cleanup = fit::defer([&]() {
+    bool complete = false;
+    realm.Teardown([&](auto result) {
+      static_assert(std::is_same_v<decltype(result), fit::result<fuchsia::component::Error>>);
+      EXPECT_TRUE(result.is_ok());
+      complete = true;
+    });
+    RunLoopUntil([&]() { return complete; });
+  });
+
+  RunLoopUntil([&]() { return statuses.has_value(); });
+  EXPECT_EQ(statuses->first, ZX_ERR_NOT_FOUND);
+  EXPECT_EQ(statuses->second, ZX_ERR_NOT_FOUND);
+}
+
+TEST_F(RealmBuilderTest, UsesProvidedNaturalSvcDirectory) {
+  static constexpr char kEchoServer[] = "echo_server";
+  static constexpr char kPrePopulatedRealmUrl[] = "#meta/pre_populated_realm.cm";
+
+  {
+    zx::result svc = component::OpenServiceRoot();
+    ASSERT_TRUE(svc.is_ok()) << svc.status_string();
+    auto realm_builder = RealmBuilder::Create(std::move(*svc));
+    realm_builder.AddChild(kEchoServer, kEchoServerUrl);
+    realm_builder.AddRoute(
+        Route{.capabilities = {Protocol{fidl::DiscoverableProtocolName<test_placeholders::Echo>}},
+              .source = ChildRef{kEchoServer},
+              .targets = {ParentRef()}});
+    auto realm = realm_builder.Build(dispatcher());
+    zx::result echo_end = realm.component().Connect<test_placeholders::Echo>();
+    ASSERT_TRUE(echo_end.is_ok()) << echo_end.status_string();
+    fidl::SyncClient<test_placeholders::Echo> echo(std::move(*echo_end));
+    auto response = echo->EchoString({{.value = "hello"}});
+    ASSERT_TRUE(response.is_ok()) << response.error_value().FormatDescription();
+    EXPECT_EQ(response->response(), "hello");
+  }
+
+  {
+    zx::result svc = component::OpenServiceRoot();
+    ASSERT_TRUE(svc.is_ok()) << svc.status_string();
+    auto realm_builder =
+        RealmBuilder::CreateFromRelativeUrl(kPrePopulatedRealmUrl, std::move(*svc));
+    auto realm = realm_builder.Build(dispatcher());
+    zx::result echo_end = realm.component().Connect<test_placeholders::Echo>();
+    ASSERT_TRUE(echo_end.is_ok()) << echo_end.status_string();
+    fidl::SyncClient<test_placeholders::Echo> echo(std::move(*echo_end));
+    auto response = echo->EchoString({{.value = "from-relative"}});
+    ASSERT_TRUE(response.is_ok()) << response.error_value().FormatDescription();
+    EXPECT_EQ(response->response(), "from-relative");
+  }
+}
+
+TEST_F(RealmBuilderTest, ScopedChildNaturalApis) {
+  // 1. ScopedChild::New with ClientEnd<fuchsia_io::Directory> (explicit name + random name).
+  {
+    zx::result svc = component::OpenServiceRoot();
+    ASSERT_TRUE(svc.is_ok()) << svc.status_string();
+    auto child =
+        ScopedChild::New(kDefaultCollection, "natural_named_echo", kEchoServerUrl, std::move(*svc));
+    EXPECT_EQ(child.GetChildName(), "natural_named_echo");
+
+    // Verify exposed_dir().
+    zx::result from_exposed = component::ConnectAt<test_placeholders::Echo>(child.exposed_dir());
+    ASSERT_TRUE(from_exposed.is_ok()) << from_exposed.status_string();
+    fidl::SyncClient<test_placeholders::Echo> echo1(std::move(*from_exposed));
+    auto res1 = echo1->EchoString({{.value = "via-exposed-dir"}});
+    ASSERT_TRUE(res1.is_ok()) << res1.error_value().FormatDescription();
+    EXPECT_EQ(res1->response(), "via-exposed-dir");
+
+    // Verify CloneExposedDir(ServerEnd<fuchsia_io::Directory>).
+    auto [cloned_client, cloned_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
+    child.CloneExposedDir(std::move(cloned_server));
+    zx::result from_cloned = component::ConnectAt<test_placeholders::Echo>(cloned_client);
+    ASSERT_TRUE(from_cloned.is_ok()) << from_cloned.status_string();
+    fidl::SyncClient<test_placeholders::Echo> echo2(std::move(*from_cloned));
+    auto res2 = echo2->EchoString({{.value = "via-cloned-dir"}});
+    ASSERT_TRUE(res2.is_ok()) << res2.error_value().FormatDescription();
+    EXPECT_EQ(res2->response(), "via-cloned-dir");
+
+    // Verify Connect<Protocol>(ServerEnd<Protocol>).
+    auto [echo_client, echo_server] = fidl::Endpoints<test_placeholders::Echo>::Create();
+    ASSERT_EQ(child.Connect<test_placeholders::Echo>(std::move(echo_server)), ZX_OK);
+    fidl::SyncClient<test_placeholders::Echo> echo3(std::move(echo_client));
+    auto res3 = echo3->EchoString({{.value = "via-server-end"}});
+    ASSERT_TRUE(res3.is_ok()) << res3.error_value().FormatDescription();
+    EXPECT_EQ(res3->response(), "via-server-end");
+
+    // Verify natural ScopedChild::Teardown.
+    bool torn_down = false;
+    child.Teardown(dispatcher(), [&](fit::result<fuchsia_component::Error> result) {
+      EXPECT_TRUE(result.is_ok());
+      torn_down = true;
+    });
+    RunLoopUntil([&]() { return torn_down; });
+  }
+
+  // 2. ScopedChild::New with ClientEnd<fuchsia_io::Directory> (random name) + generic auto
+  // Teardown.
+  {
+    zx::result svc = component::OpenServiceRoot();
+    ASSERT_TRUE(svc.is_ok()) << svc.status_string();
+    auto child = ScopedChild::New(kDefaultCollection, kEchoServerUrl, std::move(*svc));
+    EXPECT_FALSE(child.GetChildName().empty());
+
+    bool torn_down = false;
+    child.Teardown(dispatcher(), [&](auto result) {
+      static_assert(std::is_same_v<decltype(result), fit::result<fuchsia::component::Error>>);
+      EXPECT_TRUE(result.is_ok());
+      torn_down = true;
+    });
+    RunLoopUntil([&]() { return torn_down; });
+  }
+
+  // 3. ScopedChild::New with ClientEnd<fuchsia_component::Realm> (explicit name + random name).
+  {
+    zx::result realm_client = component::Connect<fuchsia_component::Realm>();
+    ASSERT_TRUE(realm_client.is_ok()) << realm_client.status_string();
+    auto named_child = ScopedChild::New(std::move(*realm_client), kDefaultCollection,
+                                        "natural_realm_named_echo", kEchoServerUrl);
+    EXPECT_EQ(named_child.GetChildName(), "natural_realm_named_echo");
+    zx::result echo_end = named_child.Connect<test_placeholders::Echo>();
+    ASSERT_TRUE(echo_end.is_ok()) << echo_end.status_string();
+    fidl::SyncClient<test_placeholders::Echo> echo(std::move(*echo_end));
+    auto res = echo->EchoString({{.value = "from-realm-client"}});
+    ASSERT_TRUE(res.is_ok()) << res.error_value().FormatDescription();
+    EXPECT_EQ(res->response(), "from-realm-client");
+  }
+
+  {
+    zx::result realm_client = component::Connect<fuchsia_component::Realm>();
+    ASSERT_TRUE(realm_client.is_ok()) << realm_client.status_string();
+    auto auto_child =
+        ScopedChild::New(std::move(*realm_client), kDefaultCollection, kEchoServerUrl);
+    EXPECT_FALSE(auto_child.GetChildName().empty());
+  }
+}
+
+TEST_F(RealmBuilderTest, NaturalDictionaryCapabilitiesCollectionsAndEnvironments) {
+  static constexpr char kEchoServer[] = "echo_server";
+
+  auto realm_builder = RealmBuilder::Create();
+  realm_builder.AddChild(kEchoServer, kEchoServerFragmentOnlyUrl);
+  realm_builder.AddDictionary("root_dict");
+  realm_builder.AddCapability(
+      fuchsia_component_decl::Capability::WithProtocol(fuchsia_component_decl::Protocol{{
+          .name = "custom.RootProtocol",
+          .source_path = "/svc/custom.RootProtocol",
+      }}));
+  realm_builder.AddCollection(fuchsia_component_decl::Collection{{
+      .name = "custom_col",
+      .durability = fuchsia_component_decl::Durability::kTransient,
+  }});
+  realm_builder.AddEnvironment(fuchsia_component_decl::Environment{{
+      .name = "custom_env",
+      .extends = fuchsia_component_decl::EnvironmentExtends::kRealm,
+  }});
+
+  auto sub_realm = realm_builder.AddChildRealm("sub");
+  sub_realm.AddDictionary("sub_dict");
+  sub_realm.AddCapability(
+      fuchsia_component_decl::Capability::WithProtocol(fuchsia_component_decl::Protocol{{
+          .name = "custom.SubProtocol",
+          .source_path = "/svc/custom.SubProtocol",
+      }}));
+  sub_realm.AddCollection(fuchsia_component_decl::Collection{{
+      .name = "sub_col",
+      .durability = fuchsia_component_decl::Durability::kTransient,
+  }});
+  sub_realm.AddEnvironment(fuchsia_component_decl::Environment{{
+      .name = "sub_env",
+      .extends = fuchsia_component_decl::EnvironmentExtends::kNone,
+      .stop_timeout_ms = 1000,
+  }});
+
+  auto root_decl = realm_builder.GetRealmDecl();
+  EXPECT_EQ(root_decl.capabilities().size(), 2u);
+  EXPECT_EQ(root_decl.collections().size(), 1u);
+  EXPECT_EQ(root_decl.collections()[0].name(), "custom_col");
+  EXPECT_EQ(root_decl.environments().size(), 1u);
+  EXPECT_EQ(root_decl.environments()[0].name(), "custom_env");
+
+  auto sub_decl = sub_realm.GetRealmDecl();
+  EXPECT_EQ(sub_decl.capabilities().size(), 2u);
+  EXPECT_EQ(sub_decl.collections().size(), 1u);
+  EXPECT_EQ(sub_decl.collections()[0].name(), "sub_col");
+  EXPECT_EQ(sub_decl.environments().size(), 1u);
+  EXPECT_EQ(sub_decl.environments()[0].name(), "sub_env");
+
+  realm_builder.AddRoute(
+      Route{.capabilities = {Protocol{fidl::DiscoverableProtocolName<test_placeholders::Echo>}},
+            .source = ChildRef{kEchoServer},
+            .targets = {DictionaryRef{.base_ref = SelfRef(), .path = "root_dict"}}});
+  realm_builder.AddRoute(
+      Route{.capabilities = {Protocol{fidl::DiscoverableProtocolName<test_placeholders::Echo>}},
+            .source = DictionaryRef{.base_ref = SelfRef(), .path = "root_dict"},
+            .targets = {ParentRef()}});
+
+  auto realm = realm_builder.Build(dispatcher());
+  zx::result echo_end = realm.component().Connect<test_placeholders::Echo>();
+  ASSERT_TRUE(echo_end.is_ok()) << echo_end.status_string();
+  fidl::SyncClient<test_placeholders::Echo> echo(std::move(*echo_end));
+  auto response = echo->EchoString({{.value = "dict-hello"}});
+  ASSERT_TRUE(response.is_ok()) << response.error_value().FormatDescription();
+  EXPECT_EQ(response->response(), "dict-hello");
+}
+
+TEST_F(RealmBuilderTest, NaturalAddChildRealmFromDeclAndReplaceDecls) {
+  static constexpr char kEchoServer[] = "echo_server";
+  static constexpr char kSubRealm[] = "sub_realm";
+  static constexpr char kNestedRealm[] = "nested_realm";
+
+  auto make_expose_from_child = [](std::string_view child_name) {
+    return std::vector<fuchsia_component_decl::Expose>{
+        fuchsia_component_decl::Expose::WithProtocol(fuchsia_component_decl::ExposeProtocol{{
+            .source = fuchsia_component_decl::Ref::WithChild(
+                fuchsia_component_decl::ChildRef{{.name = std::string(child_name)}}),
+            .source_name = std::string(fidl::DiscoverableProtocolName<test_placeholders::Echo>),
+            .target = fuchsia_component_decl::Ref::WithParent({}),
+            .target_name = std::string(fidl::DiscoverableProtocolName<test_placeholders::Echo>),
+        }}),
+    };
+  };
+
+  fuchsia_component_decl::Component nested_decl{{
+      .children =
+          std::vector<fuchsia_component_decl::Child>{
+              fuchsia_component_decl::Child{{
+                  .name = kEchoServer,
+                  .url = kEchoServerUrl,
+                  .startup = fuchsia_component_decl::StartupMode::kLazy,
+              }},
+          },
+  }};
+
+  auto realm_builder = RealmBuilder::Create();
+  auto sub_realm =
+      realm_builder.AddChildRealmFromDecl(kSubRealm, fuchsia_component_decl::Component{});
+  auto nested_realm = sub_realm.AddChildRealmFromDecl(kNestedRealm, std::move(nested_decl));
+
+  // Mutate nested_realm's decl via Realm::ReplaceRealmDecl, then also via
+  // Realm::ReplaceComponentDecl on sub_realm.
+  fuchsia_component_decl::Component updated_nested_decl{{
+      .exposes = make_expose_from_child(kEchoServer),
+      .children =
+          std::vector<fuchsia_component_decl::Child>{
+              fuchsia_component_decl::Child{{
+                  .name = kEchoServer,
+                  .url = kEchoServerUrl,
+                  .startup = fuchsia_component_decl::StartupMode::kLazy,
+              }},
+          },
+  }};
+  nested_realm.ReplaceRealmDecl(updated_nested_decl);
+  sub_realm.ReplaceComponentDecl(kNestedRealm, std::move(updated_nested_decl));
+
+  // Mutate kSubRealm's decl via RealmBuilder::ReplaceComponentDecl (realm_builder_server merges
+  // child realms added via AddChildRealm* into `children` during Build()).
+  realm_builder.ReplaceComponentDecl(
+      kSubRealm,
+      fuchsia_component_decl::Component{{.exposes = make_expose_from_child(kNestedRealm)}});
+
+  // Mutate root realm's decl via RealmBuilder::ReplaceRealmDecl.
+  realm_builder.ReplaceRealmDecl(
+      fuchsia_component_decl::Component{{.exposes = make_expose_from_child(kSubRealm)}});
+
+  auto realm = realm_builder.Build(dispatcher());
+  zx::result echo_end = realm.component().Connect<test_placeholders::Echo>();
+  ASSERT_TRUE(echo_end.is_ok()) << echo_end.status_string();
+  fidl::SyncClient<test_placeholders::Echo> echo(std::move(*echo_end));
+  auto response = echo->EchoString({{.value = "decl-hello"}});
+  ASSERT_TRUE(response.is_ok()) << response.error_value().FormatDescription();
+  EXPECT_EQ(response->response(), "decl-hello");
 }
 
 TEST_F(RealmBuilderTest, PanicsWhenBuildCalledMultipleTimes) {
@@ -1223,18 +1745,6 @@ TEST(RealmBuilderUnittest, PanicsWhenArgsAreNullptr) {
         realm_builder.Build(nullptr);
       },
       "");
-
-#if FUCHSIA_API_LEVEL_LESS_THAN(17)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-  ASSERT_DEATH(
-      {
-        auto realm_builder = RealmBuilder::Create();
-        realm_builder.AddLocalChild("some_valid_name", nullptr);
-      },
-      "");
-#pragma clang diagnostic pop
-#endif
 }
 
 TEST(DirectoryContentsUnittest, PanicWhenGivenInvalidPath) {

@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::crypto::global_prng;
 use crate::kernel::deadline::Deadline;
 use crate::kernel::event::AutounsignalEvent;
 use crate::kernel::thread::{self, AutoPreemptDisabler, ThreadPtr};
@@ -19,10 +20,6 @@ use pin_init::{PinInit, pin_data, pin_init, stack_pin_init};
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 use zx_status::Status;
-
-unsafe extern "C" {
-    fn cpp_global_prng_draw(buffer: *mut u8, len: usize);
-}
 
 crate::counters::define_kcounter!(
     PQ_COMPRESS_DEBUG_RANDOM_COMPRESSION,
@@ -116,10 +113,7 @@ impl DebugCompressor {
         }?;
 
         let mut seed = [0u8; 32];
-        // SAFETY: cpp_global_prng_draw writes size_of_val(&seed) bytes into seed.
-        unsafe {
-            cpp_global_prng_draw(seed.as_mut_ptr(), core::mem::size_of_val(&seed));
-        }
+        global_prng::draw(&mut seed);
         let rng = SmallRng::from_seed(seed);
 
         let _apd = AutoPreemptDisabler::new();

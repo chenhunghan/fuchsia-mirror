@@ -8,7 +8,7 @@ found can drop for several reasons, including:
 
 To distinguish between these, you need to be able to assess and improve your fuzzer.
 
-## Improve code coverage
+## Improve code coverage {#improve-code-coverage}
 
 Note: This information is for the deprecated `fx fuzz` tool. Similar workflows are in development
 for the `ffx fuzz` tool.

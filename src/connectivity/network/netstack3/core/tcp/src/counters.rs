@@ -309,6 +309,16 @@ impl<'a> TcpCountersRefs<'a> {
         cb(stack_wide).increment();
         cb(per_socket).increment();
     }
+
+    pub(crate) fn add<F: Fn(&TcpCountersWithSocketInner<Counter>) -> &Counter>(
+        &self,
+        value: u64,
+        cb: F,
+    ) {
+        let Self { stack_wide, per_socket } = self;
+        cb(stack_wide).add(value);
+        cb(per_socket).add(value);
+    }
 }
 
 /// Increments the stack-wide counters, and optionally the per-resouce counters.
@@ -329,6 +339,29 @@ pub(crate) fn increment_counter_with_optional_socket_id<I, CC, BT, D, F>(
     match socket_id {
         Some(id) => core_ctx.increment_both(id, cb),
         None => cb(core_ctx.counters()).increment(),
+    }
+}
+
+/// Adds `value` to the stack-wide counters, and optionally the per-resource
+/// counters.
+///
+/// Like [`increment_counter_with_optional_socket_id`], but adds an arbitrary
+/// value.
+pub(crate) fn add_counter_with_optional_socket_id<I, CC, BT, D, F>(
+    core_ctx: &CC,
+    socket_id: Option<&TcpSocketId<I, D, BT>>,
+    value: u64,
+    cb: F,
+) where
+    I: DualStackIpExt,
+    CC: TcpCounterContext<I, D, BT>,
+    D: WeakDeviceIdentifier,
+    BT: TcpBindingsTypes,
+    F: Fn(&TcpCountersWithSocket<I>) -> &Counter,
+{
+    match socket_id {
+        Some(id) => core_ctx.add_both(id, value, cb),
+        None => cb(core_ctx.counters()).add(value),
     }
 }
 

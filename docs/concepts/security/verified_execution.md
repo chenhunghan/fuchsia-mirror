@@ -162,7 +162,7 @@ verification responsibility is delegated.
     verification of all remaining preauthorized code that is not part of the ZBI
     or the package management system.
 
-#### Direct vs Indirect Verification
+#### Direct vs indirect verification {:#direct-vs-indirect-verification}
 
 Direct verification specifies exactly *what* to trust by precisely describing
 the software that is permitted to run (for example, using a cryptographic hash

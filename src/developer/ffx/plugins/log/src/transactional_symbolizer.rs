@@ -25,12 +25,21 @@ use crate::condition_variable::LocalConditionVariable;
 use crate::error::LogError;
 use crate::mutex::LocalOrderedMutex;
 
+/// Grace period to wait for a crashing/exiting symbolizer child process to become reapable
+/// after its pipes close so its exit status/signal can be reported accurately.
+const SYMBOLIZER_EXIT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Connection to a symbolizer.
 pub trait SymbolizerProcess {
     type Stdin;
     type Stdout;
     fn take_stdin(&mut self) -> Option<Self::Stdin>;
     fn take_stdout(&mut self) -> Option<Self::Stdout>;
+    /// Shuts down or reaps the symbolizer process after an error. When `wait_for_natural_exit`
+    /// is true, waits briefly for the process to finish exiting on its own before killing it.
+    async fn shutdown(&mut self, _wait_for_natural_exit: bool) -> Option<std::process::ExitStatus> {
+        None
+    }
 }
 
 /// Symbolizer state that can only be accessed by one future at a time.
@@ -41,7 +50,8 @@ where
     T::Stdout: AsyncRead + Unpin,
     T: SymbolizerProcess,
 {
-    stdin: T::Stdin,
+    process: T,
+    stdin: Option<T::Stdin>,
     stdout: Option<AsyncTransactionReader<T::Stdout>>,
     /// Pending write buffer if kernel write buffer is full.
     pending_buffer: Option<(String, usize)>,
@@ -53,8 +63,24 @@ where
     T::Stdout: AsyncRead + Unpin,
     T: SymbolizerProcess,
 {
-    fn new(stdin: T::Stdin, stdout: T::Stdout) -> Self {
-        Self { stdin, stdout: Some(AsyncTransactionReader::new(stdout)), pending_buffer: None }
+    fn new(process: T, stdin: T::Stdin, stdout: T::Stdout) -> Self {
+        Self {
+            process,
+            stdin: Some(stdin),
+            stdout: Some(AsyncTransactionReader::new(stdout)),
+            pending_buffer: None,
+        }
+    }
+
+    async fn close_and_shutdown(
+        &mut self,
+        wait_for_natural_exit: bool,
+    ) -> Option<std::process::ExitStatus> {
+        let status = self.process.shutdown(wait_for_natural_exit).await;
+        self.stdin = None;
+        self.stdout = None;
+        self.pending_buffer = None;
+        status
     }
 }
 
@@ -81,19 +107,26 @@ where
     T::Stdout: AsyncRead + Unpin + Debug,
     T: SymbolizerProcess + 'static,
 {
-    async fn symbolize(&self, entry: LogEntry) -> Option<LogEntry> {
+    async fn symbolize(&self, mut entry: LogEntry) -> Option<LogEntry> {
         if self.disabled.get() {
+            // Acquire the ordered mutex so entries arriving after symbolization is disabled
+            // stay ordered behind any entries still draining through `state.lock()`.
+            let _guard = self.state.lock().await;
             return Some(entry);
         }
-        let LogEntry { data } = entry;
-        match self.symbolize_internal(LogEntry { data }).await {
-            Ok(entry) => Some(entry),
+        match self.symbolize_internal(&mut entry).await {
+            Ok(()) => Some(entry),
             Err(ReadError::EmptyOutputFromSymbolizer) => None,
             Err(error) => {
-                self.disabled.set(true);
-                let error = error.to_string();
-                eprintln!("Internal symbolizer error: {error}. Symbolization has been disabled.");
-                None
+                if !self.disabled.replace(true) {
+                    self.pending_lines.borrow_mut().clear();
+                }
+                let message = format!(
+                    "Symbolizer is broken ({error}). Symbolization has been disabled; continuing to print unsymbolized logs."
+                );
+                log::error!("{message}");
+                eprintln!("\nERROR: {message}\n");
+                Some(entry)
             }
         }
     }
@@ -250,6 +283,7 @@ impl<'a> UnescapedMessage<'a> {
 }
 
 /// Real implementation of the symbolizer, not used by tests.
+#[derive(Debug)]
 pub struct RealSymbolizerProcess {
     process: Child,
 }
@@ -298,6 +332,25 @@ impl SymbolizerProcess for RealSymbolizerProcess {
     fn take_stdout(&mut self) -> Option<Self::Stdout> {
         self.process.stdout.take().map(|stdout| BufReader::new(stdout))
     }
+
+    async fn shutdown(&mut self, wait_for_natural_exit: bool) -> Option<std::process::ExitStatus> {
+        if let Ok(Some(status)) = self.process.try_wait() {
+            return Some(status);
+        }
+        if wait_for_natural_exit {
+            let mut wait_fut = std::pin::pin!(self.process.wait().fuse());
+            let mut timer_fut =
+                std::pin::pin!(fuchsia_async::Timer::new(SYMBOLIZER_EXIT_WAIT_TIMEOUT).fuse());
+            if let Some(status) = select! {
+                res = wait_fut => Some(res.ok()),
+                _ = timer_fut => None,
+            } {
+                return status;
+            }
+        }
+        let _ = self.process.kill().await;
+        None
+    }
 }
 
 impl<T> TransactionalSymbolizer<T>
@@ -307,19 +360,32 @@ where
     T::Stdout: AsyncRead + Unpin + Debug,
 {
     pub fn new(mut symbolizer_process: T) -> Result<Self, ReadError> {
+        let stdin = symbolizer_process.take_stdin().ok_or(ReadError::NoStdin)?;
+        let stdout = symbolizer_process.take_stdout().ok_or(ReadError::NoStdout)?;
         Ok(Self {
             pending_lines: RefCell::new(VecDeque::new()),
-            state: LocalOrderedMutex::new(SymbolizerState::new(
-                symbolizer_process.take_stdin().ok_or(ReadError::NoStdin)?,
-                symbolizer_process.take_stdout().ok_or(ReadError::NoStdout)?,
-            )),
+            state: LocalOrderedMutex::new(SymbolizerState::new(symbolizer_process, stdin, stdout)),
             current_transaction_id: Cell::new(0),
             line_available_event: LocalConditionVariable::new(),
             disabled: Cell::new(false),
         })
     }
 
-    async fn symbolize_internal(&self, mut entry: LogEntry) -> Result<LogEntry, ReadError> {
+    async fn disable_and_shutdown(
+        &self,
+        state: &mut SymbolizerState<T>,
+        err: ReadError,
+        wait_for_natural_exit: bool,
+    ) -> ReadError {
+        self.disabled.set(true);
+        self.pending_lines.borrow_mut().clear();
+        match state.close_and_shutdown(wait_for_natural_exit).await {
+            Some(status) => ReadError::ProcessExited(status),
+            None => err,
+        }
+    }
+
+    async fn symbolize_internal(&self, entry: &mut LogEntry) -> Result<(), ReadError> {
         // Get a transaction ID, later these will be generated on-device
         // and then translated to global IDs once devices support transactional logs.
         let id = self.current_transaction_id.get();
@@ -337,9 +403,12 @@ where
         self.line_available_event.notify_one();
         // Execute symbolization, only one future can execute at once
         let mut state = self.state.lock().await;
+        if self.disabled.get() {
+            return Ok(());
+        }
         // Write any pending lines to the symbolizer and check for incoming messages
         // from the device.
-        let (txn_id, msg) = loop {
+        let result = loop {
             // Check for incoming lines from the device, and output from the symbolizer concurrently.
             // Write lines to the symbolizer as space becomes available in the write buffer.
             // This Future is polled when one of the following happens:
@@ -349,34 +418,58 @@ where
             // Ordering doesn't matter here so select! is OK instead of select_biased!.
 
             // Take out stdout so state isn't borrowed mutably twice.
-            let mut stdout = state.stdout.take().unwrap();
-            let v = select! {
-                res = stdout.next().fuse() => res,
+            let Some(mut stdout) = state.stdout.take() else {
+                break Err((ReadError::StdoutClosed, true));
+            };
+            let outcome = select! {
+                res = stdout.next().fuse() => match res {
+                    Some(Ok(value)) => Some(Ok(value)),
+                    Some(Err(err)) => {
+                        let wait_for_exit = matches!(err, ReadError::IoError(_));
+                        Some(Err((err, wait_for_exit)))
+                    }
+                    None => Some(Err((ReadError::StdoutClosed, true))),
+                },
                 _ = self.line_available_event.clone().fuse() => None,
-                _ = self.write_lines_to_symbolizer(&mut state).fuse() => None,
+                res = self.write_lines_to_symbolizer(&mut state).fuse() => match res {
+                    Ok(()) => None,
+                    Err(err) => Some(Err((err, true))),
+                },
             };
             state.stdout = Some(stdout);
-            if let Some(v) = v {
-                break v;
+            if let Some(outcome) = outcome {
+                break outcome;
             }
-        }?;
+        };
+        let (txn_id, msg) = match result {
+            Ok(value) => value,
+            Err((err, wait_for_natural_exit)) => {
+                return Err(self
+                    .disable_and_shutdown(&mut state, err, wait_for_natural_exit)
+                    .await);
+            }
+        };
 
         // The TXN ID we get from the symbolizer should always match the expected TXN.
-        assert_eq!(txn_id, id);
+        if txn_id != id {
+            return Err(self
+                .disable_and_shutdown(&mut state, ReadError::MismatchedTransaction, false)
+                .await);
+        }
         let msg = EscapedMessage::from(msg.as_str()).unescape().to_string();
         // Message wasn't changed by the symbolizer.
         if msg == target_log.msg().unwrap_or("") {
-            return Ok(entry);
+            return Ok(());
         }
         // Message was changed by the symbolizer and is empty,
         // omit the message to avoid printing an extra newline.
         if msg.is_empty() {
             return Err(ReadError::EmptyOutputFromSymbolizer);
         }
-        *target_log
-            .msg_mut()
-            .expect("if a symbolized message is provided then the payload has a message") = msg;
-        Ok(entry)
+        if let Some(target_msg) = target_log.msg_mut() {
+            *target_msg = msg;
+        }
+        Ok(())
     }
 
     /// Performs a write to the symbolizer. If the write would block, returns 0.
@@ -385,8 +478,14 @@ where
         buffer: &[u8],
         state: &mut SymbolizerState<T>,
     ) -> Result<usize, ReadError> {
-        Ok(poll_fn(|context| match Pin::new(&mut state.stdin).poll_write(context, buffer) {
+        let Some(stdin) = state.stdin.as_mut() else {
+            return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into());
+        };
+        Ok(poll_fn(|context| match Pin::new(&mut *stdin).poll_write(context, buffer) {
             Poll::Pending => Poll::Ready(Ok(0)),
+            Poll::Ready(Ok(0)) if !buffer.is_empty() => {
+                Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::WriteZero)))
+            }
             Poll::Ready(output) => Poll::Ready(output),
         })
         .await?)
@@ -449,6 +548,10 @@ pub enum ReadError {
     EmptyOutputFromSymbolizer,
     #[error("Unexpected message received before a valid transaction ID")]
     UnexpectedMessageOutsideTransaction,
+    #[error("symbolizer process exited unexpectedly ({0})")]
+    ProcessExited(std::process::ExitStatus),
+    #[error("symbolizer closed stdout unexpectedly")]
+    StdoutClosed,
 }
 
 #[derive(Debug)]
@@ -604,6 +707,7 @@ mod tests {
     use assert_matches::assert_matches;
     use diagnostics_data::{BuilderArgs, Data, Logs, LogsDataBuilder, Severity, Timestamp};
     use fuchsia_sync::Mutex;
+    use futures::stream::FuturesUnordered;
     use log_command_fdomain::LogData;
     use std::fmt::Write;
     use std::sync::Arc;
@@ -658,6 +762,7 @@ mod tests {
     struct FakeProcess {
         stdin: Option<DuplexStream>,
         stdout: Option<DuplexStream>,
+        shutdown_called: Arc<Mutex<bool>>,
     }
 
     impl SymbolizerProcess for FakeProcess {
@@ -672,11 +777,31 @@ mod tests {
         fn take_stdout(&mut self) -> Option<Self::Stdout> {
             self.stdout.take()
         }
+
+        async fn shutdown(
+            &mut self,
+            _wait_for_natural_exit: bool,
+        ) -> Option<std::process::ExitStatus> {
+            *self.shutdown_called.lock() = true;
+            None
+        }
     }
 
     impl FakeProcess {
         fn new(stdin: DuplexStream, stdout: DuplexStream) -> Self {
-            Self { stdin: Some(stdin), stdout: Some(stdout) }
+            Self {
+                stdin: Some(stdin),
+                stdout: Some(stdout),
+                shutdown_called: Arc::new(Mutex::new(false)),
+            }
+        }
+
+        fn new_with_shutdown_tracker(
+            stdin: DuplexStream,
+            stdout: DuplexStream,
+            shutdown_called: Arc<Mutex<bool>>,
+        ) -> Self {
+            Self { stdin: Some(stdin), stdout: Some(stdout), shutdown_called }
         }
     }
 
@@ -868,12 +993,18 @@ mod tests {
     async fn read_transacted_malformed_input_test() {
         let fake_waker = Arc::new(FakeWaker::default());
         let (txn, _) = create_target_log_entry("Hello world!", 0);
+        let txn_clone = txn.clone();
         let (txn_2, _) = create_target_log_entry("Not symbolized", 1);
         let txn_2_clone = txn_2.clone();
         let (stdin_sender, stdin_receiver) = duplex(DUPLEX_BUFFER_SIZE);
         let (mut stdout_sender, stdout_receiver) = duplex(DUPLEX_BUFFER_SIZE);
+        let shutdown_called = Arc::new(Mutex::new(false));
         let symbolizer = assert_matches!(
-            TransactionalSymbolizer::new(FakeProcess::new(stdin_sender, stdout_receiver)),
+            TransactionalSymbolizer::new(FakeProcess::new_with_shutdown_tracker(
+                stdin_sender,
+                stdout_receiver,
+                Arc::clone(&shutdown_called),
+            )),
             Ok(value) => value
         );
         let mut symbolize_task_0 = std::pin::pin!(symbolizer.symbolize(txn));
@@ -888,15 +1019,133 @@ mod tests {
             stdout_sender.write_all("this is invalid input\n".as_bytes()).await,
             Ok(())
         );
-        // TXN should complete with error
+        // TXN should preserve the unsymbolized log entry, shut down the process, and close pipes.
         assert_eq!(
             fake_waker.clone().poll_while_woke(symbolize_task_0.as_mut()),
-            Poll::Ready(None)
+            Poll::Ready(Some(txn_clone))
         );
+        assert!(*shutdown_called.lock());
+        assert_matches!(
+            reader.next_line().await,
+            Ok(Some(value)) if value == "TXN-COMMIT:0:COMMIT"
+        );
+        assert_matches!(reader.next_line().await, Ok(None));
+        assert_matches!(stdout_sender.write_all(b"more\n").await, Err(_));
         // Symbolizer should be disabled by the error
         assert_eq!(
             fake_waker.clone().poll_while_woke(symbolize_task_1.as_mut()),
             Poll::Ready(Some(txn_2_clone))
+        );
+    }
+
+    #[fuchsia::test]
+    async fn symbolizer_failure_preserves_fifo_order_in_futures_unordered() {
+        let fake_waker = Arc::new(FakeWaker::default());
+        let (stdin_sender, stdin_receiver) = duplex(DUPLEX_BUFFER_SIZE);
+        let (stdout_sender, stdout_receiver) = duplex(DUPLEX_BUFFER_SIZE);
+        let symbolizer = assert_matches!(
+            TransactionalSymbolizer::new(FakeProcess::new(stdin_sender, stdout_receiver)),
+            Ok(value) => value
+        );
+
+        let mut unordered = FuturesUnordered::new();
+        for i in 0..4 {
+            let (txn, _) = create_target_log_entry(format!("log {i}"), i);
+            unordered.push(symbolizer.symbolize(txn));
+        }
+
+        // Poll once so entry 0 holds `state.lock()` and entries 1..4 are queued behind it.
+        {
+            let mut next_fut = std::pin::pin!(unordered.next());
+            assert_eq!(fake_waker.clone().poll_while_woke(next_fut.as_mut()), Poll::Pending);
+        }
+
+        // Simulate symbolizer crashing on startup.
+        drop(stdin_receiver);
+        drop(stdout_sender);
+
+        let mut emitted = Vec::new();
+        // Receive the first completed entry (which disables symbolization while 1..4 are still queued).
+        let first = unordered.next().await.flatten().expect("first entry");
+        emitted.push(first.data.as_target_log().unwrap().msg().unwrap().to_string());
+
+        // Push a new entry after symbolization is already disabled; it must not jump ahead of 1..4.
+        let (txn_4, _) = create_target_log_entry("log 4", 4);
+        unordered.push(symbolizer.symbolize(txn_4));
+
+        while let Some(maybe_entry) = unordered.next().await {
+            let entry = maybe_entry.expect("entry");
+            emitted.push(entry.data.as_target_log().unwrap().msg().unwrap().to_string());
+        }
+
+        assert_eq!(emitted, vec!["log 0", "log 1", "log 2", "log 3", "log 4"]);
+    }
+
+    #[fuchsia::test]
+    async fn symbolizer_crash_on_startup_eof_disables_and_keeps_printing() {
+        let fake_waker = Arc::new(FakeWaker::default());
+        let (txn_0, _) = create_target_log_entry("First log", 0);
+        let txn_0_clone = txn_0.clone();
+        let (txn_1, _) = create_target_log_entry("Second log", 1);
+        let txn_1_clone = txn_1.clone();
+        let (txn_2, _) = create_target_log_entry("Third log", 2);
+        let txn_2_clone = txn_2.clone();
+
+        let (stdin_sender, stdin_receiver) = duplex(DUPLEX_BUFFER_SIZE);
+        let (stdout_sender, stdout_receiver) = duplex(DUPLEX_BUFFER_SIZE);
+        let symbolizer = assert_matches!(
+            TransactionalSymbolizer::new(FakeProcess::new(stdin_sender, stdout_receiver)),
+            Ok(value) => value
+        );
+
+        let mut symbolize_task_0 = std::pin::pin!(symbolizer.symbolize(txn_0));
+        let mut symbolize_task_1 = std::pin::pin!(symbolizer.symbolize(txn_1));
+
+        // Poll both tasks first so task_1 is already queued on `state.lock()` (matching FuturesUnordered).
+        assert_eq!(fake_waker.clone().poll_while_woke(symbolize_task_0.as_mut()), Poll::Pending);
+        assert_eq!(fake_waker.clone().poll_while_woke(symbolize_task_1.as_mut()), Poll::Pending);
+
+        // Simulate symbolizer crashing and closing both pipes.
+        drop(stdin_receiver);
+        drop(stdout_sender);
+
+        // Both in-flight tasks and subsequent tasks should return unsymbolized entries without hanging.
+        assert_eq!(
+            fake_waker.clone().poll_while_woke(symbolize_task_0.as_mut()),
+            Poll::Ready(Some(txn_0_clone))
+        );
+        assert_eq!(
+            fake_waker.clone().poll_while_woke(symbolize_task_1.as_mut()),
+            Poll::Ready(Some(txn_1_clone))
+        );
+
+        let mut symbolize_task_2 = std::pin::pin!(symbolizer.symbolize(txn_2));
+        assert_eq!(
+            fake_waker.clone().poll_while_woke(symbolize_task_2.as_mut()),
+            Poll::Ready(Some(txn_2_clone))
+        );
+    }
+
+    #[fuchsia::test]
+    async fn symbolizer_stdin_broken_pipe_disables_and_keeps_printing() {
+        let fake_waker = Arc::new(FakeWaker::default());
+        let (txn, _) = create_target_log_entry("Log entry", 0);
+        let txn_clone = txn.clone();
+
+        let (stdin_sender, stdin_receiver) = duplex(DUPLEX_BUFFER_SIZE);
+        let (_stdout_sender, stdout_receiver) = duplex(DUPLEX_BUFFER_SIZE);
+        let symbolizer = assert_matches!(
+            TransactionalSymbolizer::new(FakeProcess::new(stdin_sender, stdout_receiver)),
+            Ok(value) => value
+        );
+
+        // Close stdin's reader while stdout remains open (Pending).
+        drop(stdin_receiver);
+
+        let mut symbolize_task = std::pin::pin!(symbolizer.symbolize(txn));
+        assert_eq!(
+            fake_waker.clone().poll_while_woke(symbolize_task.as_mut()),
+            Poll::Ready(Some(txn_clone))
         );
     }
 

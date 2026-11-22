@@ -43,6 +43,5 @@ fuchsia_cc_driver("tas5707-driver") {
 fuchsia_driver_component("tas5707") {
   component_name = "tas5707"
   deps = [ ":tas5707-driver" ]
-  info = "meta/tas5707-info.json"
   cm_label = ":tas5707_dml_manifest"
 }

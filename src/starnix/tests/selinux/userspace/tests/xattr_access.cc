@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <endian.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
-#include <optional>
 #include <string>
 
 #include <fbl/unique_fd.h>
@@ -399,38 +399,81 @@ TEST(XattrTest, RemoveSelinuxNotPermitted) {
   }));
 }
 
-std::optional<bool> g_pre_policy_skipcap_passed;
-
-TEST(XattrTest, PrePolicySecuritySelinuxSkipsCapSysAdmin) {
-  ASSERT_TRUE(g_pre_policy_skipcap_passed.has_value());
-  EXPECT_TRUE(*g_pre_policy_skipcap_passed);
+vfs_cap_data MakeV2FileCaps(uint64_t permitted, bool effective) {
+  uint32_t magic = VFS_CAP_REVISION_2;
+  if (effective) {
+    magic |= VFS_CAP_FLAGS_EFFECTIVE;
+  }
+  vfs_cap_data cap_data{};
+  cap_data.magic_etc = htole32(magic);
+  cap_data.data[0].permitted = htole32(static_cast<uint32_t>(permitted));
+  cap_data.data[1].permitted = htole32(static_cast<uint32_t>(permitted >> 32u));
+  return cap_data;
 }
+
+std::string MakeXattrTestContext(std::string_view domain) {
+  return MakeTestSecurityContext(std::string("test_xattr_") + std::string(domain) + "_t");
+}
+
+struct CapabilityXattrCase {
+  const char* domain;
+  ::testing::Matcher<int> expected;
+};
+
+class CapabilityXattrTest : public ::testing::TestWithParam<CapabilityXattrCase> {};
+
+/// Setting `security.capability` requires `capability { setfcap }` (`EPERM` if denied) and
+/// `file { setattr }` (`EACCES` if denied), without requiring `capability { sys_admin }`.
+TEST_P(CapabilityXattrTest, Set) {
+  const auto& test_case = GetParam();
+  auto scoped_fscreate = ScopedTaskAttrResetter::SetTaskAttr("fscreate", kTestFileLabel);
+  test_helper::ScopedTempFD file;
+  auto enforcing = ScopedEnforcement::SetEnforcing();
+  vfs_cap_data cap_data = MakeV2FileCaps(1ULL << CAP_NET_RAW, /*effective=*/true);
+
+  EXPECT_TRUE(RunSubprocessAs(MakeXattrTestContext(test_case.domain), [&]() {
+    ASSERT_TRUE(test_helper::HasCapability(CAP_SETFCAP));
+    EXPECT_THAT(
+        setxattr(file.name().c_str(), "security.capability", &cap_data, sizeof(cap_data), 0),
+        test_case.expected);
+  }));
+}
+
+/// Removing `security.capability` requires `capability { setfcap }` (`EPERM` if denied) and
+/// `file { setattr }` (`EACCES` if denied), without requiring `capability { sys_admin }`.
+TEST_P(CapabilityXattrTest, Remove) {
+  const auto& test_case = GetParam();
+  auto scoped_fscreate = ScopedTaskAttrResetter::SetTaskAttr("fscreate", kTestFileLabel);
+  test_helper::ScopedTempFD file;
+  vfs_cap_data cap_data = MakeV2FileCaps(1ULL << CAP_NET_RAW, /*effective=*/true);
+  ASSERT_THAT(setxattr(file.name().c_str(), "security.capability", &cap_data, sizeof(cap_data), 0),
+              SyscallSucceeds());
+
+  auto enforcing = ScopedEnforcement::SetEnforcing();
+  EXPECT_TRUE(RunSubprocessAs(MakeXattrTestContext(test_case.domain), [&]() {
+    ASSERT_TRUE(test_helper::HasCapability(CAP_SETFCAP));
+    EXPECT_THAT(removexattr(file.name().c_str(), "security.capability"), test_case.expected);
+  }));
+}
+
+INSTANTIATE_TEST_SUITE_P(XattrTest, CapabilityXattrTest,
+                         ::testing::Values(
+                             CapabilityXattrCase{
+                                 .domain = "capsetfcap",
+                                 .expected = SyscallSucceeds(),
+                             },
+                             CapabilityXattrCase{
+                                 .domain = "nocapsetfcap",
+                                 .expected = SyscallFailsWithErrno(EPERM),
+                             },
+                             CapabilityXattrCase{
+                                 .domain = "capsetfcap_nosetattr",
+                                 .expected = SyscallFailsWithErrno(EACCES),
+                             }),
+                         [](const ::testing::TestParamInfo<CapabilityXattrCase>& info) {
+                           return info.param.domain;
+                         });
 
 }  // namespace
 
-extern std::string DoPrePolicyLoadWork() {
-  test_helper::ScopedTempFD file;
-
-  // When SELinux is enabled in the kernel but no policy has been loaded yet, the VFS
-  // CAP_SYS_ADMIN check is skipped for `security.selinux` (allowing unprivileged modification and
-  // removal on an owned file), while other `security.*` extended attributes still require
-  // CAP_SYS_ADMIN.
-  test_helper::ForkHelper helper;
-  helper.RunInForkedProcess([&] {
-    test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
-    EXPECT_THAT(SetXattr(file.name(), kSelinuxAttrName, kTestFileLabel), SyscallSucceeds());
-    EXPECT_THAT(fsetxattr(file.fd(), kSelinuxAttrName, kTestFileLabel, sizeof(kTestFileLabel), 0),
-                SyscallSucceeds());
-    EXPECT_THAT(
-        lsetxattr(file.name().c_str(), kSelinuxAttrName, kTestFileLabel, sizeof(kTestFileLabel), 0),
-        SyscallSucceeds());
-    EXPECT_THAT(removexattr(file.name().c_str(), kSelinuxAttrName), SyscallSucceeds());
-    EXPECT_THAT(SetXattr(file.name(), kTestSecurityAttrName, kTestAttrValue),
-                SyscallFailsWithErrno(EPERM));
-    EXPECT_THAT(removexattr(file.name().c_str(), kTestSecurityAttrName),
-                SyscallFailsWithErrno(EPERM));
-  });
-  g_pre_policy_skipcap_passed = helper.WaitForChildren();
-
-  return "xattr_access_policy";
-}
+extern std::string GetTestPolicyName() { return "xattr_access_policy"; }

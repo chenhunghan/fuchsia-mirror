@@ -64,7 +64,7 @@ For example, if you want to capture the logs for the component
 
    You should now be able to run or OTA Fuchsia as you normally would.
 
-## Restrict log severity
+## Restrict log severity {:#restrict-log-severity}
 
 By default, a test will fail if it [logs][syslog] a message with a severity of
 `ERROR` or higher. This often indicates that an unexpected condition had

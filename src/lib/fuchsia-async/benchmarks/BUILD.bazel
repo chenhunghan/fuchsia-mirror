@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    build_flags = [
+        "//build/config/rust/lints:deny_unused_results",
+    ],
+    crate_name = "fuchsia_async_benchmarks",
+    edition = "2024",
+    deps = [
+        "//src/developer/fuchsia-criterion",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:crossbeam-utils",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

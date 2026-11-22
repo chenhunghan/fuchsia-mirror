@@ -17,8 +17,17 @@ exports_files(
 test_suite(
     name = "target_tests",
     tests = [
+        "//src/power/broker:tests",
         "//src/power/broker/client:tests",
+        "//src/power/broker/testing:tests",
+        "//src/power/broker/tests/integration:tests",
         "//src/power/cpu-manager/energy_model_config/parser:energy-model-config-parser-tests",
+        "//src/power/metrics-logger:tests",
+        "//src/power/shutdown-shim/tests",
+        "//src/power/testing/fake-activity-governor:tests",
+        "//src/power/testing/thermal-test-control:tests",
+        "//src/power/testing/topology-test-daemon/tests",
+        "//src/power/tools/cli:tests",
     ],
 )
 

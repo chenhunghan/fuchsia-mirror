@@ -669,7 +669,7 @@ pub mod test_utils {
 
     impl FromMlmeEvent for fidl_mlme::EapolIndication {
         fn from_event(event: fidl_mlme::MlmeEvent) -> Option<Self> {
-            event.into_eapol_ind()
+            event.into_eapol_ind().map(|(ind, _)| ind)
         }
     }
 
@@ -681,13 +681,13 @@ pub mod test_utils {
 
     impl FromMlmeEvent for fidl_mlme::DeauthenticateIndication {
         fn from_event(event: fidl_mlme::MlmeEvent) -> Option<Self> {
-            event.into_deauthenticate_ind()
+            event.into_deauthenticate_ind().map(|(ind, _)| ind)
         }
     }
 
     impl FromMlmeEvent for fidl_mlme::DisassociateIndication {
         fn from_event(event: fidl_mlme::MlmeEvent) -> Option<Self> {
-            event.into_disassociate_ind()
+            event.into_disassociate_ind().map(|(ind, _)| ind)
         }
     }
 

@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-import reproxy_logs
 from api.log import log_pb2
+from build.rbe import reproxy_logs
 from go.api.command import command_pb2
 from google.protobuf import timestamp_pb2
 

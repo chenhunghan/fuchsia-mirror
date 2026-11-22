@@ -37,6 +37,7 @@ fidl("fuchsia.net.policy.properties") {
     "//sdk/fidl/fuchsia.net",
     "//sdk/fidl/fuchsia.net.interfaces",
     "//sdk/fidl/fuchsia.net.name",
+    "//sdk/fidl/fuchsia.net.resources",
     "//sdk/fidl/fuchsia.posix.socket",
   ]
 }

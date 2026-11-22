@@ -34,7 +34,8 @@ Honeydew and add more and more interactions that others can also benefit.
 * Follow [instructions on how to submit contributions to the Fuchsia project](https://fuchsia.dev/fuchsia-src/development/source_code/contribute_changes)
   for the Gerrit developer work flow
 
-### Create a new user affordance
+### Creating affordances, transports, and auxiliary devices
 
-Please refer to the [Affordance](markdowns/affordance.md) doc on instructions
-for creating a new affordance in Honeydew code base.
+Please refer to the
+[Contributing guide](markdowns/contributing.md) for instructions on creating or
+updating affordances, transports, and auxiliary devices in Honeydew.

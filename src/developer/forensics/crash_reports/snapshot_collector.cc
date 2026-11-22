@@ -66,7 +66,7 @@ feedback::Annotations SnapshotCollector::GetMissingSnapshotAnnotations(const std
 }
 
 ::fpromise::promise<Report> SnapshotCollector::GetReport(
-    const zx::duration timeout, fuchsia::feedback::CrashReport fidl_report,
+    const zx::duration timeout, fuchsia_feedback::CrashReport fidl_report,
     ProgramShortname program_shortname, const ReportId report_id,
     const std::optional<timekeeper::time_utc> current_utc_time, const Product& product,
     const bool is_hourly_snapshot, const ReportingPolicy reporting_policy) {

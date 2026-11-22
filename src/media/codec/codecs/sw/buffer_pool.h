@@ -5,7 +5,6 @@
 #ifndef SRC_MEDIA_CODEC_CODECS_SW_BUFFER_POOL_H_
 #define SRC_MEDIA_CODEC_CODECS_SW_BUFFER_POOL_H_
 
-#include <fuchsia/mediacodec/cpp/fidl.h>
 #include <lib/media/codec_impl/codec_buffer.h>
 
 #include <map>
@@ -51,8 +50,12 @@ class BufferPool {
   // Returns whether any buffers in the pool are currently allocated.
   bool has_buffers_in_use();
 
+  // Returns whether any buffers have been added since the last Reset(false).
+  bool has_buffers_configured() FXL_LOCKS_EXCLUDED(lock_);
+
  private:
   std::mutex lock_;
+  bool has_buffers_configured_ FXL_GUARDED_BY(lock_) = false;
   std::map<uint8_t*, Allocation> buffers_in_use_ FXL_GUARDED_BY(lock_);
   BlockingMpscQueue<const CodecBuffer*> free_buffers_;
 };

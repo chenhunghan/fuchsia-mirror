@@ -1,0 +1,93 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "fake-shutdown-shim",
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+# @bazel2gn:raw_attribute:output_name = "fake_shutdown_shim_bin_test"
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    edition = "2024",
+    deps = [
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "fake-shutdown-shim",
+)
+
+fx_component_manifest(
+    name = "fake-shutdown-shim-manifest",
+    component_name = "fake-shutdown-shim",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/fake-shutdown-shim.cml",
+)
+
+fx_component(
+    name = "fake-shutdown-shim",
+    compiled_manifest = ":fake-shutdown-shim-manifest",
+    visibility = [
+        "//examples/power/wake_lease/rust:__pkg__",
+        "//src/connectivity/network/tests/integration:__pkg__",
+        "//src/developer/forensics/exceptions/tests:__pkg__",
+        "//src/power/bench/power_framework:__pkg__",
+        "//src/power/system-activity-governor-controller/tests:__pkg__",
+        "//src/power/system-activity-governor/fake/tests:__pkg__",
+        "//src/power/system-activity-governor/integration/testing/realm-factory:__pkg__",
+    ],
+    deps = [":bin_packaged_bin"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "fake-shutdown-shim",
+    components = [":fake-shutdown-shim"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_unittest_package(
+    name = "fake-shutdown-shim-tests",
+    unit_tests = [":bin_test"],
+)

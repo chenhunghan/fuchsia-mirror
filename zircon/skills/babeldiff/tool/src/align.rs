@@ -1,3 +1,7 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 //! Aligns the units of a C++ function with the units of a Rust function.
 
 use crate::model::{Unit, UnitKind};

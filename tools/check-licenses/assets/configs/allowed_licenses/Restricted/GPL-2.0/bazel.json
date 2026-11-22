@@ -5,7 +5,8 @@
                 "bug": "TODO: b/missing",
                 "description": "",
                 "paths": [
-                    "prebuilt/third_party/bazel/linux-x64"
+                    "prebuilt/third_party/bazel/linux-x64",
+                    "prebuilt/third_party/bazel_oot/linux-x64"
                 ]
             }
         ]

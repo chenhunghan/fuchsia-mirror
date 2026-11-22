@@ -1,0 +1,51 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/packages:resources.bzl",
+    "fuchsia_package_resource_collection",
+    "resource",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+resource(
+    name = "test_write_success_client",
+    srcs = ["test_write_success_client.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+resource(
+    name = "test_write_success_server",
+    srcs = ["test_write_success_server.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+resource(
+    name = "test_empty_nested_client",
+    srcs = ["test_empty_nested_client.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+resource(
+    name = "test_empty_nested_server",
+    srcs = ["test_empty_nested_server.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+# These are files that are meant to be included with our test component. Each
+# file represents a golden from a single process for a single test.
+fuchsia_package_resource_collection(
+    name = "resources",
+    resources = [
+        ":test_empty_nested_client",
+        ":test_empty_nested_server",
+        ":test_write_success_client",
+        ":test_write_success_server",
+    ],
+    visibility = [
+        "//examples/fidl/new/key_value_store/support_trees/rust:__pkg__",
+        "//examples/fidl/new/key_value_store/support_trees/rust_next:__pkg__",
+    ],
+)

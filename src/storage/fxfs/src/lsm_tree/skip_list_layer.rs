@@ -9,8 +9,8 @@ use crate::drop_event::DropEvent;
 use crate::log::*;
 use crate::lsm_tree::merge::{self, MergeFn};
 use crate::lsm_tree::types::{
-    BoxedLayerIterator, Existence, Item, ItemRef, Key, Layer, LayerIterator, LayerIteratorMut,
-    LayerValue, OrdLowerBound, OrdUpperBound,
+    BoxedLayerIterator, Coalesce, Existence, Item, ItemRef, Key, Layer, LayerIterator,
+    LayerIteratorMut, LayerValue, OrdLowerBound, OrdUpperBound,
 };
 use crate::serialized_types::{LATEST_VERSION, Version};
 use anyhow::{Error, bail};
@@ -205,7 +205,10 @@ impl<K: Eq + Key + OrdLowerBound, V: LayerValue> SkipListLayer<K, V> {
     }
 
     /// Merges the item into the layer.
-    pub fn merge_into(&self, item: Item<K, V>, lower_bound: &K, merge_fn: MergeFn<K, V>) {
+    pub fn merge_into(&self, item: Item<K, V>, lower_bound: &K, merge_fn: MergeFn<K, V>)
+    where
+        K: Coalesce<V>,
+    {
         merge::merge_into(
             Box::new(SkipListLayerIterMut::new(self, Bound::Included(lower_bound))),
             item,
@@ -624,8 +627,8 @@ mod tests {
     use crate::lsm_tree::merge::{MergeLayerIterator, MergeResult};
     use crate::lsm_tree::skip_list_layer::SkipListLayerIter;
     use crate::lsm_tree::types::{
-        DefaultOrdLowerBound, DefaultOrdUpperBound, Existence, FuzzyHash, Item, ItemRef, Layer,
-        LayerIterator, LayerIteratorMut, SortByU64,
+        Coalesce, DefaultOrdLowerBound, DefaultOrdUpperBound, Existence, FuzzyHash, Item, ItemRef,
+        Layer, LayerIterator, LayerIteratorMut, SortByU64,
     };
     use crate::serialized_types::{
         LATEST_VERSION, Version, Versioned, VersionedLatest, versioned_type,
@@ -667,6 +670,7 @@ mod tests {
 
     impl DefaultOrdLowerBound for TestKey {}
     impl DefaultOrdUpperBound for TestKey {}
+    impl<V> Coalesce<V> for TestKey {}
 
     #[fuchsia::test]
     async fn test_key_exists() {

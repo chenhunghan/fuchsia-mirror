@@ -33,9 +33,10 @@ constexpr int64_t kInspectComponentTimeoutSecs = 5;
 constexpr const char* kInspectSelectors[] = {
     "bootstrap/fshost:[...]root",
     "bootstrap/fshost/**:[...]root",
-    "bootstrap/boot-drivers\\:*ufs*:[...]root",
+    "bootstrap/*-drivers\\:*ufs*:[...]root",
     "bootstrap/boot-drivers\\:*sdmmc*:[...]root",
     "bootstrap/boot-drivers\\:*nvme*:[...]root",
+    "bootstrap/*-drivers\\:*interconnect*:[...]root",
     // power-broker's whole tree is big; take the leases and each element's state.
     "bootstrap/power-broker:[...]root/broker:leases",
     "bootstrap/power-broker:[...]root/broker/topology/fuchsia.inspect.Graph/topology/*/meta",

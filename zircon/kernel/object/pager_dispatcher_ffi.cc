@@ -8,7 +8,6 @@
 #include <zircon/types.h>
 
 #include <fbl/alloc_checker.h>
-#include <fbl/intrusive_double_list.h>
 #include <fbl/ref_ptr.h>
 #include <kernel/ffi.h>
 #include <ktl/utility.h>
@@ -40,15 +39,6 @@ FFI_ALWAYS_INLINE void* cpp_pager_proxy_get_ref_counted(PagerProxy* proxy) {
   return static_cast<fbl::RefCounted<PageProvider>*>(proxy);
 }
 
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE const void* cpp_pager_proxy_get_dll_node(const PagerProxy* proxy) {
-  using Traits = fbl::DefaultDoublyLinkedListTraits<fbl::RefPtr<PagerProxy>, fbl::DefaultObjectTag>;
-  using NodeState = Traits::NodeState;
-  static_assert(sizeof(NodeState) == 2 * sizeof(void*));
-  static_assert(alignof(NodeState) == alignof(void*));
-  return &Traits::node_state(*const_cast<PagerProxy*>(proxy));
-}
-
 zx_status_t cpp_pager_proxy_create(PagerDispatcher* dispatcher, PortDispatcher* port, uint64_t key,
                                    uint32_t options, PagerProxy** out_proxy) {
   fbl::AllocChecker ac;
@@ -61,25 +51,9 @@ zx_status_t cpp_pager_proxy_create(PagerDispatcher* dispatcher, PortDispatcher* 
   return ZX_OK;
 }
 
-zx_status_t cpp_pager_proxy_create_page_source(PagerProxy* proxy, PageSource** out_src) {
-  fbl::AllocChecker ac;
-  auto src = fbl::MakeRefCountedChecked<PageSource>(&ac, fbl::RefPtr<PageProvider>(proxy));
-  if (!ac.check()) {
-    return ZX_ERR_NO_MEMORY;
-  }
-  *out_src = fbl::ExportToRawPtr(&src);
-  return ZX_OK;
-}
-
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_pager_proxy_set_page_source_unchecked(PagerProxy* proxy,
-                                                                 PageSource* src) {
-  proxy->SetPageSourceUnchecked(fbl::ImportFromRawPtr(src));
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_pager_proxy_on_dispatcher_close(PagerProxy* proxy) {
-  proxy->OnDispatcherClose();
+FFI_ALWAYS_INLINE PageProvider* cpp_pager_proxy_as_page_provider(PagerProxy* proxy) {
+  return static_cast<PageProvider*>(proxy);
 }
 
 }  // extern "C"

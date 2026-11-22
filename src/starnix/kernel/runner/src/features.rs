@@ -370,6 +370,7 @@ mod tests {
                 "framebuffer aspect_ratio=9:16".to_string(),
                 "magma supported_vendors=0x13B5,0x5143,0x8086".to_string(),
                 "perfetto socket_path=/dev/socket/traced_consumer".to_string(),
+                "soc machine=TestSoC revision=1.0".to_string(),
                 "system_mode".to_string(),
                 "thermal cooling=cpu,fcc=8".to_string(),
             ],
@@ -391,6 +392,10 @@ mod tests {
         assert_eq!(
             modules.args("perfetto"),
             Some(&["socket_path=/dev/socket/traced_consumer".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("soc"),
+            Some(&["machine=TestSoC".to_string(), "revision=1.0".to_string()][..])
         );
         assert_eq!(modules.args("thermal"), Some(&["cooling=cpu,fcc=8".to_string()][..]));
     }
@@ -483,6 +488,7 @@ mod tests {
         assert!(modules.is_enabled("hw_random"));
         assert!(modules.is_enabled("loop"));
         assert!(modules.is_enabled("rtc"));
+        assert!(modules.is_enabled("soc"));
         assert!(modules.is_enabled("tun"));
         assert!(!modules.is_enabled("zram"));
         assert_eq!(modules.args("zram"), None);
@@ -518,6 +524,8 @@ mod tests {
             "framebuffer aspect_ratio=invalid",
             "magma supported_vendors=not_hex",
             "perfetto socket_path=",
+            "soc machine=",
+            "soc unknown=1",
             "thermal cooling=",
         ] {
             let start_info = test_start_info(Vec::new(), vec![invalid_spec.to_string()]);
@@ -525,6 +533,51 @@ mod tests {
                 parse_features(&start_info, &[]).is_err(),
                 "expected '{invalid_spec}' to be rejected"
             );
+        }
+    }
+
+    #[fuchsia::test]
+    async fn init_soc_module_registers_soc0_device() {
+        for (soc_spec, has_optional_attrs) in [
+            (
+                "soc machine=StarnixSoC family=Virtual soc_id=1 revision=2.0 serial_number=1234",
+                true,
+            ),
+            ("soc", false),
+        ] {
+            starnix_core::testing::spawn_kernel_and_run(async move |current_task| {
+                let kernel = current_task.kernel();
+                let root = &kernel.device_registry.objects.root;
+                assert!(root.lookup("devices/soc0".into()).is_none());
+
+                let start_info = test_start_info(
+                    Vec::new(),
+                    vec![
+                        "-device_mapper".to_string(),
+                        "-hw_random".to_string(),
+                        "-loop".to_string(),
+                        "-rtc".to_string(),
+                        "-tun".to_string(),
+                        "-zram".to_string(),
+                        soc_spec.to_string(),
+                    ],
+                );
+                let (_features, modules) =
+                    parse_features(&start_info, &[]).expect("parse_features should succeed");
+                modules.init_modules(kernel).expect("init_modules should succeed");
+
+                assert!(root.lookup("bus/soc/devices/soc0".into()).is_some());
+                assert!(root.lookup("devices/soc0/uevent".into()).is_some());
+                assert_eq!(
+                    root.lookup("devices/soc0/machine".into()).is_some(),
+                    has_optional_attrs
+                );
+                assert_eq!(root.lookup("devices/soc0/family".into()).is_some(), has_optional_attrs);
+                assert_eq!(root.lookup("devices/soc0/soc_id".into()).is_some(), has_optional_attrs);
+                assert!(root.lookup("devices/soc0/revision".into()).is_some());
+                assert!(root.lookup("devices/soc0/serial_number".into()).is_some());
+            })
+            .await;
         }
     }
 

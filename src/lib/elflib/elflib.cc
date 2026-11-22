@@ -535,16 +535,16 @@ const std::vector<Elf64_Phdr>& ElfLib::GetSegmentHeaders() {
 ElfLib::MemoryRegion ElfLib::GetSegmentData(size_t segment) {
   LoadProgramHeaders();
 
-  if (segment > segments_.size()) {
+  if (segment >= segments_.size()) {
     return {};
   }
 
-  const Elf64_Phdr* header = &segments_[segment];
+  const Elf64_Phdr& header = segments_[segment];
   ElfLib::MemoryRegion result;
 
   if (address_mode_ == AddressMode::kFile) {
-    result.ptr = memory_->GetMemory(header->p_offset, header->p_filesz);
-    result.size = header->p_filesz;
+    result.ptr = memory_->GetMemory(header.p_offset, header.p_filesz);
+    result.size = header.p_filesz;
   } else if (header_.e_type == ET_EXEC) {
     // If a file type is ET_EXEC, then it was likely compiled with -fno-pie.
     // These will be loaded directly at the address specified in p_vaddr, which
@@ -552,11 +552,11 @@ ElfLib::MemoryRegion ElfLib::GetSegmentData(size_t segment) {
     // MemoryAccessor expect to receive an _offset_ in the first parameter of
     // GetMemory calls, so we need to calculate the offset from |load_address_|
     // explicitly.
-    result.ptr = memory_->GetMemory(header->p_vaddr - load_address_, header->p_memsz);
-    result.size = header->p_memsz;
+    result.ptr = memory_->GetMemory(header.p_vaddr - load_address_, header.p_memsz);
+    result.size = header.p_memsz;
   } else {
-    result.ptr = memory_->GetMemory(header->p_vaddr, header->p_memsz);
-    result.size = header->p_memsz;
+    result.ptr = memory_->GetMemory(header.p_vaddr, header.p_memsz);
+    result.size = header.p_memsz;
   }
 
   if (result.ptr == nullptr) {

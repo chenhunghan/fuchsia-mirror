@@ -60,7 +60,7 @@ function main {
         "${item_rel_path}" == */*.json ||
         "${item_rel_path}" == out/_* ||
         "${item_rel_path}" == out/repro_*.instructions ||
-        "${item_rel_path}" == out/.*build_lock ||
+        "${item_rel_path}" == */*.build_lock ||
         "${item_rel_path}" == out/rust-analyzer ]]; then
         continue #skip
       fi

@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstring>
 #include <deque>
+#include <format>
 #include <optional>
 #include <queue>
 #include <unordered_set>
@@ -636,17 +637,29 @@ zx::result<std::shared_ptr<Node>> Node::CreateCompositeNode(
 
   // Copy the subtree dictionary of the primary parent node (or another parent if not set on
   // primary) down to the composite.
-  if (primary->HasSubtreeDictionaryRef()) {
-    composite->SetSubtreeDictionaryRef(primary->subtree_dictionary_ref_);
+  auto inherit_subtree_dictionary = [&](const Node& parent) -> zx::result<> {
     ZX_ASSERT_MSG(!has_dictionary_offer, "Cannot use dictionary offers on node %s",
                   std::string(node_name).c_str());
+    zx::result dictionary = DuplicateEventpair(parent.subtree_dictionary_ref_.value());
+    if (dictionary.is_error()) {
+      fdf_log::error("Failed to duplicate the subtree dictionary for composite '{}': {}", node_name,
+                     dictionary.status_string());
+      return dictionary.take_error();
+    }
+    composite->SetSubtreeDictionaryRef(std::move(dictionary.value()));
+    return zx::ok();
+  };
+  if (primary->HasSubtreeDictionaryRef()) {
+    if (zx::result result = inherit_subtree_dictionary(*primary); result.is_error()) {
+      return result.take_error();
+    }
   } else {
     for (const auto& parent_weak : composite->parents()) {
       if (auto parent_ptr = parent_weak.lock();
           parent_ptr && parent_ptr->HasSubtreeDictionaryRef()) {
-        composite->SetSubtreeDictionaryRef(parent_ptr->subtree_dictionary_ref_);
-        ZX_ASSERT_MSG(!has_dictionary_offer, "Cannot use dictionary offers on node %s",
-                      std::string(node_name).c_str());
+        if (zx::result result = inherit_subtree_dictionary(*parent_ptr); result.is_error()) {
+          return result.take_error();
+        }
         break;
       }
     }
@@ -763,12 +776,51 @@ std::string Node::MakeComponentMoniker() const {
   return topo_path;
 }
 
+std::string Node::MakeDisambiguator() const {
+  std::deque<std::string_view> names;
+  for (auto node = this; node != nullptr; node = node->GetPrimaryParent()) {
+    names.push_front(node->name());
+  }
+
+  // 64-bit FNV-1a over length-prefixed primary-parent names so the hash input is
+  // injective across arbitrary node names, unstripped, and undeduplicated.
+  uint64_t hash = 14695981039346656037ULL;
+  constexpr uint64_t kPrime = 1099511628211ULL;
+  for (std::string_view name : names) {
+    uint64_t len = name.size();
+    for (size_t i = 0; i < sizeof(len); ++i) {
+      hash ^= (len >> (i * 8)) & 0xff;
+      hash *= kPrime;
+    }
+    for (unsigned char c : name) {
+      hash ^= c;
+      hash *= kPrime;
+    }
+  }
+  return std::format("{:016x}", hash);
+}
+
 void Node::SetController(fidl::ClientEnd<fcomponent::Controller> component_controller) {
   component_controller_.Bind(std::move(component_controller), dispatcher_,
                              &component_controller_handler_);
 }
 
 void Node::SetShouldDestroy() { should_destroy_ = true; }
+
+void Node::AddShutdownCompleteCallback(fit::callback<void()> callback) {
+  if (GetNodeState() == NodeState::kDestroyed) {
+    callback();
+    return;
+  }
+  shutdown_complete_callbacks_.push_back(std::move(callback));
+}
+
+void Node::RunShutdownCompleteCallbacks() {
+  auto callbacks = std::move(shutdown_complete_callbacks_);
+  for (auto& cb : callbacks) {
+    cb();
+  }
+}
 
 bool g_use_test_process_koid = false;
 
@@ -795,18 +847,44 @@ void Node::OnBind() {
     return;
   }
 
-  zx_koid_t process_koid;
   if (g_use_test_process_koid) {
-    process_koid = 1337;
+    if (auto* driver_component = std::get_if<DriverComponent>(&state_); driver_component) {
+      driver_component->memory_attributed = true;
+    }
+    node_manager_.value()->memory_attributor().AddDriver(std::move(node_token.value()),
+                                                         koid.value(), 1337);
   } else {
-    zx::result result = driver_host()->GetProcessKoid();
-    if (result.is_error()) {
+    DriverHost* host = driver_host();
+    if (!host) {
       return;
     }
-    process_koid = result.value();
+    auto sync_failed = std::make_shared<bool>(false);
+    host->GetProcessKoidAsync([weak = weak_from_this(), node_token = std::move(node_token.value()),
+                               koid = koid.value(),
+                               sync_failed](zx::result<uint64_t> result) mutable {
+      if (result.is_error()) {
+        *sync_failed = true;
+        return;
+      }
+      std::shared_ptr self = weak.lock();
+      if (!self || !self->node_manager_.has_value() ||
+          self->GetNodeState() == NodeState::kWaitingOnDestroy ||
+          self->GetNodeState() == NodeState::kDestroyed) {
+        return;
+      }
+      auto* driver_component = std::get_if<DriverComponent>(&self->state_);
+      if (!driver_component || driver_component->component_instance_koid != koid ||
+          driver_component->memory_attributed) {
+        return;
+      }
+      driver_component->memory_attributed = true;
+      self->node_manager_.value()->memory_attributor().AddDriver(std::move(node_token), koid,
+                                                                 result.value());
+    });
+    if (*sync_failed) {
+      return;
+    }
   }
-  node_manager_.value()->memory_attributor().AddDriver(std::move(node_token.value()), koid.value(),
-                                                       process_koid);
 
   // Report on successes immediately without waiting for boot-up to complete.
   bind_err_ = {};
@@ -969,9 +1047,13 @@ void Node::FinishShutdown(fit::callback<void()> shutdown_callback) {
   ZX_ASSERT_MSG(GetNodeState() == NodeState::kWaitingOnDestroy,
                 "FinishShutdown called in invalid node state: %s",
                 GetNodeShutdownCoordinator().NodeStateAsString());
-  if (auto koid = token_koid(); koid.has_value()) {
-    node_manager_.value()->memory_attributor().RemoveDriver(koid.value());
+  if (auto* driver_component = std::get_if<DriverComponent>(&state_);
+      driver_component && driver_component->memory_attributed) {
+    driver_component->memory_attributed = false;
+    node_manager_.value()->memory_attributor().RemoveDriver(
+        driver_component->component_instance_koid);
   }
+  RunShutdownCompleteCallbacks();
   if (shutdown_intent() == ShutdownIntent::kRestart) {
     fdf_log::debug("Node: {} finishing restart", name());
     shutdown_callback();
@@ -1447,9 +1529,16 @@ void Node::AddChildHelper(fuchsia_driver_framework::NodeAddArgs args,
 
   // Copy the subtree dictionary of a parent node down to the child.
   if (subtree_dictionary_ref_.has_value()) {
-    child->subtree_dictionary_ref_ = subtree_dictionary_ref_;
     ZX_ASSERT_MSG(!has_dictionary_offer, "Cannot use dictionary offers on node %s",
                   std::string(name).c_str());
+    zx::result dictionary = DuplicateEventpair(subtree_dictionary_ref_.value());
+    if (dictionary.is_error()) {
+      fdf_log::error("Failed to add Node '{}': could not duplicate the subtree dictionary: {}",
+                     name, dictionary.status_string());
+      callback(fit::as_error(fdf::NodeError::kInternal));
+      return;
+    }
+    child->subtree_dictionary_ref_ = std::move(dictionary.value());
   }
 
   child->InitializeSelfResource(std::move(properties), std::move(child_offers),
@@ -1511,7 +1600,7 @@ void Node::AddChildHelper(fuchsia_driver_framework::NodeAddArgs args,
   auto finish = [weak_self = weak_from_this(), child, node = std::move(node)]() mutable {
     std::shared_ptr<Node> self = weak_self.lock();
     if (!self) {
-      fdf_log::warn("Parent of '{}' freed before AddChild dictionary import completed",
+      fdf_log::warn("Parent of '{}' freed before AddChild dictionary setup completed",
                     child->name());
       return;
     }
@@ -1531,85 +1620,93 @@ void Node::AddChildHelper(fuchsia_driver_framework::NodeAddArgs args,
     return;
   }
 
-  if (args.offers_dictionary().has_value()) {
-    (*node_manager_)
-        ->dictionary_util()
-        .ImportDictionary(
-            std::move(args.offers_dictionary()).value(),
-            [child, callback = std::move(callback), finish = std::move(finish)](
-                zx::result<fuchsia_component_sandbox::wire::NewCapabilityId> result) mutable {
-              // If the import failed it will log a warning, but we don't need to
-              // fail the child creation.
-              if (!result.is_ok()) {
-                finish();
-                callback(fit::ok(child));
-                return;
-              }
-
-              std::unordered_map<std::string,
-                                 fidl::ClientEnd<fuchsia_component_sandbox::DirReceiver>>
-                  map;
-              for (const auto& offer : child->offers()) {
-                if (offer.transport != OfferTransport::Dictionary) {
-                  continue;
-                }
-
-                auto [client, server] =
-                    fidl::Endpoints<fuchsia_component_sandbox::DirReceiver>::Create();
-                map[offer.service_name] = std::move(client);
-
-                (*child->node_manager_)
-                    ->dictionary_util()
-                    .DictionaryDirConnectorOpen(
-                        result.value(), offer.service_name,
-                        [child, server = std::move(server),
-                         offer](zx::result<fidl::ClientEnd<fuchsia_io::Directory>> result) mutable {
-                          if (result.is_ok()) {
-                            std::unordered_map<std::string, std::string>
-                                target_to_source_instance_mapping;
-                            for (auto& mapping : offer.renamed_instances) {
-                              target_to_source_instance_mapping[mapping.target_name()] =
-                                  mapping.source_name();
-                            }
-
-                            std::vector<DirInfo> dirs;
-                            dirs.emplace_back(DirInfo{
-                                .dir = std::move(result.value()),
-                                .target_service_name = offer.service_name,
-                                .target_to_source_instance_mapping =
-                                    target_to_source_instance_mapping,
-                                .is_primary = true,
-                            });
-
-                            child->dir_receivers_.emplace_back(std::move(server), std::move(dirs),
-                                                               child->dispatcher_);
-                          }
-                        });
-              }
-
-              (*child->node_manager_)
-                  ->dictionary_util()
-                  .CreateDictionaryWith(
-                      std::move(map),
-                      [child, finish = std::move(finish), callback = std::move(callback)](
-                          zx::result<fuchsia_component_sandbox::CapabilityId> result) mutable {
-                        if (!result.is_ok()) {
-                          finish();
-                          callback(fit::ok(child));
-                          return;
-                        }
-
-                        ZX_ASSERT_MSG(!child->subtree_dictionary_ref_.has_value(),
-                                      "Cannot set dictionary_ref_ on node %s",
-                                      child->name().c_str());
-                        child->dictionary_ref_ = result.value();
-                        finish();
-                        callback(fit::ok(child));
-                      });
-            });
-  } else {
+  std::vector<NodeOffer> dictionary_offers;
+  for (const auto& offer : child->offers()) {
+    if (offer.transport == OfferTransport::Dictionary) {
+      dictionary_offers.push_back(offer);
+    }
+  }
+  if (!args.offers_dictionary().has_value() || dictionary_offers.empty()) {
     finish();
     callback(fit::ok(child));
+    return;
+  }
+
+  // Look up every dictionary offer in the offers dictionary before creating the node's own
+  // dictionary. The child is only added if all of them can be opened.
+  struct OpenedOffer {
+    NodeOffer offer;
+    fidl::ClientEnd<fuchsia_io::Directory> dir;
+  };
+  auto sharder = std::make_shared<ResultAsyncSharder<OpenedOffer>>(
+      dictionary_offers.size(), [child, finish = std::move(finish), callback = std::move(callback)](
+                                    zx::result<std::vector<OpenedOffer>> result) mutable {
+        if (result.is_error()) {
+          fdf_log::error("Failed to add Node '{}': could not open its dictionary offers: {}",
+                         child->name(), result.status_string());
+          callback(fit::as_error(fdf::NodeError::kInternal));
+          return;
+        }
+
+        std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_runtime::DirReceiver>>
+            receivers;
+        for (OpenedOffer& opened : result.value()) {
+          std::unordered_map<std::string, std::string> target_to_source_instance_mapping;
+          for (auto& mapping : opened.offer.renamed_instances) {
+            target_to_source_instance_mapping[mapping.target_name()] = mapping.source_name();
+          }
+
+          std::vector<DirInfo> dirs;
+          dirs.emplace_back(DirInfo{
+              .dir = std::move(opened.dir),
+              .target_service_name = opened.offer.service_name,
+              .target_to_source_instance_mapping = std::move(target_to_source_instance_mapping),
+              .is_primary = true,
+          });
+
+          auto [client, server] = fidl::Endpoints<fuchsia_component_runtime::DirReceiver>::Create();
+          receivers[opened.offer.service_name] = std::move(client);
+          child->dir_receivers_.emplace_back(std::move(server), std::move(dirs),
+                                             child->dispatcher_);
+        }
+
+        (*child->node_manager_)
+            ->dictionary_util()
+            .CreateDictionaryWith(
+                std::move(receivers),
+                [child, finish = std::move(finish),
+                 callback = std::move(callback)](zx::result<zx::eventpair> result) mutable {
+                  if (result.is_error()) {
+                    fdf_log::error("Failed to add Node '{}': could not create its dictionary: {}",
+                                   child->name(), result.status_string());
+                    callback(fit::as_error(fdf::NodeError::kInternal));
+                    return;
+                  }
+
+                  ZX_ASSERT_MSG(!child->subtree_dictionary_ref_.has_value(),
+                                "Cannot set dictionary_ref_ on node %s", child->name().c_str());
+                  child->dictionary_ref_ = std::move(result.value());
+                  finish();
+                  callback(fit::ok(child));
+                });
+      });
+
+  zx::eventpair offers_dictionary = std::move(args.offers_dictionary().value());
+  for (const NodeOffer& offer : dictionary_offers) {
+    (*child->node_manager_)
+        ->dictionary_util()
+        .DictionaryDirConnectorOpen(
+            offers_dictionary, offer.service_name,
+            [sharder, offer](zx::result<fidl::ClientEnd<fuchsia_io::Directory>> result) mutable {
+              if (result.is_error()) {
+                sharder->CompleteShardError(result.status_value());
+                return;
+              }
+              sharder->CompleteShard(OpenedOffer{
+                  .offer = std::move(offer),
+                  .dir = std::move(result.value()),
+              });
+            });
   }
 }
 
@@ -2785,32 +2882,26 @@ zx::result<zx::event> Node::DuplicateNodeToken() {
 }
 
 void Node::PrepareDictionary(fit::callback<void(zx::result<>)> callback) {
-  std::optional<fuchsia_component_sandbox::CapabilityId> to_export;
-  if (subtree_dictionary_ref_.has_value()) {
-    to_export = subtree_dictionary_ref_;
-  } else if (dictionary_ref_.has_value()) {
-    to_export = dictionary_ref_;
-  }
-
-  if (to_export) {
+  const std::optional<zx::eventpair>& to_copy =
+      subtree_dictionary_ref_.has_value() ? subtree_dictionary_ref_ : dictionary_ref_;
+  if (to_copy.has_value()) {
     (*node_manager_)
         ->dictionary_util()
-        .CopyExportDictionary(
-            to_export.value(),
-            [weak_self = weak_from_this(), callback = std::move(callback)](
-                zx::result<fuchsia_component_sandbox::DictionaryRef> result) mutable {
-              std::shared_ptr self = weak_self.lock();
-              if (!self) {
-                return;
-              }
-              if (result.is_error()) {
-                callback(result.take_error());
-                return;
-              }
+        .CopyDictionary(to_copy.value(),
+                        [weak_self = weak_from_this(),
+                         callback = std::move(callback)](zx::result<zx::eventpair> result) mutable {
+                          std::shared_ptr self = weak_self.lock();
+                          if (!self) {
+                            return;
+                          }
+                          if (result.is_error()) {
+                            callback(result.take_error());
+                            return;
+                          }
 
-              self->offers_dictionary_ = std::move(result.value());
-              callback(zx::ok());
-            });
+                          self->offers_dictionary_ = std::move(result.value());
+                          callback(zx::ok());
+                        });
     return;
   }
 
@@ -2822,7 +2913,8 @@ void Node::PrepareDictionary(fit::callback<void(zx::result<>)> callback) {
 
   // We are a composite with parents who may or may not have dictionaries.
   struct MapEntry {
-    fuchsia_component_sandbox::CapabilityId dictionary_ref;
+    // Holds the parent whose |dictionary_ref_| contains the offer.
+    std::shared_ptr<Node> parent;
     NodeOffer offer;
     std::string parent_name;
     bool is_primary;
@@ -2849,7 +2941,7 @@ void Node::PrepareDictionary(fit::callback<void(zx::result<>)> callback) {
       }
 
       service_map[offer.service_name].emplace_back(MapEntry{
-          .dictionary_ref = parent->dictionary_ref_.value(),
+          .parent = parent,
           .offer = offer,
           .parent_name = parent_names[i],
           .is_primary = primary_index == i,
@@ -2875,95 +2967,95 @@ void Node::PrepareDictionary(fit::callback<void(zx::result<>)> callback) {
     bool is_primary;
   };
 
-  std::shared_ptr<ResultAsyncSharder<ShardResult>> sharder = std::make_shared<
-      ResultAsyncSharder<ShardResult>>(
-      total_shards, [weak_self = weak_from_this(), callback = std::move(callback)](
-                        zx::result<std::vector<ShardResult>> result) mutable {
-        std::shared_ptr self = weak_self.lock();
-        if (!self) {
-          return;
-        }
-        if (result.is_error()) {
-          callback(result.take_error());
-          return;
-        }
+  std::shared_ptr<ResultAsyncSharder<ShardResult>> sharder =
+      std::make_shared<ResultAsyncSharder<ShardResult>>(
+          total_shards, [weak_self = weak_from_this(), callback = std::move(callback)](
+                            zx::result<std::vector<ShardResult>> result) mutable {
+            std::shared_ptr self = weak_self.lock();
+            if (!self) {
+              return;
+            }
+            if (result.is_error()) {
+              callback(result.take_error());
+              return;
+            }
 
-        std::unordered_map<std::string, std::vector<DirInfo>> dirs;
-        for (ShardResult& shard : result.value()) {
-          std::unordered_map<std::string, std::string> target_to_source_instance_mapping;
-          for (auto& mapping : shard.offer.renamed_instances) {
-            target_to_source_instance_mapping[mapping.target_name()] = mapping.source_name();
-          }
+            std::unordered_map<std::string, std::vector<DirInfo>> dirs;
+            for (ShardResult& shard : result.value()) {
+              std::unordered_map<std::string, std::string> target_to_source_instance_mapping;
+              for (auto& mapping : shard.offer.renamed_instances) {
+                target_to_source_instance_mapping[mapping.target_name()] = mapping.source_name();
+              }
 
-          dirs[shard.offer.service_name].emplace_back(DirInfo{
-              .dir = std::move(shard.dir),
-              .target_service_name = shard.offer.service_name,
-              .target_to_source_instance_mapping = target_to_source_instance_mapping,
-              .parent_name = shard.parent_name,
-              .is_primary = shard.is_primary,
+              dirs[shard.offer.service_name].emplace_back(DirInfo{
+                  .dir = std::move(shard.dir),
+                  .target_service_name = shard.offer.service_name,
+                  .target_to_source_instance_mapping = target_to_source_instance_mapping,
+                  .parent_name = shard.parent_name,
+                  .is_primary = shard.is_primary,
+              });
+            }
+
+            std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_runtime::DirReceiver>>
+                map;
+
+            for (auto& offer : self->offers()) {
+              if (offer.transport != OfferTransport::Dictionary ||
+                  !dirs.contains(offer.service_name)) {
+                continue;
+              }
+
+              auto [client, server] =
+                  fidl::Endpoints<fuchsia_component_runtime::DirReceiver>::Create();
+              map[offer.service_name] = std::move(client);
+              self->dir_receivers_.emplace_back(
+                  std::move(server), std::move(dirs[offer.service_name]), self->dispatcher_);
+              dirs.erase(offer.service_name);
+            }
+
+            (*self->node_manager_)
+                ->dictionary_util()
+                .CreateDictionaryWith(
+                    std::move(map), [weak_self, callback = std::move(callback)](
+                                        zx::result<zx::eventpair> result) mutable {
+                      std::shared_ptr self = weak_self.lock();
+                      if (!self) {
+                        return;
+                      }
+                      if (!result.is_ok()) {
+                        callback(result.take_error());
+                        return;
+                      }
+
+                      ZX_ASSERT_MSG(!self->subtree_dictionary_ref_.has_value(),
+                                    "Cannot set dictionary_ref_ on node %s", self->name().c_str());
+                      self->dictionary_ref_ = std::move(result.value());
+                      (*self->node_manager_)
+                          ->dictionary_util()
+                          .CopyDictionary(self->dictionary_ref_.value(),
+                                          [weak_self, callback = std::move(callback)](
+                                              zx::result<zx::eventpair> result) mutable {
+                                            std::shared_ptr self = weak_self.lock();
+                                            if (!self) {
+                                              return;
+                                            }
+                                            if (result.is_error()) {
+                                              callback(result.take_error());
+                                              return;
+                                            }
+
+                                            self->offers_dictionary_ = std::move(result.value());
+                                            callback(zx::ok());
+                                          });
+                    });
           });
-        }
-
-        std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_sandbox::DirReceiver>>
-            map;
-
-        for (auto& offer : self->offers()) {
-          if (offer.transport != OfferTransport::Dictionary || !dirs.contains(offer.service_name)) {
-            continue;
-          }
-
-          auto [client, server] = fidl::Endpoints<fuchsia_component_sandbox::DirReceiver>::Create();
-          map[offer.service_name] = std::move(client);
-          self->dir_receivers_.emplace_back(std::move(server), std::move(dirs[offer.service_name]),
-                                            self->dispatcher_);
-          dirs.erase(offer.service_name);
-        }
-
-        (*self->node_manager_)
-            ->dictionary_util()
-            .CreateDictionaryWith(
-                std::move(map),
-                [weak_self, callback = std::move(callback)](
-                    zx::result<fuchsia_component_sandbox::CapabilityId> result) mutable {
-                  std::shared_ptr self = weak_self.lock();
-                  if (!self) {
-                    return;
-                  }
-                  if (!result.is_ok()) {
-                    callback(result.take_error());
-                    return;
-                  }
-
-                  ZX_ASSERT_MSG(!self->subtree_dictionary_ref_.has_value(),
-                                "Cannot set dictionary_ref_ on node %s", self->name().c_str());
-                  self->dictionary_ref_ = result.value();
-                  (*self->node_manager_)
-                      ->dictionary_util()
-                      .CopyExportDictionary(
-                          self->dictionary_ref_.value(),
-                          [weak_self, callback = std::move(callback)](
-                              zx::result<fuchsia_component_sandbox::DictionaryRef> result) mutable {
-                            std::shared_ptr self = weak_self.lock();
-                            if (!self) {
-                              return;
-                            }
-                            if (result.is_error()) {
-                              callback(result.take_error());
-                              return;
-                            }
-
-                            self->offers_dictionary_ = std::move(result.value());
-                            callback(zx::ok());
-                          });
-                });
-      });
 
   for (auto& [_, entries] : service_map) {
-    for (const auto& [dictionary_ref, offer, parent_name, is_primary] : entries) {
+    for (const auto& [parent, offer, parent_name, is_primary] : entries) {
       (*node_manager_)
           ->dictionary_util()
           .DictionaryDirConnectorOpen(
-              dictionary_ref, offer.service_name,
+              parent->dictionary_ref_.value(), offer.service_name,
               [sharder, offer, parent_name,
                is_primary](zx::result<fidl::ClientEnd<fuchsia_io::Directory>> result) {
                 if (result.is_ok()) {

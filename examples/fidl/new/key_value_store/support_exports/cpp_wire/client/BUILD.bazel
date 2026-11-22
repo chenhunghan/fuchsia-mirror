@@ -1,0 +1,47 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_cpp_elf_lib",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//examples/fidl/new/key_value_store/support_exports:meta/client.cml",
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+    name = "config",
+    cm_label = ":manifest",
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    # main.cc uses angled `#include <src/lib/...>` headers, which GN resolves
+    # via `//build/config:default_include_dirs` (`-I//`), whereas Bazel
+    # defaults to `-iquote .`.
+    copts = ["-I."],
+    visibility = ["//examples/fidl/new/key_value_store/support_exports/cpp_wire:__pkg__"],
+    deps = [
+        ":config",
+        "//examples/fidl/new/key_value_store/support_exports/fidl:examples.keyvaluestore.supportexports_cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/files",
+        "//src/lib/fxl",
+    ],
+)

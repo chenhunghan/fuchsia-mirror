@@ -4,9 +4,12 @@
 
 #include "src/starnix/tests/selinux/userspace/audit_checker.h"
 
+#include <lib/fit/defer.h>
 #include <sys/socket.h>
 
 #include <algorithm>
+#include <cstring>
+#include <deque>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -18,9 +21,6 @@
 #include <gtest/gtest.h>
 #include <linux/audit.h>
 #include <linux/netlink.h>
-#include <rapidjson/schema.h>
-#include <rapidjson/stringbuffer.h>
-#include <rapidjson/writer.h>
 
 #include "src/lib/fxl/strings/join_strings.h"
 #include "src/lib/fxl/strings/split_string.h"
@@ -114,19 +114,47 @@ void SendSentinel(const char* sentinel) {
   }
 }
 
+std::string ExtractAuditMessage(const struct nlmsghdr* header, ssize_t recv_bytes) {
+  // Derive payload length from the received byte count rather than `NLMSG_PAYLOAD`: Linux `kauditd`
+  // sets `nlmsg_len` on audit records to the payload length rather than including `nlmsghdr`.
+  const char* data = static_cast<const char*>(NLMSG_DATA(header));
+  size_t available = recv_bytes > static_cast<ssize_t>(sizeof(*header))
+                         ? static_cast<size_t>(recv_bytes) - sizeof(*header)
+                         : 0;
+  return std::string(data, strnlen(data, available));
+}
+
 void DrainAuditLog() {
   SendSentinel(kSentinelEnd);
   fbl::unique_fd fd = OpenNetlinkAuditSocket();
-  if (!fd.is_valid() || RegisterAsAuditDaemon(fd.get(), getpid()).is_error()) {
+  if (!fd.is_valid()) {
+    ADD_FAILURE() << "audit_drainer: failed to open NETLINK_AUDIT socket: " << strerror(errno);
     return;
   }
+  std::deque<std::vector<char>> buffered_messages;
+  if (auto reg_res = RegisterAsAuditDaemon(fd.get(), getpid(), &buffered_messages);
+      reg_res.is_error()) {
+    ADD_FAILURE() << "audit_drainer: failed to register audit daemon: "
+                  << strerror(reg_res.error_value());
+    return;
+  }
+  auto unregister = fit::defer([&] {
+    if (auto res = UnregisterAuditDaemon(fd.get()); res.is_error()) {
+      ADD_FAILURE() << "audit_drainer: failed to unregister audit daemon: "
+                    << strerror(res.error_value());
+    }
+  });
 
   char buf[kNetlinkBufSize];
-  // Drain the audit backlog until there is no other message.
+  // Drain the audit backlog until the end sentinel is observed.
   while (true) {
-    auto recv_res = ReceiveNetlinkMessage(fd.get(), buf, sizeof(buf));
-    if (recv_res.is_error() && recv_res.error_value() == EINTR) {
-      continue;
+    auto recv_res = ReceiveNetlinkMessage(fd.get(), buffered_messages, buf, sizeof(buf));
+    if (recv_res.is_error()) {
+      if (recv_res.error_value() == EINTR) {
+        continue;
+      }
+      ADD_FAILURE() << "audit_drainer: recv failed: " << strerror(recv_res.error_value());
+      break;
     }
     if (recv_res.value() < NLMSG_LENGTH(0)) {
       fprintf(stderr, "audit_drainer: message too short\n");
@@ -136,18 +164,10 @@ void DrainAuditLog() {
     if (header->nlmsg_type != AUDIT_USER_AVC) {
       continue;
     }
-    std::string message((char*)NLMSG_DATA(header),
-                        (char*)NLMSG_DATA(header) + (recv_res.value() - sizeof(*header)));
-    if (header->nlmsg_type == AUDIT_USER_AVC) {
-      if (!strstr(message.c_str(), kSentinelEnd)) {
-        continue;
-      }
+    std::string message = ExtractAuditMessage(header, recv_res.value());
+    if (strstr(message.c_str(), kSentinelEnd) != nullptr) {
       break;
     }
-  }
-  if (UnregisterAuditDaemon(fd.get()).is_error()) {
-    printf("Failed to unregister\n");
-    return;
   }
 }
 
@@ -253,19 +273,29 @@ fit::result<std::string, std::vector<AuditChecker::AuditLogEntry>> AuditChecker:
   if (!fd.is_valid()) {
     return fit::error("Failed to open NETLINK_AUDIT socket");
   }
-  auto register_result = RegisterAsAuditDaemon(fd.get(), getpid());
+  std::deque<std::vector<char>> buffered_messages;
+  auto register_result = RegisterAsAuditDaemon(fd.get(), getpid(), &buffered_messages);
   if (register_result.is_error()) {
     return fit::error("Failed to register as daemon: " +
                       std::to_string(register_result.error_value()));
   }
+  auto unregister = fit::defer([&] {
+    if (UnregisterAuditDaemon(fd.get()).is_error()) {
+      fprintf(stderr, "Failed to unregister\n");
+    }
+  });
 
   bool checked_start = false;
   char buf[kNetlinkBufSize];
   // Drain the audit backlog until there is no other message.
   while (true) {
-    auto recv_res = ReceiveNetlinkMessage(fd.get(), buf, sizeof(buf));
-    if (recv_res.is_error() && recv_res.error_value() == EINTR) {
-      continue;
+    auto recv_res = ReceiveNetlinkMessage(fd.get(), buffered_messages, buf, sizeof(buf));
+    if (recv_res.is_error()) {
+      if (recv_res.error_value() == EINTR) {
+        continue;
+      }
+      return fit::error(std::string("Failed to receive audit message: ") +
+                        strerror(recv_res.error_value()));
     }
     if (recv_res.value() < NLMSG_LENGTH(0)) {
       fprintf(stderr, "audit_listener: message too short\n");
@@ -276,8 +306,7 @@ fit::result<std::string, std::vector<AuditChecker::AuditLogEntry>> AuditChecker:
     if (header->nlmsg_type != AUDIT_AVC && header->nlmsg_type != AUDIT_USER_AVC) {
       continue;
     }
-    std::string message((char*)NLMSG_DATA(header),
-                        (char*)NLMSG_DATA(header) + (recv_res.value() - sizeof(*header)));
+    std::string message = ExtractAuditMessage(header, recv_res.value());
     if (header->nlmsg_type == AUDIT_USER_AVC) {
       if (!checked_start && strstr(message.c_str(), kSentinelStart)) {
         checked_start = true;
@@ -310,10 +339,6 @@ fit::result<std::string, std::vector<AuditChecker::AuditLogEntry>> AuditChecker:
       ADD_FAILURE() << "Failed to parse AUDIT_AVC message: " << parse_result.error_value()
                     << "\nMessage: " << message;
     }
-  }
-  if (UnregisterAuditDaemon(fd.get()).is_error()) {
-    fprintf(stderr, "Failed to unregister\n");
-    return fit::ok(parsed_logs);
   }
   if (!checked_start) {
     fprintf(stderr, "Did not find start sentinel\n");

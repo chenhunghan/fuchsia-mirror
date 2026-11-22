@@ -84,6 +84,17 @@ void FlatlandPresenterImpl::ScheduleUpdateForSession(
       });
 }
 
+void FlatlandPresenterImpl::NotifyExpectedPresent(scheduling::SessionId session_id,
+                                                  zx::time expected_present_time,
+                                                  zx::duration frame_interval, bool schedule_asap) {
+  async::PostTask(main_dispatcher_, [thiz = shared_from_this(), session_id, expected_present_time,
+                                     frame_interval, schedule_asap] {
+    TRACE_DURATION("gfx", "FlatlandPresenterImpl::NotifyExpectedPresent[task]");
+    thiz->frame_scheduler_.NotifyExpectedPresent(session_id, expected_present_time, frame_interval,
+                                                 schedule_asap);
+  });
+}
+
 std::vector<scheduling::FuturePresentationInfo>
 FlatlandPresenterImpl::GetFuturePresentationInfos() {
   FX_DCHECK(main_dispatcher_ == async_get_default_dispatcher());

@@ -954,4 +954,4 @@ differences about things to look out for in each language.
 
     You have successfully loaded and analyzed a minidump for C++ code.
 
-[basic-test-debugging]: /docs/reference/testing/fx-test.md#basic_test_debugging
+[basic-test-debugging]: /docs/reference/testing/fx-test.md#basic-test-debugging

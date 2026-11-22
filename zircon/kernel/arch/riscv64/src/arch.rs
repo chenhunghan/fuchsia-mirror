@@ -232,12 +232,14 @@ pub extern "C" fn riscv64_init_percpu() {
     }
 }
 
-/// Called in start.S prior to entering the main kernel.
-/// Bootstraps the boot CPU as CPU 0 intrinsically, though it may have a nonzero hart.
+/// Bootstraps the boot CPU as CPU 0 right after the kernel takes over from physboot, even when its
+/// hardware hart ID is nonzero.
+///
 /// # Safety
+///
+/// Must be called once on the boot CPU with interrupts disabled during early handoff, and
 /// `arch_handoff` must point to a valid `ArchPhysHandoff` struct.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn riscv64_boot_cpu_init(arch_handoff: *const ArchPhysHandoff) {
+pub(crate) unsafe fn post_handoff_bootstrap(arch_handoff: *const ArchPhysHandoff) {
     debug_assert!(!arch_handoff.is_null());
     // SAFETY: Caller guarantees `arch_handoff` is non-null and valid.
     let hart_id = unsafe { cpp_riscv64_handoff_boot_hart_id(arch_handoff) } as u32;
@@ -247,17 +249,13 @@ pub unsafe extern "C" fn riscv64_boot_cpu_init(arch_handoff: *const ArchPhysHand
     unsafe { super::feature::riscv64_feature_early_init(arch_handoff) };
 }
 
-/// # Safety
-/// `arch_handoff` must point to a valid `ArchPhysHandoff` struct.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ArchPostHandoffBootstrap(arch_handoff: *const ArchPhysHandoff) {
-    // SAFETY: Forwarded directly from boot assembly with valid `arch_handoff`.
-    unsafe { riscv64_boot_cpu_init(arch_handoff) };
-}
-
 /// Architecture early initialization before MMU/heap.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_early_init() {
+///
+/// # Safety
+///
+/// Must be called once on the boot CPU with interrupts disabled after `post_handoff_bootstrap`,
+/// before any secondary CPUs start.
+pub unsafe fn arch_early_init() {
     super::sbi::riscv64_sbi_early_init();
     super::mmu::riscv64_mmu_early_init();
     // mark the boot cpu online
@@ -265,14 +263,21 @@ pub extern "C" fn arch_early_init() {
 }
 
 /// Architecture pre-VM initialization.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_prevm_init() {
+///
+/// # Safety
+///
+/// Must be called once on the boot CPU during early boot before VM initialization.
+pub unsafe fn arch_prevm_init() {
     super::mmu::riscv64_mmu_prevm_init();
 }
 
 /// Architecture main initialization after heap/MMU are available.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_init() {
+///
+/// # Safety
+///
+/// Must be called once on the boot CPU after `arch_early_init` and VM/heap initialization, before
+/// secondary CPUs are booted.
+pub unsafe fn arch_init() {
     // print some arch info
     dprintf!(INFO, "RISCV: Boot HART ID {}\n", super::boot_hart_id());
     dprintf!(INFO, "RISCV: Supervisor mode\n");
@@ -283,8 +288,12 @@ pub extern "C" fn arch_init() {
 }
 
 /// Architecture late per-CPU initialization.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_late_init_percpu() {
+///
+/// # Safety
+///
+/// Must be called on the target CPU after feature initialization (`arch_init`) with interrupts
+/// disabled or thread migration prevented.
+pub unsafe fn arch_late_init_percpu() {
     // While it would be nicer to zero out vector state - and set it to initial -
     // earlier and next to the call to do so for FPU state, that is too early for
     // vector feature bit to have been set.
@@ -314,8 +323,11 @@ pub extern "C" fn arch_late_init_percpu() {
 }
 
 /// Places the CPU in a low-power idle state waiting for an interrupt.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_enter_idle_state() {
+///
+/// # Safety
+///
+/// Caller upholds the idle-thread, interrupt-disabled, and preempt-disabled invariants.
+pub unsafe extern "C" fn arch_enter_idle_state() {
     // SAFETY: WFI puts the CPU in low power wait-for-interrupt state.
     // Omit `nomem` so this serves as a compiler barrier against memory reordering across idle.
     unsafe {

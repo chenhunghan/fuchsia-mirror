@@ -7,9 +7,6 @@
 
 use core::arch::asm;
 
-#[cfg(target_arch = "x86")]
-use core::arch::x86::{__cpuid, _rdtsc};
-#[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{__cpuid, _rdtsc};
 
 /// Yield the processor momentarily. This should be used in busy waits.

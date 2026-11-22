@@ -37,7 +37,6 @@ fuchsia_cc_driver("alc5514-driver") {
 fuchsia_driver_component("alc5514") {
   component_name = "alc5514"
   deps = [ ":alc5514-driver" ]
-  info = "meta/alc5514-info.json"
   manifest = "meta/alc5514.cml"
 }
 

@@ -28,8 +28,12 @@ class ScriptTest : public E2eTest {
 
   void OnTestExited(const std::string& url) override;
 
+ protected:
+  void SetUp() override;
+
  private:
   std::string script_path_;
+  uint64_t timeout_ = 0;
 };
 
 }  // namespace zxdb

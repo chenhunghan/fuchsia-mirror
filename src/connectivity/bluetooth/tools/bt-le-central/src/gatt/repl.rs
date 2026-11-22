@@ -2,20 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{Error, format_err};
+use anyhow::Error;
 use bt_common::Uuid;
-use fuchsia_async as fasync;
-use futures::channel::mpsc::{SendError, channel};
-use futures::{Sink, SinkExt, Stream, StreamExt};
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
-use rustyline::{CompletionType, Config, EditMode, Editor};
-use std::thread;
+use bt_repl::{Commands, ReplControl, ReplHandler};
+use futures::{Future, FutureExt, select_biased};
 
 use super::{
     GattClient,
     GattClientPtr,
-    commands::{Cmd, CmdHelper},
+    commands::Cmd,
     do_connect,
     //  do_read_by_type,
     do_disable_notify,
@@ -42,15 +37,67 @@ pub static CLEAR_LINE: &str = "\x1b[2K";
 /// Move cursor to column 1
 pub static CHA: &str = "\x1b[1G";
 
+/// Trait for GATT clients that can notify when the underlying peer connection closes.
+pub trait WatchDisconnect {
+    /// Returns a future that resolves when the remote peer disconnects or the
+    /// underlying FIDL client channel is closed.
+    fn wait_for_disconnect(&self) -> impl Future<Output = ()> + 'static;
+}
+
+impl WatchDisconnect for bt_gatt_fuchsia::Client {
+    fn wait_for_disconnect(&self) -> impl Future<Output = ()> + 'static {
+        bt_gatt_fuchsia::Client::wait_for_disconnect(self)
+    }
+}
+
+struct GattHandler<T: bt_gatt::GattTypes> {
+    client: GattClientPtr<T>,
+}
+
+impl<T: bt_gatt::GattTypes> ReplHandler for GattHandler<T> {
+    type Command = Cmd;
+
+    async fn handle(&mut self, cmd: Cmd, args: &[&str]) -> Result<ReplControl, Error> {
+        let to_string_vec = || args.iter().map(|s| String::from(*s)).collect();
+
+        match cmd {
+            Cmd::List => {
+                do_list(args, &self.client);
+            }
+            Cmd::Find => {
+                do_find_services(args, &self.client).await;
+            }
+            Cmd::Connect => do_connect(args, &self.client).await?,
+            Cmd::ReadChr => do_read_chr(args, &self.client).await?,
+            Cmd::ReadLongChr => do_read_long_chr(args, &self.client).await?,
+            Cmd::WriteChr => do_write_chr(args.to_vec(), &self.client).await?,
+            Cmd::WriteLongChr => do_write_long_chr(args.to_vec(), &self.client).await?,
+            Cmd::ReadDesc => do_read_desc(args, &self.client).await?,
+            Cmd::ReadLongDesc => do_read_long_desc(args, &self.client).await?,
+            Cmd::WriteDesc => do_write_desc(args.to_vec(), &self.client).await?,
+            Cmd::WriteLongDesc => do_write_long_desc(args, &self.client).await?,
+            Cmd::EnableNotify => do_enable_notify(args, &self.client).await?,
+            Cmd::DisableNotify => do_disable_notify(args, &self.client).await?,
+            Cmd::Pacs => do_pacs(to_string_vec(), self.client.clone()).await?,
+            Cmd::Vol => do_vcs(to_string_vec(), self.client.clone()).await?,
+            Cmd::ReadByType => {
+                println!("Not implemented: {cmd:?}");
+            }
+        }
+        Ok(ReplControl::Continue)
+    }
+}
+
 // Starts the GATT REPL. This first requests a list of remote services and resolves the
 // returned future with an error if no services are found.
-pub async fn start_gatt_loop<'a, T: bt_gatt::GattTypes>(
+pub async fn start_gatt_loop<T: bt_gatt::GattTypes>(
     client: T::Client,
     service: Option<Uuid>,
 ) -> Result<(), Error>
 where
-    <T as bt_gatt::GattTypes>::Client: Clone,
+    <T as bt_gatt::GattTypes>::Client: Clone + WatchDisconnect,
 {
+    let disconnect_fut = client.wait_for_disconnect().fuse();
     let client = GattClient::<T>::new(client);
 
     if let Some(uuid) = service {
@@ -58,120 +105,72 @@ where
         client.find_service(uuid).await;
     }
 
-    let (mut commands, mut acks) = cmd_stream();
-    while let Some(cmd) = commands.next().await {
-        handle_cmd(cmd, &client).await.map_err(|e| {
-            println!("Error: {}", e);
-            e
-        })?;
-        acks.send(()).await?;
+    let handler = GattHandler { client };
+    let repl_fut = bt_repl::run(PROMPT, Commands::<Cmd>::new(), handler).fuse();
+    futures::pin_mut!(disconnect_fut, repl_fut);
+
+    select_biased! {
+        () = disconnect_fut => {
+            println!("{CLEAR_LINE}{CHA}Peer disconnected");
+            Ok(())
+        }
+        res = repl_fut => res,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bt_gatt::Central as _;
+    use fidl::endpoints::create_proxy_and_stream;
+    use fidl_fuchsia_bluetooth_le as fidl_le;
+    use fuchsia_async as fasync;
+    use fuchsia_bluetooth::types::PeerId;
+    use futures::StreamExt as _;
+    use futures::task::Poll;
+
+    #[fuchsia::test]
+    async fn gatt_handler_dispatches_commands() {
+        let (proxy, _central_stream) = create_proxy_and_stream::<fidl_le::CentralMarker>();
+        let central = bt_gatt_fuchsia::Central::new(proxy);
+        let client = central
+            .connect(bt_gatt_fuchsia::to_gatt_peer_id(&PeerId(1).into()))
+            .await
+            .expect("connect should succeed");
+        let mut handler =
+            GattHandler { client: GattClient::<bt_gatt_fuchsia::FuchsiaTypes>::new(client) };
+
+        let res = handler.handle(Cmd::List, &[]).await.expect("list should succeed");
+        assert_eq!(res, ReplControl::Continue);
+
+        let res = handler
+            .handle(Cmd::ReadByType, &[])
+            .await
+            .expect("read-by-type should return Continue");
+        assert_eq!(res, ReplControl::Continue);
     }
 
-    Ok(())
-}
-
-/// Generates a rustyline `Editor` in a separate thread to manage user input. This input is returned
-/// as a `Stream` of lines entered by the user.
-///
-/// The thread exits and the `Stream` is exhausted when an error occurs on stdin or the user
-/// sends a ctrl-c or ctrl-d sequence.
-///
-/// Because rustyline shares control over output to the screen with other parts of the system, a
-/// `Sink` is passed to the caller to send acknowledgements that a command has been processed and
-/// that rustyline should handle the next line of input.
-fn cmd_stream() -> (impl Stream<Item = String>, impl Sink<(), Error = SendError>) {
-    // Editor thread and command processing thread must be synchronized so that output
-    // is printed in the correct order.
-    let (mut cmd_sender, cmd_receiver) = channel(512);
-    let (ack_sender, mut ack_receiver) = channel(512);
-
-    let _ = thread::spawn(move || -> Result<(), Error> {
-        let mut exec = fasync::LocalExecutorBuilder::new().build();
-
-        let fut = async {
-            let config = Config::builder()
-                .auto_add_history(true)
-                .history_ignore_space(true)
-                .completion_type(CompletionType::List)
-                .edit_mode(EditMode::Emacs)
-                .build();
-            let c = CmdHelper::new();
-            let mut rl: Editor<CmdHelper, DefaultHistory> = Editor::with_config(config)?;
-            rl.set_helper(Some(c));
-            loop {
-                let readline = rl.readline(PROMPT);
-                match readline {
-                    Ok(line) => {
-                        cmd_sender.try_send(line)?;
-                    }
-                    Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => {
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        println!("Error: {:?}", e);
-                        return Err(e.into());
-                    }
-                }
-                // wait until processing thread is finished evaluating the last command
-                // before running the next loop in the repl
-                if ack_receiver.next().await.is_none() {
-                    return Ok(());
-                }
-            }
+    #[fuchsia::test(allow_stalls = false)]
+    async fn watch_disconnect_resolves_when_connection_closes() {
+        let (proxy, mut central_stream) = create_proxy_and_stream::<fidl_le::CentralMarker>();
+        let central = bt_gatt_fuchsia::Central::new(proxy);
+        let Poll::Ready(Ok(client)) = fasync::TestExecutor::poll_until_stalled(
+            central.connect(bt_gatt_fuchsia::to_gatt_peer_id(&PeerId(1).into())),
+        )
+        .await
+        else {
+            panic!("connect should complete");
         };
-        exec.run_singlethreaded(fut)
-    });
-    (cmd_receiver, ack_sender)
-}
 
-// Processes `cmd` and returns its result.
-async fn handle_cmd<T: bt_gatt::GattTypes>(
-    line: String,
-    client: &GattClientPtr<T>,
-) -> Result<(), Error> {
-    let mut components = line.trim().split_whitespace();
-    let cmd = components.next().map(|c| c.parse());
-    let args: Vec<&str> = components.collect();
+        let connection_server_end = match central_stream.next().await {
+            Some(Ok(fidl_le::CentralRequest::Connect { handle, .. })) => handle,
+            other => panic!("unexpected central request: {other:?}"),
+        };
 
-    let args_str: Vec<String> = args.iter().map(|s| String::from(*s)).collect();
+        let mut disconnect_fut = Box::pin(WatchDisconnect::wait_for_disconnect(&client));
+        assert!(fasync::TestExecutor::poll_until_stalled(&mut disconnect_fut).await.is_pending());
 
-    match cmd {
-        Some(Ok(Cmd::Exit)) | Some(Ok(Cmd::Quit)) => {
-            return Err(format_err!("exited").into());
-        }
-        Some(Ok(Cmd::Help)) => {
-            print!("{}", Cmd::help_msg());
-            Ok(())
-        }
-        Some(Ok(Cmd::List)) => {
-            do_list(&args, client);
-            Ok(())
-        }
-        Some(Ok(Cmd::Find)) => {
-            do_find_services(&args, client).await;
-            Ok(())
-        }
-        Some(Ok(Cmd::Connect)) => do_connect(&args, client).await,
-        Some(Ok(Cmd::ReadChr)) => do_read_chr(&args, client).await,
-        Some(Ok(Cmd::ReadLongChr)) => do_read_long_chr(&args, client).await,
-        Some(Ok(Cmd::WriteChr)) => do_write_chr(args, client).await,
-        Some(Ok(Cmd::WriteLongChr)) => do_write_long_chr(args, client).await,
-        Some(Ok(Cmd::ReadDesc)) => do_read_desc(&args, client).await,
-        Some(Ok(Cmd::ReadLongDesc)) => do_read_long_desc(&args, client).await,
-        Some(Ok(Cmd::WriteDesc)) => do_write_desc(args, client).await,
-        Some(Ok(Cmd::WriteLongDesc)) => do_write_long_desc(&args, client).await,
-        Some(Ok(Cmd::EnableNotify)) => do_enable_notify(&args, client).await,
-        Some(Ok(Cmd::DisableNotify)) => do_disable_notify(&args, client).await,
-        Some(Ok(Cmd::Pacs)) => do_pacs(args_str, client.clone()).await,
-        Some(Ok(Cmd::Vol)) => do_vcs(args_str, client.clone()).await,
-        Some(Err(e)) => {
-            eprintln!("Unknown command: {:?}", e);
-            Ok(())
-        }
-        None => Ok(()),
-        Some(Ok(unhandled)) => {
-            println!("Not implemented: {unhandled:?}");
-            Ok(())
-        }
+        drop(connection_server_end);
+        assert!(fasync::TestExecutor::poll_until_stalled(&mut disconnect_fut).await.is_ready());
     }
 }

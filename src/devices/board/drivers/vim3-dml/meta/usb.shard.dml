@@ -27,7 +27,7 @@
         {
             from: "#self",
             to: "#usb-phy-ffe09000",
-            driver_config: "fuchsia.hardware.usb.phy.Metadata",
+            driver_config: "fuchsia.hardware.usb.phy.AmlUsbPhyConfig",
             phy_type: "G12_B",
             usb_phy_modes: [
                 {
@@ -91,7 +91,7 @@
             },
         },
         {
-            name: "aml-usb-phy",
+            name: "register-reset",
             service: "fuchsia.hardware.registers.Service",
             from: "#register-controller-1000",
             to: "#usb-phy-ffe09000",
@@ -112,7 +112,7 @@
             },
         },
         {
-            name: "gpio-usb-pd",
+            name: "gpio-int",
             service: "fuchsia.hardware.gpio.Service",
             from: "#gpio-controller-ff634400",
             to: "#fusb302-22",
@@ -167,6 +167,7 @@
             },
         },
         {
+            // Must match the aml-usb-phy child node name, which looks up its global ID by name.
             name: "dwc2-phy",
             service: "fuchsia.hardware.usb.phy.Service",
             from: "#usb-phy-ffe09000",
@@ -200,11 +201,18 @@
             },
         },
         {
+            // Must match the aml-usb-phy child node name, which looks up its global ID by name.
             name: "xhci",
             service: "fuchsia.hardware.usb.phy.Service",
             from: "#usb-phy-ffe09000",
             to: "#usb-ff500000",
             constraints: { did: 31 },
+        },
+        {
+            name: "clock-init",
+            service: "fuchsia.clock.Init",
+            from: "#clock-controller-ff63c000",
+            to: "#usb-phy-ffe09000",
         },
         {
             name: "pin-states-0",

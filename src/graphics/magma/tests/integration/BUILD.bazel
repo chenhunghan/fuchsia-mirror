@@ -1,0 +1,89 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "vendor_helper_interface",
+    hdrs = ["vendor_helper_generic.h"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":fuchsia.gpu.magma.test_cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+    alwayslink = True,
+)
+
+# Server implementations should depend on :vendor_helper_interface
+fidl_library(
+    name = "fuchsia.gpu.magma.test",
+    srcs = ["test_magma.fidl"],
+    visibility = ["//visibility:private"],
+    deps = ["//zircon/vdso/zx"],
+)
+
+cml_shard(
+    name = "meta/magma_conformance_tests_child.shard",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:zxtest.shard.cml",
+    ],
+    shard = "meta/magma_conformance_tests_child.shard.cml",
+)
+
+cml_shard(
+    name = "meta/magma_conformance_tests.shard",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    shard = "meta/magma_conformance_tests.shard.cml",
+)
+
+# Conformance tests for generic vendor (runs only on devices with a
+# single magma device).
+fx_cc_binary(
+    name = "vendor-helper-generic",
+    testonly = True,
+    srcs = [
+        "vendor_helper_generic.cc",
+    ],
+    tags = ["manual"],
+    deps = [
+        ":vendor_helper_interface",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "vendor-helper-generic_packaged_bin",
+    testonly = True,
+    binary = ":vendor-helper-generic",
+    binary_name = "vendor-helper-generic",
+)
+
+fx_component_manifest(
+    name = "vendor-helper-generic-component-manifest",
+    testonly = True,
+    component_name = "vendor-helper",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/vendor_helper.cml",
+)
+
+fx_component(
+    name = "vendor-helper-generic-component",
+    testonly = True,
+    compiled_manifest = ":vendor-helper-generic-component-manifest",
+    deps = [":vendor-helper-generic_packaged_bin"],
+)

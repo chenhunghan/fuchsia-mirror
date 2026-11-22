@@ -12,6 +12,9 @@ use ffx_config::environment::ExecutableKind;
 use ffx_config::{ConfigMap, EnvironmentContext};
 use ffx_executor::CommandOutput;
 use ffx_isolate::{Isolate, IsolateError};
+use fuchsia_async::TimeoutExt as _;
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,34 +56,29 @@ static SHARED_ISOLATE: Mutex<Option<Arc<Isolate>>> = Mutex::new(None);
 // ==================== Process & permission helpers ====================
 
 pub fn process_exists(pid: i32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    u32::try_from(pid).ok().filter(|&p| p > 1).is_some_and(ffx_process::is_pid_running)
 }
 
-pub fn wait_for_process_exit(pid: i32, timeout: Duration) -> bool {
+pub async fn wait_for_process_exit(pid: i32, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
         if !process_exists(pid) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        fuchsia_async::Timer::new(Duration::from_millis(50)).await;
     }
     !process_exists(pid)
 }
 
-fn kill_process(pid: i32) {
-    let _ = std::process::Command::new("kill")
-        .args(["-9", &pid.to_string()])
-        .stderr(std::process::Stdio::null())
-        .status();
-    wait_for_process_exit(pid, Duration::from_secs(1));
+async fn kill_process(pid: i32) {
+    if pid <= 1 {
+        return;
+    }
+    let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+    wait_for_process_exit(pid, Duration::from_secs(1)).await;
 }
 
-fn kill_drivers_recorded_in(uart_dir: &Path) {
+async fn kill_drivers_recorded_in(uart_dir: &Path) {
     let Ok(entries) = std::fs::read_dir(uart_dir) else { return };
     for path in entries.flatten().map(|e| e.path()) {
         if path.extension().and_then(|s| s.to_str())
@@ -89,8 +87,8 @@ fn kill_drivers_recorded_in(uart_dir: &Path) {
             continue;
         }
         if let Some(pid) = read_pid_from_metadata_file(&path) {
-            if pid as u32 != std::process::id() {
-                kill_process(pid);
+            if pid > 1 && pid as u32 != std::process::id() {
+                kill_process(pid).await;
             }
         }
     }
@@ -151,24 +149,24 @@ struct BootLockGuard {
 }
 
 impl BootLockGuard {
-    fn acquire() -> Self {
+    async fn acquire() -> Self {
         let lock_dir = PathBuf::from("/tmp/ffx_uart_boot.lock");
         loop {
-            Self::remove_if_owner_dead(&lock_dir);
+            Self::remove_if_owner_dead(&lock_dir).await;
             match std::fs::create_dir(&lock_dir) {
                 Ok(()) => {
                     let _ = std::fs::write(lock_dir.join("pid"), std::process::id().to_string());
                     return Self { lock_dir };
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    std::thread::sleep(Duration::from_millis(100));
+                    fuchsia_async::Timer::new(Duration::from_millis(100)).await;
                 }
                 Err(e) => panic!("Failed to create lock dir: {e:?}"),
             }
         }
     }
 
-    fn remove_if_owner_dead(lock_dir: &Path) {
+    async fn remove_if_owner_dead(lock_dir: &Path) {
         if !lock_dir.exists() {
             return;
         }
@@ -177,7 +175,7 @@ impl BootLockGuard {
             if pid_file.exists() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            fuchsia_async::Timer::new(Duration::from_millis(10)).await;
         }
         let owner_alive = std::fs::read_to_string(&pid_file)
             .ok()
@@ -240,20 +238,20 @@ impl TestEmulator {
 
     /// Kills every recorded driver process and recreates the shared data directory.
     pub async fn reset(&self) {
-        kill_drivers_recorded_in(&self.uart_dir());
+        kill_drivers_recorded_in(&self.uart_dir()).await;
         let _ = std::fs::remove_dir_all(&self.shared_data_dir);
         let _ = std::fs::create_dir_all(&self.shared_data_dir);
     }
 
     async fn boot(base_name: &str, is_shared: bool) -> Self {
-        let _boot_lock = BootLockGuard::acquire();
+        let _boot_lock = BootLockGuard::acquire().await;
 
         if !INITIALIZED.swap(true, Ordering::SeqCst) {
             let _ = std::process::Command::new("pkill").args(["-f", "qemu-system-x86"]).status();
             let _ = std::fs::remove_dir_all(&*SHARED_SSH_KEY_DIR);
         }
         let _ = std::fs::create_dir_all(&*SHARED_SSH_KEY_DIR);
-        Self::kill_stale_drivers();
+        Self::kill_stale_drivers().await;
 
         let isolate = if is_shared {
             let cached = SHARED_ISOLATE.lock().unwrap().clone();
@@ -288,7 +286,7 @@ impl TestEmulator {
         }
     }
 
-    fn kill_stale_drivers() {
+    async fn kill_stale_drivers() {
         let _ = std::process::Command::new("pkill").args(["-f", "ffx-uart-driver"]).status();
         for _ in 0..100 {
             let any_alive = std::process::Command::new("pgrep")
@@ -299,7 +297,7 @@ impl TestEmulator {
             if !any_alive {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            fuchsia_async::Timer::new(Duration::from_millis(10)).await;
         }
     }
 
@@ -363,23 +361,79 @@ impl TestEmulator {
         output
     }
 
-    pub async fn restart(&self) {
-        self.stop().await;
-        self.stopped.store(false, Ordering::SeqCst);
-        let reboot_log = self.isolate.log_dir().join("emulator_reboot.log");
-        start_emulator_instance(&self.isolate, &self.emu_name, &reboot_log).await;
+    pub async fn reboot_target(&self) {
+        let output = self
+            .isolate
+            .ffx(&["-t", &self.emu_name, "target", "reboot"])
+            .await
+            .expect("ffx target reboot");
+        assert_success(&output, "ffx target reboot");
+    }
+
+    pub async fn wait_for_uart_down(&self, timeout: Duration) {
+        let target = with_uart_prefix(&self.emu_name);
+        let timeout_secs = timeout.as_secs().max(1).to_string();
+        let output = self
+            .isolate
+            .ffx(&["-t", &target, "target", "wait", "--down", "--timeout", &timeout_secs])
+            .await
+            .expect("ffx target wait --down");
+        assert_success(&output, &format!("ffx -t {target} target wait --down"));
+    }
+
+    async fn try_target_echo(&self, target: &str, timeout: Duration) -> bool {
+        let fut = async { Some(self.isolate.ffx(&["-t", target, "target", "echo"]).await) };
+        match fut.on_timeout(timeout, || None).await {
+            Some(Ok(output)) => output.status.success(),
+            Some(Err(_)) | None => false,
+        }
     }
 
     pub async fn wait_for_target_echo(&self, timeout: Duration) -> bool {
+        const PER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
         let start = Instant::now();
-        while start.elapsed() < timeout {
-            let echo = self.isolate.ffx(&["-t", &self.emu_name, "target", "echo"]).await.unwrap();
-            if echo.status.success() {
+        loop {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return false;
+            }
+            if self.try_target_echo(&self.emu_name, remaining.min(PER_ATTEMPT_TIMEOUT)).await {
                 return true;
             }
-            std::thread::sleep(Duration::from_secs(1));
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return false;
+            }
+            fuchsia_async::Timer::new(remaining.min(Duration::from_secs(1))).await;
         }
-        false
+    }
+
+    /// Waits for the UART connection to reach the `Connected` state and respond
+    /// to `target echo` over the `uart:` target prefix.
+    pub async fn wait_for_uart_ready(&self, timeout: Duration) -> bool {
+        const PER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+        let target = with_uart_prefix(&self.emu_name);
+        let start = Instant::now();
+        loop {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return false;
+            }
+            if self.is_connected(&self.emu_name).await {
+                let remaining = timeout.saturating_sub(start.elapsed());
+                if remaining.is_zero() {
+                    return false;
+                }
+                if self.try_target_echo(&target, remaining.min(PER_ATTEMPT_TIMEOUT)).await {
+                    return true;
+                }
+            }
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return false;
+            }
+            fuchsia_async::Timer::new(remaining.min(Duration::from_millis(500))).await;
+        }
     }
 
     // ---------- Raw `ffx uart` subcommands ----------
@@ -533,16 +587,48 @@ impl TestEmulator {
         self.find_connection(list, target).is_some()
     }
 
-    pub async fn assert_connected(&self, target: &str) {
+    async fn check_connected(&self, target: &str) -> Result<(), String> {
         let metadata_path = self.metadata_path(target);
-        assert!(metadata_path.exists(), "metadata file {metadata_path:?} should exist");
+        if !metadata_path.exists() {
+            return Err(format!("metadata file {metadata_path:?} should exist"));
+        }
         let socket_path = self.socket_path(target);
-        assert!(socket_path.exists(), "socket file {socket_path:?} should exist");
-        let list = self.list_connections().await;
-        assert!(
-            self.list_contains_target(&list, target),
-            "target {target} should be in the list of connections, list: {list:?}"
-        );
+        if !socket_path.exists() {
+            return Err(format!("socket file {socket_path:?} should exist"));
+        }
+        let list_output = self
+            .isolate
+            .ffx(&["--machine", "json", "uart", "list"])
+            .await
+            .map_err(|e| format!("ffx --machine json uart list failed: {e:?}"))?;
+        if !list_output.status.success() {
+            return Err(format!(
+                "ffx --machine json uart list failed ({}): {}",
+                list_output.status, list_output.stderr
+            ));
+        }
+        let list: serde_json::Value = serde_json::from_str(&list_output.stdout)
+            .map_err(|e| format!("invalid json from ffx uart list: {e}"))?;
+        let entry = self.find_connection(&list, target).ok_or_else(|| {
+            format!("target {target} should be in the list of connections, list: {list:?}")
+        })?;
+        let status = entry.get("status").and_then(|s| s.as_str());
+        if status != Some("Connected") {
+            return Err(format!(
+                "target {target} should have status Connected, got {status:?}, entry: {entry:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn is_connected(&self, target: &str) -> bool {
+        self.check_connected(target).await.is_ok()
+    }
+
+    pub async fn assert_connected(&self, target: &str) {
+        if let Err(err) = self.check_connected(target).await {
+            panic!("{err}");
+        }
     }
 
     pub async fn assert_disconnected(&self, target: &str) {

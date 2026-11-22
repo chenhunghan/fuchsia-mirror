@@ -379,4 +379,4 @@ problematic cases.
 [GN]: https://gn.googlesource.com/gn/
 [bazel-action-graph]: https://bazel.build/reference/glossary#action-graph
 [clean-build-fences]: https://cs.opensource.google/fuchsia/fuchsia/+/main:build/force_clean/README.md
-[fuchsia-feature-pending-commands]: /docs/development/build/ninja_fuchsia_improvements.md#feature-stastus-of-pending-commands
+[fuchsia-feature-pending-commands]: /docs/development/build/ninja_fuchsia_improvements.md#feature-status-of-running-commands

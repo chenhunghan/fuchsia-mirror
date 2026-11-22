@@ -115,8 +115,6 @@ class RamdiskTest {
 
   void Terminate() { ramdisk_.Reset(); }
 
-  zx_status_t Rebind() { return ramdisk_.Rebind().status_value(); }
-
   zx::result<> SetFlags(uint32_t flags) { return ramdisk_.SetFlags(flags); }
   zx::result<> SleepAfter(uint64_t block_count) { return ramdisk_.SleepAfter(block_count); }
   zx::result<> Wake() { return ramdisk_.Wake(); }
@@ -129,7 +127,6 @@ class RamdiskTest {
   }
 
   const ramdevice_client::Ramdisk& ramdisk() const { return ramdisk_; }
-  const ramdisk_client_t* ramdisk_client() const { return ramdisk_.client(); }
 
  private:
   explicit RamdiskTest(ramdevice_client::Ramdisk ramdisk) : ramdisk_(std::move(ramdisk)) {}

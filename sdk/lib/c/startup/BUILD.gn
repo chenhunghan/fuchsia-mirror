@@ -275,12 +275,12 @@ libc_source_set("startup-trampoline") {
                       ] + startup_relocate_symbols + startup_random_symbols
 
   undefined_symbols += [
-    # TODO(https://fxbug.dev/342469121): These won't be used anymore when
+    # TODO(https://fxbug.dev/349433421): These won't be used anymore when
     # ../threads:musl-tls is removed.
     "${libc_namespace}_GetTlsLayout",
     "${libc_namespace}_InitializeTls",
 
-    # TODO(https://fxbug.dev/342469121): This won't be used anymore when
+    # TODO(https://fxbug.dev/349433421): This won't be used anymore when
     # :musl-glue is removed.
     "${libc_namespace}_InitialStackSize",
   ]

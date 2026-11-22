@@ -109,7 +109,7 @@ class FfxRunner:
             return self.target
 
         # Query ffx target list with target_name to resolve it to an IP address/port.
-        target_list = self.target_list(None, query=target_name)
+        target_list = self.target_list(query=target_name)
         if not target_list:
             raise Exception(
                 f"No targets found in target list when matching '{target_name}'"
@@ -145,13 +145,11 @@ class FfxRunner:
     def required_configs(self):
         return [f"ssh.priv={self.ssh_key}"]
 
-    def run_strict(self, target, args, extra_configs=None):
-        if extra_configs is None:
-            extra_configs = []
+    def run_strict(self, target, args):
         target_address = (
             target.address if isinstance(target, Target) else target
         )
-        cfgs = ",".join(self.required_configs() + extra_configs)
+        cfgs = ",".join(self.required_configs())
         res = self.run(
             target_address,
             ["--strict", "--config", cfgs, "-o", self.log_file],
@@ -174,16 +172,14 @@ class FfxRunner:
         res = self.run_strict(self.target, ["target", "echo", msg])
         return res["message"]
 
-    def target_list(self, emu_instance_dir, query=None):
+    def target_list(self, query=None):
         """Lists available targets, optionally filtering by query."""
-        if emu_instance_dir:
-            extra_configs = [f"emu.instance_dir={emu_instance_dir}"]
-        else:
-            extra_configs = ["emu.instance_dir="]
+        # Emulators are found under <shared_data>/emu/instances, so this only
+        # lists emulators if `-c shared_data=<dir>` is added to the configs.
         args = ["target", "list"]
         if query:
             args.append(query)
-        res = self.run_strict(self.target, args, extra_configs)
+        res = self.run_strict(self.target, args)
         return res
 
     def target_show(self):

@@ -249,7 +249,7 @@ bool ExprTokenizer::CurrentMatchesTokenRecord(const ExprTokenRecord& record) con
   FX_DCHECK(!record.static_value.empty());
 
   const size_t size = record.static_value.size();
-  if (!can_advance(size))
+  if (!can_advance(static_cast<int>(size)))
     return false;  // Not enough room.
 
   if (!(record.languages & static_cast<unsigned>(language_)))

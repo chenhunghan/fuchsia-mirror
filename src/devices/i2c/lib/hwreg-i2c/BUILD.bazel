@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = ["include/hwreg/i2c.h"],
+    deps = [
+        # <hwreg/i2c.h> has #include <fidl/fuchsia.hardware.i2c/cpp/wire.h>.
+        "//sdk/fidl/fuchsia.hardware.i2c:fuchsia.hardware.i2c_cpp",
+
+        # <hwreg/i2c.h> has #include <hwreg/bitfields.h>
+        "//zircon/system/ulib/hwreg",
+    ],
+)
+
+fx_cc_library(
+    name = "hwreg-i2c",
+    visibility = [
+        "//src/devices/i2c/lib/hwreg-i2c/test:__pkg__",
+        "//src/devices/power/drivers/fusb302:__pkg__",
+        "//src/media/audio/drivers/codecs/da7219:__pkg__",
+    ],
+    deps = [":headers"],
+    alwayslink = True,
+)

@@ -17,7 +17,7 @@
             "/tmp:tmpfs",
 
             // LINT.ThenChange(debian_container.cml, debian_container_profiled.cml, debian_container_with_user_volume.cml)
-            "/data:remotevol::nosuid,nodev,relatime,keylocation=/data,inlinecrypt",
+            "/data:remotevol::nosuid,nodev,relatime,keylocation=/data/fbe_keys,inlinecrypt",
         ],
     },
     use: [

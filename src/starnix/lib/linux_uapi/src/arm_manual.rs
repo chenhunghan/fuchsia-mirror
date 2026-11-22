@@ -49,6 +49,11 @@ arch_translate_data! {
         val
     }
 
+    BidiFrom<timezone> {
+        tz_minuteswest,
+        tz_dsttime
+    }
+
     BidiFrom<sigaltstack> {
         ss_sp,
         ss_flags,

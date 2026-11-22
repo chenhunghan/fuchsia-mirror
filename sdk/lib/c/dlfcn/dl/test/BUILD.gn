@@ -26,7 +26,6 @@ test("dl-unittests") {
     "..:concat-view",
     "..:diagnostics",
     "..:error",
-    "..:stateful-error",
     "//src/lib/fxl/test:gtest_main",
     "//third_party/googletest:gmock",
   ]

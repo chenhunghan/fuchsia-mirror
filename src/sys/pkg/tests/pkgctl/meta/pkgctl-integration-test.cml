@@ -13,11 +13,11 @@
     children: [
         {
             name: "dns_resolver",
-            url: "#meta/dns_resolver.cm",
+            url: "dns-resolver#meta/dns_resolver.cm",
         },
         {
             name: "http_client",
-            url: "#meta/http-client.cm",
+            url: "http-client#meta/http-client.cm",
         },
         {
             name: "netstack",

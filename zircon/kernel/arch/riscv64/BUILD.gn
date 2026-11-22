@@ -100,23 +100,20 @@ if (toolchain_base_environment == "kernel") {
       "mmu.cc",
       "mp.cc",
       "riscv64_context_switch.S",
-      "riscv64_ffi.cc",
       "riscv64_user_copy.S",
-      "spinlock.cc",
       "stvec.S",
       "user_copy_c.cc",
       "vector_asm.S",
     ]
     deps = [
       "//sdk/lib/zbi-format",
-      "//zircon/kernel/dev/iommu/stub",
+      "//zircon/kernel/dev/iommu",
       "//zircon/kernel/dev/pdev/power",
       "//zircon/kernel/lib/arch",
       "//zircon/kernel/lib/boot-options",
       "//zircon/kernel/lib/code-patching",
       "//zircon/kernel/lib/console",
       "//zircon/kernel/lib/counters",
-      "//zircon/kernel/lib/crashlog",
       "//zircon/kernel/lib/heap",
       "//zircon/kernel/lib/init",
       "//zircon/kernel/lib/ktl",
@@ -209,32 +206,6 @@ if (toolchain_base_environment == "kernel") {
       "partialeq",
     ]
     expect_lints = [ "non_camel_case_types" ]
-  }
-
-  kernel_bindgen_crate("riscv64-crashlog-bindings") {
-    headers = [ "include/arch/crashlog_regs.h" ]
-    cpp = true
-    non_rust_deps = [ ":headers" ]
-    deps = [ ":riscv64-regs-bindings" ]
-    notice_year = 2026
-    raw_lines = [
-      "#![no_std]",
-      "use riscv64_regs_bindings::*;",
-    ]
-    type_blocklist = [
-      "zx_.*",
-      "iframe_t.*",
-      "arch_exception_context.*",
-      "syscall_regs_t.*",
-    ]
-    type_allowlist = [ "crashlog_regs_t" ]
-    explicit_padding = false
-    std_derives = [
-      "default",
-      "eq",
-      "partialeq",
-    ]
-    expect_lints = []
   }
 
   kernel_bindgen_crate("riscv64-thread-bindings") {
@@ -397,7 +368,6 @@ if (toolchain_base_environment == "kernel") {
       ":riscv-sbi-bindings",
       ":riscv64-aspace-bindings",
       ":riscv64-aspace-constants-bindings",
-      ":riscv64-crashlog-bindings",
       ":riscv64-mp-bindings",
       ":riscv64-regs-bindings",
       ":riscv64-restricted-bindings",
@@ -426,4 +396,8 @@ if (toolchain_base_environment == "kernel") {
   group("kernel-tests") {
     testonly = true
   }
+}
+
+group("boot_tests") {
+  testonly = true
 }

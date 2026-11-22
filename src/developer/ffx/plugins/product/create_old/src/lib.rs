@@ -79,16 +79,22 @@ pub async fn pb_create_with_sdk_version(
     let mut pb_builder =
         ProductBundleBuilder::new(cmd.product_name.clone()).sdk_version(sdk_version.to_string());
 
+    let mut system_a_delivery_blob_type = None;
+    let mut system_b_delivery_blob_type = None;
+    let mut system_r_delivery_blob_type = None;
     if let Some(system_path) = &cmd.system_a {
         let system = AssembledSystem::from_dir(system_path)?;
+        system_a_delivery_blob_type = system.delivery_blob_type;
         pb_builder = pb_builder.system(system, PartitionSlot::A);
     }
     if let Some(system_path) = &cmd.system_b {
         let system = AssembledSystem::from_dir(system_path)?;
+        system_b_delivery_blob_type = system.delivery_blob_type;
         pb_builder = pb_builder.system(system, PartitionSlot::B);
     }
     if let Some(system_path) = &cmd.system_r {
         let system = AssembledSystem::from_dir(system_path)?;
+        system_r_delivery_blob_type = system.delivery_blob_type;
         pb_builder = pb_builder.system(system, PartitionSlot::R);
     }
 
@@ -97,8 +103,18 @@ pub async fn pb_create_with_sdk_version(
         pb_builder = pb_builder.update_package(epoch);
     }
     if let Some(tuf_keys) = &cmd.tuf_keys {
-        let delivery_blob_type =
-            cmd.delivery_blob_type.unwrap_or(DEFAULT_DELIVERY_BLOB_TYPE).try_into()?;
+        let raw_blob_type = cmd
+            .delivery_blob_type
+            .or(system_a_delivery_blob_type)
+            .or(system_b_delivery_blob_type)
+            .or(system_r_delivery_blob_type)
+            .unwrap_or(DEFAULT_DELIVERY_BLOB_TYPE);
+        if raw_blob_type == 0 {
+            anyhow::bail!("Delivery blob type 0 (Reserved) is not supported");
+        }
+        let delivery_blob_type = raw_blob_type
+            .try_into()
+            .with_context(|| format!("Invalid delivery blob type: {raw_blob_type}"))?;
         pb_builder = pb_builder.repository(delivery_blob_type, tuf_keys);
     }
     for path in &cmd.virtual_device {
@@ -162,6 +178,7 @@ mod test {
             partitions_config: Some(DirectoryPathBuf::new(partitions_dir)),
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         }
         .write_to_dir(&system_dir, None::<Utf8PathBuf>)
         .unwrap();
@@ -239,6 +256,7 @@ mod test {
             partitions_config: Some(DirectoryPathBuf::new(partitions_dir)),
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         }
         .write_to_dir(&system_dir, None::<Utf8PathBuf>)
         .unwrap();
@@ -316,6 +334,7 @@ mod test {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         manifest.images = vec![
             Image::ZBI { path: tempdir.join("path1"), signed: false },
@@ -372,6 +391,7 @@ mod test {
             partitions_config: Some(DirectoryPathBuf::new(partitions_dir)),
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         }
         .write_to_dir(&system_dir, None::<Utf8PathBuf>)
         .unwrap();
@@ -470,6 +490,7 @@ mod test {
             partitions_config: Some(DirectoryPathBuf::new(partitions_dir)),
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         }
         .write_to_dir(&system_dir, None::<Utf8PathBuf>)
         .unwrap();
@@ -565,6 +586,7 @@ mod test {
             partitions_config: Some(DirectoryPathBuf::new(partitions_dir)),
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         }
         .write_to_dir(&system_dir, None::<Utf8PathBuf>)
         .unwrap();
@@ -645,5 +667,141 @@ mod test {
         assert!(matches!(device2, Ok(VirtualDevice::V1(VirtualDeviceV1 { .. }))));
 
         Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_pb_create_uses_assembled_system_delivery_blob_type() {
+        let temp = TempDir::new().unwrap();
+        let tempdir = Utf8Path::from_path(temp.path()).unwrap();
+        let pb_dir = tempdir.join("pb");
+
+        let partitions_dir = tempdir.join("partitions");
+        fs::create_dir(&partitions_dir).unwrap();
+        let partitions_path = partitions_dir.join("partitions_config.json");
+        let partitions_file = File::create(&partitions_path).unwrap();
+        serde_json::to_writer(&partitions_file, &PartitionsConfig::default()).unwrap();
+
+        let system_dir = tempdir.join("system");
+        fs::create_dir(&system_dir).unwrap();
+        AssembledSystem {
+            images: Default::default(),
+            board_name: "my_board".into(),
+            partitions_config: Some(DirectoryPathBuf::new(partitions_dir)),
+            system_release_info: SystemReleaseInfo::new_for_testing(),
+            platform_tools: vec![],
+            delivery_blob_type: Some(2),
+        }
+        .write_to_dir(&system_dir, None::<Utf8PathBuf>)
+        .unwrap();
+
+        let tuf_keys = tempdir.join("keys");
+        test_utils::make_repo_keys_dir(&tuf_keys);
+
+        let tool_provider = Box::new(FakeToolProvider::new_with_side_effect(blobfs_side_effect));
+
+        pb_create_with_sdk_version(
+            CreateCommand {
+                product_name: String::default(),
+                system_a: Some(system_dir),
+                system_b: None,
+                system_r: None,
+                tuf_keys: Some(tuf_keys),
+                update_package_version_file: None,
+                update_package_epoch: None,
+                virtual_device: vec![],
+                recommended_device: None,
+                out_dir: pb_dir.clone(),
+                delivery_blob_type: None,
+                with_deprecated_flash_manifest: false,
+                gerrit_size_report: None,
+            },
+            /*sdk_version=*/ "",
+            tool_provider,
+        )
+        .await
+        .unwrap();
+
+        let ProductBundle::V2(pb) = ProductBundle::try_load_from(&pb_dir).unwrap();
+        assert_eq!(pb.repositories.len(), 1);
+        assert_eq!(pb.repositories[0].delivery_blob_type, 2);
+    }
+
+    #[fuchsia::test]
+    async fn test_pb_create_falls_back_to_system_r_and_rejects_zero_delivery_blob_type() {
+        let temp = TempDir::new().unwrap();
+        let tempdir = Utf8Path::from_path(temp.path()).unwrap();
+        let pb_dir = tempdir.join("pb");
+
+        let partitions_dir = tempdir.join("partitions");
+        fs::create_dir(&partitions_dir).unwrap();
+        let partitions_path = partitions_dir.join("partitions_config.json");
+        let partitions_file = File::create(&partitions_path).unwrap();
+        serde_json::to_writer(&partitions_file, &PartitionsConfig::default()).unwrap();
+
+        let system_r_dir = tempdir.join("system_r");
+        fs::create_dir(&system_r_dir).unwrap();
+        AssembledSystem {
+            images: Default::default(),
+            board_name: "my_board".into(),
+            partitions_config: Some(DirectoryPathBuf::new(partitions_dir.clone())),
+            system_release_info: SystemReleaseInfo::new_for_testing(),
+            platform_tools: vec![],
+            delivery_blob_type: Some(2),
+        }
+        .write_to_dir(&system_r_dir, None::<Utf8PathBuf>)
+        .unwrap();
+
+        let tuf_keys = tempdir.join("keys");
+        test_utils::make_repo_keys_dir(&tuf_keys);
+
+        pb_create_with_sdk_version(
+            CreateCommand {
+                product_name: String::default(),
+                system_a: None,
+                system_b: None,
+                system_r: Some(system_r_dir.clone()),
+                tuf_keys: Some(tuf_keys.clone()),
+                update_package_version_file: None,
+                update_package_epoch: None,
+                virtual_device: vec![],
+                recommended_device: None,
+                out_dir: pb_dir.clone(),
+                delivery_blob_type: None,
+                with_deprecated_flash_manifest: false,
+                gerrit_size_report: None,
+            },
+            /*sdk_version=*/ "",
+            Box::new(FakeToolProvider::new_with_side_effect(blobfs_side_effect)),
+        )
+        .await
+        .unwrap();
+
+        let ProductBundle::V2(pb) = ProductBundle::try_load_from(&pb_dir).unwrap();
+        assert_eq!(pb.repositories.len(), 1);
+        assert_eq!(pb.repositories[0].delivery_blob_type, 2);
+
+        assert!(
+            pb_create_with_sdk_version(
+                CreateCommand {
+                    product_name: String::default(),
+                    system_a: None,
+                    system_b: None,
+                    system_r: Some(system_r_dir),
+                    tuf_keys: Some(tuf_keys),
+                    update_package_version_file: None,
+                    update_package_epoch: None,
+                    virtual_device: vec![],
+                    recommended_device: None,
+                    out_dir: tempdir.join("pb_invalid"),
+                    delivery_blob_type: Some(0),
+                    with_deprecated_flash_manifest: false,
+                    gerrit_size_report: None,
+                },
+                /*sdk_version=*/ "",
+                Box::new(FakeToolProvider::new_with_side_effect(blobfs_side_effect)),
+            )
+            .await
+            .is_err()
+        );
     }
 }

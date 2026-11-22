@@ -129,16 +129,20 @@ impl Inspector {
     ///
     /// The returned handle has `zx::Rights::BASIC | zx::Rights::READ | zx::Rights::MAP |
     /// zx::Rights::GET_PROPERTY` (no `zx::Rights::WRITE`).
-    pub fn duplicate_blob_vmo(&self, link_name: &str) -> Option<zx::Vmo> {
+    ///
+    /// Returns [`Error::VmoMissing`] if no blob with `link_name` exists, or an error if the
+    /// inspector or blob lock is currently held.
+    pub fn duplicate_blob_vmo(&self, link_name: &str) -> Result<zx::Vmo, Error> {
         let blob = self.get_blob(link_name)?;
-        blob.try_lock()?.duplicate_vmo()
+        let guard = blob.try_lock().ok_or(Error::ExpectedLockState(false))?;
+        guard.duplicate_vmo()
     }
 
     /// Produces a read-only Copy-on-Write VMO snapshot with `VMO_FROZEN` set in its
     /// `"BLOB"` header for the blob child identified by `link_name` (the unique link content
     /// key stored in the `LINK_VALUE` block's `content` index, e.g. `"events-0"`).
     pub fn frozen_blob_vmo_copy(&self, link_name: &str) -> Result<zx::Vmo, Error> {
-        let blob = self.get_blob(link_name).ok_or(Error::VmoMissing)?;
+        let blob = self.get_blob(link_name)?;
         let mut guard = blob.try_lock().ok_or(Error::ExpectedLockState(false))?;
         guard.frozen_vmo_copy()
     }
@@ -146,11 +150,14 @@ impl Inspector {
     /// Returns a VMO holding a deep copy of the data in the blob child identified by
     /// `link_name` (the unique link content key stored in the `LINK_VALUE` block's `content`
     /// index, e.g. `"events-0"`).
-    pub fn copy_blob_vmo(&self, link_name: &str) -> Option<zx::Vmo> {
-        self.copy_blob_vmo_data(link_name).and_then(|data| {
-            let vmo = zx::Vmo::create(data.len() as u64).ok()?;
-            vmo.write(&data, 0).ok().map(|_| vmo)
-        })
+    ///
+    /// Returns [`Error::VmoMissing`] if no blob with `link_name` exists, or an error if the
+    /// inspector or blob lock is currently held.
+    pub fn copy_blob_vmo(&self, link_name: &str) -> Result<zx::Vmo, Error> {
+        let data = self.copy_blob_vmo_data(link_name)?;
+        let vmo = zx::Vmo::create(data.len() as u64).map_err(Error::AllocateVmo)?;
+        vmo.write(&data, 0).map_err(Error::AllocateVmo)?;
+        Ok(vmo)
     }
 
     pub(crate) fn get_storage_handle(&self) -> Option<Arc<zx::Vmo>> {
@@ -216,15 +223,19 @@ impl Inspector {
     /// VMO for the blob child identified by `link_name` (the unique link content key stored in
     /// the `LINK_VALUE` block's `content` index, e.g. `"events-0"`, rather than the
     /// user-provided property name).
-    pub fn copy_blob_vmo_data(&self, link_name: &str) -> Option<Box<[u8]>> {
+    ///
+    /// Returns [`Error::VmoMissing`] if no blob with `link_name` exists, or an error if the
+    /// inspector or blob lock is currently held.
+    pub fn copy_blob_vmo_data(&self, link_name: &str) -> Result<Box<[u8]>, Error> {
         let blob = self.get_blob(link_name)?;
-        blob.try_lock()?.copy_vmo_bytes()
+        let guard = blob.try_lock().ok_or(Error::ExpectedLockState(false))?;
+        guard.copy_vmo_bytes().ok_or(Error::ExpectedLockState(false))
     }
 
-    pub(crate) fn get_blob(&self, link_name: &str) -> Option<Arc<Mutex<BlobBuffer>>> {
-        let state = self.state()?;
-        let guard = state.try_lock().ok()?;
-        guard.blobs().get(link_name).cloned()
+    pub(crate) fn get_blob(&self, link_name: &str) -> Result<Arc<Mutex<BlobBuffer>>, Error> {
+        let state = self.state().ok_or(Error::VmoMissing)?;
+        let guard = state.try_lock()?;
+        guard.blobs().get(link_name).cloned().ok_or(Error::VmoMissing)
     }
 
     pub fn max_size(&self) -> Option<usize> {

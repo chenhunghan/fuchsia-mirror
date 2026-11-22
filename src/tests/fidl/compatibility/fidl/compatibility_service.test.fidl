@@ -21,7 +21,7 @@ type this_is_a_table = table {
     1: s string;
 };
 
-type this_is_a_xunion = flexible union {
+type this_is_a_flexible_union = flexible union {
     1: s string;
     2: b bool;
 };
@@ -436,7 +436,7 @@ type Struct = resource struct {
     structs structs;
     unions unions;
     table this_is_a_table;
-    xunion this_is_a_xunion;
+    flexible_union this_is_a_flexible_union;
     b bool;
 };
 
@@ -467,7 +467,7 @@ type ArraysStruct = resource struct {
     vectors array<vector<uint32>, arrays_size>;
     nullable_vectors array<vector<uint32>:optional, arrays_size>;
     tables array<this_is_a_table, arrays_size>;
-    xunions array<this_is_a_xunion, arrays_size>;
+    flexible_unions array<this_is_a_flexible_union, arrays_size>;
 };
 
 // This struct contains vectors of all different kinds of FIDL types.
@@ -497,7 +497,7 @@ type VectorsStruct = resource struct {
     vectors vector<vector<uint32>>:vectors_size;
     nullable_vectors vector<vector<uint32>:optional>:vectors_size;
     tables vector<this_is_a_table>:vectors_size;
-    xunions vector<this_is_a_xunion>:vectors_size;
+    flexible_unions vector<this_is_a_flexible_union>:vectors_size;
 };
 
 // This table has members all different FIDL types.
@@ -522,11 +522,11 @@ type AllTypesTable = resource table {
     18: array_member array<uint32, arrays_size>;
     19: vector_member vector<uint32>;
     20: table_member this_is_a_table;
-    21: xunion_member this_is_a_xunion;
+    21: flexible_union_member this_is_a_flexible_union;
 };
 
-// This xunion has members all different FIDL types.
-type AllTypesXunion = flexible resource union {
+// This flexible union has members all different FIDL types.
+type AllTypesFlexibleUnion = flexible resource union {
     1: bool_member bool;
     2: int8_member int8;
     3: int16_member int16;
@@ -547,7 +547,7 @@ type AllTypesXunion = flexible resource union {
     18: array_member array<uint32, arrays_size>;
     19: vector_member vector<uint32>;
     20: table_member this_is_a_table;
-    21: xunion_member this_is_a_xunion;
+    21: flexible_union_member this_is_a_flexible_union;
 };
 
 type RespondWith = strict enum {
@@ -674,19 +674,28 @@ closed protocol Echo {
 
     // TODO(https://fxbug.dev/42169565): renamed these tests to make clearer the difference between these and
     // the payload tests below.
-    strict EchoXunions(resource struct {
-        value vector<AllTypesXunion>;
+    //
+    // The selectors on the next two methods keep the ordinals they had under
+    // their previous names. Implementations of this protocol that are built
+    // outside this repository use their own copy of this file, which is
+    // updated separately, and they run against the implementations built
+    // here. Removing a selector changes the method's ordinal, so it breaks
+    // any implementation built from a copy that still has it.
+    @selector("EchoXunions")
+    strict EchoFlexibleUnions(resource struct {
+        value vector<AllTypesFlexibleUnion>;
         forward_to_server string;
     }) -> (resource struct {
-        value vector<AllTypesXunion>;
+        value vector<AllTypesFlexibleUnion>;
     });
-    strict EchoXunionsWithError(resource struct {
-        value vector<AllTypesXunion>;
+    @selector("EchoXunionsWithError")
+    strict EchoFlexibleUnionsWithError(resource struct {
+        value vector<AllTypesFlexibleUnion>;
         result_err default_enum;
         forward_to_server string;
         result_variant RespondWith;
     }) -> (resource struct {
-        value vector<AllTypesXunion>;
+        value vector<AllTypesFlexibleUnion>;
     }) error default_enum;
 
     strict EchoNamedStruct(imp.RequestStruct) -> (imp.ResponseStruct);

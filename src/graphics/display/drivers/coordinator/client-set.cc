@@ -179,13 +179,18 @@ void ClientSet::HandleClientOwnershipChanges() {
   }
 
   if (new_client_owning_displays != client_owning_displays_) {
+    // `SetOwnership()` can synchronously submit configurations and notifications
+    // that query `GetClientOwningDisplays()`. Update `client_owning_displays_`
+    // before calling `SetOwnership()` so queries always reflect the transition.
     if (client_owning_displays_) {
-      client_owning_displays_->SetOwnership(false);
+      Client* old_client_owning_displays = client_owning_displays_;
+      client_owning_displays_ = nullptr;
+      old_client_owning_displays->SetOwnership(false);
     }
     if (new_client_owning_displays) {
+      client_owning_displays_ = new_client_owning_displays;
       new_client_owning_displays->SetOwnership(true);
     }
-    client_owning_displays_ = new_client_owning_displays;
   }
 }
 

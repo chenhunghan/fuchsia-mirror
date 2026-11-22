@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import datetime
+import logging
 import time
 from io import BufferedRandom
 from pathlib import Path
@@ -10,11 +12,8 @@ from types import TracebackType
 
 from libs.commands.command import LinuxCommand
 from libs.proc.runner import Runner
-from mobly import utils
-from mobly.logger import (
-    epoch_to_log_line_timestamp,
-    normalize_log_line_timestamp,
-)
+
+_LOGGER = logging.getLogger(__name__)
 
 # Max time to wait for tcpdump to terminate after sending SIGTERM.
 TERMINATE_TIMEOUT_SEC: float = 5.0
@@ -37,8 +36,10 @@ class LinuxTcpdumpCommand(LinuxCommand):
             A context manager to run tcpdump. Must be used in a with statement
             for the process to start and exit correctly.
         """
-        time_stamp = normalize_log_line_timestamp(
-            epoch_to_log_line_timestamp(utils.get_current_epoch_time())
+        seconds, millis = divmod(round(time.time() * 1000), 1000)
+        time_stamp = (
+            datetime.datetime.fromtimestamp(seconds).strftime("%m-%d_%H-%M-%S.")
+            + f"{millis:03d}"
         )
         return TcpdumpProcess(
             self, interface, pcap=Path(output_dir, f"tcpdump_{time_stamp}.pcap")
@@ -55,14 +56,13 @@ class TcpdumpProcess:
         pcap: Path,
     ) -> None:
         self._tcpdump = tcpdump
-        self._log = tcpdump._runner.log
         self._interface = interface
         self._pcap_path = pcap
         self._pcap_file: BufferedRandom | None = None
         self._process: Popen[bytes] | None = None
 
     def __enter__(self) -> None:
-        self._log.info(
+        _LOGGER.info(
             "Streaming %s packet capture to %s",
             self._interface,
             self._pcap_path,
@@ -106,12 +106,12 @@ class TcpdumpProcess:
                 "tcpdump did not terminate after sending SIGTERM"
             )
 
-        self._log.info(
+        _LOGGER.info(
             "%s packet capture wrote to %s", self._interface, self._pcap_path
         )
 
         _, stderr = self._process.communicate()
-        self._log.debug(
+        _LOGGER.debug(
             "tcpdump returned with status %i\nstderr: %s",
             exit_code,
             stderr.decode("utf-8", errors="replace"),

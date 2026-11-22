@@ -252,7 +252,7 @@ If you have a particular commit that you want jiri to honor, download its
 
 A: Can't, sorry. Try to arrange your changes so that they don't break each
 petal during a transition (i.e., do a [soft
-transition](working_across_petals.md#soft-transitions-preferred)). But sometimes
+transition](working_across_petals.md#soft-transitions)). But sometimes
 you will necessarily break things; aim to minimize the duration of breakage
 (i.e., a [hard transition](working_across_petals.md#hard-transitions)).
 
@@ -344,10 +344,10 @@ match. This can be useful to bisect within fuchsia.git.
 
 ### Q: When/how do I make a soft vs hard transition when changing APIs?
 
-See [this section](working_across_petals.md#hard-and-soft-transitions) about hard
+See [this section](working_across_petals.md) about hard
 and soft transitions.
 
-### Q: How do I update a FIDL protocol?
+### Q: How do I update a FIDL protocol? {:#q-how-do-i-update-a-fidl-protocol}
 
 A: The preferred method for updating a FIDL protocol is to use a *soft
 transition*. In order for a soft transition to work, you need to create an
@@ -372,7 +372,7 @@ Use the following steps to execute a soft transition:
 1.  Publish the Stem repository, typically by waiting for the daily automatic
     publication.
 
-### Q: How do I coordinate changes across multiple Petals?
+### Q: How do I coordinate changes across multiple petals? {:#q-how-do-i-coordinate-changes-across-multiple-petals}
 
 A: Coordinating an atomic change across multiple Petals (or between the Stem
 repository and one or more Petals) requires performing a *hard transition*.

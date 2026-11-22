@@ -5,6 +5,5 @@
 import("//build/bazel/export_fuchsia_package_to_bazel.gni")
 
 export_fuchsia_package_to_bazel("stress-test-runner") {
-  testonly = true
   package = "//src/sys/test_runners/stress_test:stress-test-runner"
 }

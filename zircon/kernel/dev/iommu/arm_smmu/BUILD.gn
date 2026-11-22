@@ -9,16 +9,21 @@ import("//zircon/kernel/kernel_rust_mod.gni")
 
 kernel_rust_mod("arm_smmu_rs") {
   sources = [
+    "arm_smmu_ffi.rs",
     "common/constants.rs",
     "common/device_aspace.rs",
     "common/env.rs",
+    "common/irq.rs",
+    "common/mmio.rs",
     "common/mod.rs",
     "common/page_cache.rs",
     "common/smmu_mode.rs",
     "common/translation_table.rs",
+    "common/utils.rs",
     "common/vmsav8_64.rs",
     "mod.rs",
     "unit_tests.rs",
+    "v2/console.rs",
     "v2/context_bank.rs",
     "v2/mod.rs",
     "v2/registers.rs",
@@ -26,6 +31,7 @@ kernel_rust_mod("arm_smmu_rs") {
     "v2/smmu_bti.rs",
     "v2/smmu_pmt.rs",
     "v2/stream_match_reg.rs",
+    "v2/unit_tests.rs",
     "v2/utils.rs",
   ]
   deps = [
@@ -33,67 +39,25 @@ kernel_rust_mod("arm_smmu_rs") {
     "//sdk/rust/zx-types",
     "//src/lib/kalloc",
     "//src/lib/ksync",
+    "//src/lib/lazy_init:lazy_init_rs",
     "//src/lib/regio",
     "//src/lib/zr",
     "//third_party/rust_crates:pin-init",
-    "//zircon/kernel/lib/arch:arch-rs",
     "//zircon/kernel/lib/boot-options:boot-options-rs",
     "//zircon/kernel/lib/debug",
+    "//zircon/kernel/lib/init:init_rust",
     "//zircon/system/ulib/fbl/rust:fbl",
     "//zircon/system/ulib/region-alloc/rust:region-alloc",
   ]
+  test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }
 
 source_set("arm_smmu") {
   public_deps = [ ":headers" ]
-
-  sources = [
-    "console.cc",
-    "context_bank.cc",
-    "device_aspace.cc",
-    "smmu.cc",
-    "smmu_bti.cc",
-    "smmu_env_ffi.cc",
-    "smmu_mode.cc",
-    "smmu_pmt.cc",
-    "stream_match_reg_group.cc",
-    "translation_table_helper.cc",
-    "utils.cc",
-  ]
-  deps = [
-    ":arm_smmu_rs",
-    "//zircon/kernel/dev/iommu",
-    "//zircon/kernel/dev/iommu/stub",
-    "//zircon/kernel/lib/boot-options",
-    "//zircon/kernel/lib/btree:headers",
-    "//zircon/kernel/lib/console",
-    "//zircon/kernel/lib/ktl",
-    "//zircon/kernel/lib/root_resource_filter",
-    "//zircon/system/ulib/hwreg",
-    "//zircon/system/ulib/region-alloc",
-  ]
+  deps = [ ":arm_smmu_rs" ]
 }
 
 library_headers("headers") {
-  headers = [
-    "dev/arm_smmu/context_bank.h",
-    "dev/arm_smmu/device_aspace.h",
-    "dev/arm_smmu/page_cache.h",
-    "dev/arm_smmu/smmu.h",
-    "dev/arm_smmu/smmu_bti.h",
-    "dev/arm_smmu/smmu_registers.h",
-    "dev/arm_smmu/stream_match_reg_group.h",
-    "dev/arm_smmu/translation_table_helper.h",
-    "dev/arm_smmu/utils.h",
-    "dev/arm_smmu/vmsav8_64.h",
-  ]
-  public_deps = [
-    "//zircon/kernel/dev/interrupt",
-    "//zircon/kernel/dev/iommu:headers",
-    "//zircon/kernel/lib/boot-options:headers",
-    "//zircon/kernel/lib/console:headers",
-    "//zircon/kernel/lib/ktl:headers",
-    "//zircon/kernel/vm:headers",
-    "//zircon/system/ulib/hwreg:headers",
-  ]
+  headers = [ "dev/arm_smmu/init.h" ]
+  public_deps = [ "//sdk/lib/zbi-format" ]
 }

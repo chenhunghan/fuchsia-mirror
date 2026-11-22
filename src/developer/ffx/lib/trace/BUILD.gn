@@ -50,7 +50,7 @@ if (is_host) {
     ]
     with_unit_tests = true
     deps = [
-      "//sdk/fidl/fuchsia.tracing.controller:fuchsia.tracing.controller_rust",
+      "//sdk/fidl/fuchsia.tracing.controller:fuchsia.tracing.controller_rust_common",
       "//sdk/rust/zx-types",
       "//src/developer/ffx/config:lib",
       "//src/lib/fidl_codec/rust:fidl_codec_pure",

@@ -4,6 +4,10 @@
 
 import("//build/cpp/library_headers.gni")
 
+# BUILD.bazel mirrors these targets and is kept manually synchronized, as they
+# are too complex for bazel2gn.
+# LINT.IfChange
+
 if (is_fuchsia || is_linux) {
   target(default_library_type, "libpcap") {
     output_name = "pcap"
@@ -87,6 +91,7 @@ copy("copy_config") {
 
 library_headers("headers") {
   headers = [
+    "pcap.h",
     "pcap/bpf.h",
     "pcap/can_socketcan.h",
     "pcap/compiler-tests.h",
@@ -118,3 +123,4 @@ config("suppress_warnings") {
     cflags += [ "-Wno-macro-redefined" ]
   }
 }
+# LINT.ThenChange(BUILD.bazel)

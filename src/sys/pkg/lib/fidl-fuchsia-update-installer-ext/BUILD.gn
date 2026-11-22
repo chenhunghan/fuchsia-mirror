@@ -56,13 +56,12 @@ rustc_library("fidl-fuchsia-update-installer-ext") {
     "//src/sys/pkg/*",
     "//vendor/google/*",
   ]
-  deps = [
-    "//sdk/fidl/fuchsia.net.http:fuchsia.net.http_rust",
-    "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
+  deps = []
+  deps += [
+    "//sdk/fidl/fuchsia.net.http:fuchsia.net.http_rust_common",
     "//src/lib/diagnostics/inspect/rust",
     "//src/lib/fdomain/client",
     "//src/lib/fidl/rust/fidl",
-    "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust",
     "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust_fdomain",
     "//src/sys/pkg/lib/event-queue",
     "//src/sys/pkg/lib/metrics:cobalt_sw_delivery_registry_rustlib",
@@ -76,6 +75,17 @@ rustc_library("fidl-fuchsia-update-installer-ext") {
     "//third_party/rust_crates:thiserror",
     "//third_party/rust_crates:typed-builder",
   ]
+  if (is_fuchsia) {
+    deps += [
+      "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
+      "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust",
+    ]
+  } else {
+    deps += [
+      "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust_common",
+      "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust_common",
+    ]
+  }
 }
 
 rustc_test("fidl_fuchsia_update_installer_ext_lib_test") {
@@ -86,33 +96,44 @@ rustc_test("fidl_fuchsia_update_installer_ext_lib_test") {
   ]
   edition = "2024"
   proc_macro_deps = [ "//third_party/rust_crates:proptest-derive" ]
-  deps = [
-           "//sdk/fidl/fuchsia.net.http:fuchsia.net.http_rust",
-           "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
-           "//src/lib/diagnostics/inspect/rust",
-           "//src/lib/fdomain/client",
-           "//src/lib/fidl/rust/fidl",
-           "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust",
-           "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust_fdomain",
-           "//src/sys/pkg/lib/event-queue",
-           "//src/sys/pkg/lib/metrics:cobalt_sw_delivery_registry_rustlib",
-           "//third_party/cobalt/src/lib/client/rust:cobalt-client",
-           "//third_party/rust_crates:futures",
-           "//third_party/rust_crates:http",
-           "//third_party/rust_crates:log",
-           "//third_party/rust_crates:pin-project",
-           "//third_party/rust_crates:proptest",
-           "//third_party/rust_crates:serde",
-           "//third_party/rust_crates:thiserror",
-           "//third_party/rust_crates:typed-builder",
-         ] + [
-           "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
-           "//src/lib/fdomain/local",
-           "//src/lib/fuchsia",
-           "//src/lib/fuchsia-async",
-           "//third_party/rust_crates:assert_matches",
-           "//third_party/rust_crates:serde_json",
-         ]
+  deps = []
+  deps += [
+    "//sdk/fidl/fuchsia.net.http:fuchsia.net.http_rust_common",
+    "//src/lib/diagnostics/inspect/rust",
+    "//src/lib/fdomain/client",
+    "//src/lib/fidl/rust/fidl",
+    "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust_fdomain",
+    "//src/sys/pkg/lib/event-queue",
+    "//src/sys/pkg/lib/metrics:cobalt_sw_delivery_registry_rustlib",
+    "//third_party/cobalt/src/lib/client/rust:cobalt-client",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:http",
+    "//third_party/rust_crates:log",
+    "//third_party/rust_crates:pin-project",
+    "//third_party/rust_crates:proptest",
+    "//third_party/rust_crates:serde",
+    "//third_party/rust_crates:thiserror",
+    "//third_party/rust_crates:typed-builder",
+  ]
+  if (is_fuchsia) {
+    deps += [
+      "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
+      "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust",
+    ]
+  } else {
+    deps += [
+      "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust_common",
+      "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust_common",
+    ]
+  }
+  deps += [
+    "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+    "//src/lib/fdomain/local",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//third_party/rust_crates:assert_matches",
+    "//third_party/rust_crates:serde_json",
+  ]
   lint_config = "//build/config/rust/lints:clippy_warn_all"
   visibility = [ ":*" ]
 }

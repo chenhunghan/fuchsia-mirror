@@ -46,20 +46,51 @@ def _dep_pyrefly_checks(ctx, attr_name):
 def _pyrefly_output_groups(checks):
     return [OutputGroupInfo(_validation = checks, pyrefly_checks = checks)] if checks else []
 
+def _append_target_pyrefly_checks(checks, value):
+    """Appends the `pyrefly_checks` depset of `value` to `checks` if it is a Target that has one."""
+    if type(value) == "Target" and OutputGroupInfo in value and hasattr(value[OutputGroupInfo], "pyrefly_checks"):
+        checks.append(value[OutputGroupInfo].pyrefly_checks)
+
+def _all_public_attr_pyrefly_checks(ctx):
+    """Returns the `pyrefly_checks` depsets of the targets in all public attributes.
+
+    Attributes whose names start with `_` (implicit dependencies such as tools
+    and toolchains) are skipped.
+    """
+    checks = []
+    for name in dir(ctx.rule.attr):
+        if name.startswith("_"):
+            continue
+        value = getattr(ctx.rule.attr, name, None)
+        value_type = type(value)
+        if value_type == "Target":
+            _append_target_pyrefly_checks(checks, value)
+        elif value_type == "list":
+            for item in value:
+                _append_target_pyrefly_checks(checks, item)
+        elif value_type == "dict":
+            # E.g. `attr.string_keyed_label_dict` (host_test_data_map's `files_map`)
+            # or `attr.label_keyed_string_dict`.
+            for key, item in value.items():
+                _append_target_pyrefly_checks(checks, key)
+                _append_target_pyrefly_checks(checks, item)
+    return checks
+
 def _pyrefly_aspect_impl(target, ctx):
     if build_config.host_os != "linux":
         fail("pyrefly_aspect is only supported on Linux hosts, got %s." % build_config.host_os)
 
     # Bazel only requests the `_validation` outputs of a command-line aspect
     # for top-level targets (https://github.com/bazelbuild/bazel/issues/19636),
-    # so a check runs only when its target, a Python target depending on it, or
-    # a host_test() wrapping it is built at the top level. Forward the checks of
-    # a host_test()'s `binary` (e.g. the inner py_binary of host_py_test()).
-    if ctx.rule.kind == "host_test":
-        return _pyrefly_output_groups(depset(transitive = _dep_pyrefly_checks(ctx, "binary")))
-
+    # so a check runs only when its target, or a target depending on it, is
+    # built at the top level. Make the checks transitive over every public
+    # attribute of targets that are not Python targets, so that Python targets
+    # reached through other rules (e.g. a filegroup, or the `data` of a
+    # host_test() such as the Mobly driver and test binaries of a
+    # python_mobly_test()) are checked too.
     if PyInfo not in target:
-        return []
+        attr_checks = _all_public_attr_pyrefly_checks(ctx)
+        return _pyrefly_output_groups(depset(transitive = attr_checks)) if attr_checks else []
 
     # Skip external repositories and vendored third_party/prebuilt packages.
     # build/bazel_sdk/ holds the sources of standalone repositories (e.g.

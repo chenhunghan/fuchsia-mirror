@@ -24,8 +24,15 @@ cc_library(
         "include",
     ],
     target_compatible_with = ["@platforms//os:fuchsia"],
-    deps = [
-        "//zircon/system/ulib/fbl",
-        "@fuchsia_sdk//pkg/zx",
-    ],
+    deps = select({
+        # Targets built with the Bazel SDK rules use the SDK copies.
+        "//build/bazel/platforms:is_fuchsia_with_sdk_rules": [
+            "@fuchsia_sdk//pkg/fbl_deprecated",
+            "@fuchsia_sdk//pkg/zx",
+        ],
+        "//conditions:default": [
+            "//zircon/system/ulib/fbl",
+            "//zircon/system/ulib/zx",
+        ],
+    }),
 )

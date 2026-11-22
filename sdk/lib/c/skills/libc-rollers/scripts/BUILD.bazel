@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":check_libc_rollers_test"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+py_library(
+    name = "libc_rollers",
+    srcs = [
+        "libc_rollers/__init__.py",
+        "libc_rollers/config.py",
+        "libc_rollers/constants.py",
+        "libc_rollers/formatting.py",
+        "libc_rollers/gerrit.py",
+        "libc_rollers/luci.py",
+        "libc_rollers/metrics.py",
+        "libc_rollers/monitor.py",
+        "libc_rollers/triage.py",
+        "libc_rollers/utils.py",
+    ],
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_py_test(
+    name = "check_libc_rollers_test",
+    srcs = [
+        "check_libc_rollers.py",
+        "check_libc_rollers_test.py",
+    ],
+    deps = [":libc_rollers"],
+)

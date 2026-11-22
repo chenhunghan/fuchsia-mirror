@@ -1,0 +1,536 @@
+{
+    "name": "sync_control_and_bulk",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 255,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd1",
+                "mode": "rdwr"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd1"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd2",
+                "mode": "rdwr"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd2"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_script_control",
+                "b_request": 1,
+                "action": {
+                    "reply": [
+                        202,
+                        254,
+                        186,
+                        190
+                    ]
+                }
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ok": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd1",
+                "bm_request_type": 64,
+                "b_request": 1,
+                "w_value": 4660,
+                "w_index": 0,
+                "w_length": 4,
+                "timeout_ms": 2000,
+                "data": [
+                    202,
+                    254,
+                    186,
+                    190
+                ]
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 4,
+                    "canary_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd1",
+                "bm_request_type": 192,
+                "b_request": 1,
+                "w_value": 4660,
+                "w_index": 0,
+                "w_length": 4,
+                "timeout_ms": 2000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 4,
+                    "data": [
+                        202,
+                        254,
+                        186,
+                        190
+                    ],
+                    "canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd1",
+                "bm_request_type": 64,
+                "b_request": 2,
+                "w_value": 0,
+                "w_index": 0,
+                "w_length": 0,
+                "timeout_ms": 2000,
+                "data_ptr": "null"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 0,
+                    "canary_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_script_control",
+                "b_request": 255,
+                "action": {
+                    "stall": true
+                }
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ok": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd1",
+                "bm_request_type": 192,
+                "b_request": 255,
+                "w_value": 0,
+                "w_index": 0,
+                "w_length": 4,
+                "timeout_ms": 2000
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EPIPE"
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "claimed": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "bulk",
+                "fd": "fd1",
+                "ep": 2,
+                "len": 8,
+                "timeout_ms": 2000,
+                "data": [
+                    222,
+                    173,
+                    190,
+                    239,
+                    1,
+                    2,
+                    3,
+                    4
+                ]
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 8,
+                    "canary_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_assert_empty",
+                "ep": 2
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EAGAIN"
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_pop_out",
+                "ep": 2,
+                "timeout_ms": 2000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 2,
+                    "bytes_popped": 8,
+                    "data": [
+                        222,
+                        173,
+                        190,
+                        239,
+                        1,
+                        2,
+                        3,
+                        4
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_assert_empty",
+                "ep": 2
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 2,
+                    "empty": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_push_in",
+                "ep": 129,
+                "data": [
+                    222,
+                    173,
+                    190,
+                    239,
+                    1,
+                    2,
+                    3,
+                    4
+                ]
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 129,
+                    "bytes_pushed": 8
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "bulk",
+                "fd": "fd1",
+                "ep": 129,
+                "len": 64,
+                "timeout_ms": 2000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 8,
+                    "data": [
+                        222,
+                        173,
+                        190,
+                        239,
+                        1,
+                        2,
+                        3,
+                        4
+                    ],
+                    "canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_script_control",
+                "b_request": 48,
+                "action": {
+                    "hold": "h_ctrl_1"
+                }
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ok": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "start_op",
+                "task": "t_ctrl",
+                "inner": {
+                    "type": "control",
+                    "fd": "fd1",
+                    "bm_request_type": 192,
+                    "b_request": 48,
+                    "w_value": 0,
+                    "w_index": 0,
+                    "w_length": 4,
+                    "timeout_ms": 2000
+                }
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "task": "t_ctrl",
+                    "started": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_release_control",
+                "hold": "h_ctrl_1",
+                "action": {
+                    "reply": [
+                        170,
+                        187,
+                        204,
+                        221
+                    ]
+                }
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ok": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "await_task",
+                "task": "t_ctrl",
+                "timeout_ms": 2000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 4,
+                    "data": [
+                        170,
+                        187,
+                        204,
+                        221
+                    ],
+                    "canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "start_op",
+                "task": "t_bulk_in",
+                "inner": {
+                    "type": "bulk",
+                    "fd": "fd1",
+                    "ep": 129,
+                    "len": 64,
+                    "timeout_ms": 2000
+                }
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "task": "t_bulk_in",
+                    "started": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_push_in",
+                "ep": 129,
+                "data": [
+                    17,
+                    34,
+                    51,
+                    68
+                ]
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 129,
+                    "bytes_pushed": 4
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "await_task",
+                "task": "t_bulk_in",
+                "timeout_ms": 2000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 4,
+                    "data": [
+                        17,
+                        34,
+                        51,
+                        68
+                    ],
+                    "canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "await_task",
+                "task": "t_nonexistent",
+                "timeout_ms": 100
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "ESRCH"
+            }
+        },
+        {
+            "step": {
+                "type": "bulk",
+                "fd": "fd2",
+                "ep": 2,
+                "len": 4,
+                "timeout_ms": 1000,
+                "data": [
+                    1,
+                    2,
+                    3,
+                    4
+                ]
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EBUSY"
+            }
+        },
+        {
+            "step": {
+                "type": "release_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "released": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd2"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        }
+    ]
+}

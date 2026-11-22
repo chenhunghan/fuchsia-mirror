@@ -3,14 +3,16 @@
 // found in the LICENSE file.
 
 #include <lib/stdcompat/optional.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <zircon/status.h>
 
+#include <limits>
+#include <type_traits>
 #include <unordered_map>
 
 #include <gtest/gtest.h>
 
 #include "src/lib/testing/predicates/status.h"
-#include "vmo_store.h"
 
 namespace vmo_store {
 namespace testing {
@@ -221,6 +223,41 @@ TYPED_TEST(TypedStorageTest, BasicStoreOperations) {
   ASSERT_STATUS(store.RegisterWithKey(
                     k1, MakeStoredVmoHelper<typename TestFixture::VmoStore::Meta>(zx::vmo(), 0)),
                 ZX_ERR_BAD_HANDLE);
+}
+
+TEST(StoredVmoSfinaeTest, ConstructorsRespectMetaType) {
+  static_assert(std::is_constructible_v<StoredVmo<void>, zx::vmo>);
+  static_assert(!std::is_constructible_v<StoredVmo<void>, zx::vmo, int>);
+
+  static_assert(!std::is_constructible_v<StoredVmo<int>, zx::vmo>);
+  static_assert(std::is_constructible_v<StoredVmo<int>, zx::vmo, int>);
+  static_assert(!std::is_constructible_v<StoredVmo<int>, zx::vmo, const char*>);
+
+  static_assert(!std::is_constructible_v<StoredVmo<MoveOnlyMeta>, zx::vmo>);
+  static_assert(std::is_constructible_v<StoredVmo<MoveOnlyMeta>, zx::vmo, MoveOnlyMeta>);
+}
+
+TEST(HashTableStorageTest, PushReturnsNulloptWhenKeySpaceExhausted) {
+  VmoStore<HashTableStorage<uint8_t>> store(Options{});
+
+  constexpr uint8_t kMissingKey = std::numeric_limits<uint8_t>::max();
+  for (uint16_t i = 0; i < kMissingKey; ++i) {
+    ASSERT_OK(store.RegisterWithKey(static_cast<uint8_t>(i), MakeVmo()));
+  }
+  ASSERT_FALSE(store.is_full());
+  ASSERT_EQ(store.count(), size_t{kMissingKey});
+
+  // One key remains unused (`kMissingKey`), so Register must find it cleanly.
+  zx::result<uint8_t> last_key = store.Register(MakeVmo());
+  ASSERT_OK(last_key.status_value());
+  EXPECT_EQ(*last_key, kMissingKey);
+  ASSERT_TRUE(store.is_full());
+  EXPECT_EQ(store.count(), size_t{kMissingKey} + 1);
+
+  // Once every uint8_t key is in use, Register must not loop infinitely.
+  zx::result<uint8_t> full_result = store.Register(MakeVmo());
+  ASSERT_STATUS(full_result.status_value(), ZX_ERR_NO_RESOURCES);
+  EXPECT_EQ(store.count(), size_t{kMissingKey} + 1);
 }
 
 }  // namespace testing

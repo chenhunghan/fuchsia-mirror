@@ -35,6 +35,10 @@ void SingletonDisplayService::GetMetrics(
   metrics.extent_in_mm(fuchsia_math::SizeU{display_->width_in_mm(), display_->height_in_mm()});
   metrics.recommended_device_pixel_ratio(fuchsia_math::VecF{dpr.x, dpr.y});
   metrics.maximum_refresh_rate_in_millihertz(display_->maximum_refresh_rate_in_millihertz());
+  metrics.vsync_period(display_->vsync_period().get());
+  if (display_->vrr_config().has_value()) {
+    metrics.vrr_config(*display_->vrr_config());
+  }
 
   callback(std::move(metrics));
 }

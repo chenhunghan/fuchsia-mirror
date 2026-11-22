@@ -10,4 +10,4 @@ The data is held in a VMO shared with userspace via
 `/boot/kernel/i/memory-profile/d/heap.bin`
 
 More detail on how to use it at
-src/performance/memory/heapdump/kernel-collector/README.md
+src/memory/heapdump/kernel-collector/README.md

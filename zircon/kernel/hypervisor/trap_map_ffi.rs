@@ -4,7 +4,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use core::ffi::{c_char, c_void};
 use fbl::RefPtr;
 use pin_init::PinInit;
 use zx_status::Status;
@@ -12,32 +11,13 @@ use zx_types::{ZX_OK, zx_gpaddr_t, zx_port_packet_t, zx_status_t};
 
 use crate::object::PortDispatcher;
 
-use super::state_invalidator::StateInvalidator;
-use super::trap_map::{PortPacketArena, Trap, TrapMap};
-
-#[allow(improper_ctypes)]
-unsafe extern "C" {
-    pub(super) fn cpp_port_packet_arena_init(arena: *mut PortPacketArena);
-    pub(super) fn cpp_port_packet_arena_destroy(arena: *mut PortPacketArena);
-    pub(super) fn cpp_port_packet_arena_init_pool(
-        arena: *mut PortPacketArena,
-        name: *const c_char,
-        ob_size: usize,
-        max_count: usize,
-    ) -> zx_status_t;
-    pub(super) fn cpp_port_packet_arena_alloc(arena: *mut PortPacketArena) -> *mut c_void;
-    pub(super) fn cpp_port_packet_arena_free(arena: *mut PortPacketArena, port_packet: *mut c_void);
-}
+use super::trap_map::{Trap, TrapMap};
 
 /// Queues `packet` on a `Trap`'s port for C++ callers.
 #[allow(improper_ctypes_definitions)]
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_trap_queue(
-    trap: &Trap,
-    packet: &zx_port_packet_t,
-    invalidator: Option<&mut StateInvalidator>,
-) -> zx_status_t {
-    Status::result_into_raw(trap.queue(packet, invalidator))
+pub extern "C" fn rust_trap_queue(trap: &Trap, packet: &zx_port_packet_t) -> zx_status_t {
+    Status::result_into_raw(trap.queue(packet, None))
 }
 
 /// Returns `true` if `trap` has an associated port.
@@ -119,7 +99,7 @@ pub extern "C" fn rust_trap_map_find_trap(
 ) -> zx_status_t {
     match trap_map.find_trap(kind, addr) {
         Ok(trap) => {
-            *out = core::ptr::from_ref(trap).cast_mut();
+            *out = trap.as_mut_ptr();
             ZX_OK
         }
         Err(status) => status.into_raw(),

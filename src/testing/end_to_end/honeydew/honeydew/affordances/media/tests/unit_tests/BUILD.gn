@@ -6,8 +6,8 @@ import("//build/python/python_host_test.gni")
 
 assert(is_host, "Python targets only supported on a host toolchain")
 
-python_host_test("media_using_fc_test") {
-  main_source = "media_using_fc_test.py"
+python_host_test("media_test") {
+  main_source = "media_test.py"
   libraries = [
     "//src/testing/end_to_end/honeydew",
     "//third_party/mobly",
@@ -16,5 +16,5 @@ python_host_test("media_using_fc_test") {
 
 group("unit_tests") {
   testonly = true
-  public_deps = [ ":media_using_fc_test" ]
+  public_deps = [ ":media_test" ]
 }

@@ -15,9 +15,11 @@ fuchsia_unittest_component("fdio-zxtest-component") {
   deps = [
     ":accept-child",
     ":chroot-child",
+    ":cwd-child",
     ":echo-args",
     ":fdio-test",
     ":hello-world",
+    ":no-startup-cwd-child",
     ":null-namespace-child",
     ":shebang-test-script",
   ]
@@ -121,7 +123,6 @@ test("fdio-test") {
       "//sdk/lib/driver_test_realm/simple",
       "//sdk/lib/fdio",
       "//sdk/lib/zxio",
-      "//src/connectivity/network/lib/udp_serde",
       "//src/connectivity/network/tests/socket:util",
       "//zircon/system/ulib/sync",
       "//zircon/system/ulib/test-utils",
@@ -168,8 +169,8 @@ test("fdio-gtest") {
 
 executable("accept-child") {
   visibility = [ ":*" ]
-
   testonly = true
+
   sources = [ "fdio_atexit_test_accept_child.cc" ]
   deps = [
     "//sdk/lib/fdio",
@@ -180,28 +181,47 @@ executable("accept-child") {
 
 executable("chroot-child") {
   visibility = [ ":*" ]
-
   testonly = true
-  sources = [ "fdio_chroot_child.cc" ]
 
+  sources = [ "fdio_chroot_child.cc" ]
   if (is_fuchsia) {
     deps = [ "//sdk/lib/fdio" ]
   }
 }
 
 # Used by tests in fdio_startup.cc.
+executable("cwd-child") {
+  visibility = [ ":*" ]
+  testonly = true
+
+  sources = [ "fdio_cwd_child.cc" ]
+  deps = [ "//sdk/lib/fdio" ]
+}
+
+executable("no-startup-cwd-child") {
+  visibility = [ ":*" ]
+  testonly = true
+
+  sources = [
+    "fdio_cwd_child.cc",
+    "fdio_no_startup.cc",
+  ]
+  deps = [ "//sdk/lib/fdio" ]
+  ldflags = [ "-Wl,--export-dynamic-symbol=__libc_extensions_init" ]
+}
+
 executable("hello-world") {
   visibility = [ ":*" ]
-
   testonly = true
+
   sources = [ "hello.cc" ]
   deps = [ "//sdk/lib/fdio" ]
 }
 
 executable("null-namespace-child") {
   visibility = [ ":*" ]
-
   testonly = true
+
   sources = [ "fdio_null_namespace_child.cc" ]
   deps = [
     "//sdk/lib/fdio",
@@ -213,11 +233,13 @@ executable("null-namespace-child") {
 executable("echo-args") {
   visibility = [ ":*" ]
   testonly = true
+
   sources = [ "echo_args.cc" ]
 }
 
 resource("shebang-test-script") {
   testonly = true
+
   sources = [ "test_bins/shebang_test_script" ]
   outputs = [ "bin/shebang_test_script" ]
   allow_binary_output_dir = true

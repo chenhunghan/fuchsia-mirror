@@ -1,0 +1,92 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":elf-search-test-rust-pkg"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_library(
+    name = "elf-search-wrapper-lib",
+    srcs = [
+        "src/wrapper.cc",
+        "src/wrapper.h",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/elf-search"],
+    alwayslink = True,
+)
+
+fx_cc_shared_library(
+    name = "elf-search-wrapper",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [":elf-search-wrapper-lib"],
+)
+
+# Wrap the shared library in `cc_import()` to expose `CcInfo` for `rustc_library(link_deps)`.
+# Use `interface_library` + `system_provided = True` so runtime shared library runfiles
+# (including `libelf-search-wrapper.so` and `libtrace-engine.so`) are supplied by
+# `data = [":elf-search-wrapper"]` on `:lib` without duplicate package entries.
+# @bazel2gn:skip
+cc_import(
+    name = "elf-search-wrapper-import",
+    interface_library = ":elf-search-wrapper",
+    system_provided = True,
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/lib.rs",
+        "src/sys.rs",
+    ],
+    crate_name = "elf_search",
+    # Propagate `:elf-search-wrapper`'s runtime shared library runfiles (including
+    # `libtrace-engine.so`), which `native.cc_import` does not forward.
+    # @bazel2gn:skip
+    data = [":elf-search-wrapper"],
+    edition = "2024",
+    link_deps = [
+        # `rustc_library(link_deps)` requires `CcInfo` from the `cc_import()` wrapper,
+        # whereas GN `rustc_library` depends on `shared_library("elf-search-wrapper")` directly.
+        ":elf-search-wrapper-import",  # @bazel2gn:path_overwrite::elf-search-wrapper
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/memory/heapdump/collector:__pkg__",
+        "//src/memory/stacktrack/collector:__pkg__",
+    ],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/elf_parse",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Set crate_name so the test binary matches the GN with_unit_tests output name.
+    crate_name = "elf_search_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia-runtime"],
+)
+
+fx_unittest_package(
+    name = "elf-search-test-rust-pkg",
+    package_name = "elf-search-test-rust",
+    unit_tests = [":lib_test"],
+)

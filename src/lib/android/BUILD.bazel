@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(android_rust_config)
+build_flags(
+    name = "android_rust_config",
+    rustflags = [
+        "-Adead-code",
+        "-Adeprecated",
+        "-Aelided-lifetimes-in-paths",
+        "-Anon-camel-case-types",
+        "-Aunused-imports",
+        "-Aunused-must-use",
+        "-Aunused-mut",
+        "-Aunused-assignments",
+        "-Zallow-features=custom_inner_attributes",
+    ],
+    visibility = [
+        "//src/lib/android:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+# LINT.ThenChange(BUILD.gn:android_rust_config)
+
+# LINT.IfChange(android_aidl_rust_config)
+build_flags(
+    name = "android_aidl_rust_config",
+    rustflags = [
+        "-Aunused-crate-dependencies",
+        "-Adeprecated",
+        "-Aunused-variables",
+        "-Aunreachable-patterns",
+    ],
+    subflags = [":android_rust_config"],
+    visibility = [
+        "//src/lib/android:__subpackages__",
+        "//src/microfuchsia:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+# LINT.ThenChange(BUILD.gn:android_aidl_rust_config)

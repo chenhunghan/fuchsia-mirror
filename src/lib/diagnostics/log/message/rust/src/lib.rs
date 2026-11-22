@@ -57,11 +57,38 @@ pub fn from_logger(source: MonikerWithUrl, msg: LoggerMessage) -> LogsData {
     builder.build()
 }
 
+pub trait TagMetadata: Clone {
+    fn from_manifest(moniker: &str, url: &str) -> Option<Self>;
+    fn unknown_rolled_out(rolled_out_logs: u64) -> Self;
+    fn with_rolled_out(&self, rolled_out_logs: u64) -> Self;
+}
+
 #[derive(Clone)]
 pub struct ExtendedMetadata {
     pub moniker: ExtendedMoniker,
     pub url: FlyStr,
     pub rolled_out_logs: u64,
+}
+
+impl TagMetadata for ExtendedMetadata {
+    fn from_manifest(moniker: &str, url: &str) -> Option<Self> {
+        let moniker = ExtendedMoniker::parse_str(moniker).ok()?;
+        Some(Self { moniker, url: FlyStr::new(url), rolled_out_logs: 0 })
+    }
+
+    fn unknown_rolled_out(rolled_out_logs: u64) -> Self {
+        Self {
+            moniker: ExtendedMoniker::ComponentInstance(Moniker::parse_str("/UNKNOWN").unwrap()),
+            url: FlyStr::new(ARCHIVIST_URL),
+            rolled_out_logs,
+        }
+    }
+
+    fn with_rolled_out(&self, rolled_out_logs: u64) -> Self {
+        let mut metadata = self.clone();
+        metadata.rolled_out_logs = rolled_out_logs;
+        metadata
+    }
 }
 
 #[cfg(fuchsia_api_level_less_than = "HEAD")]
@@ -210,18 +237,24 @@ pub fn parse_logs_data<'a>(
 /// - When parsing a legacy log record (`is_control == false`), `MessageParser` resolves the
 ///   record's tag to retrieve the component's identity from the internal mapping, constructing
 ///   a fully attributed `LogsData` containing the correct component moniker and URL.
-#[derive(Default)]
-pub struct MessageParser {
-    tag_map: HashMap<u32, ExtendedMetadata>,
+pub struct MessageParser<M = ExtendedMetadata> {
+    tag_map: HashMap<u32, M>,
+}
+
+impl<M> Default for MessageParser<M> {
+    fn default() -> Self {
+        Self { tag_map: HashMap::new() }
+    }
 }
 
 pub trait MessageFormatter<'a> {
     type Result;
+    type Metadata: TagMetadata;
 
     fn format(
         &mut self,
         record: &Record<'a>,
-        metadata: Option<ExtendedMetadata>,
+        metadata: Option<&Self::Metadata>,
     ) -> Result<Self::Result, MessageError>;
 }
 
@@ -230,18 +263,19 @@ pub struct RustMessageFormatter;
 
 impl<'a> MessageFormatter<'a> for RustMessageFormatter {
     type Result = Data<Logs>;
+    type Metadata = ExtendedMetadata;
 
     fn format(
         &mut self,
         record: &Record<'a>,
-        metadata: Option<ExtendedMetadata>,
+        metadata: Option<&Self::Metadata>,
     ) -> Result<Self::Result, MessageError> {
-        let rolled_out = metadata.as_ref().map(|value| value.rolled_out_logs).unwrap_or(0);
-        parse_logs_data(record, metadata, rolled_out)
+        let rolled_out = metadata.map(|value| value.rolled_out_logs).unwrap_or(0);
+        parse_logs_data(record, metadata.cloned(), rolled_out)
     }
 }
 
-impl MessageParser {
+impl<M: TagMetadata> MessageParser<M> {
     /// Parses the next log record from the given `bytes`.
     ///
     /// This function can handle both standard log records and "Archivist" manifest records.
@@ -258,7 +292,7 @@ impl MessageParser {
     ///   if a log message was parsed, or `None` if it was an Archivist manifest record. The
     ///   second element is the remaining slice of bytes after parsing the record.
     /// * `Err(MessageError)`: An error if parsing failed.
-    pub fn parse_next<'a, F: MessageFormatter<'a>>(
+    pub fn parse_next<'a, F: MessageFormatter<'a, Metadata = M>>(
         &mut self,
         bytes: &'a [u8],
         mut formatter: F,
@@ -295,33 +329,22 @@ impl MessageParser {
                 }
             }
             if let Some(count) = rolled_out {
-                let mut metadata =
-                    self.tag_map.get(&base_tag).cloned().unwrap_or_else(|| ExtendedMetadata {
-                        moniker: diagnostics_data::ExtendedMoniker::ComponentInstance(
-                            moniker::Moniker::parse_str("/UNKNOWN").unwrap(),
-                        ),
-                        url: flyweights::FlyStr::new(ARCHIVIST_URL),
-                        rolled_out_logs: count,
-                    });
-                metadata.rolled_out_logs = count;
-                let data = formatter.format(&input, Some(metadata))?;
+                let metadata = self
+                    .tag_map
+                    .get(&base_tag)
+                    .map(|m| m.with_rolled_out(count))
+                    .unwrap_or_else(|| M::unknown_rolled_out(count));
+                let data = formatter.format(&input, Some(&metadata))?;
                 return Ok((Some(data), remaining));
             }
             if let (Some(m), Some(u)) = (moniker, url)
-                && let Ok(extended_moniker) = ExtendedMoniker::parse_str(&m)
+                && let Some(metadata) = M::from_manifest(&m, &u)
             {
-                self.tag_map.insert(
-                    base_tag,
-                    ExtendedMetadata {
-                        moniker: extended_moniker,
-                        url: FlyStr::new(u),
-                        rolled_out_logs: 0,
-                    },
-                );
+                self.tag_map.insert(base_tag, metadata);
             }
             Ok((None, remaining))
         } else {
-            let metadata = self.tag_map.get(&base_tag).cloned();
+            let metadata = self.tag_map.get(&base_tag);
             let data = formatter.format(&input, metadata)?;
             Ok((Some(data), remaining))
         }

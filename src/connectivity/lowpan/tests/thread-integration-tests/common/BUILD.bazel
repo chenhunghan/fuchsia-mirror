@@ -1,0 +1,62 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The fixture: builds the netemul topology and gives tests handles to its nodes.
+# Packages of tests using it must list thread_test_subpackages from
+# thread_test_package.gni as their subpackages.
+rustc_library(
+    name = "thread_testing_common",
+    testonly = True,
+    srcs = [
+        "src/lib.rs",
+        "src/medium.rs",
+        "src/node.rs",
+        "src/test_services.rs",
+        "src/utilities.rs",
+    ],
+    aspect_hints = [":client_includes"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    visibility = ["//src/connectivity/lowpan/tests/thread-integration-tests:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.lowpan.device:fuchsia.lowpan.device_rust",
+        "//sdk/fidl/fuchsia.lowpan:fuchsia.lowpan_rust",
+        "//sdk/fidl/fuchsia.net.dhcpv6:fuchsia.net.dhcpv6_rust",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.net.masquerade:fuchsia.net.masquerade_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/network/testing/netemul/fidl:fuchsia.netemul_rust",
+        "//src/connectivity/network/testing/netemul/network-context/fidl:network_rust",
+        "//src/connectivity/network/testing/netemul/rust:lib",
+        "//src/connectivity/openthread/tests/rf_medium_dispatcher/fidl/test.lowpan.rfsim:test.lowpan.rfsim_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+# Makes components that use the fixture include client.shard.cml.
+expect_includes(
+    name = "client_includes",
+    includes = [":client.shard"],
+)
+
+cml_shard(
+    name = "client.shard",
+    includes = ["//src/connectivity/network/testing/netemul/service/meta:client.shard"],
+    shard = "client.shard.cml",
+)

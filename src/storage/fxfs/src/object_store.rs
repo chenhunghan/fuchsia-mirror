@@ -118,9 +118,21 @@ const CACHED_KEYS_LIMIT: usize = 4;
 pub const VOLUME_DATA_KEY_ID: u64 = 0;
 pub const FSCRYPT_KEY_ID: u64 = 1;
 
-/// DataObjectHandle stores an owner that must implement this trait, which allows the handle to get
-/// back to an ObjectStore.
-pub trait HandleOwner: AsRef<ObjectStore> + Send + Sync + 'static {}
+/// Handles store an owner that must implement this trait, which allows the handle to get back to
+/// the store that holds its object.
+///
+/// Handle methods that need a local `ObjectStore` (anything that writes or touches the device,
+/// the allocator, extents or the graveyard) require [`LocalHandleOwner`].
+pub trait HandleOwner: Send + Sync + 'static {
+    type Store: ObjectStoreTrait;
+
+    /// Returns the store that holds the handle's object.
+    fn store(&self) -> &Self::Store;
+}
+
+/// A [`HandleOwner`] backed by a local [`ObjectStore`].
+pub trait LocalHandleOwner: HandleOwner<Store = ObjectStore> {}
+impl<T: HandleOwner<Store = ObjectStore> + ?Sized> LocalHandleOwner for T {}
 
 /// StoreInfo stores information about the object store.  This is stored within the parent object
 /// store, and is used, for example, to get the persistent layer objects.
@@ -212,14 +224,15 @@ pub const MAX_STORE_INFO_SERIALIZED_SIZE: usize = 131072;
 // This needs to be large enough to accommodate the maximum amount of unflushed data (data that is
 // in the journal but hasn't yet been written to layer files) for a store.  We set a limit because
 // we want to limit the amount of memory use in the case the filesystem is corrupt or under attack.
-pub const MAX_ENCRYPTED_MUTATIONS_SIZE: usize = 8 * journal::DEFAULT_RECLAIM_SIZE as usize;
+pub const MAX_ENCRYPTED_MUTATIONS_SIZE: usize = 16 * journal::DEFAULT_RECLAIM_SIZE as usize;
 
 #[derive(Default)]
 pub struct HandleOptions {
     /// If true, transactions used by this handle will skip journal space checks.
     pub skip_journal_checks: bool,
     /// If true, data written to any attribute of this handle will not have per-block checksums
-    /// computed.
+    /// stored in the extent records.  Checksums are still recorded in the journal when barriers
+    /// are disabled, since they are required to detect torn writes during replay.
     pub skip_checksums: bool,
     /// If true, any files using fsverity will not attempt to perform any verification. This is
     /// useful to open an object without the correct encryption keys to look at the metadata.
@@ -589,8 +602,64 @@ impl Drop for ReservedId<'_> {
     }
 }
 
+/// Where a symlink's target is stored, as returned by `resolve_symlink`.
+#[derive(Debug, PartialEq)]
+pub enum SymlinkTarget {
+    /// The target, stored in the object record.
+    Inline(Vec<u8>),
+    /// The fscrypt-encrypted target, stored in the object record. `read_encrypted_symlink`
+    /// decrypts it.
+    Encrypted(Vec<u8>),
+    /// The target is too long to store in the object record, so it's stored (possibly encrypted)
+    /// in the symlink's data attribute.
+    NonInline,
+}
+
+/// Reads the object record of symlink `object_id` and returns where its target is stored. This
+/// only reads the tree, so it works for any store.
+///
+/// This does not prevent TOCTOU races; the caller is responsible for holding appropriate locks to
+/// ensure the symlink is not modified or removed after it has been queried.
+///
+/// Returns `FxfsError::NotFound` if the object doesn't exist or has been deleted, and
+/// `FxfsError::Inconsistent` if it isn't a symlink.
+pub async fn resolve_symlink(
+    store: &impl ObjectStoreTrait,
+    object_id: u64,
+) -> Result<SymlinkTarget, Error> {
+    match store.tree().find(&ObjectKey::object(object_id)).await? {
+        None | Some(Item { value: ObjectValue::None, .. }) => bail!(FxfsError::NotFound),
+        Some(Item {
+            value: ObjectValue::Object { kind: ObjectKind::EncryptedSymlink { link, .. }, .. },
+            ..
+        }) => Ok(SymlinkTarget::Encrypted(link.into_vec())),
+        Some(Item {
+            value: ObjectValue::Object { kind: ObjectKind::Symlink { link, .. }, .. },
+            ..
+        }) => Ok(SymlinkTarget::Inline(link.into_vec())),
+        Some(Item {
+            value: ObjectValue::Object { kind: ObjectKind::NonInlineSymlink { .. }, .. },
+            ..
+        }) => Ok(SymlinkTarget::NonInline),
+        Some(item) => Err(anyhow!(FxfsError::Inconsistent)
+            .context(format!("Unexpected item in symlink lookup: {item:?}"))),
+    }
+}
+
 #[async_trait]
 pub trait ObjectStoreTrait: Send + Sync + 'static {
+    /// Returns the object ID of this store within its parent store.
+    fn store_object_id(&self) -> u64;
+
+    /// Returns true if the store is encrypted.
+    fn is_encrypted(&self) -> bool;
+
+    /// Called when an encrypted `StoreObjectHandle` is dropped.
+    fn on_encrypted_handle_drop(&self, _object_id: u64) {}
+
+    /// Retrieves or unwraps the fscrypt key for `object_id`.
+    async fn get_fscrypt_key(&self, object_id: u64) -> Result<CipherHolder, Error>;
+
     /// Purges an object that is in the graveyard.
     async fn purge(
         &self,
@@ -1158,13 +1227,13 @@ impl ObjectStore {
     /// prevent this.  One example where this can cause an issue is if the object ends up using a
     /// permanent key (which is the case if a value is passed for `crypt`), the permanent key is
     /// dropped when a handle is dropped, which will impact any other handles for the same object.
-    pub async fn open_object<S: HandleOwner>(
+    pub async fn open_object<S: LocalHandleOwner>(
         owner: &Arc<S>,
         obj_id: u64,
         options: HandleOptions,
         crypt: Option<Arc<dyn Crypt>>,
     ) -> Result<DataObjectHandle<S>, Error> {
-        let store = owner.as_ref().as_ref();
+        let store = owner.store();
         let mut fsverity_descriptor = None;
         let mut overwrite_ranges = Vec::new();
         let value = store
@@ -1189,7 +1258,8 @@ impl ObjectStore {
 
         ensure!(size <= MAX_FILE_SIZE, FxfsError::Inconsistent);
 
-        if track_overwrite_extents {
+        if track_overwrite_extents && size > 0 {
+            let cutoff = store.block_size.align_up(size).ok_or(FxfsError::Inconsistent)?;
             let layer_set = store.tree.layer_set();
             let mut merger = layer_set.merger();
             let mut iter = merger
@@ -1214,6 +1284,9 @@ impl ObjectStore {
                         value,
                         ..
                     }) if *object_id == obj_id => {
+                        if extent.start >= cutoff {
+                            break;
+                        }
                         match value {
                             ObjectValue::Extent(ExtentValue::None)
                             | ObjectValue::Extent(ExtentValue::Some {
@@ -1231,7 +1304,8 @@ impl ObjectStore {
                             | ObjectValue::Extent(ExtentValue::Some {
                                 mode: ExtentMode::Overwrite,
                                 ..
-                            }) => overwrite_ranges.push(extent.clone().into()),
+                            }) => overwrite_ranges
+                                .push(extent.start..std::cmp::min(extent.end, cutoff)),
                             _ => bail!(
                                 anyhow!(FxfsError::Inconsistent)
                                     .context("open_object: Expected extent")
@@ -1280,14 +1354,14 @@ impl ObjectStore {
         Ok(data_object_handle)
     }
 
-    pub fn create_object_with_id<S: HandleOwner>(
+    pub fn create_object_with_id<S: LocalHandleOwner>(
         owner: &Arc<S>,
         transaction: &mut Transaction<'_>,
         reserved_object_id: ReservedId<'_>,
         options: HandleOptions,
         encryption_options: Option<ObjectEncryptionOptions>,
     ) -> Result<DataObjectHandle<S>, Error> {
-        let store = owner.as_ref().as_ref();
+        let store = owner.store();
         // Don't permit creating unencrypted objects in an encrypted store.  The converse is OK.
         debug_assert!(store.crypt().is_none() || encryption_options.is_some());
         let now = Timestamp::now();
@@ -1357,13 +1431,13 @@ impl ObjectStore {
     /// If the store is encrypted, the object will be automatically encrypted as well.
     /// If `wrapping_key_id` is set, the new keys will be wrapped with that specific key, and
     /// otherwise the default data key is used.
-    pub async fn create_object<S: HandleOwner>(
+    pub async fn create_object<S: LocalHandleOwner>(
         owner: &Arc<S>,
         mut transaction: &mut Transaction<'_>,
         options: HandleOptions,
         fscrypt_info: Option<FscryptDirInfo>,
     ) -> Result<DataObjectHandle<S>, Error> {
-        let store = owner.as_ref().as_ref();
+        let store = owner.store();
         let object_id = store.get_next_object_id(transaction).await?;
         let crypt = store.crypt();
         let encryption_options = if let Some(crypt) = crypt {
@@ -1400,7 +1474,7 @@ impl ObjectStore {
     /// There are some cases where an encrypted object needs to be created in an unencrypted store.
     /// For example, when layer files for a child store are created in the root store, but they must
     /// be encrypted using the child store's keys.  This method exists for that purpose.
-    pub(crate) async fn create_object_with_key<S: HandleOwner>(
+    pub(crate) async fn create_object_with_key<S: LocalHandleOwner>(
         owner: &Arc<S>,
         mut transaction: &mut Transaction<'_>,
         object_id: ReservedId<'_>,
@@ -1677,9 +1751,50 @@ impl ObjectStore {
         Ok(())
     }
 
-    /// Deletes extents for attribute `attribute_id` in object `object_id`.  Also see the comments
-    /// for TrimMode and TrimResult. Should hold a lock on the attribute, and the object as it
-    /// performs a read-modify-write on the sizes.
+    /// Returns true if `(object_id, attribute_id)` has any overwrite extent in `iter` with
+    /// `extent.start < upper_bound` (if `Some`).
+    async fn iter_has_overwrite_extent(
+        mut iter: impl LayerIterator<ObjectKey, ObjectValue>,
+        object_id: u64,
+        attribute_id: AttributeId,
+        upper_bound: Option<u64>,
+    ) -> Result<bool, Error> {
+        while let Some(ItemRef {
+            key:
+                ObjectKey {
+                    object_id: key_object_id,
+                    data:
+                        ObjectKeyData::Attribute(extent_attribute_id, AttributeKey::Extent(extent)),
+                },
+            value,
+            ..
+        }) = iter.get()
+        {
+            if *key_object_id != object_id
+                || *extent_attribute_id != attribute_id
+                || upper_bound.is_some_and(|bound| extent.start >= bound)
+            {
+                break;
+            }
+            if matches!(
+                value,
+                ObjectValue::Extent(ExtentValue::Some {
+                    mode: ExtentMode::Overwrite | ExtentMode::OverwritePartial(_),
+                    ..
+                })
+            ) {
+                return Ok(true);
+            }
+            iter.advance().await?;
+        }
+        Ok(false)
+    }
+
+    /// Deletes extents for attribute `attribute_id` in object `object_id`, clearing
+    /// `has_overwrite_extents` on the attribute if this batch deletes its last overwrite extent
+    /// (unless the object or attribute itself is being tombstoned in this transaction).  Also see
+    /// the comments for TrimMode and TrimResult.  Should hold a lock on the attribute, and the
+    /// object as it performs a read-modify-write on the sizes.
     pub async fn trim_some(
         &self,
         transaction: &mut Transaction<'_>,
@@ -1750,6 +1865,8 @@ impl ObjectStore {
         let allocator = self.allocator();
         let mut result = TrimResult::Done(None);
         let mut deallocated = 0;
+        let mut trimmed_overwrite_extent = false;
+        let mut straddled_overwrite_extent = false;
         let block_size = self.block_size;
 
         while let Some(item_ref) = iter.get() {
@@ -1767,7 +1884,7 @@ impl ObjectStore {
                 }
                 if let (
                     AttributeKey::Extent(extent),
-                    ObjectValue::Extent(ExtentValue::Some { device_offset, .. }),
+                    ObjectValue::Extent(ExtentValue::Some { device_offset, mode, .. }),
                 ) = (attribute_key, item_ref.value)
                 {
                     let start = std::cmp::max(extent.start, aligned_offset);
@@ -1781,6 +1898,12 @@ impl ObjectStore {
                     ensure!(block_size.is_aligned(&device_range), FxfsError::Inconsistent);
                     allocator.deallocate(transaction, self.store_object_id, device_range).await?;
                     deallocated += len;
+                    if matches!(mode, ExtentMode::Overwrite | ExtentMode::OverwritePartial(_)) {
+                        trimmed_overwrite_extent = true;
+                        if extent.start < aligned_offset {
+                            straddled_overwrite_extent = true;
+                        }
+                    }
                     // Stop if the transaction is getting too big.
                     if transaction.mutations().len() >= TRANSACTION_MUTATION_THRESHOLD {
                         result = TrimResult::Incomplete;
@@ -1796,29 +1919,15 @@ impl ObjectStore {
         let finished_tombstone_attribute =
             matches!(mode, TrimMode::Tombstone(TombstoneMode::Attribute))
                 && !matches!(result, TrimResult::Incomplete);
-        let mut object_mutation = None;
-        let nodes = if finished_tombstone_object { -1 } else { 0 };
-        if nodes != 0 || deallocated != 0 {
-            let mutation = self.txn_get_object_mutation(transaction, object_id).await?;
-            if let ObjectValue::Object { attributes: ObjectAttributes { project_id, .. }, .. } =
-                mutation.item.value
-            {
-                if let Some(project_id) = project_id {
-                    transaction.merge_bytes_and_nodes(
-                        self.store_object_id,
-                        ObjectKey::project_usage(self.root_directory_object_id(), project_id),
-                        BytesAndNodes { bytes: -i64::try_from(deallocated).unwrap(), nodes },
-                    );
-                }
-                object_mutation = Some(mutation);
-            } else {
-                panic!("Inconsistent object type.");
-            }
-        }
 
         // Deletion marker records *must* be merged so as to consume all other records for the
         // object.
         if finished_tombstone_object {
+            let mutation = self.txn_get_object_mutation(transaction, object_id).await?;
+            let ObjectValue::Object { attributes, .. } = mutation.item.value else {
+                bail!(FxfsError::Inconsistent);
+            };
+            self.update_quota_usage(transaction, Some(&attributes), None)?;
             transaction.add(
                 self.store_object_id,
                 Mutation::merge_object(ObjectKey::object(object_id), ObjectValue::None),
@@ -1832,12 +1941,64 @@ impl ObjectStore {
                         ObjectValue::None,
                     ),
                 );
+            } else if trimmed_overwrite_extent {
+                // Keep `has_overwrite_extents` consistent with on-disk extents after each batch:
+                // clear it in the exact transaction that deletes the last overwrite extent.
+                let mut has_remaining_overwrite_extents = straddled_overwrite_extent;
+                if !has_remaining_overwrite_extents && matches!(result, TrimResult::Incomplete) {
+                    iter.advance().await?;
+                    has_remaining_overwrite_extents =
+                        Self::iter_has_overwrite_extent(iter, object_id, attribute_id, None)
+                            .await?;
+                } else {
+                    drop(iter);
+                }
+                if !has_remaining_overwrite_extents && aligned_offset > 0 {
+                    let prefix_iter = merger
+                        .query(Query::FullRange(&ObjectKey::from_extent(
+                            object_id,
+                            attribute_id,
+                            Extent::search_key_from_offset(0),
+                        )))
+                        .await?;
+                    has_remaining_overwrite_extents = Self::iter_has_overwrite_extent(
+                        prefix_iter,
+                        object_id,
+                        attribute_id,
+                        Some(aligned_offset),
+                    )
+                    .await?;
+                }
+                if !has_remaining_overwrite_extents {
+                    let attr_key =
+                        ObjectKey::attribute(object_id, attribute_id, AttributeKey::Attribute);
+                    let updated = transaction.update_object_mutation_value(
+                        self.store_object_id,
+                        attr_key.clone(),
+                        |value| {
+                            if let ObjectValue::Attribute { has_overwrite_extents, .. } = value {
+                                *has_overwrite_extents = false;
+                            }
+                        },
+                    );
+                    if !updated {
+                        let mut item =
+                            self.tree.find(&attr_key).await?.ok_or(FxfsError::Inconsistent)?;
+                        if let ObjectValue::Attribute { has_overwrite_extents, .. } =
+                            &mut item.value
+                            && *has_overwrite_extents
+                        {
+                            *has_overwrite_extents = false;
+                            transaction.add(
+                                self.store_object_id,
+                                Mutation::replace_or_insert_object(item.key, item.value),
+                            );
+                        }
+                    }
+                }
             }
             if deallocated > 0 {
-                let mut mutation = match object_mutation {
-                    Some(mutation) => mutation,
-                    None => self.txn_get_object_mutation(transaction, object_id).await?,
-                };
+                let mut mutation = self.txn_get_object_mutation(transaction, object_id).await?;
                 transaction.add(
                     self.store_object_id,
                     Mutation::merge_object(
@@ -1846,17 +2007,16 @@ impl ObjectStore {
                     ),
                 );
                 // Update allocated size.
-                if let ObjectValue::Object {
-                    attributes: ObjectAttributes { allocated_size, .. },
-                    ..
-                } = &mut mutation.item.value
-                {
+                if let ObjectValue::Object { ref mut attributes, .. } = mutation.item.value {
+                    let old_attributes = attributes.clone();
                     // The only way for these to fail are if the volume is inconsistent.
-                    *allocated_size = allocated_size.checked_sub(deallocated).ok_or_else(|| {
-                        anyhow!(FxfsError::Inconsistent).context("Allocated size overflow")
-                    })?;
+                    attributes.allocated_size =
+                        attributes.allocated_size.checked_sub(deallocated).ok_or_else(|| {
+                            anyhow!(FxfsError::Inconsistent).context("Allocated size overflow")
+                        })?;
+                    self.update_quota_usage(transaction, Some(&old_attributes), Some(attributes))?;
                 } else {
-                    panic!("Unexpected object value");
+                    bail!(FxfsError::Inconsistent);
                 }
                 transaction.add(self.store_object_id, Mutation::ObjectStore(mutation));
             }
@@ -2774,20 +2934,10 @@ impl ObjectStore {
 
     /// Returns the link of a symlink object.
     pub async fn read_symlink(&self, object_id: u64) -> Result<Vec<u8>, Error> {
-        match self.tree.find(&ObjectKey::object(object_id)).await? {
-            None | Some(Item { value: ObjectValue::None, .. }) => bail!(FxfsError::NotFound),
-            Some(Item {
-                value: ObjectValue::Object { kind: ObjectKind::EncryptedSymlink { link, .. }, .. },
-                ..
-            }) => self.read_encrypted_symlink(object_id, link.into_vec()).await,
-            Some(Item {
-                value: ObjectValue::Object { kind: ObjectKind::Symlink { link, .. }, .. },
-                ..
-            }) => Ok(link.into_vec()),
-            Some(Item {
-                value: ObjectValue::Object { kind: ObjectKind::NonInlineSymlink { .. }, .. },
-                ..
-            }) => {
+        match resolve_symlink(self, object_id).await? {
+            SymlinkTarget::Inline(link) => Ok(link),
+            SymlinkTarget::Encrypted(link) => self.read_encrypted_symlink(object_id, link).await,
+            SymlinkTarget::NonInline => {
                 let store = self
                     .filesystem()
                     .ensure_local()
@@ -2803,8 +2953,6 @@ impl ObjectStore {
                 );
                 handle.read_non_inline_symlink().await
             }
-            Some(item) => Err(anyhow!(FxfsError::Inconsistent)
-                .context(format!("Unexpected item in symlink lookup: {item:?}"))),
         }
     }
 
@@ -2841,6 +2989,90 @@ impl ObjectStore {
             .ok_or(FxfsError::Inconsistent)?
     }
 
+    /// Reconciles all quota usages (project ID, and in the future user/group) when an object's
+    /// attributes change (e.g. allocated size update, project ID update, or object tombstone
+    /// or creation).
+    pub(crate) fn update_quota_usage(
+        &self,
+        transaction: &mut Transaction<'_>,
+        old: Option<&ObjectAttributes>,
+        new: Option<&ObjectAttributes>,
+    ) -> Result<(), Error> {
+        let old_bytes = old
+            .map(|attributes| i64::try_from(attributes.allocated_size))
+            .transpose()
+            .map_err(|_| FxfsError::TooBig)?;
+        let new_bytes = new
+            .map(|attributes| i64::try_from(attributes.allocated_size))
+            .transpose()
+            .map_err(|_| FxfsError::TooBig)?;
+
+        self.reconcile_quota(
+            transaction,
+            old.and_then(|attributes| attributes.project_id).map(ObjectKeyData::project_usage),
+            new.and_then(|attributes| attributes.project_id).map(ObjectKeyData::project_usage),
+            old_bytes.unwrap_or(0),
+            new_bytes.unwrap_or(0),
+        );
+
+        // TODO(https://fxbug.dev/562121082): Reconcile Owner (user/group) usage here.
+
+        Ok(())
+    }
+
+    /// Reconciles quota usage for an object when its quota association or allocated bytes change.
+    /// Emits merge mutations on the root directory to adjust bytes and node counts:
+    /// - If the association is unchanged (same key), only emits a byte delta.
+    /// - If transitioning from one key to another (or adding/removing), emits -old and/or +new with
+    ///   node count adjustments.
+    fn reconcile_quota(
+        &self,
+        transaction: &mut Transaction<'_>,
+        old: Option<ObjectKeyData>,
+        new: Option<ObjectKeyData>,
+        old_bytes: i64,
+        new_bytes: i64,
+    ) {
+        // TODO(https://fxbug.dev/562121082): When Owner (user/group) usage is added, extend these
+        // assertions to also accept Owner usage keys and verify that when both `old` and `new` are
+        // `Some`, they belong to the same quota domain (Project vs. User vs. Group).
+        let is_usage_key = |key_data: &ObjectKeyData| {
+            matches!(key_data, ObjectKeyData::Project { property: ProjectProperty::Usage, .. })
+        };
+        debug_assert!(old.as_ref().is_none_or(is_usage_key), "Expected usage key, got {old:?}");
+        debug_assert!(new.as_ref().is_none_or(is_usage_key), "Expected usage key, got {new:?}");
+
+        let store_id = self.store_object_id();
+        let root_id = self.root_directory_object_id();
+        match (old, new) {
+            (Some(old_data), Some(new_data)) if old_data == new_data => {
+                if old_bytes != new_bytes {
+                    transaction.merge_bytes_and_nodes(
+                        store_id,
+                        ObjectKey { object_id: root_id, data: new_data },
+                        BytesAndNodes { bytes: new_bytes - old_bytes, nodes: 0 },
+                    );
+                }
+            }
+            (old, new) => {
+                if let Some(old_data) = old {
+                    transaction.merge_bytes_and_nodes(
+                        store_id,
+                        ObjectKey { object_id: root_id, data: old_data },
+                        BytesAndNodes { bytes: -old_bytes, nodes: -1 },
+                    );
+                }
+                if let Some(new_data) = new {
+                    transaction.merge_bytes_and_nodes(
+                        store_id,
+                        ObjectKey { object_id: root_id, data: new_data },
+                        BytesAndNodes { bytes: new_bytes, nodes: 1 },
+                    );
+                }
+            }
+        }
+    }
+
     pub async fn update_attributes<'a>(
         &self,
         transaction: &mut Transaction<'a>,
@@ -2848,7 +3080,22 @@ impl ObjectStore {
         node_attributes: Option<&fio::MutableNodeAttributes>,
         change_time: Option<Timestamp>,
     ) -> Result<(), Error> {
-        if change_time.is_none() {
+        self.update_attributes_internal(transaction, object_id, node_attributes, change_time, None)
+            .await
+    }
+
+    /// Updates object attributes in-tree and within the transaction, reconciling quota changes.
+    /// If `project_id` is `None`, the project ID is left unchanged; if `Some(None)`, it is cleared;
+    /// if `Some(Some(id))`, it is updated to `id`.
+    pub(crate) async fn update_attributes_internal(
+        &self,
+        transaction: &mut Transaction<'_>,
+        object_id: u64,
+        node_attributes: Option<&fio::MutableNodeAttributes>,
+        change_time: Option<Timestamp>,
+        project_id: Option<Option<ProjectId>>,
+    ) -> Result<(), Error> {
+        if change_time.is_none() && project_id.is_none() {
             if let Some(attributes) = node_attributes {
                 let empty_attributes = fio::MutableNodeAttributes { ..Default::default() };
                 if *attributes == empty_attributes {
@@ -2859,9 +3106,16 @@ impl ObjectStore {
             }
         }
         let mut mutation = self.txn_get_object_mutation(transaction, object_id).await?;
-        if let ObjectValue::Object { ref mut attributes, .. } = mutation.item.value {
+        if let ObjectValue::Object { ref kind, ref mut attributes } = mutation.item.value {
+            if matches!(kind, ObjectKind::Graveyard) {
+                bail!(FxfsError::Inconsistent);
+            }
+            let old_attributes = attributes.clone();
             if let Some(time) = change_time {
                 attributes.change_time = time;
+            }
+            if let Some(project_id) = project_id {
+                attributes.project_id = project_id;
             }
             if let Some(node_attributes) = node_attributes {
                 if let Some(time) = node_attributes.creation_time {
@@ -2901,10 +3155,11 @@ impl ObjectStore {
                     }
                 }
             }
+            self.update_quota_usage(transaction, Some(&old_attributes), Some(attributes))?;
         } else {
             bail!(
                 anyhow!(FxfsError::Inconsistent)
-                    .context("ObjectStore.update_attributes: Expected object value")
+                    .context("ObjectStore.update_attributes_internal: Expected object value")
             );
         };
         transaction.add(self.store_object_id(), Mutation::ObjectStore(mutation));
@@ -3019,6 +3274,25 @@ impl ObjectStore {
 
 #[async_trait]
 impl ObjectStoreTrait for ObjectStore {
+    fn store_object_id(&self) -> u64 {
+        self.store_object_id()
+    }
+
+    fn is_encrypted(&self) -> bool {
+        self.is_encrypted()
+    }
+
+    fn on_encrypted_handle_drop(&self, object_id: u64) {
+        let _ = self.key_manager.remove(object_id);
+    }
+
+    async fn get_fscrypt_key(&self, object_id: u64) -> Result<CipherHolder, Error> {
+        let crypt = self.crypt().ok_or(FxfsError::NoKey)?;
+        self.key_manager
+            .get_fscrypt_key(object_id, crypt.as_ref(), async || self.get_keys(object_id).await)
+            .await
+    }
+
     async fn purge(
         &self,
         object_id: u64,
@@ -3037,12 +3311,6 @@ impl ObjectStoreTrait for ObjectStore {
 
     fn filesystem(&self) -> Arc<dyn Filesystem> {
         self.filesystem()
-    }
-}
-
-impl AsRef<dyn ObjectStoreTrait> for ObjectStore {
-    fn as_ref(&self) -> &dyn ObjectStoreTrait {
-        self
     }
 }
 
@@ -3492,10 +3760,10 @@ impl Drop for ObjectStore {
     }
 }
 
-impl HandleOwner for ObjectStore {}
+impl HandleOwner for ObjectStore {
+    type Store = Self;
 
-impl AsRef<ObjectStore> for ObjectStore {
-    fn as_ref(&self) -> &ObjectStore {
+    fn store(&self) -> &Self {
         self
     }
 }
@@ -3555,7 +3823,7 @@ pub async fn load_store_info(
 }
 
 async fn load_store_info_from_handle(
-    handle: &DataObjectHandle<impl HandleOwner>,
+    handle: &DataObjectHandle<impl LocalHandleOwner>,
 ) -> Result<StoreInfo, Error> {
     Ok(if handle.get_size() > 0 {
         let serialized_info = handle.contents(MAX_STORE_INFO_SERIALIZED_SIZE).await?;
@@ -3590,8 +3858,10 @@ mod tests {
     use crate::object_store::directory::{Directory, replace_child};
     use crate::object_store::journal::{JournalCheckpoint, JournalOptions};
     use crate::object_store::object_record::{
-        AttributeKey, ObjectDescriptor, ObjectKey, ObjectKind, ObjectValue,
+        AttributeKey, BytesAndNodes, ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKind,
+        ObjectValue, Timestamp,
     };
+    use crate::object_store::project_id::ProjectId;
     use crate::object_store::store_object_handle::MAX_INLINE_XATTR_SIZE;
     use crate::object_store::transaction::{Options, lock_keys};
     use crate::object_store::volume::root_volume;
@@ -4406,7 +4676,7 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_object_id_cipher_roll_checks_journal_space() {
-        let reclaim_size = 65536;
+        let reclaim_size = 32768;
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let (mut hooks, fs_hooks) = Hooks::new();
         let fs = FxFilesystemBuilder::new()
@@ -4476,8 +4746,8 @@ mod tests {
                 .await
                 .expect("new_transaction failed");
 
-            // Fill the journal past `reclaim_size` while compactions are paused so that space is
-            // tied up in the metadata reservation for uncompacted journal mutations.
+            // Fill the journal past `2 * reclaim_size` while compactions are paused so that space
+            // is tied up in the metadata reservation for uncompacted journal mutations.
             write_xattrs().await;
 
             let journal_clone = fs.journal().clone();
@@ -5207,7 +5477,7 @@ mod tests {
                 .await
                 .expect("symlink");
         }
-        assert_eq!(transaction.commit().await.expect("commit"), 0);
+        assert_eq!(transaction.commit().await.expect("commit").offset(), 0);
     }
 
     #[fuchsia::test]
@@ -5688,7 +5958,7 @@ mod tests {
     async fn test_writes_to_other_store_not_blocked_by_stall() {
         let device = DeviceHolder::new(FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystemBuilder::new()
-            .journal_options(JournalOptions { reclaim_size: 32_768, ..Default::default() })
+            .journal_options(JournalOptions { reclaim_size: 16_384, ..Default::default() })
             .format(device)
             .await
             .expect("format failed");
@@ -5988,7 +6258,7 @@ mod tests {
     async fn test_unlock_pre_cache_stall_does_not_block_other_stores() {
         let device = DeviceHolder::new(FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystemBuilder::new()
-            .journal_options(JournalOptions { reclaim_size: 32_768, ..Default::default() })
+            .journal_options(JournalOptions { reclaim_size: 16_384, ..Default::default() })
             .format(device)
             .await
             .expect("format failed");
@@ -6106,7 +6376,7 @@ mod tests {
         let crypt2 = Arc::new(new_insecure_crypt());
         let (store1_id, device) = {
             let fs = FxFilesystemBuilder::new()
-                .journal_options(JournalOptions { reclaim_size: 32_768, ..Default::default() })
+                .journal_options(JournalOptions { reclaim_size: 16_384, ..Default::default() })
                 .format(device)
                 .await
                 .expect("format failed");
@@ -6198,7 +6468,7 @@ mod tests {
 
         log::info!("Opening filesystem");
         let fs = FxFilesystemBuilder::new()
-            .journal_options(JournalOptions { reclaim_size: 32_768, ..Default::default() })
+            .journal_options(JournalOptions { reclaim_size: 16_384, ..Default::default() })
             .open(device)
             .await
             .expect("open failed");
@@ -6834,7 +7104,7 @@ mod tests {
     async fn test_object_store_trait() {
         let fs = test_filesystem().await;
         let root_store = fs.root_store();
-        let store_trait: &dyn super::ObjectStoreTrait = (*root_store).as_ref();
+        let store_trait: &dyn super::ObjectStoreTrait = &*root_store;
 
         // Test filesystem() and tree() accessors via trait
         let fs_from_trait = store_trait.filesystem();
@@ -6900,6 +7170,190 @@ mod tests {
                 .expect("find failed")
                 .is_none()
         );
+
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_update_quota_usage() {
+        let fs = test_filesystem().await;
+        let store = fs.root_store();
+        let store_id = store.store_object_id();
+        let root_dir_id = store.root_directory_object_id();
+        let p1 = ProjectId::new(10).unwrap();
+        let p2 = ProjectId::new(20).unwrap();
+
+        let base_attr = ObjectAttributes {
+            project_id: None,
+            allocated_size: 0,
+            creation_time: Timestamp::zero(),
+            modification_time: Timestamp::zero(),
+            access_time: Timestamp::zero(),
+            change_time: Timestamp::zero(),
+            posix_attributes: None,
+        };
+
+        // 1. No-op when unchanged (None, None), or same project and same bytes.
+        {
+            let mut transaction = store
+                .new_transaction(lock_keys![], Options::default())
+                .await
+                .expect("new_transaction failed");
+            store.update_quota_usage(&mut transaction, None, None).expect("update_quota_usage");
+            let attr = ObjectAttributes { project_id: Some(p1), allocated_size: 100, ..base_attr };
+            store
+                .update_quota_usage(&mut transaction, Some(&attr), Some(&attr))
+                .expect("update_quota_usage");
+            assert!(transaction.mutations().is_empty());
+        }
+
+        // 2. Add node: (None, Some) with p1 and 500 bytes.
+        {
+            let mut transaction = store
+                .new_transaction(lock_keys![], Options::default())
+                .await
+                .expect("new_transaction failed");
+            let new_attr =
+                ObjectAttributes { project_id: Some(p1), allocated_size: 500, ..base_attr };
+            store
+                .update_quota_usage(&mut transaction, None, Some(&new_attr))
+                .expect("update_quota_usage");
+            assert_eq!(
+                transaction
+                    .get_object_mutation(store_id, ObjectKey::project_usage(root_dir_id, p1))
+                    .unwrap()
+                    .item
+                    .value,
+                ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 500, nodes: 1 })
+            );
+        }
+
+        // 3. Remove node: (Some, None) with p1 and 500 bytes.
+        {
+            let mut transaction = store
+                .new_transaction(lock_keys![], Options::default())
+                .await
+                .expect("new_transaction failed");
+            let old_attr =
+                ObjectAttributes { project_id: Some(p1), allocated_size: 500, ..base_attr };
+            store
+                .update_quota_usage(&mut transaction, Some(&old_attr), None)
+                .expect("update_quota_usage");
+            assert_eq!(
+                transaction
+                    .get_object_mutation(store_id, ObjectKey::project_usage(root_dir_id, p1))
+                    .unwrap()
+                    .item
+                    .value,
+                ObjectValue::BytesAndNodes(BytesAndNodes { bytes: -500, nodes: -1 })
+            );
+        }
+
+        // 4. Byte delta on same project: 500 -> 800 bytes.
+        {
+            let mut transaction = store
+                .new_transaction(lock_keys![], Options::default())
+                .await
+                .expect("new_transaction failed");
+            let old_attr =
+                ObjectAttributes { project_id: Some(p1), allocated_size: 500, ..base_attr };
+            let new_attr =
+                ObjectAttributes { project_id: Some(p1), allocated_size: 800, ..base_attr };
+            store
+                .update_quota_usage(&mut transaction, Some(&old_attr), Some(&new_attr))
+                .expect("update_quota_usage");
+            assert_eq!(
+                transaction
+                    .get_object_mutation(store_id, ObjectKey::project_usage(root_dir_id, p1))
+                    .unwrap()
+                    .item
+                    .value,
+                ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 300, nodes: 0 })
+            );
+        }
+
+        // 5. Switching projects: p1 (500 bytes) -> p2 (500 bytes).
+        {
+            let mut transaction = store
+                .new_transaction(lock_keys![], Options::default())
+                .await
+                .expect("new_transaction failed");
+            let old_attr =
+                ObjectAttributes { project_id: Some(p1), allocated_size: 500, ..base_attr };
+            let new_attr =
+                ObjectAttributes { project_id: Some(p2), allocated_size: 500, ..base_attr };
+            store
+                .update_quota_usage(&mut transaction, Some(&old_attr), Some(&new_attr))
+                .expect("update_quota_usage");
+            assert_eq!(
+                transaction
+                    .get_object_mutation(store_id, ObjectKey::project_usage(root_dir_id, p1))
+                    .unwrap()
+                    .item
+                    .value,
+                ObjectValue::BytesAndNodes(BytesAndNodes { bytes: -500, nodes: -1 })
+            );
+            assert_eq!(
+                transaction
+                    .get_object_mutation(store_id, ObjectKey::project_usage(root_dir_id, p2))
+                    .unwrap()
+                    .item
+                    .value,
+                ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 500, nodes: 1 })
+            );
+        }
+
+        // 6. FxfsError::TooBig when allocated_size > i64::MAX as u64.
+        {
+            let mut transaction = store
+                .new_transaction(lock_keys![], Options::default())
+                .await
+                .expect("new_transaction failed");
+            let too_big_attr = ObjectAttributes {
+                project_id: Some(p1),
+                allocated_size: (i64::MAX as u64) + 1,
+                ..base_attr
+            };
+            assert_matches!(
+                store.update_quota_usage(&mut transaction, None, Some(&too_big_attr)),
+                Err(e) if e.root_cause().downcast_ref::<FxfsError>() == Some(&FxfsError::TooBig)
+            );
+        }
+
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_project_on_symlink() {
+        let fs = test_filesystem().await;
+        let store = fs.root_store();
+        let store_id = store.store_object_id();
+        let root_dir_id = store.root_directory_object_id();
+        let p1 = ProjectId::new(10).unwrap();
+
+        let root_dir = Directory::open(&store, root_dir_id).await.expect("open root dir failed");
+        let mut transaction = store
+            .new_transaction(lock_keys![LockKey::object(store_id, root_dir_id)], Options::default())
+            .await
+            .expect("new_transaction failed");
+        let symlink_id = root_dir
+            .create_symlink(&mut transaction, b"target", "symlink")
+            .await
+            .expect("create_symlink failed");
+        transaction.commit().await.expect("commit failed");
+
+        // Setting a project on a symlink must fail with NotSupported.
+        let err = store
+            .set_project_for_node(symlink_id, p1)
+            .await
+            .expect_err("setting project on symlink should fail");
+        assert_eq!(err.root_cause().downcast_ref::<FxfsError>(), Some(&FxfsError::NotSupported));
+
+        // Clearing an unprojected symlink should succeed.
+        store
+            .clear_project_for_node(symlink_id)
+            .await
+            .expect("clear_project_for_node on unprojected symlink should succeed");
 
         fs.close().await.expect("close failed");
     }

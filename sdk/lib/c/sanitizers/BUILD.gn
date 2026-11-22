@@ -69,10 +69,12 @@ libc_source_set("memory-snapshot") {
     "../dlfcn:dlfcn-abi",
     "../ld:writable-segments",
     "../threads:thread",
-    "../threads:thread-list",
-    "../threads:thread-storage",
     "//zircon/system/ulib/zx",
     "//zircon/third_party/ulib/musl:musl_internal",
+  ]
+  libc_deps = [
+    "../threads:thread-list",
+    "../threads:thread-storage",
   ]
 }
 
@@ -99,11 +101,10 @@ libc_test("unittests") {
     ":backtrace.testonly",
     "//sdk/lib/ld/testing:ld-abi-testing",
     "//src/lib/symbolizer-markup",
-    "//zircon/system/ulib/zxtest",
   ]
 
-  # This is hack!  Approximate guess for whether zxtest and libc will have been
-  # compiled with frame pointers.
+  # This is hack!  Approximate guess for whether the test framework and libc
+  # will have been compiled with frame pointers.
   incomplete_fp = !is_debug || zx_assert_level == 0
   defines = [ "INCOMPLETE_FRAME_POINTERS=$incomplete_fp" ]
 }

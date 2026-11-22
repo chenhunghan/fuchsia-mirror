@@ -2,6 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_fuchsia_package.gni")
+
+bazel_fuchsia_package("package") {
+  package_name = "unreliable-echo"
+  testonly = true
+  bazel_config = "fuchsia_platform"
+}
+
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -58,27 +66,23 @@ rustc_library("lib") {
 fuchsia_component_manifest("unreliable-echo-v4_manifest") {
   component_name = "unreliable-echo-v4"
   manifest = "meta/unreliable-echo-v4.cml"
+  visibility = [ ":*" ]
 }
 
 fuchsia_component("unreliable-echo-v4") {
   cm_label = ":unreliable-echo-v4_manifest"
-  visibility = [
-    ":*",
-    "//src/connectivity/network/testing/network-test-realm/tests:*",
-  ]
   deps = [ ":bin" ]
+  visibility = [ ":*" ]
 }
 
 fuchsia_component_manifest("unreliable-echo-v6_manifest") {
   component_name = "unreliable-echo-v6"
   manifest = "meta/unreliable-echo-v6.cml"
+  visibility = [ ":*" ]
 }
 
 fuchsia_component("unreliable-echo-v6") {
   cm_label = ":unreliable-echo-v6_manifest"
-  visibility = [
-    ":*",
-    "//src/connectivity/network/testing/network-test-realm/tests:*",
-  ]
   deps = [ ":bin" ]
+  visibility = [ ":*" ]
 }

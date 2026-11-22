@@ -27,13 +27,13 @@ component and its containing package. For more information about building
 components, see [Build components][build-components].
 
 To get the client component up and running, there are three targets that are
-defined in `//examples/fidl/cpp/client/BUILD.gn`:
+defined in `//examples/fidl/cpp/client/BUILD.bazel`:
 
 1. The raw executable file for the client. This produces a binary with the
    specified output name that can run on Fuchsia:
 
-    ```gn
-    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client/BUILD.gn" region_tag="bin" %}
+    ```bazel
+    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client/BUILD.bazel" region_tag="bin" %}
     ```
 
 1. A component that is set up to run the client executable.
@@ -42,14 +42,14 @@ defined in `//examples/fidl/cpp/client/BUILD.gn`:
    configures `echo-client` as an executable component which runs
    `fidl_echo_cpp_client` in `:bin`.
 
-    ```gn
-    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client/BUILD.gn" region_tag="component" %}
+    ```bazel
+    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client/BUILD.bazel" region_tag="component" %}
     ```
 
     The server component manifest is located at
     `//examples/fidl/cpp/client/meta/client.cml`. The binary name in the
     manifest must match the output name of the `executable` defined in
-    `BUILD.gn`.
+    `BUILD.bazel`.
 
     ```json5
     {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client/meta/client.cml" region_tag="example_snippet" %}
@@ -60,8 +60,8 @@ defined in `//examples/fidl/cpp/client/BUILD.gn`:
    a server component, and a [realm][glossary.realm] component to declare the
    appropriate capabilities and routes.
 
-    ```gn
-    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client/BUILD.gn" region_tag="package" %}
+    ```bazel
+    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/client/BUILD.bazel" region_tag="package" %}
     ```
 
 ### Building the client {#build}
@@ -360,7 +360,7 @@ checkout at [`//examples/fidl/cpp/client/wire`][cpp-wire-client-src].
 [build-components]: /docs/development/components/build.md
 [cpp-client-src]: /examples/fidl/cpp/client
 [cpp-wire-client-src]: /examples/fidl/cpp/client/wire
-[resultof]: /docs/reference/fidl/bindings/cpp-bindings.md#resultof
+[resultof]: /docs/reference/fidl/bindings/cpp-bindings.md#result
 [server-handler]: /docs/development/languages/fidl/tutorials/cpp/basics/server.md#server-handler
 [server-tut]: /docs/development/languages/fidl/tutorials/cpp/basics/server.md
 [sync-client]: /docs/development/languages/fidl/tutorials/cpp/basics/sync-client.md
@@ -371,6 +371,6 @@ checkout at [`//examples/fidl/cpp/client/wire`][cpp-wire-client-src].
 [pipelining-tut]: /docs/development/languages/fidl/tutorials/cpp/topics/request-pipelining.md
 [products]: /docs/development/build/software_assembly/build_configuration.md
 [natural-types]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#using-natural
-[natural-structs]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#natural_structs
-[natural-tables]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#natural_tables
+[natural-structs]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#natural-structs
+[natural-tables]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#natural-tables
 [wire-types]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md#using-wire

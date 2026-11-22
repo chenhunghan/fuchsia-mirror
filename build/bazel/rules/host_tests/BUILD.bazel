@@ -2,4 +2,27 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
 package(default_applicable_licenses = ["//:license"])
+
+# The ffx binary and the subtools that python_mobly_test() makes available to
+# Mobly tests at runtime, under `host-tools/`. This mirrors the GN
+# `//src/developer/ffx:suite_test_data` used by the GN python_mobly_test()
+# template.
+#
+# TODO(https://fxbug.dev/585395922): Add the ffx-debug subtool once
+# //src/developer/ffx/plugins/debug is available in Bazel.
+filegroup(
+    name = "python_mobly_test_ffx_test_data",
+    testonly = True,
+    srcs = [
+        "//src/developer/ffx:test_data",
+        "//src/developer/ffx/plugins/component:ffx_component_tool_test_data",
+        "//src/developer/ffx/plugins/emulator:ffx_emulator_tool_test_data",
+        "//src/developer/ffx/plugins/product_bundle:ffx_product_bundle_tool_test_data",
+        "//src/developer/ffx/plugins/repository:ffx_repository_tool_test_data",
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//:__subpackages__"],
+)

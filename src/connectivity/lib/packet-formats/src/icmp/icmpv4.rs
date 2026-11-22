@@ -16,7 +16,7 @@ use crate::error::{ParseError, ParseResult};
 use super::common::{IcmpDestUnreachable, IcmpEchoReply, IcmpEchoRequest, IcmpTimeExceeded};
 use super::{
     IcmpIpExt, IcmpMessageType, IcmpPacket, IcmpPacketRaw, IcmpParseArgs, IcmpZeroCode, IdAndSeq,
-    OriginalPacket, peek_message_type,
+    OriginalPacket, peek_message_type, verify_message_checksum,
 };
 
 /// Dispatches expressions to the type-safe variants of [`Icmpv4Packet`] or
@@ -102,11 +102,13 @@ impl<B: SplitByteSlice> ParsablePacket<B, IcmpParseArgs<Ipv4Addr>> for Icmpv4Pac
     }
 
     fn parse<BV: BufferView<B>>(buffer: BV, args: IcmpParseArgs<Ipv4Addr>) -> ParseResult<Self> {
+        let checksum = verify_message_checksum::<Ipv4>(args.src_ip, args.dst_ip, buffer.as_ref());
+
         macro_rules! mtch {
-            ($buffer:expr, $args:expr, $($variant:ident => $type:ty,)*) => {
+            ($buffer:expr, $checksum:expr, $($variant:ident => $type:ty,)*) => {
                 match peek_message_type($buffer.as_ref())? {
                     $(Icmpv4MessageType::$variant => {
-                        let packet = <IcmpPacket<Ipv4, B, $type> as ParsablePacket<_, _>>::parse($buffer, $args)?;
+                        let packet = IcmpPacket::<Ipv4, B, $type>::parse_with_checksum($buffer, $checksum)?;
                         Icmpv4Packet::$variant(packet)
                     })*
                 }
@@ -115,7 +117,7 @@ impl<B: SplitByteSlice> ParsablePacket<B, IcmpParseArgs<Ipv4Addr>> for Icmpv4Pac
 
         Ok(mtch!(
             buffer,
-            args,
+            checksum,
             EchoReply => IcmpEchoReply,
             DestUnreachable => IcmpDestUnreachable,
             Redirect => Icmpv4Redirect,

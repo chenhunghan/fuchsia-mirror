@@ -1,0 +1,96 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":data-proxy-test"],
+    visibility = ["//src/testing:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "data_proxy",
+    edition = "2024",
+    visibility = ["//src/testing/sl4f:__pkg__"],
+    deps = [
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/testing/sl4f/fidl:fuchsia.testing.proxy_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Matches the binary path in meta/data_proxy_bin_test.cml.
+    crate_name = "data_proxy_bin_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-hyper",
+        "//third_party/rust_crates/vendor:http-body-util",
+        "//third_party/rust_crates/vendor:hyper",
+        "//third_party/rust_crates/vendor:hyper-util",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_test_packaged",
+    testonly = True,
+    binary = ":bin_test",
+    binary_name = "data_proxy_bin_test",
+)
+
+fx_component_manifest(
+    name = "data-proxy-test_manifest",
+    testonly = True,
+    component_name = "data-proxy-test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default",
+    ],
+    manifest = "meta/data_proxy_bin_test.cml",
+)
+
+fx_test_component(
+    name = "data-proxy-test_component",
+    compiled_manifest = ":data-proxy-test_manifest",
+    deps = [":bin_test_packaged"],
+)
+
+fx_package(
+    name = "data-proxy-test_package",
+    package_name = "data-proxy-test",
+    subpackages = ["//src/connectivity/network/netstack3:package-debug"],
+    test_components = [":data-proxy-test_component"],
+)
+
+fx_test(
+    name = "data-proxy-test",
+    package = ":data-proxy-test_package",
+)

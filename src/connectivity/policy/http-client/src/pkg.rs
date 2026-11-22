@@ -10,8 +10,10 @@ use fuchsia_hyper as fhyper;
 use fuchsia_inspect as finspect;
 use fuchsia_inspect::Property as _;
 use fuchsia_trace as ftrace;
+use futures::future::FutureExt as _;
 use futures::stream::TryStreamExt as _;
-use log::warn;
+use log::{error, warn};
+use std::pin::pin;
 
 const TCP_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -47,6 +49,7 @@ pub async fn serve_client_request_stream(
                         header_timeout,
                         body_timeout,
                         resumption_attempt_limit,
+                        cancel,
                         responder,
                     } => {
                         let r = download_blob(
@@ -58,6 +61,7 @@ pub async fn serve_client_request_stream(
                                 body_timeout: zx::BootDuration::from_nanos(body_timeout),
                                 resumption_attempt_limit,
                             },
+                            cancel,
                             inspect.create_child(
                                 request_count
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -87,15 +91,32 @@ async fn download_blob(
     url: String,
     writer: ffxfs::BlobWriterProxy,
     params: crate::resuming_get::Params,
+    cancel: Option<zx::EventPair>,
     inspect: finspect::Node,
 ) -> Result<u64, fpkg_http::ClientDownloadBlobError> {
-    download_blob_impl(client, &url, writer, params, inspect).await.map_err(
-        |e: DownloadBlobError| {
+    let mut cancel_fut = pin!(
+        async {
+            let Some(cancel) = cancel else {
+                return std::future::pending().await;
+            };
+            if let Err(status) =
+                fasync::OnSignals::new(cancel, zx::Signals::EVENTPAIR_PEER_CLOSED).await
+            {
+                error!(status:?; "Failed to wait on cancel eventpair");
+                std::future::pending().await
+            }
+        }
+        .fuse()
+    );
+    let mut download_fut = pin!(download_blob_impl(client, &url, writer, params, inspect).fuse());
+    futures::select_biased! {
+        () = cancel_fut => Err(fpkg_http::ClientDownloadBlobError::Canceled),
+        res = download_fut => res.map_err(|e: DownloadBlobError| {
             let fidl_err = e.to_fidl_err();
             warn!(url:%, params:?; "Failed to download blob: {:#}", anyhow!(e));
             fidl_err
-        },
-    )
+        }),
+    }
 }
 
 async fn download_blob_impl(
@@ -239,19 +260,22 @@ mod tests {
     use super::*;
     use futures::stream::StreamExt as _;
 
+    const TEST_TIMEOUT: zx::BootDuration = zx::BootDuration::from_seconds(30);
+    const STREAMING_BODY_SIZE: u64 = 1_000_000;
+    const FIRST_CHUNK_SIZE: usize = 500;
+
     // Takes an async fn that maps requests to responses and returns an http server and the address
     // the server is listening on.
-    fn create_http_server<F>(
-        handler: impl FnMut(hyper::Request<hyper::body::Incoming>) -> F + Send + Clone + 'static,
+    fn create_http_server<F, B>(
+        handler: impl FnMut(hyper::Request<hyper::body::Incoming>) -> F + Send + 'static,
     ) -> (std::net::SocketAddr, fasync::Task<()>)
     where
-        F: std::future::Future<
-                Output = std::result::Result<
-                    hyper::Response<http_body_util::Full<hyper::body::Bytes>>,
-                    std::convert::Infallible,
-                >,
-            > + Send
+        F: std::future::Future<Output = std::result::Result<hyper::Response<B>, !>>
+            + Send
             + 'static,
+        B: hyper::body::Body + Send + 'static,
+        B::Data: Send,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         let addr =
             std::net::SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0);
@@ -260,6 +284,7 @@ mod tests {
         let handler = std::sync::Arc::new(std::sync::Mutex::new(handler));
         let server = fasync::Task::spawn(async move {
             let mut listener = listener;
+            let scope = fasync::Scope::new();
             loop {
                 match listener.accept().await {
                     Ok((next_listener, conn, _)) => {
@@ -271,14 +296,13 @@ mod tests {
                             let mut h = handler.lock().unwrap();
                             (h)(req)
                         });
-                        fasync::Task::spawn(async move {
+                        let _: fasync::JoinHandle<()> = scope.spawn(async move {
                             let _ = hyper_util::server::conn::auto::Builder::new(
                                 fuchsia_hyper::Executor,
                             )
                             .serve_connection(io, service)
                             .await;
-                        })
-                        .detach();
+                        });
                     }
                     Err(_) => break,
                 }
@@ -328,9 +352,9 @@ mod tests {
             let resp = hyper::Response::builder()
                 .status(http::StatusCode::OK)
                 .header(http::header::CONTENT_LENGTH, content.len())
-                .body(http_body_util::Full::new(content.clone().into()))
+                .body(http_body_util::Full::new(hyper::body::Bytes::from(content.clone())))
                 .unwrap();
-            std::future::ready(Ok::<_, std::convert::Infallible>(resp))
+            std::future::ready(Ok::<_, !>(resp))
         };
         let (server_addr, _server) = create_http_server(handler);
         let client = fhyper::new_https_client();
@@ -344,18 +368,173 @@ mod tests {
         assert_eq!(
             download_blob(
                 &client,
-                format!("http://{server_addr}/the-file.txt").parse().unwrap(),
+                format!("http://{server_addr}/the-file.txt"),
                 proxy,
                 crate::resuming_get::Params {
-                    header_timeout: zx::BootDuration::from_seconds(30),
-                    body_timeout: zx::BootDuration::from_seconds(30),
-                    resumption_attempt_limit: 0
+                    header_timeout: TEST_TIMEOUT,
+                    body_timeout: TEST_TIMEOUT,
+                    resumption_attempt_limit: 0,
                 },
-                Default::default()
+                None,
+                Default::default(),
             )
             .await,
             Ok(u64::try_from(content_clone.len()).unwrap())
         );
         assert_eq!(blob_writer_server.await, content_clone);
+    }
+
+    #[fuchsia::test]
+    async fn download_blob_pre_canceled_makes_no_requests() {
+        let handler = move |_req: hyper::Request<hyper::body::Incoming>| -> std::future::Ready<
+            std::result::Result<hyper::Response<http_body_util::Full<hyper::body::Bytes>>, !>,
+        > {
+            panic!("unexpected HTTP request for pre-canceled download");
+        };
+        let (server_addr, _server) = create_http_server(handler);
+        let client = fhyper::new_https_client();
+        let (proxy, mut blob_writer_request_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ffxfs::BlobWriterMarker>();
+        let (cancel_tx, cancel_rx) = zx::EventPair::create();
+        drop(cancel_tx);
+
+        assert_eq!(
+            download_blob(
+                &client,
+                format!("http://{server_addr}/the-file.txt"),
+                proxy,
+                crate::resuming_get::Params {
+                    header_timeout: TEST_TIMEOUT,
+                    body_timeout: TEST_TIMEOUT,
+                    resumption_attempt_limit: 0,
+                },
+                Some(cancel_rx),
+                Default::default(),
+            )
+            .await,
+            Err(fpkg_http::ClientDownloadBlobError::Canceled)
+        );
+        assert!(blob_writer_request_stream.next().await.is_none());
+    }
+
+    #[fuchsia::test]
+    async fn download_blob_canceled_mid_flight_aborts_and_closes_writer() {
+        let (mut body_stream_open, body_stream_guard) = futures::channel::oneshot::channel::<()>();
+        let mut body_stream_guard = Some(body_stream_guard);
+        let second_content: Vec<u8> = b"subsequent download".to_vec();
+        let second_content_clone = second_content.clone();
+        let handler = move |req: hyper::Request<hyper::body::Incoming>| {
+            assert_eq!(req.method(), http::Method::GET);
+            let resp = match req.uri().path() {
+                "/canceled" => {
+                    let guard = body_stream_guard.take().expect("single canceled request");
+                    let first_chunk = hyper::body::Bytes::from(vec![0xabu8; FIRST_CHUNK_SIZE]);
+                    let body_stream = futures::stream::once(std::future::ready(Ok::<_, !>(
+                        hyper::body::Frame::data(first_chunk),
+                    )))
+                    .chain(futures::stream::once(async move {
+                        let _guard = guard;
+                        std::future::pending().await
+                    }));
+                    hyper::Response::builder()
+                        .status(http::StatusCode::OK)
+                        .header(http::header::CONTENT_LENGTH, STREAMING_BODY_SIZE)
+                        .body(http_body_util::BodyExt::boxed(http_body_util::StreamBody::new(
+                            body_stream,
+                        )))
+                        .unwrap()
+                }
+                "/after-cancel" => hyper::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header(http::header::CONTENT_LENGTH, second_content.len())
+                    .body(http_body_util::BodyExt::boxed(http_body_util::Full::new(
+                        hyper::body::Bytes::from(second_content.clone()),
+                    )))
+                    .unwrap(),
+                path => panic!("unexpected request path {path}"),
+            };
+            std::future::ready(Ok::<_, !>(resp))
+        };
+        let (server_addr, _server) = create_http_server(handler);
+        let client = std::sync::Arc::new(fhyper::new_https_client());
+        let (proxy, mut blob_writer_request_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ffxfs::BlobWriterMarker>();
+        let (cancel_tx, cancel_rx) = zx::EventPair::create();
+
+        let scope = fasync::Scope::new();
+        let writer_task = scope.compute(async move {
+            match blob_writer_request_stream.next().await.unwrap().unwrap() {
+                ffxfs::BlobWriterRequest::GetVmo { size, responder } => {
+                    assert_eq!(size, STREAMING_BODY_SIZE);
+                    let vmo = zx::Vmo::create(size).unwrap();
+                    let () = responder.send(Ok(vmo)).unwrap();
+                }
+                req => panic!("unexpected request {req:?}"),
+            }
+            match blob_writer_request_stream.next().await.unwrap().unwrap() {
+                ffxfs::BlobWriterRequest::BytesReady { bytes_written, responder } => {
+                    assert_eq!(bytes_written, u64::try_from(FIRST_CHUNK_SIZE).unwrap());
+                    let () = responder.send(Ok(())).unwrap();
+                }
+                req => panic!("unexpected request {req:?}"),
+            }
+            blob_writer_request_stream
+        });
+
+        let client_clone = std::sync::Arc::clone(&client);
+        let mut download_task = scope.compute(async move {
+            download_blob(
+                &client_clone,
+                format!("http://{server_addr}/canceled"),
+                proxy,
+                crate::resuming_get::Params {
+                    header_timeout: TEST_TIMEOUT,
+                    body_timeout: TEST_TIMEOUT,
+                    resumption_attempt_limit: 0,
+                },
+                Some(cancel_rx),
+                Default::default(),
+            )
+            .await
+        });
+
+        let mut blob_writer_request_stream = writer_task.await;
+        // `BlobWriter` and the server response body stream remain open while `download_blob` waits
+        // for the remaining HTTP body.
+        assert!(blob_writer_request_stream.next().now_or_never().is_none());
+        assert!((&mut download_task).now_or_never().is_none());
+        assert!(!body_stream_open.is_canceled());
+
+        drop(cancel_tx);
+        assert_eq!(download_task.await, Err(fpkg_http::ClientDownloadBlobError::Canceled));
+        // `BlobWriter` must already be closed by the time `download_blob` returns `Err(Canceled)`.
+        assert!(blob_writer_request_stream.next().now_or_never().expect("writer closed").is_none());
+        // Confirm the server observes connection teardown and drops the in-flight body stream.
+        body_stream_open.cancellation().await;
+
+        // Confirm the same client and its connection pool remain usable after cancellation.
+        let (proxy, blob_writer_request_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ffxfs::BlobWriterMarker>();
+        let blob_writer_server = scope.compute(serve_blob_writer_request_stream(
+            second_content_clone.len().try_into().unwrap(),
+            blob_writer_request_stream,
+        ));
+        assert_eq!(
+            download_blob(
+                &client,
+                format!("http://{server_addr}/after-cancel"),
+                proxy,
+                crate::resuming_get::Params {
+                    header_timeout: TEST_TIMEOUT,
+                    body_timeout: TEST_TIMEOUT,
+                    resumption_attempt_limit: 0,
+                },
+                None,
+                Default::default(),
+            )
+            .await,
+            Ok(u64::try_from(second_content_clone.len()).unwrap())
+        );
+        assert_eq!(blob_writer_server.await, second_content_clone);
     }
 }

@@ -5,7 +5,6 @@
 #include <gtest/gtest.h>
 
 #include "../diagnostics.h"
-#include "../stateful-error.h"
 
 namespace {
 
@@ -45,40 +44,6 @@ TEST(DlTests, Diagnostics) {
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_value().take_str(), "some error");
   }
-}
-
-TEST(DlTests, StatefuLError) {
-  dl::StatefulError error_state;
-
-  // Initially clear.
-  EXPECT_EQ(error_state.GetAndClearLastError(), nullptr);
-
-  // Called with success.
-  EXPECT_EQ(error_state(fit::result<dl::Error, int>{fit::ok(3)}, -1), 3);
-
-  // Still clear.
-  EXPECT_EQ(error_state.GetAndClearLastError(), nullptr);
-
-  // Called with error.
-  EXPECT_EQ(error_state(fit::result<dl::Error, void*>{fit::error{dl::Error{"foo"}}}, nullptr),
-            nullptr);
-
-  // Returns error.
-  EXPECT_STREQ(error_state.GetAndClearLastError(), "foo");
-
-  // Clear after returning error.
-  EXPECT_EQ(error_state.GetAndClearLastError(), nullptr);
-
-  // Two errors without checking in between.
-  EXPECT_EQ(error_state(fit::result<dl::Error, void*>{fit::error{dl::Error{"foo"}}}, nullptr),
-            nullptr);
-  EXPECT_EQ(error_state(fit::result<dl::Error, int>{fit::error{dl::Error{"bar"}}}, -1), -1);
-
-  // Returns error.
-  EXPECT_STREQ(error_state.GetAndClearLastError(), "bar");
-
-  // Clear after returning error.
-  EXPECT_EQ(error_state.GetAndClearLastError(), nullptr);
 }
 
 }  // namespace

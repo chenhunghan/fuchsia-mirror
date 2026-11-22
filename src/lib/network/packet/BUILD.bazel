@@ -59,6 +59,5 @@ wrap_host_rust_test(
 
 fx_unittest_package(
     name = "packet-test",
-    package_name = "packet-test",
     unit_tests = [":packet_lib_test"],
 )

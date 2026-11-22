@@ -22,6 +22,8 @@ from importlib import resources
 from pathlib import Path
 
 from honeydew import errors
+from honeydew.affordances.usb import usb as usb_affordance
+from honeydew.transports import transport
 from honeydew.transports.adb import errors as adb_errors
 from honeydew.transports.adb.adb_server import AdbServer
 from honeydew.transports.ffx import ffx
@@ -29,14 +31,22 @@ from honeydew.utils import common, host_shell
 
 _ADB_PATH_ENV_VAR = "HONEYDEW_ADB_OVERRIDE"
 
-# Default timeout for check_connection().
-_DEFAULT_CHECK_CONNECTION_TIMEOUT_SECS: float = 300.0
+# Default per-attempt timeout for check_connection().
+_DEFAULT_CHECK_CONNECTION_TIMEOUT_SECS: float = 30.0
 
 _DEFAULT_TCP_CONNECT_TIMEOUT_SECS: float = 10.0
 _TCP_CONNECT_POLL_INTERVAL_SECS: float = 1.0
 _TCP_RECONNECT_TIMEOUT_SECS: float = 30.0
 
 _DEFAULT_RUN_ATTEMPTS: int = 3
+
+_COLLECT_ADB_DEVICES_TIMEOUT_SECS: float = 10.0
+
+# Timeout and retry delay for querying adbd's UID in `Adb.verify_root()`. The
+# single retry absorbs a transient connection drop (matches Mobly's
+# `is_adb_root`).
+_ROOT_CHECK_TIMEOUT_SECS: float = 10.0
+_ROOT_CHECK_RETRY_DELAY_SECS: float = 0.2
 
 # Serializes `adb forward` and `adb reverse` calls across all Adb instances in
 # this process. The ADB server has known concurrency issues when it creates or
@@ -274,6 +284,18 @@ def is_tcp_serial(serial_number: str | None) -> bool:
     return ":" not in host
 
 
+def _parse_is_root_uid(device_name: str, output: str) -> bool:
+    # The output also contains stderr, e.g. adb daemon startup messages, so
+    # only parse the last line.
+    lines = output.strip().splitlines()
+    try:
+        return int(lines[-1] if lines else "") == 0
+    except ValueError as err:
+        raise adb_errors.AdbCommandError(
+            f"Unexpected `id -u` output on {device_name}: {output!r}"
+        ) from err
+
+
 class _AdbRootContextManager(
     contextlib.AbstractContextManager[None],
     contextlib.AbstractAsyncContextManager[None],
@@ -295,13 +317,34 @@ class _AdbRootContextManager(
     def __enter__(self) -> None:
         with self._adb._root_lock:
             if self._adb._root_ref_count == 0:
-                if not self._adb.is_root:
-                    self._adb.root(
-                        timeout=self._timeout, attempts=self._attempts
+                start_time: float = time.time()
+                # Query the device directly; `_is_root` is only a best-effort
+                # cache and can be stale if adbd restarted without root.
+                try:
+                    self._adb._rooted_by_context = not self._adb.verify_root(
+                        timeout=self._timeout
+                    )
+                except adb_errors.AdbUnauthorizedError:
+                    raise
+                except adb_errors.AdbCommandError as err:
+                    if self._attempts <= 1:
+                        raise
+                    _LOGGER.debug(
+                        "Failed to verify root state on %s in `use_adb_root`, "
+                        "falling through to `root()`: %s",
+                        self._adb._device_name,
+                        err,
                     )
                     self._adb._rooted_by_context = True
-                else:
-                    self._adb._rooted_by_context = False
+                if self._adb._rooted_by_context:
+                    self._adb.root(
+                        timeout=self._adb._get_remaining_timeout(
+                            start_time=start_time,
+                            timeout=self._timeout,
+                            operation="use_adb_root",
+                        ),
+                        attempts=self._attempts,
+                    )
             self._adb._root_ref_count += 1
 
     def __exit__(
@@ -331,7 +374,7 @@ class _AdbRootContextManager(
         self.__exit__(exc_type, exc_val, exc_tb)
 
 
-class Adb:
+class Adb(transport.Transport):
     """Provides methods for Host-(Fuchsia)Target interactions via ADB.
 
     Note: The USB detection logic (`verify_supported()`) relies on Linux-specific
@@ -347,6 +390,9 @@ class Adb:
         vendor_keys_path: Path to custom vendor keys.
         attempts: Default maximum number of attempts for ADB commands.
             Defaults to 3.
+        usb: Optional USB affordance object to notify before and after USB
+            disconnects triggered by ADB operations (such as `adb root`,
+            `adb unroot`, and `_recover_adb_server()`).
 
     Raises:
         NotSupportedError: If ADB transport is not supported on the device.
@@ -363,10 +409,12 @@ class Adb:
         output_dir: Path | str | None = None,
         vendor_keys_path: str | None = None,
         attempts: int = _DEFAULT_RUN_ATTEMPTS,
+        usb: usb_affordance.USB | None = None,
     ) -> None:
         self._device_name: str = device_name
         self._serial_number: str = serial_number
         self._ffx: ffx.FFX = ffx_transport
+        self._usb: usb_affordance.USB | None = usb
         self._run_isolated_server: bool = run_isolated_server
         self._output_dir: Path | None = Path(output_dir) if output_dir else None
         if self._run_isolated_server and self._output_dir is None:
@@ -387,6 +435,11 @@ class Adb:
         self._root_lock: threading.Lock = threading.Lock()
         self._root_ref_count: int = 0
         self._rooted_by_context: bool = False
+        # Tracks whether `_recover_adb_server()` is currently running so that
+        # `check_connection()` (invoked via `self._usb.after_connect()` ->
+        # `AndroidDevice.health_check()`) only makes a single `wait-for-device`
+        # attempt instead of recursively re-entering `_recover_adb_server()`.
+        self._is_recovering: bool = False
 
         try:
             self.verify_supported()
@@ -413,7 +466,9 @@ class Adb:
             # For TCP targets, `check_connection()` invokes `_connect_tcp()`
             # before running `wait-for-device` (both during `__init__` and
             # after device reboots in `on_device_boot()`).
-            self.check_connection()
+            self.check_connection(
+                timeout=_DEFAULT_CHECK_CONNECTION_TIMEOUT_SECS
+            )
             # Cache the remote adbd PID upon initial connection so FFX can kill
             # a wedged adbd out-of-band if ADB later becomes unresponsive.
             self._cache_adbd_pid()
@@ -452,6 +507,74 @@ class Adb:
             return None
         return (self._adb_server.host(), self._adb_server.port())
 
+    @property
+    def attempts(self) -> int:
+        """Returns the maximum number of attempts for ADB commands.
+
+        Returns:
+            The maximum number of attempts for ADB commands.
+        """
+        return self._attempts
+
+    def restart_server(self) -> None:
+        """Restarts the isolated host ADB server, if one is running.
+
+        Use this when the host ADB server holds a stale USB handle to the
+        device, e.g. after an in-place USB port reset (`USBDEVFS_RESET`) that
+        keeps the device number. Unlike the internal recovery path, this does
+        not restart adbd on the device. The restart is intentional, so it does
+        not count toward the server's crash restart limit.
+
+        After the restart, re-establishes the ADB connection and re-caches the
+        remote adbd PID, as `__init__()` does.
+
+        While ADB is idle, the restart doesn't reset the device's USB stack.
+        But if bulk data is in flight, usb-adb-function resets it to flush the
+        partial packets, so the USB affordance is notified before and after,
+        as `root()` and `unroot()` do.
+
+        Does nothing if no isolated ADB server is configured.
+
+        Must be called from the main thread: `after_connect()` runs the device
+        health check, which uses SIGALRM.
+
+        Raises:
+            AdbServerError: If the restarted server fails to become ready.
+            AdbUnauthorizedError: If the device is unauthorized for ADB
+                connections after the restart.
+            AdbConnectionError: If ADB fails to reconnect to the device after
+                the restart.
+            UsbError: If re-establishing the device connection fails after
+                the restart.
+        """
+        _LOGGER.info("Restarting isolated ADB server for %s", self._device_name)
+        if self._adb_server is None:
+            _LOGGER.info(
+                "No isolated ADB server was started for %s during "
+                "initialization (run_isolated_server=False), so there is "
+                "nothing to restart.",
+                self._device_name,
+            )
+            return
+        if self._usb is not None:
+            self._usb.before_disconnect()
+        self._adb_server.reset_restart_count()
+        self._adb_server.restart()
+        # Same as `__init__()`: for TCP targets, `check_connection()` also
+        # reconnects over TCP before running `wait-for-device`. A single
+        # attempt, since a retry in `run()` would call `_recover_adb_server()`,
+        # which restarts adbd on the device.
+        self.check_connection(
+            timeout=_DEFAULT_CHECK_CONNECTION_TIMEOUT_SECS, attempts=1
+        )
+        # Re-cache the remote adbd PID so FFX can still kill a wedged adbd
+        # out-of-band if ADB later becomes unresponsive.
+        self._cache_adbd_pid()
+        # Re-open the other host transports in case the USB stack was reset.
+        # Only done on success so a failure here never masks a restart error.
+        if self._usb is not None:
+            self._usb.after_connect()
+
     def on_device_boot(self) -> None:
         """Takes actions after the Fuchsia device reboots.
 
@@ -465,7 +588,7 @@ class Adb:
             self._rooted_by_context = False
             self._root_ref_count = 0
             self._cached_adbd_pid = None
-        self.check_connection()
+        self.check_connection(timeout=_DEFAULT_CHECK_CONNECTION_TIMEOUT_SECS)
         # A device reboot spawns a fresh adbd process in Starnix with a new PID;
         # update the cached PID so FFX can kill it if ADB later wedges.
         self._cache_adbd_pid()
@@ -732,48 +855,90 @@ class Adb:
             )
 
     def _recover_adb_server(self) -> None:
-        """Restarts remote adbd (if cached) and isolated host ADB server, restoring root if needed."""
+        """Restarts remote adbd (if cached) and isolated host ADB server, restoring root if needed.
+
+        Killing the remote adbd closes its FunctionFS endpoints, which makes the
+        device re-enumerate on the host. The USB affordance is notified before
+        and after so that FFX treats the drop as intentional and
+        Fuchsia-Controller is re-opened on the re-created USB interface.
+        """
         assert self._adb_server is not None
-        self._restart_adbd()
-        self._adb_server.restart()
-        time.sleep(10)
-        if is_tcp_serial(self._serial_number):
-            self._connect_tcp(timeout=_TCP_RECONNECT_TIMEOUT_SECS)
-        if self._is_root:
-            _LOGGER.info(
-                "Restoring root privileges on %s after ADB recovery...",
-                self._device_name,
-            )
-            try:
-                host_shell.run(
-                    cmd=self._build_adb_cmd(["root"], include_serial=True),
-                    capture_output=True,
-                    capture_error_in_output=True,
-                    timeout=30.0,
-                    env=self._get_command_env(),
-                )
-                if is_tcp_serial(self._serial_number):
-                    self._connect_tcp(timeout=_TCP_RECONNECT_TIMEOUT_SECS)
-                host_shell.run(
-                    cmd=self._build_adb_cmd(
-                        ["wait-for-device"], include_serial=True
-                    ),
-                    capture_output=True,
-                    capture_error_in_output=True,
-                    timeout=30.0,
-                    env=self._get_command_env(),
-                )
-            except adb_errors.AdbUnauthorizedError:
-                raise
-            except errors.HoneydewError as err:
-                _LOGGER.warning(
-                    "Failed to restore root privileges on %s after ADB recovery: %s",
+        # Mark recovery in progress because `self._usb.after_connect()` below
+        # calls `AndroidDevice.health_check()` -> `self.check_connection()`,
+        # which by default runs `wait-for-device` with `attempts=3`. If
+        # `wait-for-device` failed on attempt 1 during recovery, `self.run()`
+        # would otherwise call `_recover_adb_server()` recursively.
+        self._is_recovering = True
+        try:
+            # Killing on-device `adbd` (in `_restart_adbd()`) or running
+            # `adb root` below closes `adbd`'s FunctionFS endpoints (`ep0`),
+            # causing the composite USB gadget to unbind and re-enumerate on the
+            # host with a new Linux network interface index (`ifindex` / IPv6
+            # `scope_id`). Notify the USB affordance before and after so FFX
+            # treats the drop as intentional and FFX / FuchsiaController refresh
+            # their target address / context on the new USB interface.
+            if self._usb is not None:
+                self._usb.before_disconnect()
+            self._restart_adbd()
+            self._adb_server.restart()
+            time.sleep(10)
+            if is_tcp_serial(self._serial_number):
+                self._connect_tcp(timeout=_TCP_RECONNECT_TIMEOUT_SECS)
+            if self._is_root:
+                _LOGGER.info(
+                    "Restoring root privileges on %s after ADB recovery...",
                     self._device_name,
-                    err,
                 )
-        # Cache the newly spawned remote adbd PID after killing the old adbd
-        # process and/or restarting adbd as root.
-        self._cache_adbd_pid()
+                try:
+                    host_shell.run(
+                        cmd=self._build_adb_cmd(["root"], include_serial=True),
+                        capture_output=True,
+                        capture_error_in_output=True,
+                        timeout=30.0,
+                        env=self._get_command_env(),
+                    )
+                    if is_tcp_serial(self._serial_number):
+                        self._connect_tcp(timeout=_TCP_RECONNECT_TIMEOUT_SECS)
+                    host_shell.run(
+                        cmd=self._build_adb_cmd(
+                            ["wait-for-device"], include_serial=True
+                        ),
+                        capture_output=True,
+                        capture_error_in_output=True,
+                        timeout=30.0,
+                        env=self._get_command_env(),
+                    )
+                except adb_errors.AdbUnauthorizedError:
+                    raise
+                except errors.HoneydewError as err:
+                    _LOGGER.warning(
+                        "Failed to restore root privileges on %s after ADB recovery: %s",
+                        self._device_name,
+                        err,
+                    )
+            if self._usb is not None:
+                try:
+                    self._usb.after_connect()
+                except errors.HoneydewError as err:
+                    # `_recover_adb_server()` is a best-effort recovery step
+                    # inside `Adb.run()`'s retry loop (similar to the `adb root`
+                    # restoration block above). Catch `HoneydewError` and log a
+                    # warning so that if the device fails to come back online
+                    # during recovery, `Adb.run()` proceeds to its final retry
+                    # attempt and raises the expected `AdbError` /
+                    # `AdbCommandError` to the caller rather than aborting inside
+                    # `_recover_adb_server()` with a `FuchsiaDeviceError` or
+                    # `HealthCheckError`.
+                    _LOGGER.warning(
+                        "Failed to re-establish USB connection on %s after ADB recovery: %s",
+                        self._device_name,
+                        err,
+                    )
+            # Cache the newly spawned remote adbd PID after killing the old adbd
+            # process and/or restarting adbd as root.
+            self._cache_adbd_pid()
+        finally:
+            self._is_recovering = False
 
     def _verify_adb_tcp_support(self) -> None:
         """Verifies that the ADB TCP serial host can be resolved locally.
@@ -863,16 +1028,80 @@ class Adb:
             )
         return remaining_timeout
 
+    def _get_device_state_from_adb_devices(self, devices_output: str) -> str:
+        """Returns this device's state from `adb devices -l` output.
+
+        Args:
+            devices_output: Output of `adb devices -l`.
+
+        Returns:
+            The device state as reported by ADB (e.g. "device", "offline",
+            "unauthorized", "no permissions"), or "not listed" if this device's
+            serial number is not in the output.
+        """
+        # Skip the "List of devices attached" header line.
+        for line in devices_output.splitlines()[1:]:
+            tokens: list[str] = line.split()
+            if not tokens or tokens[0] != self._serial_number:
+                continue
+            if tokens[1:3] == ["no", "permissions"]:
+                return "no permissions"
+            return tokens[1] if len(tokens) > 1 else "unknown"
+        return "not listed"
+
+    def _log_adb_devices(self) -> str | None:
+        """Logs `adb devices -l` output and this device's state, for triage.
+
+        With the isolated ADB server, the server is started with
+        `--one-device <serial>`, so the output lists at most this device.
+        Otherwise the shared host ADB server lists every attached device.
+
+        Returns:
+            This device's state (see `_get_device_state_from_adb_devices()`),
+            or None if `adb devices -l` could not be run.
+        """
+        try:
+            output = (
+                host_shell.run(
+                    cmd=self._build_adb_cmd(
+                        ["devices", "-l"], include_serial=False
+                    ),
+                    capture_output=True,
+                    capture_error_in_output=True,
+                    timeout=_COLLECT_ADB_DEVICES_TIMEOUT_SECS,
+                    env=self._get_command_env(),
+                )
+                or ""
+            ).strip()
+            state: str = self._get_device_state_from_adb_devices(output)
+            _LOGGER.info(
+                "ADB Triage: %s (serial %s) state on host: %s. "
+                "Host `adb devices -l` output (checking for %s):\n%s",
+                self._device_name,
+                self._serial_number,
+                state,
+                self._device_name,
+                output,
+            )
+            return state
+        except errors.HoneydewError as err:
+            _LOGGER.warning(
+                "Failed to collect `adb devices -l` output for %s: %s",
+                self._device_name,
+                err,
+            )
+            return None
+
     def check_connection(
         self,
-        timeout: float | None = _DEFAULT_CHECK_CONNECTION_TIMEOUT_SECS,
+        timeout: float,
         attempts: int | None = None,
     ) -> None:
         """Checks the ADB connection from host to Fuchsia device.
 
         Args:
-            timeout: Maximum amount of time in seconds to wait for connection.
-                Defaults to 300.0 seconds.
+            timeout: Maximum amount of time in seconds to wait for each
+                connection attempt.
             attempts: Maximum number of attempts to run the `wait-for-device`
                 command. Defaults to the instance's configured default attempts.
 
@@ -880,7 +1109,14 @@ class Adb:
             AdbUnauthorizedError: If the device is unauthorized for ADB connections.
             AdbConnectionError: If ADB fails to connect to the device.
         """
-        attempts = self._attempts if attempts is None else attempts
+        # When called from inside `_recover_adb_server()` (via
+        # `self._usb.after_connect()` -> `health_check()` -> `check_connection()`),
+        # force a single attempt so a failed `wait-for-device` does not
+        # recursively re-trigger `_recover_adb_server()`.
+        if self._is_recovering:
+            attempts = 1
+        elif attempts is None:
+            attempts = self._attempts
         try:
             _LOGGER.info(
                 "Checking ADB connection from host to %s...",
@@ -898,20 +1134,28 @@ class Adb:
                     timeout=timeout,
                     operation="connect_tcp",
                 )
+            # Host `adb devices -l` is logged below for any failure, so don't
+            # also log it from `run()`.
             self.run(
                 ["wait-for-device"],
                 timeout=remaining_timeout,
                 attempts=attempts,
+                log_devices_on_failure=False,
             )
             _LOGGER.info(
                 "ADB completed the connection check from host to %s.",
                 self._device_name,
             )
-        except adb_errors.AdbConnectionError:
-            raise
         except errors.HoneydewError as err:
+            adb_state: str | None = self._log_adb_devices()
+            if isinstance(err, adb_errors.AdbConnectionError):
+                raise
+            # Keep the state before `err`, which can be long, so it stays
+            # visible in truncated failure summaries.
+            state_info: str = f" (adb state: {adb_state})" if adb_state else ""
             raise adb_errors.AdbConnectionError(
-                f"ADB connection check failed for {self._device_name} with err: {err}"
+                f"ADB connection check failed for {self._device_name}"
+                f"{state_info} with err: {err}"
             ) from err
 
     def run(
@@ -920,19 +1164,23 @@ class Adb:
         timeout: float | None = None,
         include_serial: bool = True,
         attempts: int | None = None,
+        log_devices_on_failure: bool = False,
     ) -> str:
         """Runs an ADB command and returns the output.
 
         Args:
             cmd: ADB command as a list of strings (excluding 'adb' and '-s <serial>' if include_serial=True).
-            timeout: Maximum amount of time in seconds to wait for the command to finish across all
-                attempts. Defaults to None (no time limit), which is recommended to avoid flakiness
+            timeout: Maximum amount of time in seconds to wait for each command attempt to finish.
+                Defaults to None (no time limit), which is recommended to avoid flakiness
                 on slow or overloaded test environments. Only pass a timeout when explicitly
                 required or for commands expected to fail fast.
             include_serial: Whether to include '-s <serial_number>' in the command.
                 Defaults to True. Should be set to False for commands like 'adb devices'.
             attempts: Maximum number of attempts to run the command. Defaults to the instance's
                 configured default attempts.
+            log_devices_on_failure: Whether to log host `adb devices -l` output and this
+                device's state if the command fails after all attempts. Useful for
+                connection-related commands such as `wait-for-device`. Defaults to False.
 
         Returns:
             The combined stdout and stderr of the command.
@@ -943,133 +1191,233 @@ class Adb:
             adb_errors.AdbCommandError: If the command fails.
         """
         attempts = self._attempts if attempts is None else attempts
-        timeout_per_attempt: float | None = None
         if timeout is not None:
-            timeout_per_attempt = timeout / attempts
             _LOGGER.info(
-                "Timeout of %ss (%ss per attempt) is set for ADB command '%s'. "
+                "Timeout of %ss per attempt is set for ADB command '%s'. "
                 "Note that timeouts can cause flakiness on overloaded test environments.",
                 timeout,
-                timeout_per_attempt,
                 " ".join(cmd),
             )
 
         attempt = 1
-        while True:
-            # Construct adb_cmd inside the loop to ensure we use the updated port if restarted
-            adb_cmd = self._build_adb_cmd(cmd, include_serial=include_serial)
-
-            _LOGGER.debug(
-                "Running ADB command (attempt %d/%d): %s",
-                attempt,
-                attempts,
-                adb_cmd,
-            )
-            env = self._get_command_env()
-
-            try:
-                output: str = (
-                    host_shell.run(
-                        cmd=adb_cmd,
-                        capture_output=True,
-                        capture_error_in_output=True,
-                        timeout=timeout_per_attempt,
-                        env=env,
-                    )
-                    or ""
+        try:
+            while True:
+                # Construct adb_cmd inside the loop to ensure we use the updated port if restarted
+                adb_cmd = self._build_adb_cmd(
+                    cmd, include_serial=include_serial
                 )
-                if self._adb_server:
-                    self._adb_server.reset_restart_count()
-                return output
 
-            except errors.HoneydewTimeoutError as err:
-                if attempt < attempts and self._adb_server:
-                    _LOGGER.warning(
-                        "ADB command timed out. "
-                        "Attempting to restart isolated ADB server and retry..."
-                    )
-                    self._recover_adb_server()
-                    attempt += 1
-                    continue
-                raise adb_errors.AdbTimeoutError(
-                    f"ADB command '{adb_cmd}' timed out after {timeout} seconds"
-                ) from err
-
-            except errors.HostCmdError as err:
-                err_msg_lower = str(err).lower()
-                if "unauthorized" in err_msg_lower:
-                    raise adb_errors.AdbUnauthorizedError(
-                        f"Device '{self._device_name}' ({self._serial_number}) is unauthorized. "
-                        "Ensure valid ADB vendor keys are bundled or configured via vendor_keys_path / ADB_VENDOR_KEYS. "
-                        f"Original error: {err}"
-                    ) from err
-
-                is_retriable = any(
-                    x in err_msg_lower
-                    for x in [
-                        "offline",
-                        "not found",
-                        "connection refused",
-                        "cannot connect",
-                        "closed",
-                        "protocol fault",
-                        "connection reset",
-                        "no route to host",
-                        "network is unreachable",
-                        "connection timed out",
-                    ]
+                _LOGGER.debug(
+                    "Running ADB command (attempt %d/%d): %s",
+                    attempt,
+                    attempts,
+                    adb_cmd,
                 )
-                if is_retriable and attempt < attempts:
-                    if "offline" in err_msg_lower and attempt == 1:
-                        self._reconnect_offline()
-                        time.sleep(2)
-                        attempt += 1
-                        continue
+                env = self._get_command_env()
+
+                try:
+                    output: str = (
+                        host_shell.run(
+                            cmd=adb_cmd,
+                            capture_output=True,
+                            capture_error_in_output=True,
+                            timeout=timeout,
+                            env=env,
+                        )
+                        or ""
+                    )
                     if self._adb_server:
+                        self._adb_server.reset_restart_count()
+                    return output
+
+                except errors.HoneydewTimeoutError as err:
+                    if attempt < attempts and self._adb_server:
                         _LOGGER.warning(
-                            "ADB command failed with connection error: %s. "
-                            "Attempting to restart isolated ADB server and retry...",
-                            str(err),
+                            "ADB command timed out. "
+                            "Attempting to restart isolated ADB server and retry..."
                         )
                         self._recover_adb_server()
                         attempt += 1
                         continue
-                    elif is_tcp_serial(self._serial_number):
-                        _LOGGER.warning(
-                            "ADB command failed with connection error: %s. "
-                            "Attempting to reconnect ADB over TCP and retry...",
-                            str(err),
-                        )
-                        try:
-                            self._connect_tcp(
-                                timeout=_TCP_RECONNECT_TIMEOUT_SECS
-                            )
-                        except adb_errors.AdbUnauthorizedError:
-                            raise
-                        except errors.HoneydewError as connect_err:
+                    raise adb_errors.AdbTimeoutError(
+                        f"ADB command '{adb_cmd}' timed out after {timeout} seconds"
+                    ) from err
+
+                except errors.HostCmdError as err:
+                    err_msg_lower = str(err).lower()
+                    if "unauthorized" in err_msg_lower:
+                        raise adb_errors.AdbUnauthorizedError(
+                            f"Device '{self._device_name}' ({self._serial_number}) is unauthorized. "
+                            "Ensure valid ADB vendor keys are bundled or configured via vendor_keys_path / ADB_VENDOR_KEYS. "
+                            f"Original error: {err}"
+                        ) from err
+
+                    is_retriable = any(
+                        x in err_msg_lower
+                        for x in [
+                            "offline",
+                            "not found",
+                            "connection refused",
+                            "cannot connect",
+                            "closed",
+                            "protocol fault",
+                            "connection reset",
+                            "no route to host",
+                            "network is unreachable",
+                            "connection timed out",
+                            # Include the leading ": " (e.g. "failed to read copy response: EOF")
+                            # to avoid matching "eof" inside ordinary words or shell syntax errors.
+                            ": eof",
+                        ]
+                    )
+                    if is_retriable and attempt < attempts:
+                        if "offline" in err_msg_lower and attempt == 1:
+                            self._reconnect_offline()
+                            time.sleep(2)
+                            attempt += 1
+                            continue
+                        if self._adb_server:
                             _LOGGER.warning(
-                                "Failed to reconnect ADB over TCP on %s: %s",
-                                self._device_name,
-                                connect_err,
+                                "ADB command failed with connection error: %s. "
+                                "Attempting to restart isolated ADB server and retry...",
+                                str(err),
                             )
-                        attempt += 1
-                        continue
-                raise adb_errors.AdbCommandError(str(err)) from err
+                            self._recover_adb_server()
+                            attempt += 1
+                            continue
+                        elif is_tcp_serial(self._serial_number):
+                            _LOGGER.warning(
+                                "ADB command failed with connection error: %s. "
+                                "Attempting to reconnect ADB over TCP and retry...",
+                                str(err),
+                            )
+                            try:
+                                self._connect_tcp(
+                                    timeout=_TCP_RECONNECT_TIMEOUT_SECS
+                                )
+                            except adb_errors.AdbUnauthorizedError:
+                                raise
+                            except errors.HoneydewError as connect_err:
+                                _LOGGER.warning(
+                                    "Failed to reconnect ADB over TCP on %s: %s",
+                                    self._device_name,
+                                    connect_err,
+                                )
+                            attempt += 1
+                            continue
+                    raise adb_errors.AdbCommandError(str(err)) from err
 
-            except errors.HoneydewError as err:
-                raise adb_errors.AdbCommandError(
-                    f"Failed to run ADB command '{adb_cmd}': {err}"
-                ) from err
-
-    @property
-    def is_root(self) -> bool:
-        """Whether the ADB daemon on the device is currently running as root."""
-        return self._is_root
+                except errors.HoneydewError as err:
+                    raise adb_errors.AdbCommandError(
+                        f"Failed to run ADB command '{adb_cmd}': {err}"
+                    ) from err
+        except adb_errors.AdbError:
+            if log_devices_on_failure:
+                self._log_adb_devices()
+            raise
 
     @property
     def is_su_root(self) -> bool:
         """Whether su_root mode is currently enabled on the ADB transport."""
         return self._is_su_root
+
+    def is_rootable(
+        self, timeout: float | None = _ROOT_CHECK_TIMEOUT_SECS
+    ) -> bool:
+        """Checks whether adbd on the device can run as root.
+
+        Args:
+            timeout: Maximum time in seconds to wait for the check. Defaults to
+                _ROOT_CHECK_TIMEOUT_SECS; pass None for no time limit.
+
+        Returns:
+            True if `ro.debuggable` is 1, False otherwise.
+
+        Raises:
+            AdbUnauthorizedError: If the device is unauthorized.
+            AdbCommandError: If the property cannot be read.
+            AdbTimeoutError: If reading the property times out.
+        """
+        # Use `exec-out` rather than `getprop` (`adb shell`): `su_root` mode
+        # rewrites `shell` commands to `shell su root ...`, which fails on
+        # non-debuggable builds where `su` is absent.
+        cmd = ["exec-out", "getprop", "ro.debuggable"]
+        output = self.run(cmd, timeout=timeout, attempts=1)
+        lines = output.strip().splitlines()
+        return (lines[-1].strip() if lines else "") == "1"
+
+    def verify_root(
+        self, timeout: float | None = _ROOT_CHECK_TIMEOUT_SECS
+    ) -> bool:
+        """Checks on the device whether adbd runs as root.
+
+        Queries adbd's UID with `id -u`, retrying once on a command error
+        without triggering full ADB server recovery (which could mutate root
+        state using the stale `_is_root` flag).
+
+        Args:
+            timeout: Maximum time in seconds for the check, including the retry.
+               Defaults to _ROOT_CHECK_TIMEOUT_SECS; pass None for no time
+               limit.
+
+        Returns:
+            True if adbd runs as root (UID 0), False otherwise.
+
+        Raises:
+            AdbUnauthorizedError: If the device is unauthorized.
+            AdbCommandError: If the query fails twice or returns a non-integer.
+            AdbTimeoutError: If the check times out.
+        """
+        # Use `exec-out` rather than `shell`: su_root mode rewrites `shell`
+        # commands to `shell su root ...`, which would report UID 0 even when
+        # adbd itself is not running as root.
+        cmd = ["exec-out", "id", "-u"]
+        start_time: float = time.time()
+        try:
+            self._is_root = _parse_is_root_uid(
+                self._device_name,
+                self.run(cmd, timeout=timeout, attempts=1),
+            )
+        except adb_errors.AdbUnauthorizedError:
+            raise
+        except adb_errors.AdbCommandError as err:
+            # Retry command or empty/truncated `exec-out` errors once directly
+            # (`attempts=1`); `run(attempts=2)` invokes `_recover_adb_server()`,
+            # which kills adbd and restores root from the potentially stale
+            # `_is_root` flag.
+            _LOGGER.debug(
+                "Querying adbd UID on %s failed, retrying once: %s",
+                self._device_name,
+                err,
+            )
+            remaining_timeout = self._get_remaining_timeout(
+                start_time=start_time,
+                timeout=timeout,
+                operation="verify_root",
+            )
+            if (
+                remaining_timeout is not None
+                and remaining_timeout <= _ROOT_CHECK_RETRY_DELAY_SECS
+            ):
+                # Not enough budget left to retry; keep the original error.
+                raise
+            time.sleep(_ROOT_CHECK_RETRY_DELAY_SECS)
+            self._is_root = _parse_is_root_uid(
+                self._device_name,
+                self.run(
+                    cmd,
+                    timeout=self._get_remaining_timeout(
+                        start_time=start_time,
+                        timeout=timeout,
+                        operation="verify_root",
+                    ),
+                    attempts=1,
+                ),
+            )
+        _LOGGER.debug(
+            "adbd on %s runs as root: %s", self._device_name, self._is_root
+        )
+        return self._is_root
 
     def root(
         self,
@@ -1085,13 +1433,23 @@ class Adb:
 
         Raises:
             AdbTimeoutError: If the command times out.
-            AdbCommandError: If the command fails.
+            AdbCommandError: If the command fails, or adbd is not running as
+                root afterwards (e.g. on a production build).
             AdbConnectionError: If reconnecting to a TCP target fails.
         """
         attempts = self._attempts if attempts is None else attempts
         _LOGGER.info("Enabling root-privileges on %s.", self._device_name)
         start_time: float = time.time()
-        self.run(["root"], timeout=timeout, attempts=attempts)
+        # `adb root` restarts the on-device adbd, which closes its FunctionFS
+        # endpoints and makes the device re-enumerate on the host. Notify the
+        # USB affordance so FFX treats the drop as intentional.
+        if self._usb is not None:
+            self._usb.before_disconnect()
+        root_output = self.run(
+            ["root"],
+            timeout=timeout / attempts if timeout is not None else None,
+            attempts=attempts,
+        ).strip()
         remaining_timeout: float | None = self._get_remaining_timeout(
             start_time=start_time, timeout=timeout, operation="root"
         )
@@ -1104,12 +1462,50 @@ class Adb:
                 start_time=start_time, timeout=timeout, operation="root"
             )
         self.run(
-            ["wait-for-device"], timeout=remaining_timeout, attempts=attempts
+            ["wait-for-device"],
+            timeout=(
+                remaining_timeout / attempts
+                if remaining_timeout is not None
+                else None
+            ),
+            attempts=attempts,
+            log_devices_on_failure=True,
         )
-        self._is_root = True
+        remaining_timeout = self._get_remaining_timeout(
+            start_time=start_time, timeout=timeout, operation="root"
+        )
+        # `adb root` can exit successfully without granting root (e.g. "adbd
+        # cannot run as root in production builds"), so check the device.
+        if not self.verify_root(timeout=remaining_timeout):
+            reason = "adbd is still not root although the build is debuggable"
+            try:
+                check_timeout = self._get_remaining_timeout(
+                    start_time=start_time,
+                    timeout=timeout,
+                    operation="root",
+                )
+                if (
+                    check_timeout is None
+                    or check_timeout > _ROOT_CHECK_TIMEOUT_SECS
+                ):
+                    check_timeout = _ROOT_CHECK_TIMEOUT_SECS
+                if not self.is_rootable(timeout=check_timeout):
+                    reason = (
+                        "`ro.debuggable` is not 1 (e.g. a production build)"
+                    )
+            except adb_errors.AdbError as err:
+                reason = f"could not check `ro.debuggable`: {err}"
+            raise adb_errors.AdbCommandError(
+                f"`adb root` did not make adbd run as root on "
+                f"{self._device_name} (output: {root_output!r}): {reason}"
+            )
         # `adb root` terminates the running adbd process and spawns a new adbd
         # process as root (UID 0) with a new PID; update the cached PID.
         self._cache_adbd_pid()
+        # Re-open the other host transports on the re-enumerated device. Only
+        # done on success so a failure here never masks the `adb root` error.
+        if self._usb is not None:
+            self._usb.after_connect()
 
     def unroot(
         self,
@@ -1131,7 +1527,16 @@ class Adb:
         attempts = self._attempts if attempts is None else attempts
         _LOGGER.info("Disabling root-privileges on %s.", self._device_name)
         start_time: float = time.time()
-        self.run(["unroot"], timeout=timeout, attempts=attempts)
+        # `adb unroot` restarts the on-device adbd, which closes its FunctionFS
+        # endpoints and makes the device re-enumerate on the host. Notify the
+        # USB affordance so FFX treats the drop as intentional.
+        if self._usb is not None:
+            self._usb.before_disconnect()
+        self.run(
+            ["unroot"],
+            timeout=timeout / attempts if timeout is not None else None,
+            attempts=attempts,
+        )
         remaining_timeout: float | None = self._get_remaining_timeout(
             start_time=start_time, timeout=timeout, operation="unroot"
         )
@@ -1144,13 +1549,24 @@ class Adb:
                 start_time=start_time, timeout=timeout, operation="unroot"
             )
         self.run(
-            ["wait-for-device"], timeout=remaining_timeout, attempts=attempts
+            ["wait-for-device"],
+            timeout=(
+                remaining_timeout / attempts
+                if remaining_timeout is not None
+                else None
+            ),
+            attempts=attempts,
+            log_devices_on_failure=True,
         )
         self._is_root = False
         self._rooted_by_context = False
         # `adb unroot` terminates the running adbd process and spawns a new adbd
         # process as shell (UID 2000) with a new PID; update the cached PID.
         self._cache_adbd_pid()
+        # Re-open the other host transports on the re-enumerated device. Only
+        # done on success so a failure here never masks the `adb unroot` error.
+        if self._usb is not None:
+            self._usb.after_connect()
 
     def use_adb_root(
         self,

@@ -98,7 +98,7 @@ void GeometryProvider::RegisterViewTreeWatcherImpl(
   auto endpoint_id = endpoint_counter_++;
   auto [it, _] = endpoints_.insert(
       {endpoint_id, std::make_unique<ProviderEndpoint>(
-                        std::move(endpoint), context_view,
+                        *this, std::move(endpoint), context_view,
                         [weak_provider = weak_factory_.GetWeakPtr(), endpoint_id] {
                           if (weak_provider) {
                             auto count = weak_provider->endpoints_.erase(endpoint_id);
@@ -344,9 +344,10 @@ fuchsia_ui_observation_geometry::ViewDescriptor GeometryProvider::ExtractViewDes
 }
 
 GeometryProvider::ProviderEndpoint::ProviderEndpoint(
+    GeometryProvider& provider,
     fidl::ServerEnd<fuchsia_ui_observation_geometry::ViewTreeWatcher> endpoint,
     std::optional<zx_koid_t> context_view, fit::function<void()> destroy_instance_function)
-    : context_view_(std::move(context_view)) {
+    : provider_(provider), context_view_(std::move(context_view)) {
   binding_.emplace(async_get_default_dispatcher(), std::move(endpoint), this,
                    [destroy_instance = std::move(destroy_instance_function)](fidl::UnbindInfo) {
                      if (destroy_instance) {
@@ -384,6 +385,10 @@ void GeometryProvider::ProviderEndpoint::Watch(WatchCompleter::Sync& completer) 
     CloseChannel();
     return;
   }
+
+  // Pull any snapshot already published to `snapshot_holder_` whose async notification task
+  // (`InputManager::OnNewViewTreeSnapshot()`) has not yet executed on the input thread.
+  provider_.OnNewViewTreeSnapshot();
 
   // If there are snapshots lined up in the queue, send the response otherwise store the callback.
   pending_completer_ = completer.ToAsync();

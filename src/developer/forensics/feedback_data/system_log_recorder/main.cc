@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <string>
 
 #include "src/developer/forensics/feedback/config.h"
 #include "src/developer/forensics/feedback/constants.h"
@@ -65,12 +66,20 @@ int main() {
   const size_t max_num_files = std::max<size_t>(
       1, feedback_config->persisted_logs_total_size / feedback::kPersistedLogsFileSize);
 
+  // If Feedback only retains one previous boot, then the previous boot logs are stored in /tmp and
+  // don't count against the log size budget. If Feedback retains multiple previous boots, then the
+  // current boot logs share the size budget with the previous boots in |kPreviousLogsDir|.
+  const std::optional<std::string> previous_logs_dir =
+      feedback::UsesMultiPreviousBootLogs() ? std::optional<std::string>(feedback::kPreviousLogsDir)
+                                            : std::nullopt;
+
   SystemLogRecorder recorder(
       main_loop.dispatcher(), write_loop.dispatcher(), context->svc(),
       SystemLogRecorder::WriteParameters{
           .period = kWritePeriod,
           .max_write_size = kMaxWriteSize,
           .logs_dir = feedback::kCurrentLogsDir,
+          .previous_logs_dir = previous_logs_dir,
           .max_num_files = max_num_files,
           .total_log_size = feedback_config->persisted_logs_total_size,
           .fallback_buffer_size = feedback_data::kFallbackLogBufferSize,

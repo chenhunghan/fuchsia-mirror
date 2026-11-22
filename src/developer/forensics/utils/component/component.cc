@@ -5,7 +5,6 @@
 #include "src/developer/forensics/utils/component/component.h"
 
 #include <lib/async-loop/default.h>
-#include <lib/fidl/cpp/interface_request.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <string>

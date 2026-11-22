@@ -26,11 +26,11 @@ namespace {
 
 using ConsumeResult = LogMessageStore::ConsumeResult;
 
-::fpromise::result<fuchsia::logger::LogMessage, std::string> BuildLogMessage(
+::fpromise::result<fuchsia_logger::LogMessage, std::string> BuildLogMessage(
     const int32_t severity, const std::string& text,
     const zx::duration timestamp_offset = zx::duration(0),
     const std::vector<std::string>& tags = {}) {
-  return ::fpromise::ok(testing::BuildLogMessage(severity, text, timestamp_offset, tags));
+  return ::fpromise::ok(forensics::BuildLogMessage(severity, text, timestamp_offset, tags));
 }
 
 // Only change "X" for one character. i.e. X -> 12 is not allowed.
@@ -689,8 +689,7 @@ TEST_F(LogMessageStoreTest, ResetClearsBuffer) {
 }
 
 TEST_F(LogMessageStoreTest, IgnoresMessagesAtOrBeforeTimestamp) {
-  const zx::time_boot kIgnoreBeforeTimestamp =
-      zx::time_boot((zx::sec(15604) + zx::sec(1)).to_nsecs());
+  const zx::time_boot kIgnoreBeforeTimestamp = kLogMessageBaseTimestamp + zx::sec(1);
   SimpleRedactor redactor(/*count_calls=*/true);
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, &redactor, MakeIdentityEncoder(),
                         kIgnoreBeforeTimestamp);
@@ -712,8 +711,7 @@ TEST_F(LogMessageStoreTest, IgnoresMessagesAtOrBeforeTimestamp) {
 }
 
 TEST_F(LogMessageStoreTest, ResetClearsIgnoreBeforeTimestamp) {
-  const zx::time_boot kIgnoreBeforeTimestamp =
-      zx::time_boot((zx::sec(15604) + zx::sec(1)).to_nsecs());
+  const zx::time_boot kIgnoreBeforeTimestamp = kLogMessageBaseTimestamp + zx::sec(1);
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, GetIdentityRedactor(),
                         MakeIdentityEncoder(), kIgnoreBeforeTimestamp);
 

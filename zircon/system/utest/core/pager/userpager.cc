@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include <fbl/algorithm.h>
 #include <fbl/array.h>
@@ -452,13 +453,12 @@ bool UserPager::SupplyPages(Vmo* paged_vmo, uint64_t dest_offset, uint64_t lengt
     return false;
   }
 
+  std::vector<uint8_t> data(zx_system_get_page_size());
   uint64_t cur = 0;
   while (cur < length) {
-    uint8_t data[zx_system_get_page_size()];
-    paged_vmo->GenerateBufferContents(data, 1, dest_offset + cur);
+    paged_vmo->GenerateBufferContents(data.data(), 1, dest_offset + cur);
 
-    status =
-        vmo.write(data, (src_offset + cur) * zx_system_get_page_size(), zx_system_get_page_size());
+    status = vmo.write(data.data(), (src_offset + cur) * data.size(), data.size());
     if (status != ZX_OK) {
       fprintf(stderr, "vmo write failed with %s\n", zx_status_get_string(status));
       return false;

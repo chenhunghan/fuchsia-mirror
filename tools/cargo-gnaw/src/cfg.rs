@@ -33,9 +33,15 @@ pub fn target_to_gn_conditional(target: &str) -> Result<String> {
         let (target_arch, target_os) = match target {
             "aarch64-apple-darwin" => ("aarch64", "macos"),
             "aarch64-linux-android" => ("aarch64", "android"),
+            "aarch64-pc-windows-msvc" => ("aarch64", "windows"),
+            "aarch64-unknown-linux-gnu" => ("aarch64", "linux"),
+            "arm64ec-pc-windows-msvc" => ("arm64ec", "windows"),
             "riscv32i-unknown-none-elf" => ("riscv32i", "unknown"),
             "riscv32imc-unknown-none-elf" => ("riscv32imc", "unknown"),
             "thumbv6m-none-eabi" => ("thumbv6m", "unknown"),
+            "x86_64-apple-darwin" => ("x86_64", "macos"),
+            "x86_64-pc-windows-msvc" => ("x86_64", "windows"),
+            "x86_64-unknown-linux-gnu" => ("x86_64", "linux"),
             // Return an error for unknown targets, to notify the dev that they should
             // update this list.
             _ => {

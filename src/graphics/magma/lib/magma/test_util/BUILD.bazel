@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "logger_init_helper",
+    testonly = True,
+    srcs = ["logger_init_helper.cc"],
+    implementation_deps = [
+        "//sdk/lib/fdio",
+        "//src/graphics/magma/lib/magma/platform:handle",
+        "//src/graphics/magma/lib/magma/platform:logger_impl",
+        "//src/graphics/magma/lib/magma/platform:logger_provider_header",
+        "//zircon/system/ulib/zx",
+    ],
+    public_configs = ["//src/graphics/magma:src_config"],
+    visibility = [
+        "//src/graphics/drivers:__subpackages__",
+        "//src/graphics/magma/lib/magma_service/sys_driver/tests:__pkg__",
+        "//src/graphics/magma/tests/unit_tests:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    alwayslink = True,
+)

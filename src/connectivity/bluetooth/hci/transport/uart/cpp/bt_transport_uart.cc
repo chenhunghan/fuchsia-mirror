@@ -285,7 +285,7 @@ void BtTransportUart::SendSnoop(fidl::VectorView<uint8_t>& packet,
       builder.packet(fhbt::wire::SnoopPacket::WithIso(arena, packet));
       break;
     default:
-      fdf::error("Unknown snoop packet type: {}", static_cast<fidl_xunion_tag_t>(type));
+      fdf::error("Unknown snoop packet type: {}", static_cast<fidl_union_tag_t>(type));
   }
   builder.direction(direction);
   builder.sequence(snoop_seq_++);
@@ -661,7 +661,7 @@ void BtTransportUart::Send(fidl::Server<fhbt::HciTransport>::SendRequest& reques
       data_type_name = "command";
       break;
     default:
-      fdf::error("Unknown packet type: {}", static_cast<fidl_xunion_tag_t>(request.Which()));
+      fdf::error("Unknown packet type: {}", static_cast<fidl_union_tag_t>(request.Which()));
   }
 
   fdf::trace("received data type: {}", data_type_name);

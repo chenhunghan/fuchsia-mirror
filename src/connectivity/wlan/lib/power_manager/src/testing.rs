@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use fidl_fuchsia_power_system as fsystem;
 use fuchsia_sync::Mutex;
 use std::sync::Arc;
-use wlan_power_manager::{PowerManager, SyncPowerManager, WakeLease};
+use wlan_power_manager::{
+    InitSuspendBlocker, PowerLevel, PowerManager, SyncPowerManager, WakeLease,
+};
 
 pub struct TestPowerManager {
     pub calls: Arc<Mutex<Vec<String>>>,
@@ -58,7 +60,7 @@ impl PowerManager for TestPowerManager {
         &self,
         lease_name: &str,
         _dependency_token: fidl_fuchsia_power_broker::DependencyToken,
-        _dependency_level: u8,
+        _dependency_level: PowerLevel,
     ) -> Result<fidl_fuchsia_power_broker::LeaseToken, Error> {
         self.calls.lock().push(lease_name.to_string());
         if let Err(e) = self.mock_power_element_lease_result.lock().as_ref() {
@@ -69,15 +71,13 @@ impl PowerManager for TestPowerManager {
         Ok(local_token)
     }
 
-    async fn register_suspend_blocker(
-        &self,
-        _suspend_blocker: fidl::endpoints::ClientEnd<fsystem::SuspendBlockerMarker>,
-        name: &str,
-    ) -> Result<WakeLease, Error> {
+    async fn register_suspend_blocker(&self, name: &str) -> Result<InitSuspendBlocker, Error> {
         self.calls.lock().push(name.to_string());
         let (local_token, token) = fsystem::LeaseToken::create();
         self.active_leases.lock().push((name.to_string(), local_token));
-        Ok(WakeLease::from_token_for_test(token))
+        let (_client, requests) =
+            fidl::endpoints::create_request_stream::<fsystem::SuspendBlockerMarker>();
+        Ok(InitSuspendBlocker::new(WakeLease::from_token_for_test(token), requests))
     }
 }
 

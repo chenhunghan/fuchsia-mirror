@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
       "data": "test.doccomments",
       "start_offset": 58,
       "end_offset": 74
@@ -17,7 +17,7 @@
       "identifier": "test.doccomments/C",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
         "data": "C",
         "start_offset": 779,
         "end_offset": 780
@@ -33,7 +33,7 @@
       "identifier": "test.doccomments/MyFlexibleEnum",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
         "data": "MyFlexibleEnum",
         "start_offset": 1192,
         "end_offset": 1206
@@ -43,7 +43,7 @@
           "name": "FOO",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
             "data": "FOO",
             "start_offset": 1306,
             "end_offset": 1309
@@ -56,7 +56,7 @@
           "name": "BAR",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
             "data": "BAR",
             "start_offset": 1448,
             "end_offset": 1451
@@ -72,7 +72,7 @@
       "identifier": "test.doccomments/MyStrictEnum",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
         "data": "MyStrictEnum",
         "start_offset": 858,
         "end_offset": 870
@@ -82,7 +82,7 @@
           "name": "FOO",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
             "data": "FOO",
             "start_offset": 968,
             "end_offset": 971
@@ -95,7 +95,7 @@
           "name": "BAR",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
             "data": "BAR",
             "start_offset": 1110,
             "end_offset": 1113
@@ -113,7 +113,7 @@
       "identifier": "test.doccomments/FlexibleUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
         "data": "FlexibleUnion",
         "start_offset": 1886,
         "end_offset": 1899
@@ -124,7 +124,7 @@
           "name": "Field",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
             "data": "Field",
             "start_offset": 1998,
             "end_offset": 2003
@@ -140,7 +140,7 @@
       "identifier": "test.doccomments/StrictUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
         "data": "StrictUnion",
         "start_offset": 1692,
         "end_offset": 1703
@@ -151,7 +151,7 @@
           "name": "Field",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
             "data": "Field",
             "start_offset": 1800,
             "end_offset": 1805
@@ -169,7 +169,7 @@
       "identifier": "test.doccomments/Table",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
         "data": "Table",
         "start_offset": 2066,
         "end_offset": 2071
@@ -180,7 +180,7 @@
           "name": "Field",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
             "data": "Field",
             "start_offset": 2159,
             "end_offset": 2164
@@ -198,7 +198,7 @@
       "identifier": "test.doccomments/Struct",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
         "data": "Struct",
         "start_offset": 1514,
         "end_offset": 1520
@@ -208,7 +208,7 @@
           "name": "Field",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
             "data": "Field",
             "start_offset": 1610,
             "end_offset": 1615
@@ -225,7 +225,7 @@
       "identifier": "test.doccomments/Interface",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
         "data": "Interface",
         "start_offset": 2246,
         "end_offset": 2255
@@ -235,7 +235,7 @@
           "identifier": "Method",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
             "data": "Method",
             "start_offset": 2329,
             "end_offset": 2335
@@ -245,7 +245,7 @@
           "identifier": "OnEvent",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/doc_comments.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/doc_comments.test.fidl",
             "data": "OnEvent",
             "start_offset": 2412,
             "end_offset": 2419

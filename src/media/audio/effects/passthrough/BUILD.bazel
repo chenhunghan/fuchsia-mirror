@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# audio_core currently only supports a single .so that must be called
+# 'audio_effects.so'.
+# TODO(https://fxbug.dev/570694755): Verify whether audio_effects should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+fx_cc_binary(
+    name = "audio_effects",
+    srcs = ["passthrough.cc"],
+    linkshared = True,
+    # Uses Fuchsia-only Zircon headers (<zircon/compiler.h>, <zircon/types.h>)
+    # via //sdk/lib/media/audio/effects and Fuchsia libc strlcpy().
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/media/audio/audio_core:__pkg__",
+    ],
+    deps = ["//sdk/lib/media/audio/effects"],
+)
+
+alias(
+    name = "passthrough",
+    actual = ":audio_effects",
+    visibility = [
+        "//src/media/audio/effects:__pkg__",
+    ],
+)

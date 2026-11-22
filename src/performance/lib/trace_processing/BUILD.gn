@@ -16,6 +16,7 @@ python_library("trace_processing") {
     "__init__.py",
     "hardware_configs.py",
     "metrics/__init__.py",
+    "metrics/_gfx_sql.py",
     "metrics/agg_cpu_breakdown.py",
     "metrics/app_render.py",
     "metrics/cpu.py",
@@ -30,6 +31,7 @@ python_library("trace_processing") {
     "metrics/suspend.py",
     "metrics/wakeup.py",
     "run_cpu_breakdown.py",
+    "run_graphics_metrics.py",
     "trace_importing.py",
     "trace_importing_fxt.py",
     "trace_metrics.py",
@@ -141,10 +143,7 @@ python_binary("run_suspend_metrics_bin") {
 python_binary("run_graphics_metrics_bin") {
   testonly = true
   main_source = "run_graphics_metrics.py"
-  deps = [
-    ":trace_processing",
-    "//src/performance/trace2json",
-  ]
+  deps = [ ":trace_processing" ]
   output_name = "run_graphics_metrics.pyz"
 }
 

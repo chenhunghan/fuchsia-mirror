@@ -94,6 +94,23 @@ pyrefly_build_only_tests_group = rule(
     } | STAMP_GROUP_NON_DEPS_ATTRS,
 )
 
+def _pyrefly_attr_forwarding_test_target_impl(_ctx):
+    return [DefaultInfo()]
+
+pyrefly_attr_forwarding_test_target = rule(
+    implementation = _pyrefly_attr_forwarding_test_target_impl,
+    doc = """A rule that is not a Python rule, used to test how pyrefly_aspect forwards checks.
+
+    pyrefly_aspect must forward the checks of the targets in `label_dict`
+    (keys of a `label_keyed_string_dict`), but not the ones of `_private`, since
+    `_`-prefixed attributes (tools, toolchains...) are skipped.
+    """,
+    attrs = {
+        "label_dict": attr.label_keyed_string_dict(),
+        "_private": attr.label(default = ":pyrefly_valid_bin"),
+    },
+)
+
 def pyrefly_test_suite(name):
     """Defines analysis tests for pyrefly_aspect targets in BUILD.bazel.
 
@@ -119,19 +136,40 @@ def pyrefly_test_suite(name):
         )
         tests.append(":" + test_name)
 
-    # Checks are transitive over `deps` and `pyi_deps`, and host_test() forwards
-    # the checks of its binary, which Bazel would not otherwise request.
+    # Checks are transitive over `deps` and `pyi_deps` of Python targets, and
+    # over every public attribute of other targets, so that Bazel requests the
+    # checks of Python targets reached through them (e.g. the binary or `data`
+    # of a host_test(), or the `srcs` of a filegroup).
+    bin_checks = [
+        "pyrefly_valid_bin.pyrefly.ok",
+        "pyrefly_valid_lib.pyrefly.ok",
+        "pyrefly_valid_pyi_lib.pyrefly.ok",
+    ]
     validation_cases = [
-        ("bin_transitive", ":pyrefly_valid_bin", [
-            "pyrefly_valid_bin.pyrefly.ok",
-            "pyrefly_valid_lib.pyrefly.ok",
-            "pyrefly_valid_pyi_lib.pyrefly.ok",
-        ]),
+        ("bin_transitive", ":pyrefly_valid_bin", bin_checks),
         ("host_py_test_forwarded", ":pyrefly_host_test_default", [
             "pyrefly_host_test_default_bin.pyrefly.ok",
             "pyrefly_valid_lib.pyrefly.ok",
         ]),
         ("host_py_test_disabled_forwarded", ":pyrefly_host_test_disabled", []),
+        ("filegroup_forwarded", ":pyrefly_filegroup", ["pyrefly_valid_lib.pyrefly.ok"]),
+        ("filegroup_disabled_forwarded", ":pyrefly_filegroup_optout", []),
+        ("non_python_bin", ":pyrefly_non_python_bin", []),
+        ("host_test_data_files_forwarded", ":pyrefly_data_files", bin_checks),
+        ("host_test_data_map_forwarded", ":pyrefly_data_map", bin_checks),
+        ("host_test_data_forwarded", ":pyrefly_host_test_data", bin_checks),
+        ("host_test_nested_data_files_forwarded", ":pyrefly_host_test_data_files", bin_checks),
+        ("host_test_nested_data_map_forwarded", ":pyrefly_host_test_data_map", bin_checks),
+        ("label_keyed_dict_forwarded", ":pyrefly_label_keyed_dict", ["pyrefly_valid_lib.pyrefly.ok"]),
+        ("private_attr_not_forwarded", ":pyrefly_private_attr_only", []),
+        # `no-pyrefly` skips only the tagged target's own check, not its deps'.
+        ("bin_disabled_deps_still_checked", ":pyrefly_type_error_optout_bin", [
+            "pyrefly_valid_lib.pyrefly.ok",
+        ]),
+        # ... and does not affect the tagged target's dependants.
+        ("bin_with_disabled_dep_still_checked", ":pyrefly_optout_dependant_bin", [
+            "pyrefly_optout_dependant_bin.pyrefly.ok",
+        ]),
     ]
     for case_name, target_under_test, expected_validation_files in validation_cases:
         test_name = case_name + "_pyrefly_validation_test"

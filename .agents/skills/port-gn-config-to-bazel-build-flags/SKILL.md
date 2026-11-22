@@ -226,26 +226,29 @@ Bazel `select()` expressions on `build_flags()` attributes:
       until platform-aware `select()` flags are enabled).
 
 5.  **Toolchain-Specific GN Variables (`optimize`, `debuginfo`, `dwarf_version`,
-    `compress_debuginfo`, `is_profile`)**:
+    `compress_debuginfo`)**:
     - Exposed as Bazel `build_setting()` flags in
       `//build/bazel/config/variables:<varname>` (populated by
       `//build/bazel/config/bazel_args.gni`) with matching `config_setting()`
       predicates in `//build/bazel/config/select/<varname>:<value>`.
     - See `//build/bazel/config/BUILD_CONFIGURATION_VARIABLES.md` for details.
 
-6.  **GN Toolchain Variant Tags (`toolchain_variant.tags` and
-    `toolchain_variant.instrumented`)**:
-    - Exposed via `//build/bazel/config/toolchain_tags/<tag>:{true,false}`
-      (where `toolchain_variant.instrumented` is equivalent to the
-      `"instrumented"` tag:
-      `//build/bazel/config/toolchain_tags/instrumented:true`).
-    - For composite conditions (e.g. `toolchain_variant.instrumented ||
+6.  **GN Toolchain Variant Features (`toolchain_variant.tags`,
+    `toolchain_variant.configs`, and `toolchain_variant.instrumented`)**:
+    - Exposed via `//build/bazel/config/variant_features/<feature>:{true,false}`
+      (where `toolchain_variant.instrumented` corresponds to the
+      `"instrumented"` feature:
+      `//build/bazel/config/variant_features/instrumented:true`).
+    - Composite `is_profile` and `is_coverage` conditions are exposed in
+      `//build/bazel/config/select/{is_profile,is_coverage}:{true,false}`. For
+      other composite conditions (e.g. `toolchain_variant.instrumented ||
       is_lto`), use `selects.config_setting_group(match_any = [...])` from
       `@bazel_skylib//lib:selects.bzl`.
-    - If a required tag from `//build/toolchain/variant_tags.gni` is not yet
-      present under `//build/bazel/config/toolchain_tags/`, add it to
-      `DEFAULT_TAGS_LIST` in `//build/bazel/config/toolchain_tags/update.py` and
-      re-run the script.
+    - If a required GN variant tag or config is not yet exposed under
+      `//build/bazel/config/variant_features/`, follow the checklist in
+      `//build/bazel/config/variant_features/README.md` (`bazel_args.gni`,
+      `feature_flag.bzl`, `//build/bazel/config/variant_features/`, and
+      `sanitizer.bzl` / `toolchain_utils.bzl`).
 
 ---
 

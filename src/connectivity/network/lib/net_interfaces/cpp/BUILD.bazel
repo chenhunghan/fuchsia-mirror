@@ -1,0 +1,60 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":net_interfaces_tests"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+alias(
+    name = "cpp",
+    actual = ":net-interfaces",
+    visibility = [
+        "//src/connectivity/network/mdns/service:__pkg__",
+        "//src/virtualization/bin/vmm/device/virtio_net:__pkg__",
+    ],
+)
+
+fx_cc_library(
+    name = "net-interfaces",
+    srcs = ["net_interfaces.cc"],
+    hdrs = ["net_interfaces.h"],
+    aspect_hints = [
+        "//src/connectivity/network/lib/net_interfaces:net_interfaces_includes",
+    ],
+    implementation_deps = ["//src/lib/fxl"],
+    visibility = [
+        "//src/connectivity/network/mdns/service:__pkg__",
+        "//src/virtualization/bin/vmm/device/virtio_net:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_hlcpp",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "net_interfaces_test",
+    srcs = [
+        "net_interfaces_test.cc",
+        "test_common.cc",
+        "test_common.h",
+    ],
+    deps = [
+        ":cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+    ],
+)
+
+fx_unittest_package(
+    name = "net_interfaces_tests",
+    unit_tests = [":net_interfaces_test"],
+)

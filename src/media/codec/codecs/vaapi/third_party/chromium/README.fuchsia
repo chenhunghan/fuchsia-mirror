@@ -3,7 +3,8 @@ URL: https://chromium.googlesource.com/chromium/src
 Revision: c53c9bb7825c3179a7e89607e8520438fb2bf627
 Security Critical: yes
 
+License: BSD-3-Clause
 License File: LICENSE
-  License: BSD-3-Clause, Copyright
 
-Description: This path contains Chromium VAAPI media code.
+Description:
+  This path contains Chromium VAAPI media code.

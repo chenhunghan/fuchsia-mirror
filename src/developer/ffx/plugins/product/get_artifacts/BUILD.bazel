@@ -38,7 +38,6 @@ host_rustc_test(
     name = "lib_test",
     compile_data = ["//build/sdk/meta:test_data/single_vd_manifest.json"],
     crate = ":lib",
-    # Unique output_name in GN for generic lib_test target.
     crate_name = "ffx_product_get_artifacts_lib_test",
     edition = "2024",
     visibility = [

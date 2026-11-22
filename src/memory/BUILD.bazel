@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "target_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//src/memory/attribution/processing:tests",
+        "//src/memory/heapdump/collector:tests",
+        "//src/memory/heapdump/instrumentation:rust-tests",
+        "//src/memory/heapdump/instrumentation/tests",
+        "//src/memory/heapdump/kernel-collector:tests",
+        "//src/memory/heapdump/lib/heapdump_snapshot:heapdump-snapshot-tests",
+        "//src/memory/heapdump/lib/heapdump_vmo:tests",
+        "//src/memory/legacy/metrics/tests",
+        "//src/memory/lib/pprof:tests",
+        "//src/memory/pressure_signaler:tests",
+        "//src/memory/stacktrack/collector:tests",
+        "//src/memory/stacktrack/lib/stacktrack_snapshot:stacktrack-snapshot-tests",
+        "//src/memory/stacktrack/lib/stacktrack_vmo:tests",
+        "//src/memory/thrasher:tests",
+    ],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/memory/heapdump/lib/heapdump_snapshot:heapdump_snapshot_fdomain_test",
+        "//src/memory/stacktrack/lib/stacktrack_snapshot:stacktrack_snapshot_fdomain_test",
+    ],
+)

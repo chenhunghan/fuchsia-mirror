@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
       "data": "test.escaping",
       "start_offset": 45,
       "end_offset": 58
@@ -17,7 +17,7 @@
       "identifier": "test.escaping/BASIC",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "BASIC",
         "start_offset": 147,
         "end_offset": 152
@@ -30,7 +30,7 @@
       "identifier": "test.escaping/DOLLAR",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "DOLLAR",
         "start_offset": 492,
         "end_offset": 498
@@ -43,7 +43,7 @@
       "identifier": "test.escaping/DOLLAR_BRACE",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "DOLLAR_BRACE",
         "start_offset": 519,
         "end_offset": 531
@@ -56,7 +56,7 @@
       "identifier": "test.escaping/MAX",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "MAX",
         "start_offset": 213,
         "end_offset": 216
@@ -69,7 +69,7 @@
       "identifier": "test.escaping/NULL",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "NULL",
         "start_offset": 184,
         "end_offset": 188
@@ -82,7 +82,7 @@
       "identifier": "test.escaping/SMILE_LEADING_ZERO",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "SMILE_LEADING_ZERO",
         "start_offset": 363,
         "end_offset": 381
@@ -95,7 +95,7 @@
       "identifier": "test.escaping/SMILE_LITERAL",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "SMILE_LITERAL",
         "start_offset": 246,
         "end_offset": 259
@@ -108,7 +108,7 @@
       "identifier": "test.escaping/SMILE_LOWER",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "SMILE_LOWER",
         "start_offset": 283,
         "end_offset": 294
@@ -121,7 +121,7 @@
       "identifier": "test.escaping/SMILE_UPPER",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "SMILE_UPPER",
         "start_offset": 323,
         "end_offset": 334
@@ -134,7 +134,7 @@
       "identifier": "test.escaping/STAR",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "STAR",
         "start_offset": 736,
         "end_offset": 740
@@ -147,7 +147,7 @@
       "identifier": "test.escaping/TWINKLE",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "TWINKLE",
         "start_offset": 761,
         "end_offset": 768
@@ -166,7 +166,7 @@
       "identifier": "test.escaping/DocCommentWithQuotes",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "DocCommentWithQuotes",
         "start_offset": 106,
         "end_offset": 126
@@ -178,7 +178,7 @@
       "identifier": "test.escaping/DocCommentWithStars",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
         "data": "DocCommentWithStars",
         "start_offset": 677,
         "end_offset": 696
@@ -188,7 +188,7 @@
           "name": "field",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/escaping.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/escaping.test.fidl",
             "data": "field",
             "start_offset": 712,
             "end_offset": 717

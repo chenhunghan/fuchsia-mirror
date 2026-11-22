@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
 package(default_applicable_licenses = ["//:license"])
 
 # Device tests for //src/zircon defined in Bazel. These are exported to `fx test`
@@ -10,8 +12,18 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
-        "//src/zircon/bin/zxsh:zxsh_tests",
         "//src/zircon/tests/exception:tests",
+        "//src/zircon/tests/stress-tests:tests",
         "//src/zircon/tests/vmo:tests",
+    ],
+)
+
+# Host tests for //src/zircon defined in Bazel. These are exported to `fx test`
+# and infra builders through the `bazel_tests` target in //src/zircon/BUILD.gn.
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/zircon/bin/kcounter/lib:host_tests",
     ],
 )

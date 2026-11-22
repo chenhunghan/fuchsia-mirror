@@ -693,7 +693,7 @@ fn ptrace_cont(
     } else {
         state.set_stopped(StopState::Waking, None, None, None);
         drop(state);
-        tracee.thread_group().set_stopped(StopState::Waking, None, false);
+        tracee.thread_group().set_stopped(StopState::Waking, None);
     }
     if detach {
         tracee.write().set_ptrace(None)?;

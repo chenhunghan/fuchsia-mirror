@@ -3,12 +3,15 @@
 // found in the LICENSE file.
 
 #include <lib/async/cpp/task.h>
+#include <lib/async/cpp/wait.h>
 #include <lib/driver/runtime/testing/cpp/internal/test_dispatcher_builder.h>
 #include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/fdf/cpp/dispatcher.h>
 #include <lib/fdf/cpp/env.h>
 #include <lib/fdf/testing.h>
 #include <lib/sync/cpp/completion.h>
+#include <lib/zx/channel.h>
+#include <lib/zx/event.h>
 
 #include "src/devices/bin/driver_runtime/dispatcher.h"
 #include "src/devices/bin/driver_runtime/dispatcher_coordinator.h"
@@ -472,4 +475,147 @@ TEST_F(DispatcherDumpTest, DumpAllDispatchersCAbi) {
   fdf_env_free_all_threads_dump(thread_entries, thread_count);
 
   ASSERT_OK(fdf_testing_run_until_idle());
+}
+
+TEST_F(DispatcherDumpTest, ZirconChannelWaitNotCountedAsInlinedAllowSyncCalls) {
+  ASSERT_OK(driver_runtime::GetDispatcherCoordinator().Start(0));
+
+  libsync::Completion shutdown_completion;
+  auto dispatcher = fdf_env::DispatcherBuilder::CreateSynchronizedWithOwner(
+      CreateFakeDriver(), fdf::SynchronizedDispatcher::Options::kAllowSyncCalls, "allow_sync",
+      [&](fdf_dispatcher_t* dispatcher) { shutdown_completion.Signal(); });
+  ASSERT_OK(dispatcher.status_value());
+
+  zx::channel ch0, ch1;
+  ASSERT_OK(zx::channel::create(0, &ch0, &ch1));
+
+  libsync::Completion wait_done;
+  async::WaitOnce wait(ch0.get(), ZX_CHANNEL_READABLE);
+  ASSERT_OK(wait.Begin(dispatcher->async_dispatcher(),
+                       [&wait_done](async_dispatcher_t* d, async::WaitOnce* w, zx_status_t status,
+                                    const zx_packet_signal_t* signal) {
+                         ASSERT_OK(status);
+                         wait_done.Signal();
+                       }));
+
+  constexpr char kByte = 'x';
+  ASSERT_OK(ch1.write(0, &kByte, sizeof(kByte), nullptr, 0));
+  ASSERT_OK(wait_done.Wait(zx::time::infinite()));
+  dispatcher->get()->GetDispatcher()->WaitUntilIdle();
+
+  driver_runtime::DumpState state;
+  dispatcher->get()->GetDispatcher()->Dump(&state);
+  EXPECT_EQ(state.debug_stats.num_total_requests, 1u);
+  EXPECT_EQ(state.debug_stats.num_inlined_requests, 0u);
+
+  dispatcher->ShutdownAsync();
+  shutdown_completion.Wait();
+}
+
+TEST_F(DispatcherDumpTest, ZirconChannelWaitNotCountedAsInlinedNoThreadMigration) {
+  ASSERT_OK(driver_runtime::GetDispatcherCoordinator().Start(0));
+
+  constexpr std::string_view kRole = "fuchsia.test.diag_no_sync";
+  ASSERT_OK(fdf_env_set_scheduler_role_opts(kRole.data(), kRole.size(),
+                                            FDF_SCHEDULER_ROLE_OPTION_NO_SYNC_CALLS));
+
+  DispatcherShutdownObserver observer;
+  fdf_dispatcher_t* dispatcher = nullptr;
+  constexpr std::string_view kName = "no_migration";
+  ASSERT_OK(fdf_env_dispatcher_create_with_owner(
+      CreateFakeDriver(), FDF_DISPATCHER_OPTION_NO_THREAD_MIGRATION, kName.data(), kName.size(),
+      kRole.data(), kRole.size(), observer.fdf_observer(), &dispatcher));
+
+  zx::channel ch0, ch1;
+  ASSERT_OK(zx::channel::create(0, &ch0, &ch1));
+
+  libsync::Completion wait_done;
+  async::WaitOnce wait(ch0.get(), ZX_CHANNEL_READABLE);
+  ASSERT_OK(wait.Begin(fdf_dispatcher_get_async_dispatcher(dispatcher),
+                       [&wait_done](async_dispatcher_t* d, async::WaitOnce* w, zx_status_t status,
+                                    const zx_packet_signal_t* signal) {
+                         ASSERT_OK(status);
+                         wait_done.Signal();
+                       }));
+
+  constexpr char kByte = 'x';
+  ASSERT_OK(ch1.write(0, &kByte, sizeof(kByte), nullptr, 0));
+  ASSERT_OK(wait_done.Wait(zx::time::infinite()));
+  dispatcher->GetDispatcher()->WaitUntilIdle();
+
+  driver_runtime::DumpState state;
+  dispatcher->GetDispatcher()->Dump(&state);
+  EXPECT_EQ(state.debug_stats.num_total_requests, 1u);
+  EXPECT_EQ(state.debug_stats.num_inlined_requests, 0u);
+
+  fdf_dispatcher_shutdown_async(dispatcher);
+  ASSERT_OK(observer.WaitUntilShutdown());
+  fdf_dispatcher_destroy(dispatcher);
+}
+
+TEST_F(DispatcherDumpTest, UnmanagedAndManagedAllowSyncCallsWaitDebugStatsMatch) {
+  ASSERT_OK(driver_runtime::GetDispatcherCoordinator().Start(0));
+
+  libsync::Completion managed_shutdown;
+  auto managed_dispatcher = fdf_env::DispatcherBuilder::CreateSynchronizedWithOwner(
+      CreateFakeDriver(), fdf::SynchronizedDispatcher::Options::kAllowSyncCalls, "managed",
+      [&](fdf_dispatcher_t* dispatcher) { managed_shutdown.Signal(); });
+  ASSERT_OK(managed_dispatcher.status_value());
+
+  libsync::Completion unmanaged_shutdown;
+  auto unmanaged_dispatcher =
+      fdf_internal::TestDispatcherBuilder::CreateUnmanagedSynchronizedDispatcher(
+          CreateFakeDriver(), fdf::SynchronizedDispatcher::Options::kAllowSyncCalls, "unmanaged",
+          [&](fdf_dispatcher_t* dispatcher) { unmanaged_shutdown.Signal(); });
+  ASSERT_OK(unmanaged_dispatcher.status_value());
+
+  zx::event managed_event;
+  ASSERT_OK(zx::event::create(0, &managed_event));
+  libsync::Completion managed_done;
+  async::WaitOnce managed_wait(managed_event.get(), ZX_USER_SIGNAL_0);
+  ASSERT_OK(
+      managed_wait.Begin(managed_dispatcher->async_dispatcher(),
+                         [&managed_done](async_dispatcher_t* d, async::WaitOnce* w,
+                                         zx_status_t status, const zx_packet_signal_t* signal) {
+                           ASSERT_OK(status);
+                           managed_done.Signal();
+                         }));
+  ASSERT_OK(managed_event.signal(0, ZX_USER_SIGNAL_0));
+  ASSERT_OK(managed_done.Wait(zx::time::infinite()));
+  managed_dispatcher->get()->GetDispatcher()->WaitUntilIdle();
+
+  zx::event unmanaged_event;
+  ASSERT_OK(zx::event::create(0, &unmanaged_event));
+  libsync::Completion unmanaged_done;
+  async::WaitOnce unmanaged_wait(unmanaged_event.get(), ZX_USER_SIGNAL_0);
+  ASSERT_OK(
+      unmanaged_wait.Begin(unmanaged_dispatcher->async_dispatcher(),
+                           [&unmanaged_done](async_dispatcher_t* d, async::WaitOnce* w,
+                                             zx_status_t status, const zx_packet_signal_t* signal) {
+                             ASSERT_OK(status);
+                             unmanaged_done.Signal();
+                           }));
+  ASSERT_OK(unmanaged_event.signal(0, ZX_USER_SIGNAL_0));
+  ASSERT_OK(fdf_testing_run_until_idle());
+  ASSERT_OK(unmanaged_done.Wait(zx::time::infinite()));
+
+  driver_runtime::DumpState managed_state;
+  managed_dispatcher->get()->GetDispatcher()->Dump(&managed_state);
+
+  driver_runtime::DumpState unmanaged_state;
+  unmanaged_dispatcher->get()->GetDispatcher()->Dump(&unmanaged_state);
+
+  EXPECT_EQ(managed_state.debug_stats.num_total_requests, 1u);
+  EXPECT_EQ(managed_state.debug_stats.num_total_requests,
+            unmanaged_state.debug_stats.num_total_requests);
+  EXPECT_EQ(managed_state.debug_stats.num_inlined_requests,
+            unmanaged_state.debug_stats.num_inlined_requests);
+  EXPECT_EQ(managed_state.debug_stats.non_inlined.allow_sync_calls,
+            unmanaged_state.debug_stats.non_inlined.allow_sync_calls);
+
+  managed_dispatcher->ShutdownAsync();
+  unmanaged_dispatcher->ShutdownAsync();
+  ASSERT_OK(fdf_testing_run_until_idle());
+  managed_shutdown.Wait();
+  unmanaged_shutdown.Wait();
 }

@@ -74,6 +74,9 @@ class DisplayEngineFidlAdapter : public fdf::WireServer<fuchsia_hardware_display
                     fdf::Arena& arena, StartCaptureCompleter::Sync& completer) override;
   void ReleaseCapture(fuchsia_hardware_display_engine::wire::EngineReleaseCaptureRequest* request,
                       fdf::Arena& arena, ReleaseCaptureCompleter::Sync& completer) override;
+  void NotifyExpectedPresent(
+      fuchsia_hardware_display_engine::wire::EngineNotifyExpectedPresentRequest* request,
+      fdf::Arena& arena, NotifyExpectedPresentCompleter::Sync& completer) override;
   void handle_unknown_method(
       fidl::UnknownMethodMetadata<fuchsia_hardware_display_engine::Engine> metadata,
       fidl::UnknownMethodCompleter::Sync& completer) override;

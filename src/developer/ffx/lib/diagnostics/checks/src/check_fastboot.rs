@@ -52,6 +52,16 @@ impl<'a, F, N> FastbootDeviceStatus<'a, F, N> {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+#[error(
+    "\nUnable to connect to Fastboot device. Consult {doc_link}\nUnderlying error: {underlying:#}"
+)]
+pub struct FastbootConnectionError {
+    pub doc_link: String,
+    #[source]
+    pub underlying: anyhow::Error,
+}
+
 impl<F, N> Check for FastbootDeviceStatus<'_, F, N>
 where
     N: Notifier + Sized,
@@ -88,7 +98,7 @@ where
                     return Err(anyhow::anyhow!("received non-fastboot target handle: {input:?}"));
                 }
             };
-            let connection_kind = match &fastboot_state.connection_state {
+            let (connection_kind, doc_section) = match &fastboot_state.connection_state {
                 FastbootConnectionState::Usb => {
                     let discovery::TargetState::Fastboot(discovery::FastbootTargetState {
                         ref serial_number,
@@ -99,27 +109,42 @@ where
                             "input in incorrect state. Expecting Fastboot state instead found: {input:?}"
                         );
                     };
-                    FastbootConnectionKind::Usb(serial_number.to_owned())
+                    (
+                        FastbootConnectionKind::Usb(serial_number.to_owned()),
+                        "usb-fastboot-discovery",
+                    )
                 }
                 // This assumes the first address in the array will a.) exist, and b.) be the _most
                 // correct_ address from which we're selecting.
-                FastbootConnectionState::Tcp(v) => FastbootConnectionKind::Tcp(
-                    input.node_name.clone().unwrap_or_else(|| "".to_owned()),
-                    v[0].into(),
+                FastbootConnectionState::Tcp(v) => (
+                    FastbootConnectionKind::Tcp(
+                        input.node_name.clone().unwrap_or_else(|| "".to_owned()),
+                        v[0].into(),
+                    ),
+                    "fastboot-file-discovery",
                 ),
-                FastbootConnectionState::Udp(v) => FastbootConnectionKind::Udp(
-                    input.node_name.clone().unwrap_or_else(|| "".to_owned()),
-                    v[0].into(),
+                FastbootConnectionState::Udp(v) => (
+                    FastbootConnectionKind::Udp(
+                        input.node_name.clone().unwrap_or_else(|| "".to_owned()),
+                        v[0].into(),
+                    ),
+                    "fastboot-file-discovery",
                 ),
             };
+            let doc_link = ffx_diagnostics_formatting::doc_link(&format!(
+                "development/tools/ffx/workflows/network-connectivity/device-discovery#{doc_section}"
+            ));
             // This error is covered within the fastboot library itself, so has no analytics.
-            let mut interface = self.factory.build_interface(connection_kind).await?;
+            let mut interface =
+                self.factory.build_interface(connection_kind).await.map_err(|e| {
+                    FastbootConnectionError { doc_link: doc_link.clone(), underlying: e.into() }
+                })?;
             interface
                 .get_var("serialno")
                 .await
                 .or_analytics(PointOfFailure::FastbootQueryingSerialNo { handle: input.clone() })
                 .await
-                .map_err(Into::into)
+                .map_err(|e| FastbootConnectionError { doc_link, underlying: e.into() }.into())
         })
     }
 }
@@ -202,6 +227,57 @@ mod test {
         let mut check = FastbootDeviceStatus::new(&factory);
         let res = check.check(handle, &mut notifier).await;
         assert!(res.is_err());
+    }
+
+    #[fuchsia::test]
+    async fn test_fastboot_check_connection_error_doc_links() {
+        // By default, `setup_connection_factory()` leaves the fake fastboot variable map empty, so
+        // `get_var("serialno")` fails with `FastbootError::GetVariableError`.
+        let (_state, factory) = setup_connection_factory();
+        let usb_handle = TargetHandle {
+            node_name: Some("test-node".to_string()),
+            state: TargetState::Fastboot(discovery::FastbootTargetState {
+                serial_number: "test-serial".to_string(),
+                connection_state: FastbootConnectionState::Usb,
+            }),
+            manual: false,
+        };
+        let mut notifier = ffx_diagnostics::StringNotifier::new();
+        let mut check = FastbootDeviceStatus::new(&factory);
+        let err = check.check(usb_handle, &mut notifier).await.unwrap_err().to_string();
+        assert!(
+            err.contains("#usb-fastboot-discovery"),
+            "Expected #usb-fastboot-discovery link in error: {err}"
+        );
+
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 1234);
+        let tcp_handle = TargetHandle {
+            node_name: Some("test-node".to_string()),
+            state: TargetState::Fastboot(discovery::FastbootTargetState {
+                serial_number: "test-serial".to_string(),
+                connection_state: FastbootConnectionState::Tcp(vec![TargetIpAddr::from(addr)]),
+            }),
+            manual: false,
+        };
+        let err = check.check(tcp_handle, &mut notifier).await.unwrap_err().to_string();
+        assert!(
+            err.contains("#fastboot-file-discovery"),
+            "Expected #fastboot-file-discovery link in error: {err}"
+        );
+
+        let udp_handle = TargetHandle {
+            node_name: Some("test-node".to_string()),
+            state: TargetState::Fastboot(discovery::FastbootTargetState {
+                serial_number: "test-serial".to_string(),
+                connection_state: FastbootConnectionState::Udp(vec![TargetIpAddr::from(addr)]),
+            }),
+            manual: false,
+        };
+        let err = check.check(udp_handle, &mut notifier).await.unwrap_err().to_string();
+        assert!(
+            err.contains("#fastboot-file-discovery"),
+            "Expected #fastboot-file-discovery link in error: {err}"
+        );
     }
 
     #[fuchsia::test]

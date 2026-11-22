@@ -262,20 +262,25 @@ impl Diagnostics for CobaltDiagnostics {
             Event::StartClock { track, source } => {
                 if track == Track::Primary {
                     let event = match source {
-                        StartClockSource::Rtc => LifecycleEvent::StartedUtcFromRtc,
-                        StartClockSource::External(_) => LifecycleEvent::StartedUtcFromTimeSource,
+                        StartClockSource::Rtc => Some(LifecycleEvent::StartedUtcFromRtc),
+                        StartClockSource::External(_) => {
+                            Some(LifecycleEvent::StartedUtcFromTimeSource)
+                        }
+                        StartClockSource::Backstop => None,
                     };
-                    self.sender.lock().send(
-                        MetricEvent::builder(TIMEKEEPER_LIFECYCLE_EVENTS_MIGRATED_METRIC_ID)
-                            .with_event_codes(event.as_event_codes())
-                            .as_occurrence(1),
-                    );
+                    if let Some(event) = event {
+                        self.sender.lock().send(
+                            MetricEvent::builder(TIMEKEEPER_LIFECYCLE_EVENTS_MIGRATED_METRIC_ID)
+                                .with_event_codes(event.as_event_codes())
+                                .as_occurrence(1),
+                        );
+                    }
                 }
             }
             Event::UpdateClock { track, reason } => {
                 self.record_clock_update(track, reason);
             }
-            Event::UserAdjustUtc { .. } => {
+            Event::UserAdjustUtc { .. } | Event::StartupClockState { .. } => {
                 // Don't record anything to Cobalt.
             }
         }
@@ -329,6 +334,14 @@ mod test {
             track: Track::Monitor,
             source: StartClockSource::External(Role::Monitor),
         });
+        assert!(mpsc_receiver.try_recv().is_err());
+
+        diagnostics.record(Event::StartClock {
+            track: Track::Primary,
+            source: StartClockSource::Backstop,
+        });
+        assert!(mpsc_receiver.try_recv().is_err());
+
         diagnostics.record(Event::StartClock {
             track: Track::Primary,
             source: StartClockSource::External(Role::Primary),

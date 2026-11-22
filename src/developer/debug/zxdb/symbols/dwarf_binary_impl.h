@@ -47,7 +47,7 @@ class DwarfBinaryImpl final : public DwarfBinary {
   const DwarfSymbolFactory* GetSymbolFactory() const override;
   bool HasBinary() const override;
   llvm::object::ObjectFile* GetLLVMObjectFile() override;
-  llvm::DWARFContext* GetLLVMContext() override;
+  llvm::DWARFContext* GetLLVMContext() const override;
   uint64_t GetMappedLength() const override;
   const std::map<std::string, llvm::ELF::Elf64_Sym>& GetELFSymbols() const override;
   const std::map<std::string, uint64_t> GetPLTSymbols() const override;
@@ -58,6 +58,7 @@ class DwarfBinaryImpl final : public DwarfBinary {
   std::optional<uint64_t> GetDebugAddrEntry(uint64_t addr_base, uint64_t index) const override;
   llvm::DWARFDie GetLLVMDieAtOffset(DwarfDieRef die_ref) const override;
   DwarfDieRef GetDieRefForSignature(uint64_t signature) const override;
+  const llvm::DWARFDebugNames* GetDebugNames() const override;
   void ClearLLVMCache() override;
 
  private:

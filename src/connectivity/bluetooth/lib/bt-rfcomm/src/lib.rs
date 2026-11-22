@@ -13,7 +13,8 @@ pub use error::Error as RfcommError;
 /// The definitions for RFCOMM frames - the basic unit of data in RFCOMM.
 pub mod frame;
 
-/// Convenience helpers for the `bredr.Profile` API RFCOMM operations.
+/// Convenience helpers for `fuchsia.bluetooth.bredr.Profile` SDP service definitions.
+#[cfg(target_os = "fuchsia")]
 pub mod profile;
 
 /// The Role assigned to a device in an RFCOMM Session.

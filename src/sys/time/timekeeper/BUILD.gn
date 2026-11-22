@@ -128,21 +128,20 @@ resource("testdata") {
 }
 
 # Kept in GN because it uses GN-only targets
-# `//src/connectivity/network/dns:component` and
+# `//src/connectivity/network/dns:package` and
 # `//src/connectivity/network/netstack3:package-for-tests`.
 fuchsia_unittest_package("timekeeper-tests") {
   manifest = "meta/unittests.cml"
   deps = [
     ":bin_test",
     ":testdata",
-    "//src/connectivity/network/dns:component",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
+  ]
   test_specs = {
-    environments = [
-      nuc7_env,
-      nuc11_env,
-    ]
+    environments = [ nuc11_env ]
     log_settings = {
       max_severity = "ERROR"
     }

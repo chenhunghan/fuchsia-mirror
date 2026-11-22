@@ -63,6 +63,7 @@
                     "Functions": [
                         "foo"
                     ],
+                    "Address": 6032,
                     "Size": 16
                 }
             },
@@ -71,6 +72,7 @@
                     "Functions": [
                         "bar"
                     ],
+                    "Address": 6048,
                     "Size": 32
                 }
             },
@@ -79,6 +81,7 @@
                     "Functions": [
                         "baz"
                     ],
+                    "Address": 6064,
                     "Size": 8
                 }
             },
@@ -87,6 +90,7 @@
                     "Functions": [
                         "main"
                     ],
+                    "Address": 6080,
                     "Size": 64
                 }
             }

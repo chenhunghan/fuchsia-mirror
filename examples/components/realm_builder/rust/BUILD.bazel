@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["meta/sample_realm.cml"],
+    visibility = ["//examples/components/realm_builder:__pkg__"],
+)
+
+rustc_test(
+    name = "rust_sample_realm",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//examples/components/realm_builder:__pkg__"],
+    # [START realm_builder_dep_rust]
+    deps = [
+        # GN's //src/lib/fuchsia-component-test group also pulls in the
+        # RealmBuilder server component, which Bazel adds via the test
+        # package's `components`.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",
+
+        # [START_EXCLUDE]
+        "//examples/components/routing/fidl:echo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+
+        # [END_EXCLUDE]
+    ],
+    # [END realm_builder_dep_rust]
+)

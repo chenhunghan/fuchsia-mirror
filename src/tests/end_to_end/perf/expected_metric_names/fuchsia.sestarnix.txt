@@ -19,15 +19,14 @@ fuchsia.sestarnix: compute_create_sid_filename_no_match
 fuchsia.sestarnix: compute_create_sid_filename_no_target_rules
 fuchsia.sestarnix: compute_create_sid_filename_nameless
 fuchsia.sestarnix: compute_create_sid_filename_read_contended
-fuchsia.sestarnix: cached_create_sid_filename_match
-fuchsia.sestarnix: cached_create_sid_filename_no_match
-fuchsia.sestarnix: cached_create_sid_filename_no_target_rules
 fuchsia.sestarnix: cached_create_sid_filename_nameless
 fuchsia.sestarnix: concurrent_access_cache_get
 fuchsia.sestarnix: concurrent_access_cache_get_contended
 fuchsia.sestarnix: binder_transaction
 fuchsia.sestarnix: check_file_ioctl_access
+fuchsia.sestarnix: check_file_ioctl_access_tmpfs
 fuchsia.sestarnix: file_open_tmpfs
 fuchsia.sestarnix: file_permission
+fuchsia.sestarnix: file_permission_tmpfs
 fuchsia.sestarnix: fs_node_permission
 fuchsia.sestarnix: fs_node_permission_tmpfs

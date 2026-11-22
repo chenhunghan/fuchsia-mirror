@@ -42,12 +42,11 @@ if (is_linux && !has_prebuilt_vulkan_runtime) {
     sources = [
       "flatland/rectangle_compositor_unittest.cc",
       "fs/hack_filesystem_unittest.cc",
-      "renderer/batch_gpu_downloader_unittest.cc",
+      "impl/naive_image_unittest.cc",
       "renderer/buffer_cache_unittest.cc",
       "renderer/sampler_cache_unittest.cc",
       "resources/resource_recycler_unittest.cc",
       "run_all_unittests.cc",
-      "shape/mesh_spec_unittest.cc",
       "util/align_unittest.cc",
       "util/bit_ops_unittest.cc",
       "util/bitmap_unittest.cc",
@@ -59,6 +58,7 @@ if (is_linux && !has_prebuilt_vulkan_runtime) {
       "util/hash_unittest.cc",
       "util/hashable_unittest.cc",
       "util/hashmap_unittest.cc",
+      "util/image_byte_size_unittest.cc",
       "util/intrusive_list_unittest.cc",
       "util/object_pool_unittest.cc",
       "util/stack_allocator_unittest.cc",
@@ -178,15 +178,17 @@ if (is_linux && !has_prebuilt_vulkan_runtime) {
 
   vulkan_test("escher_fatal_unittests") {
     sources = [
+      "base/owner_death_unittest.cc",
       "renderer/batch_gpu_uploader_unittest.cc",
       "run_all_unittests.cc",
       "vk/descriptor_set_layout_unittest.cc",
+      "vk/gpu_allocator_death_unittest.cc",
       "vk/shader_utils_unittest.cc",
     ]
 
     deps = [
-      "base:base_unittests",
       "//src/lib/fxl",
+      "//src/ui/lib/escher/base:escher_base",
       "//src/ui/lib/escher/test/common:gtest_escher",
       "//src/ui/lib/escher/test/common:readback_fixtures",
       "//third_party/glm",

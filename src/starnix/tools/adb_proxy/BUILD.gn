@@ -4,12 +4,6 @@
 import("//build/bazel/export_fuchsia_package_to_bazel.gni")
 import("//build/components.gni")
 
-fuchsia_component("adb_proxy_component") {
-  component_name = "adb_proxy"
-  manifest = "meta/adb_proxy.cml"
-  deps = [ ":bin" ]
-}
-
 fuchsia_package("adb_proxy") {
   package_name = "adb_proxy"
   deps = [ ":adb_proxy_component" ]
@@ -71,4 +65,14 @@ rustc_binary("bin") {
     "//src/lib/fuchsia",
     "//third_party/rust_crates:anyhow",
   ]
+}
+
+fuchsia_component_manifest("adb_proxy_manifest") {
+  component_name = "adb_proxy"
+  manifest = "meta/adb_proxy.cml"
+}
+
+fuchsia_component("adb_proxy_component") {
+  cm_label = ":adb_proxy_manifest"
+  deps = [ ":bin" ]
 }

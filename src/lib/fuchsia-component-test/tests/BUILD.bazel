@@ -1,0 +1,485 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":fuchsia-component-test-tests",
+        ":offered-cap-passthrough-tests",
+        ":scoped-instance-tests",
+    ],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+rustc_test(
+    name = "fuchsia_component_test_tests_bin",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//examples/components/services/fidl:fuchsia.examples.services_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.test:fuchsia.component.test_rust",
+        "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//src/lib/fuchsia-fs",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_rust/testing",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fuchsia_component_test_tests_bin_packaged",
+    testonly = True,
+    binary = ":fuchsia_component_test_tests_bin",
+    binary_name = "fuchsia_component_test_tests_bin",
+)
+
+fx_component_manifest(
+    name = "fuchsia_component_test_tests_manifest",
+    testonly = True,
+    component_name = "fuchsia-component-test-tests",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/fuchsia-component-test-tests.cml",
+)
+
+fx_test_component(
+    name = "fuchsia_component_test_tests_component",
+    compiled_manifest = ":fuchsia_component_test_tests_manifest",
+    deps = [":fuchsia_component_test_tests_bin_packaged"],
+)
+
+fx_component_manifest(
+    name = "echo_client_empty_manifest",
+    testonly = True,
+    component_name = "echo_client_empty",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/echo_client_empty.cml",
+)
+
+fx_component(
+    name = "echo_client_empty_component",
+    testonly = True,
+    compiled_manifest = ":echo_client_empty_manifest",
+    deps = [
+        # GN depends on the rustc_binary directly; Bazel wraps it in fx_packaged_binary.
+        "//src/sys/component_manager/testing/echo_client:echo_client_testing_packaged_bin",  # @bazel2gn:path_overwrite://src/sys/component_manager/testing/echo_client:echo_client_testing
+    ],
+)
+
+fx_component_manifest(
+    name = "echo_client_with_elf_runner_manifest",
+    testonly = True,
+    component_name = "echo_client_with_elf_runner",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "meta/echo_client_with_elf_runner.cml",
+)
+
+fx_component(
+    name = "echo_client_with_elf_runner",
+    testonly = True,
+    compiled_manifest = ":echo_client_with_elf_runner_manifest",
+    deps = [
+        # GN depends on the rustc_binary directly; Bazel wraps it in fx_packaged_binary.
+        "//src/sys/component_manager/testing/echo_client:echo_client_testing_packaged_bin",  # @bazel2gn:path_overwrite://src/sys/component_manager/testing/echo_client:echo_client_testing
+    ],
+)
+
+fx_component_manifest(
+    name = "echo_server_empty_manifest",
+    testonly = True,
+    component_name = "echo_server_empty",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/echo_server_empty.cml",
+)
+
+fx_component(
+    name = "echo_server_empty_component",
+    testonly = True,
+    compiled_manifest = ":echo_server_empty_manifest",
+    deps = [
+        # GN depends on the echo_server component; Bazel uses the packaged binary.
+        "//src/sys/component_manager/testing/echo_server:echo_server_testing_packaged_bin",  # @bazel2gn:path_overwrite://src/sys/component_manager/testing/echo_server
+    ],
+)
+
+rustc_test(
+    name = "scoped-instance-test",
+    srcs = ["scoped_instance/lib.rs"],
+    crate_root = "scoped_instance/lib.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+rustc_test(
+    name = "offered-cap-passthrough-test",
+    srcs = ["offered_cap_passthrough/lib.rs"],
+    crate_root = "offered_cap_passthrough/lib.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_binary(
+    name = "realm",
+    testonly = True,
+    srcs = ["scoped_instance/realm.rs"],
+    crate_root = "scoped_instance/realm.rs",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "realm_packaged_bin",
+    testonly = True,
+    binary = ":realm",
+    binary_name = "realm",
+)
+
+fidl_library(
+    name = "fuchsia.component.client.test",
+    testonly = True,
+    srcs = ["client.test.fidl"],
+    # GN fidl() suppresses fidl-lint by default for non-SDK test libraries;
+    # Bazel fidl_library runs fidl-lint unless excluded_checks is specified.
+    # @bazel2gn:skip
+    excluded_checks = ["protocol-name-includes-service"],
+)
+
+fx_packaged_binary(
+    name = "scoped-instance-test_packaged_bin",
+    testonly = True,
+    binary = ":scoped-instance-test",
+    binary_name = "scoped_instance_test",
+)
+
+fx_component_manifest(
+    name = "scoped_instance_test_manifest",
+    testonly = True,
+    component_name = "scoped_instance_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/scoped_instance_test.cml",
+)
+
+fx_test_component(
+    name = "scoped_instance_test_component",
+    compiled_manifest = ":scoped_instance_test_manifest",
+    deps = [":scoped-instance-test_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "offered-cap-passthrough-test_packaged_bin",
+    testonly = True,
+    binary = ":offered-cap-passthrough-test",
+    binary_name = "offered_cap_passthrough_test",
+)
+
+fx_component_manifest(
+    name = "offered_cap_passthrough_test_manifest",
+    testonly = True,
+    component_name = "offered_cap_passthrough_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/offered-cap-passthrough-test.cml",
+)
+
+fx_test_component(
+    name = "offered_cap_passthrough_test_component",
+    compiled_manifest = ":offered_cap_passthrough_test_manifest",
+    deps = [":offered-cap-passthrough-test_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "realm_manifest",
+    testonly = True,
+    component_name = "realm",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "meta/realm.cml",
+)
+
+fx_component(
+    name = "realm_component",
+    testonly = True,
+    compiled_manifest = ":realm_manifest",
+    deps = [":realm_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "realm_with_wait_manifest",
+    testonly = True,
+    component_name = "realm_with_wait",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "meta/realm_with_wait.cml",
+)
+
+fx_component(
+    name = "realm_with_wait_component",
+    testonly = True,
+    compiled_manifest = ":realm_with_wait_manifest",
+    deps = [":realm_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "echo_realm_manifest",
+    testonly = True,
+    component_name = "echo_realm",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/echo_realm.cml",
+)
+
+fx_component(
+    name = "echo_realm_component",
+    testonly = True,
+    compiled_manifest = ":echo_realm_manifest",
+)
+
+rustc_test(
+    name = "arbitrary_realm_test_bin",
+    srcs = ["src/arbitrary_realm_test.rs"],
+    crate_root = "src/arbitrary_realm_test.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fx_packaged_binary(
+    name = "arbitrary_realm_test_bin_packaged",
+    testonly = True,
+    binary = ":arbitrary_realm_test_bin",
+    binary_name = "arbitrary_realm_test_bin",
+)
+
+fx_component_manifest(
+    name = "arbitrary_realm_test_manifest",
+    testonly = True,
+    component_name = "arbitrary_realm_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/arbitrary_realm_test.cml",
+)
+
+# disable check for realm_builder.shard.cml as we don't want the realm builder
+# library to use it from namespace.
+fx_test_component(
+    name = "arbitrary_realm_test_component",
+    check_includes = False,
+    compiled_manifest = ":arbitrary_realm_test_manifest",
+    deps = [":arbitrary_realm_test_bin_packaged"],
+)
+
+fx_component_manifest(
+    name = "child_realm_with_realmbuilder_manifest",
+    testonly = True,
+    component_name = "child_realm_with_realmbuilder",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/child_realm.cml",
+)
+
+fx_component(
+    name = "child_realm_with_realmbuilder",
+    testonly = True,
+    compiled_manifest = ":child_realm_with_realmbuilder_manifest",
+)
+
+fx_component_manifest(
+    name = "component_manager_expose_dir_rights_manifest",
+    testonly = True,
+    component_name = "component_manager_expose_dir_rights",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/component_manager:meta/component_manager.cml",
+    ],
+    manifest = "meta/component_manager_expose_dir_rights.cml",
+)
+
+fx_component(
+    name = "component_manager_expose_dir_rights",
+    testonly = True,
+    compiled_manifest = ":component_manager_expose_dir_rights_manifest",
+    deps = [
+        # GN depends on the rustc_binary directly; Bazel wraps it in fx_packaged_binary.
+        "//src/sys/component_manager:bin_with_tracing_packaged",  # @bazel2gn:path_overwrite://src/sys/component_manager:bin_with_tracing
+    ],
+)
+
+# Needs reviewer attention (bazel2gn skip): src/lib.rs and
+# src/arbitrary_realm_test.rs hardcode absolute
+# fuchsia-pkg://fuchsia.com/fuchsia-component-test-tests#meta/... URLs, which
+# fail hermetic package resolution when bazel2gn renames the GN test package to
+# fuchsia-component-test-tests-gn; TODO(https://fxbug.dev/570694755).
+# @bazel2gn:skip
+fx_package(
+    name = "fuchsia-component-test-tests-gn",
+    package_name = "fuchsia-component-test-tests",
+    components = [
+        ":child_realm_with_realmbuilder",
+        ":component_manager_expose_dir_rights",
+        ":echo_client_empty_component",
+        ":echo_client_with_elf_runner",
+        ":echo_realm_component",
+        ":echo_server_empty_component",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/lib/fuchsia-component-test/tests/collection_sc:component",
+        "//src/lib/fuchsia-component-test/tests/echo_client_sc:component",
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+        "//src/sys/component_manager/testing/echo_client",
+        "//src/sys/component_manager/testing/echo_server",
+        "//src/sys/component_manager/tests/rights:elf_runner_and_environment",
+        "//src/sys/component_manager/tests/rights:expose_dir_rights",
+    ],
+    test_components = [
+        ":arbitrary_realm_test_component",
+        ":fuchsia_component_test_tests_component",
+    ],
+)
+
+fx_test(
+    name = "fuchsia-component-test-tests",
+    package = ":fuchsia-component-test-tests-gn",
+)
+
+fx_package(
+    name = "scoped-instance-tests-gn",
+    package_name = "scoped-instance-tests",
+    components = [
+        ":realm_component",
+        ":realm_with_wait_component",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-debug-cmp",
+        "//src/sys/component_manager/testing/echo_server",
+    ],
+    test_components = [":scoped_instance_test_component"],
+)
+
+fx_test(
+    name = "scoped-instance-tests",
+    package = ":scoped-instance-tests-gn",
+)
+
+fx_package(
+    name = "offered-cap-passthrough-tests-gn",
+    package_name = "offered-cap-passthrough-tests",
+    components = [
+        ":echo_client_with_elf_runner",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+        "//src/sys/component_manager/testing/echo_client",
+        "//src/sys/component_manager/testing/echo_server",
+    ],
+    test_components = [":offered_cap_passthrough_test_component"],
+)
+
+fx_test(
+    name = "offered-cap-passthrough-tests",
+    package = ":offered-cap-passthrough-tests-gn",
+)

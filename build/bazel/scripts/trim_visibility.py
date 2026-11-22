@@ -70,7 +70,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Callable, Iterable, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Callable, Iterable
 
 # Marker line that separates hand-written GN targets from bazel2gn generated
 # targets in a BUILD.gn file.
@@ -1198,7 +1199,7 @@ def print_list_report(
             print(f"  ~ {path}{_gn_load_note(path, gn_loaded)}")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1236,7 +1237,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--fuchsia-dir",
-        default=os.environ.get(
+        default=env.get(
             "FUCHSIA_DIR",
             os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "../../.."
@@ -1539,7 +1540,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        sys.exit(main(sys.argv[1:], os.environ))
     except Error as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

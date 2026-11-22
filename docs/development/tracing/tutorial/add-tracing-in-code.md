@@ -253,7 +253,7 @@ trace from the component. For more information, see the next
 [rust-macros]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_trace/index.html
 [trace-instant]: /docs/reference/tracing/c_cpp_macros.md#trace-instant
 [trace-instant-rust]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_trace/macro.instant.html
-[ntrace]: /docs/reference/tracing/c_cpp_macros.md#ntrace
+[ntrace]: /docs/reference/tracing/c_cpp_macros.md
 [trace-enabled]: /docs/reference/tracing/c_cpp_macros.md#trace-enabled
 [trace-category-enabled]: /docs/reference/tracing/c_cpp_macros.md#trace-category-enabled
 [trace-enabled-rust]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_trace/fn.is_enabled.html

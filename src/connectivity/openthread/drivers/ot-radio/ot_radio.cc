@@ -43,15 +43,17 @@ constexpr zx::duration kRcpHardResetRetryWaitTime = zx::msec(700);
 OtRadioDevice::LowpanSpinelDeviceFidlImpl::LowpanSpinelDeviceFidlImpl(OtRadioDevice& ot_radio)
     : ot_radio_obj_(ot_radio) {}
 
-void OtRadioDevice::LowpanSpinelDeviceFidlImpl::Bind(
+fidl::ServerBindingRef<lowpan_spinel_fidl::Device> OtRadioDevice::LowpanSpinelDeviceFidlImpl::Bind(
     async_dispatcher_t* dispatcher, fidl::ServerEnd<lowpan_spinel_fidl::Device> channel) {
   fidl::OnUnboundFn<LowpanSpinelDeviceFidlImpl> on_unbound =
       [](LowpanSpinelDeviceFidlImpl* server, fidl::UnbindInfo /*unused*/,
          fidl::ServerEnd<lowpan_spinel_fidl::Device> /*unused*/) {
-        server->ot_radio_obj_.fidl_impl_obj_.release();
+        OtRadioDevice& ot_radio = server->ot_radio_obj_;
+        fbl::AutoLock lock(&ot_radio.fidl_lock_);
+        ot_radio.fidl_binding_.reset();
+        ot_radio.fidl_impl_obj_.reset();
       };
-  ot_radio_obj_.fidl_binding_ =
-      fidl::BindServer(dispatcher, std::move(channel), this, std::move(on_unbound));
+  return fidl::BindServer(dispatcher, std::move(channel), this, std::move(on_unbound));
 }
 
 void OtRadioDevice::ResetFrameInspectData() {
@@ -101,6 +103,7 @@ void OtRadioDevice::LowpanSpinelDeviceFidlImpl::Close(CloseCompleter::Sync& comp
   zx_status_t res = ot_radio_obj_.AssertResetPin();
   if (res == ZX_OK) {
     ot_radio_obj_.power_status_ = OT_SPINEL_DEVICE_OFF;
+    ot_radio_obj_.hard_reset_end_.store(0);
     completer.ReplySuccess();
   } else {
     zxlogf(ERROR, "Error in handling FIDL close req: %s, power status: %u",
@@ -123,17 +126,29 @@ void OtRadioDevice::LowpanSpinelDeviceFidlImpl::SendFrame(SendFrameRequestView r
                  "ot_radio_obj_.outbound_cnt", ot_radio_obj_.outbound_cnt_);
   if (ot_radio_obj_.power_status_ == OT_SPINEL_DEVICE_OFF) {
     // TODO(https://fxbug.dev/42176667): Consider handling errors instead of ignoring them.
-    (void)fidl::WireSendEvent(*ot_radio_obj_.fidl_binding_)
-        ->OnError(lowpan_spinel_fidl::wire::Error::kClosed, false);
+    fbl::AutoLock lock(&ot_radio_obj_.fidl_lock_);
+    if (ot_radio_obj_.fidl_binding_.has_value()) {
+      (void)fidl::WireSendEvent(*ot_radio_obj_.fidl_binding_)
+          ->OnError(lowpan_spinel_fidl::wire::Error::kClosed, false);
+    }
   } else if (request->data.size() > kMaxFrameSize) {
     // TODO(https://fxbug.dev/42176667): Consider handling errors instead of ignoring them.
-    (void)fidl::WireSendEvent(*ot_radio_obj_.fidl_binding_)
-        ->OnError(lowpan_spinel_fidl::wire::Error::kOutboundFrameTooLarge, false);
+    fbl::AutoLock lock(&ot_radio_obj_.fidl_lock_);
+    if (ot_radio_obj_.fidl_binding_.has_value()) {
+      (void)fidl::WireSendEvent(*ot_radio_obj_.fidl_binding_)
+          ->OnError(lowpan_spinel_fidl::wire::Error::kOutboundFrameTooLarge, false);
+    }
   } else if (ot_radio_obj_.outbound_allowance_ == 0) {
     // Client violates the protocol, close FIDL channel and device. Will not send OnError event.
     ot_radio_obj_.power_status_ = OT_SPINEL_DEVICE_OFF;
+    ot_radio_obj_.hard_reset_end_.store(0);
     ot_radio_obj_.AssertResetPin();
-    ot_radio_obj_.fidl_binding_->Close(ZX_ERR_IO_OVERRUN);
+    {
+      fbl::AutoLock lock(&ot_radio_obj_.fidl_lock_);
+      if (ot_radio_obj_.fidl_binding_.has_value()) {
+        ot_radio_obj_.fidl_binding_->Close(ZX_ERR_IO_OVERRUN);
+      }
+    }
     completer.Close(ZX_ERR_IO_OVERRUN);
   } else {
     // All good, send out the frame.
@@ -146,8 +161,11 @@ void OtRadioDevice::LowpanSpinelDeviceFidlImpl::SendFrame(SendFrameRequestView r
       zxlogf(DEBUG, "Successfully Txed pkt, total tx pkt %lu", ot_radio_obj_.outbound_cnt_);
       if ((ot_radio_obj_.outbound_cnt_ & 1) == 0) {
         ot_radio_obj_.outbound_allowance_ += kOutboundAllowanceInc;
-        (void)fidl::WireSendEvent(*ot_radio_obj_.fidl_binding_)
-            ->OnReadyForSendFrames(kOutboundAllowanceInc);
+        fbl::AutoLock lock(&ot_radio_obj_.fidl_lock_);
+        if (ot_radio_obj_.fidl_binding_.has_value()) {
+          (void)fidl::WireSendEvent(*ot_radio_obj_.fidl_binding_)
+              ->OnReadyForSendFrames(kOutboundAllowanceInc);
+        }
       }
     }
   }
@@ -172,6 +190,7 @@ OtRadioDevice::OtRadioDevice(zx_device_t* device)
 
 void OtRadioDevice::SetChannel(SetChannelRequestView request,
                                SetChannelCompleter::Sync& completer) {
+  fbl::AutoLock lock(&fidl_lock_);
   if (fidl_impl_obj_ != nullptr) {
     zxlogf(ERROR, "ot-radio: channel already set");
     completer.ReplyError(ZX_ERR_ALREADY_BOUND);
@@ -188,9 +207,10 @@ void OtRadioDevice::SetChannel(SetChannelRequestView request,
   inbound_cnt_ = 0;
   outbound_cnt_ = 0;
   inbound_frame_available_ = false;
+  hard_reset_end_.store(0);
 
   fidl_impl_obj_ = std::make_unique<LowpanSpinelDeviceFidlImpl>(*this);
-  fidl_impl_obj_->Bind(loop_.dispatcher(), std::move(request->req));
+  fidl_binding_ = fidl_impl_obj_->Bind(loop_.dispatcher(), std::move(request->req));
   completer.ReplySuccess();
 }
 
@@ -384,14 +404,19 @@ zx_status_t OtRadioDevice::HandleRadioRxFrame(uint8_t* frameBuffer, uint16_t len
                  "inbound_allowance_", inbound_allowance_.load(), "inbound_cnt_", inbound_cnt_);
   zxlogf(DEBUG, "ot-radio: received frame of len:%d", length);
   if (power_status_ == OT_SPINEL_DEVICE_ON) {
-    auto data = fidl::VectorView<uint8_t>::FromExternal(frameBuffer, length);
-    fidl::Status result = fidl::WireSendEvent(*fidl_binding_)->OnReceiveFrame(std::move(data));
-    InspectInboundFrame(frameBuffer, length);
-    if (!result.ok()) {
-      zxlogf(ERROR, "ot-radio: failed to send OnReceive() event due to %s",
-             result.FormatDescription().c_str());
+    fbl::AutoLock lock(&fidl_lock_);
+    if (fidl_binding_.has_value()) {
+      auto data = fidl::VectorView<uint8_t>::FromExternal(frameBuffer, length);
+      fidl::Status result = fidl::WireSendEvent(*fidl_binding_)->OnReceiveFrame(std::move(data));
+      InspectInboundFrame(frameBuffer, length);
+      if (!result.ok()) {
+        zxlogf(ERROR, "ot-radio: failed to send OnReceive() event due to %s",
+               result.FormatDescription().c_str());
+      }
+      inbound_cnt_++;
+    } else {
+      zxlogf(WARNING, "OtRadioDevice::HandleRadioRxFrame(): fidl_binding_ is not bound");
     }
-    inbound_cnt_++;
   } else {
     zxlogf(ERROR, "OtRadioDevice::HandleRadioRxFrame(): Radio is off");
   }
@@ -542,8 +567,13 @@ bool OtRadioDevice::ShouldRetryReset() {
     zxlogf(INFO, "ot-radio: rcp back online");
     hard_reset_end_.store(0);
     outbound_allowance_.store(kOutboundAllowanceInit);
-    // TODO(https://fxbug.dev/42176667): Consider handling errors instead of ignoring them.
-    (void)fidl::WireSendEvent(*fidl_binding_)->OnReadyForSendFrames(kOutboundAllowanceInit);
+    fbl::AutoLock lock(&fidl_lock_);
+    if (fidl_binding_.has_value()) {
+      // TODO(https://fxbug.dev/42176667): Consider handling errors instead of ignoring them.
+      (void)fidl::WireSendEvent(*fidl_binding_)->OnReadyForSendFrames(kOutboundAllowanceInit);
+    } else {
+      zxlogf(WARNING, "ot-radio: fidl_binding_ is not bound, skipping OnReadyForSendFrames");
+    }
     return false;
   }
   zx_time_t cur_time_us = zx::clock::get_monotonic().get();
@@ -739,6 +769,10 @@ zx_status_t OtRadioDevice::Start() {
 
     zxlogf(INFO, "ot-radio: FW update done successfully");
 
+    // Reset the retry timer armed by `UpdateRadioFirmware()`'s hardware reset
+    // before restarting `RadioThread`.
+    hard_reset_end_.store(0);
+
     // Restart the Radio thread:
     StartRadioThread();
   } else {
@@ -778,6 +812,16 @@ zx_status_t OtRadioDevice::CheckFWUpdateRequired(bool* update_fw) {
 
   int attempts;
   bool response_received = false;
+
+  // Clean up temporary inbound allowance and frame availability state on exit
+  // so `RadioThread` does not process unsolicited frames before `Open()`.
+  auto cleanup = fit::defer([this]() {
+    inbound_allowance_.store(0);
+    inbound_frame_available_.store(false);
+    if (spinel_framer_.get()) {
+      spinel_framer_->SetInboundAllowanceStatus(false);
+    }
+  });
 
   // Now get the ncp version
   auto status = GetNCPVersion();

@@ -17,9 +17,10 @@ set -euo pipefail
 # //third_party/<name>/src and put BUILD.gn + BUILD.bazel (plus README.fuchsia
 # and LICENSE as required) in //third_party/<name>/.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="${PLANTER_WORKDIR:-.}"
 
-python3 - "$WORKDIR" <<'PYEOF'
+python3 - "$WORKDIR" "$SCRIPT_DIR" <<'PYEOF'
 import json
 import os
 import re
@@ -27,7 +28,12 @@ import subprocess
 import sys
 
 workdir = os.path.abspath(sys.argv[1])
-change_base = os.environ.get("PLANTER_CHANGE_BASE", "").strip() or "HEAD"
+script_dir = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else ""
+if script_dir and script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+import planter_check_lib as pcl
+
+change_base = pcl.resolve_change_base(workdir)
 
 
 def git(args):

@@ -5,9 +5,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/types.h>
 
 #include <zxtest/zxtest.h>
+
+#include "helper.h"
 
 // Sanity tests that enforce compile time check for printing primitive types, and preventing
 // undefined symbols.
@@ -292,4 +295,27 @@ TEST(CPrintTest, ConstVoidPointer) {
   const void* n = NULL;
 
   ASSERT_NULL(n);
+}
+
+// The hex printer for the BYTES macros returns the length it needs when the buffer is too small,
+// and never writes more than the buffer size.
+TEST(CPrintTest, Hex) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS, "Hex printing failed.");
+  const uint8_t bytes[] = {0x01, 0xab, 0xff};
+  char small = 'x';
+  ASSERT_EQ(_zxtest_print_hex(bytes, sizeof(bytes), &small, 1), 8u);
+  char buffer[9];
+  ASSERT_EQ(_zxtest_print_hex(bytes, sizeof(bytes), buffer, sizeof(buffer)), 8u);
+  ASSERT_EQ(strcmp(buffer, "01 AB FF"), 0);
+
+  ASSERT_EQ(_zxtest_print_hex(bytes, 0, &small, 1), 0u);
+  ASSERT_EQ(small, '\0');
+
+  small = 'x';
+  ASSERT_EQ(_zxtest_print_hex(NULL, 0, &small, 1), 9u);
+  ASSERT_EQ(small, '\0');
+  char null_buffer[10];
+  ASSERT_EQ(_zxtest_print_hex(NULL, 0, null_buffer, sizeof(null_buffer)), 9u);
+  ASSERT_EQ(strcmp(null_buffer, "<nullptr>"), 0);
+  TEST_CHECKPOINT();
 }

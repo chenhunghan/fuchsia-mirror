@@ -15,7 +15,7 @@ from typing import Sequence
 
 import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_wlan_base_test
-import honeydew.affordances.connectivity.wlan.core as wlan_core
+from honeydew.affordances.connectivity.wlan.core import wlan_core
 from honeydew.affordances.connectivity.wlan.utils.errors import (
     HoneydewWlanError,
 )

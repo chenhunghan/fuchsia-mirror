@@ -10,20 +10,19 @@
 
 #include <ktl/utility.h>
 #include <phys/boot-options.h>
+#include <phys/output/stdout.h>
+#include <phys/output/uart.h>
 #include <phys/runtime/main.h>
-#include <phys/uart/driver.h>
 
 #include "test-main.h"
 
 #include <ktl/enforce.h>
 
-void PhysMain(void* bootloader_data, arch::EarlyTicks ticks) {
-  // Apply any relocations required to ourself.
-  ApplyRelocations();
-
+void CppPhysMain(void* bootloader_data, arch::EarlyTicks ticks) {
   ArchSetUpCpu();
 
-  SetUartConsole(uart::qemu::kConfig);
+  UartDriver& uart = SetUartDriver(uart::qemu::kConfig);
+  gPhysStdout.set_console(FILE{&uart});
 
   static BootOptions boot_opts;
   boot_opts.serial = uart::qemu::kConfig;

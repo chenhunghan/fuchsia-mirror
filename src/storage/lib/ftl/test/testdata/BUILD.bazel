@@ -1,0 +1,17 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+
+package(default_applicable_licenses = ["//:license"])
+
+resource(
+    name = "minimal_image",
+    srcs = [
+        "nand.zstd",
+        "wear_info.bin",
+    ],
+    outputs = ["testdata/{{source_file_part}}"],
+    visibility = ["//src/storage/lib/ftl/test:__pkg__"],
+)

@@ -17,10 +17,6 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 DMC_PATH_KEY: str = "DMC_PATH"
 
 
-class PowerSwitchDmcError(power_switch.PowerSwitchError):
-    """Custom exception class for raising DMC related errors."""
-
-
 class PowerState(enum.StrEnum):
     """Different power states supported by `dmc set-power-state`."""
 
@@ -32,14 +28,17 @@ class PowerState(enum.StrEnum):
 class PowerSwitchUsingDmc(power_switch.PowerSwitch):
     """PowerSwitch auxiliary device implementation using DMC.
 
-    Note: `PowerSwitchDmc` is implemented to do power off/on a Fuchsia device
-    that is hosted in Fuchsia Infra labs and Fuchsia Infra workflows are
-    different from local workflows. As a result, `PowerSwitchDmc` will only work
-    for FuchsiaInfra labs and will not work for local set ups or any other
+    Note: `PowerSwitchUsingDmc` is implemented to do power off/on a Fuchsia
+    device that is hosted in Fuchsia Infra labs and Fuchsia Infra workflows are
+    different from local workflows. As a result, `PowerSwitchUsingDmc` will only
+    work for FuchsiaInfra labs and will not work for local set ups or any other
     setups for that matter.
 
     Args:
         device_name: Device name returned by `ffx target list`.
+
+    Raises:
+        errors.NotSupportedError: If `DMC_PATH` is not set in the environment.
     """
 
     def __init__(self, device_name: str) -> None:
@@ -48,17 +47,14 @@ class PowerSwitchUsingDmc(power_switch.PowerSwitch):
         try:
             self._dmc_path: str = os.environ[DMC_PATH_KEY]
         except KeyError as error:
-            raise PowerSwitchDmcError(
+            raise errors.NotSupportedError(
                 f"{DMC_PATH_KEY} environmental variable is not set on "
                 f"{platform.node()}"
             ) from error
 
     # List all the public methods
-    def power_off(self, outlet: int | None = None) -> None:
+    def power_off(self) -> None:
         """Turns off the power of the Fuchsia device.
-
-        Args:
-            outlet: None. Not being used by this implementation.
 
         Raises:
             PowerSwitchError: In case of failure.
@@ -71,11 +67,8 @@ class PowerSwitchUsingDmc(power_switch.PowerSwitch):
         )
         _LOGGER.info("Successfully powered off %s...", self._name)
 
-    def power_on(self, outlet: int | None = None) -> None:
+    def power_on(self) -> None:
         """Turns on the power of the Fuchsia device.
-
-        Args:
-            outlet: None. Not being used by this implementation.
 
         Raises:
             PowerSwitchError: In case of failure.

@@ -9,6 +9,9 @@ pub const CATEGORY_STARNIX: &'static str = "starnix";
 // (`sys_*` events).
 pub const CATEGORY_STARNIX_SYSCALLS: &'static str = "starnix:syscalls";
 
+// The trace category used for storage-backed filesystem syscall durations (`sys_*` events).
+pub const CATEGORY_STARNIX_SYSCALLS_FS: &'static str = "starnix:syscalls:fs";
+
 // The trace category used for memory manager related traces.
 pub const CATEGORY_STARNIX_MM: &'static str = "starnix:mm";
 
@@ -17,9 +20,6 @@ pub const CATEGORY_STARNIX_SECURITY: &'static str = "starnix:security";
 
 // The name used to track the duration in Starnix while executing a task.
 pub const NAME_RUN_TASK: &'static str = "RunTask";
-
-// The trace category used for atrace events generated within starnix.
-pub const CATEGORY_ATRACE: &'static str = "starnix:atrace";
 
 // The trace category used for trace events about emitting trace events.
 pub const CATEGORY_TRACE_META: &'static str = "starnix:trace_meta";

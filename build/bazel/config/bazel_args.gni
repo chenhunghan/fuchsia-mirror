@@ -3,11 +3,9 @@
 # found in the LICENSE file.
 
 import("//build/bazel/config/logging.gni")
-import("//build/bazel/config/toolchain_tags/toolchain_tags.gni")
 import("//build/bazel/remote_services.gni")
 import("//build/config/clang/clang.gni")
 import("//build/config/compiler.gni")
-import("//build/config/fuchsia_cxx_version.gni")
 
 # Compute the list of `bazel build` arguments corresponding to the current
 # GN build configuration.
@@ -95,9 +93,9 @@ _is_compilation_mode_opt =
 # fuchsia_toolchain_tags on Fuchsia and host_toolchain_tags on host).
 _tags = toolchain_variant.tags
 
-_has_lto =
-    _tags + [ "lto" ] - [ "lto" ] != _tags ||
-    _optimize_with_lto + [ optimize ] - [ optimize ] != _optimize_with_lto
+_has_lto_tag = _tags + [ "lto" ] - [ "lto" ] != _tags
+_has_lto = _has_lto_tag || _optimize_with_lto + [ optimize ] - [ optimize ] !=
+                           _optimize_with_lto
 
 _has_asan = _tags + [ "asan" ] - [ "asan" ] != _tags
 _has_hwasan = _tags + [ "hwasan" ] - [ "hwasan" ] != _tags
@@ -124,6 +122,14 @@ _has_profile_rust = _configs + [ "//build/config/profile:profile-rust" ] -
 # but `--features=address` at link time because the asan runtime provides
 # the leak checking runtime support.
 #
+# See //build/bazel/config/variant_features/README.md for how these Bazel
+# feature names map to combinations of GN toolchain_variant.tags and
+# toolchain_variant.configs. Every variant feature emitted here must be
+# registered as a feature(name = ...) in sanitizer.bzl or toolchain_utils.bzl.
+# NOTE: "thinlto" has no underscore so it does not trigger upstream
+# Bazel / @rules_cc / @rules_rust / @rules_go's built-in "thin_lto" LTO
+# indexing pipeline.
+#
 # Note that currently only C++ rules support all these features.
 # TODO(https://fxbug.dev/447095455): Support variant flags for Rust binaries.
 # TODO(https://fxbug.dev/447095534): Support variant flags for Go binaries.
@@ -148,7 +154,11 @@ if (_has_ubsan) {
 if (_has_sancov) {
   _enabled_features += [ "sancov" ]
 }
-if (_has_coverage_clang) {
+_has_coverage_cts = _configs + [ "//build/config/profile:coverage-cts" ] -
+                    [ "//build/config/profile:coverage-cts" ] != _configs
+if (_has_coverage_cts) {
+  _enabled_features += [ "coverage-cts" ]
+} else if (_has_coverage_clang) {
   _enabled_features += [ "coverage" ]
 }
 if (_has_coverage_rust) {
@@ -175,16 +185,47 @@ if (_has_profile_rust) {
   }
 }
 
-if (is_coverage) {
-  _build_args += [ "--//build/bazel/config/variables:is_coverage=True" ]
-} else {
-  _build_args += [ "--//build/bazel/config/variables:is_coverage=False" ]
+_has_profile_use = _configs + [ "//build/config/profile:profile-use" ] -
+                   [ "//build/config/profile:profile-use" ] != _configs
+if (_has_profile_use) {
+  _enabled_features += [ "profile-use" ]
 }
 
-if (is_profile) {
-  _build_args += [ "--//build/bazel/config/variables:is_profile=True" ]
-} else {
-  _build_args += [ "--//build/bazel/config/variables:is_profile=False" ]
+_has_profile_use_rust =
+    _configs + [ "//build/config/profile:profile-use-rust" ] -
+    [ "//build/config/profile:profile-use-rust" ] != _configs
+if (_has_profile_use_rust) {
+  _enabled_features += [ "profile-use-rust" ]
+}
+
+_has_fuzzer = _tags + [ "fuzzer" ] - [ "fuzzer" ] != _tags
+if (_has_fuzzer) {
+  _enabled_features += [ "fuzzer" ]
+}
+
+_has_heapdump = _tags + [ "heapdump" ] - [ "heapdump" ] != _tags
+if (_has_heapdump) {
+  _enabled_features += [ "heapdump" ]
+}
+
+_has_cfi = _tags + [ "cfi" ] - [ "cfi" ] != _tags
+if (_has_cfi) {
+  _enabled_features += [ "cfi" ]
+}
+
+_has_instrumented = _tags + [ "instrumented" ] - [ "instrumented" ] != _tags
+if (_has_instrumented) {
+  _enabled_features += [ "instrumented" ]
+}
+
+if (_has_lto_tag) {
+  _enabled_features += [ "lto" ]
+}
+
+_has_thinlto = _configs + [ "//build/config/lto:thinlto" ] -
+               [ "//build/config/lto:thinlto" ] != _configs
+if (_has_thinlto) {
+  _enabled_features += [ "thinlto" ]
 }
 
 # LINT.IfChange(dwarf_version)
@@ -215,7 +256,9 @@ if (_is_compilation_mode_dbg) {
   _build_args += [ "--compilation_mode=fastbuild" ]
 } else if (_is_compilation_mode_opt) {
   _build_args += [ "--compilation_mode=opt" ]
-  if (clang_ml_inliner) {
+  if (clang_ml_inliner &&
+      (optimize == "size" || optimize == "size_lto" ||
+       optimize == "size_thinlto" || optimize == "size_thinlto_clang")) {
     _enabled_features += [ "ml_inliner" ]
   }
 } else {
@@ -230,17 +273,6 @@ if (_is_compilation_mode_dbg) {
 if (_enabled_features != []) {
   _build_args += [ "--@fuchsia_rules_common//build_flags:enabled_features=" +
                    string_join(",", _enabled_features) ]
-}
-
-_build_args += toolchain_tags_bazel_args
-
-# Forward GN C/C++ compiler optimization configuration to Bazel
-# TODO(https://fxbug.dev/565437401): Remove this once
-# //build/config:default_warnings is ported to Bazel.
-if (fuchsia_cxx_version == 20) {
-  _build_args += [ "--cxxopt=-Wno-deprecated-this-capture" ]
-} else if (fuchsia_cxx_version == 23) {
-  _build_args += [ "--cxxopt=-Wno-deprecated-this-capture" ]
 }
 
 # LINT.IfChange(bazel_args_json_schema)

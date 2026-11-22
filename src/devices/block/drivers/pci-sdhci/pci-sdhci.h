@@ -6,7 +6,7 @@
 #define SRC_DEVICES_BLOCK_DRIVERS_PCI_SDHCI_PCI_SDHCI_H_
 
 #include <fidl/fuchsia.hardware.sdhci/cpp/driver/fidl.h>
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/pci/cpp/pci.h>
 /// Under DFv2, we inherit from `fdf::DriverBase2`.
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/fidl_driver/cpp/server.h>

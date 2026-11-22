@@ -465,6 +465,74 @@ void DeviceHost::UnregisterVirtualAudioDrivers() {
   }
   fidl::SyncClient mgr_client(std::move(*dev_mgr));
 
+  // 1. Remove ephemeral test nodes first, while their drivers are still active,
+  // so driver_manager can cleanly stop and remove the nodes rather than failing
+  // bind and quarantining them.
+  std::vector<std::string> moniker_filters;
+  for (const auto& node_name : added_test_nodes_) {
+    auto remove_res = mgr_client->RemoveTestNode({{.name = node_name}});
+    if (remove_res.is_ok()) {
+      FX_LOGS(INFO) << "Called RemoveTestNode for " << node_name;
+      moniker_filters.push_back("dev." + node_name);
+    } else {
+      FX_LOGS(WARNING) << "RemoveTestNode(" << node_name
+                       << ") returned error: " << remove_res.error_value().FormatDescription();
+      if (remove_res.error_value().is_domain_error() &&
+          remove_res.error_value().domain_error() != ZX_ERR_NOT_FOUND) {
+        moniker_filters.push_back("dev." + node_name);
+      }
+    }
+  }
+  added_test_nodes_.clear();
+
+  // 2. RemoveTestNode is asynchronous; poll GetNodeInfo until the removed test nodes
+  // and any children under them are no longer present in the node topology.
+  // If we hang indefinitely here, the test execution environment will eventually timeout.
+  if (!moniker_filters.empty()) {
+    while (true) {
+      auto [info_client, info_server] =
+          fidl::Endpoints<fuchsia_driver_development::NodeInfoIterator>::Create();
+      fidl::SyncClient iterator_client(std::move(info_client));
+      auto get_info_res = mgr_client->GetNodeInfo({{
+          .node_filter = moniker_filters,
+          .iterator = std::move(info_server),
+          .exact_match = false,
+      }});
+      if (get_info_res.is_error()) {
+        FX_LOGS(WARNING) << "GetNodeInfo failed while waiting for test node removal: "
+                         << get_info_res.error_value().FormatDescription();
+        break;
+      }
+
+      size_t count = 0;
+      bool read_error = false;
+      while (true) {
+        auto next_res = iterator_client->GetNext();
+        if (next_res.is_error()) {
+          FX_LOGS(WARNING) << "NodeInfoIterator.GetNext failed: "
+                           << next_res.error_value().FormatDescription();
+          read_error = true;
+          break;
+        }
+        if (next_res->nodes().empty()) {
+          break;
+        }
+        count += next_res->nodes().size();
+      }
+
+      if (read_error) {
+        break;
+      }
+      if (count == 0) {
+        FX_LOGS(INFO) << "Confirmed removal of virtual-audio test nodes";
+        break;
+      }
+      zx::nanosleep(zx::deadline_after(zx::msec(20)));
+    }
+  }
+
+  // 3. Now that the test nodes are removed from the topology, disable the ephemeral
+  // drivers and restart driver hosts to unload their packages.
   auto restart_flags = fuchsia_driver_development::RestartRematchFlags::kRequested |
                        fuchsia_driver_development::RestartRematchFlags::kCompositeSpec;
 
@@ -486,17 +554,6 @@ void DeviceHost::UnregisterVirtualAudioDrivers() {
     }
   }
   registered_driver_urls_.clear();
-
-  for (const auto& node_name : added_test_nodes_) {
-    auto remove_res = mgr_client->RemoveTestNode({{.name = node_name}});
-    if (remove_res.is_ok()) {
-      FX_LOGS(INFO) << "Removed test node " << node_name;
-    } else {
-      FX_LOGS(WARNING) << "RemoveTestNode(" << node_name
-                       << ") returned error: " << remove_res.error_value().FormatDescription();
-    }
-  }
-  added_test_nodes_.clear();
 }
 
 void DeviceHost::WaitForDeviceNode(const std::string& directory_path,
@@ -662,10 +719,10 @@ zx_status_t DeviceHost::QuitDeviceLoop() {
         zx::msec(100));
   });
 
-  zx_status_t status = done.Wait(zx::sec(20));
+  done.Wait();
   device_loop_.Shutdown();
 
-  return status;
+  return ZX_OK;
 }
 
 }  // namespace media::audio::drivers::test

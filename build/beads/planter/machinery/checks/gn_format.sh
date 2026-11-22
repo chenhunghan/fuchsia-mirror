@@ -17,12 +17,13 @@
 #    (`BUILD.gn`, `*.gni`, `*.gn`) added or modified by the change.
 # Prints a JSON array of findings on stdout.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="${PLANTER_WORKDIR:-.}"
-CHANGE_BASE="${PLANTER_CHANGE_BASE:-HEAD}"
+CHANGE_BASE="${PLANTER_RESOLVED_CHANGE_BASE:-${PLANTER_CHANGE_BASE:-HEAD}}"
 TARGET_DIR="${PLANTER_TARGET_DIR:-}"
 TARGET_DIRS="${PLANTER_TARGET_DIRS:-$TARGET_DIR}"
 
-python3 - "$WORKDIR" "$CHANGE_BASE" "$TARGET_DIRS" <<'PYEOF'
+python3 - "$WORKDIR" "$CHANGE_BASE" "$TARGET_DIRS" "$SCRIPT_DIR" <<'PYEOF'
 import json
 import os
 import re
@@ -31,8 +32,15 @@ import subprocess
 import sys
 
 workdir = os.path.abspath(sys.argv[1])
-change_base = sys.argv[2].strip() or "HEAD"
 raw_target_dirs = sys.argv[3]
+script_dir = os.path.abspath(sys.argv[4]) if len(sys.argv) > 4 else ""
+if script_dir and script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+import planter_check_lib as pcl
+
+change_base = pcl.resolve_change_base(
+    workdir, sys.argv[2].strip() or "HEAD", target_dirs=raw_target_dirs
+)
 
 SENTINEL = "## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##"
 
@@ -57,12 +65,40 @@ def git_lines(args):
 
 
 def collect_changed_gn_files():
+    tdirs = pcl._resolve_active_target_dirs(workdir, raw_target_dirs)
     changed = set(git_lines(["diff", "--name-only", change_base]))
     changed.update(git_lines(["ls-files", "--others", "--exclude-standard"]))
     if change_base == "HEAD" and not any(
         p.endswith(".gn") or p.endswith(".gni") for p in changed
     ):
         changed.update(git_lines(["diff", "--name-only", "HEAD~1", "HEAD"]))
+    # Exclude GN files from unmodified stacked prerequisite commits outside target_dirs.
+    if tdirs:
+        worktree_dirty = set(git_lines(["diff", "--name-only", "HEAD"]))
+        worktree_dirty.update(
+            git_lines(["ls-files", "--others", "--exclude-standard"])
+        )
+        head_files = set(git_lines(["diff", "--name-only", "HEAD~1", "HEAD"]))
+        head_touches_tdirs = any(
+            f == td or f.startswith(td + "/")
+            for td in tdirs
+            for f in head_files
+        )
+        if not head_touches_tdirs:
+            changed = {
+                p
+                for p in changed
+                if p in worktree_dirty
+                or any(p == td or p.startswith(td + "/") for td in tdirs)
+            }
+        else:
+            changed = {
+                p
+                for p in changed
+                if p in worktree_dirty
+                or p in head_files
+                or any(p == td or p.startswith(td + "/") for td in tdirs)
+            }
     for raw_dir in re.split(r"[\s,]+", raw_target_dirs):
         d = raw_dir.strip().strip("/")
         if d:
@@ -222,7 +258,7 @@ stale_prebuilt = bool(
     gn_bin
     and cipd_pkg
     and pinned_rev
-    and (upstream_gn_roll or not local_rev or not pinned_rev.startswith(local_rev))
+    and (not local_rev or not pinned_rev.startswith(local_rev))
 )
 
 check_gn_bin = gn_bin
@@ -256,7 +292,6 @@ findings = []
 # Report a stale local GN prebuilt binary (or unmerged origin/main GN roll) so local fx bazel2gn and shac match CQ.
 if gn_files and stale_prebuilt:
     target_file = gn_files[0]
-    rebase_prefix = "Run `git rebase origin/main`, update " if upstream_gn_roll else "Update "
     msg = (
         f"Local GN prebuilt '{gn_rel}' is at revision '{local_rev or 'unknown'}', "
         f"but manifests/jiri.lock (on {'origin/main' if upstream_gn_roll else 'HEAD'}) "
@@ -266,7 +301,7 @@ if gn_files and stale_prebuilt:
         "`verify_bazel2gn` in CQ."
     )
     rem = (
-        f"{rebase_prefix}the local GN prebuilt in place to match manifests/jiri.lock by running "
+        "Update the local GN prebuilt in place to match manifests/jiri.lock by running "
         f"`{cipd_update_cmd}`, then re-sync bazel2gn directories with `{b2g_sync_cmd}` "
         f"and format any hand-edited GN files with `{gn_rel} format <file>`."
     )

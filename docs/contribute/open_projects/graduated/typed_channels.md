@@ -321,29 +321,19 @@ Reach out for questions or for status updates:
 [fidl-protocol]: /docs/reference/fidl/language/language.md#protocols
 [fix-protocol-1]: https://fuchsia-review.googlesource.com/c/fuchsia/+/463034
 [fix-protocol-2]: https://fuchsia-review.googlesource.com/c/fuchsia/+/466169
-[fix-protocol-3]:
-https://fuchsia-review.googlesource.com/c/fuchsia/+/478491/28/src/firmware/paver/partition-client.h#b46
-[bind-server]:
-https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/fidl/cpp/wire/include/lib/fidl/cpp/wire/server.h?q=fidl::BindServer&ss=fuchsia%2Ffuchsia
+[fix-protocol-3]: https://fuchsia-review.googlesource.com/c/fuchsia/+/478491/28/src/firmware/paver/partition-client.h#b46
+[bind-server]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/fidl/cpp/wire/include/lib/fidl/cpp/wire/server.h?q=fidl::BindServer&ss=fuchsia%2Ffuchsia
 [typed-channel]: /docs/reference/fidl/bindings/cpp-bindings.md#typed-channels
-[raw-channel-interface]:
-https://cs.opensource.google/search?q=RawChannelInterface&sq=&ss=fuchsia%2Ffuchsia
-[create-endpoints]:
-https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/fidl/cpp/wire/include/lib/fidl/cpp/wire/connect_service.h;l=36?q=fidl::CreateEndpoints&ss=fuchsia%2Ffuchsia
-[fdio-service-connect]:
-https://cs.opensource.google/search?q=fdio_service_connect&ss=fuchsia%2Ffuchsia&start=11
-[service-connect]:
-https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/component/incoming/cpp/protocol.h;l=41
-[service-connect-at]:
-https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/component/incoming/cpp/protocol.h;l=69
-[open-service-root]:
-https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/component/incoming/cpp/protocol.h;l=28
+[raw-channel-interface]: https://cs.opensource.google/search?q=RawChannelInterface&sq=&ss=fuchsia%2Ffuchsia
+[create-endpoints]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/fidl/cpp/wire/include/lib/fidl/cpp/wire/connect_service.h;l=36?q=fidl::CreateEndpoints&ss=fuchsia%2Ffuchsia
+[fdio-service-connect]: https://cs.opensource.google/search?q=fdio_service_connect&ss=fuchsia%2Ffuchsia&start=11
+[service-connect]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/component/incoming/cpp/protocol.h;l=41
+[service-connect-at]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/component/incoming/cpp/protocol.h;l=69
+[open-service-root]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/component/incoming/cpp/protocol.h;l=28
 [lib-component]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/sys/component/cpp/
-[rfc-0023]: /docs/contribute/governance/rfcs/0023_compositional_model_protocols.md#is_a_relationship_considered_harmful
-[target-allowlist]:
-https://cs.opensource.google/fuchsia/fuchsia/+/main:build/cpp/BUILD.gn?q=%22could%20be%20migrated%20to%20use%20typed%20channels%22&ss=fuchsia%2Ffuchsia:build%2Fcpp%2F
-[protocol-allowlist]:
-https://cs.opensource.google/fuchsia/fuchsia/+/main:tools/fidl/lib/fidlgen_cpp/typed_channel_migration.go?q=%22rawChannelInterfaceAllowed%20%3D%20map%5Bstring%5Dbool%22&ss=fuchsia%2Ffuchsia
+[rfc-0023]: /docs/contribute/governance/rfcs/0023_compositional_model_protocols.md#is-a-relationship-considered-harmful
+[target-allowlist]: https://cs.opensource.google/fuchsia/fuchsia/+/main:build/cpp/BUILD.gn?q=%22could%20be%20migrated%20to%20use%20typed%20channels%22&ss=fuchsia%2Ffuchsia:build%2Fcpp%2F
+[protocol-allowlist]: https://cs.opensource.google/fuchsia/fuchsia/+/main:tools/fidl/lib/fidlgen_cpp/typed_channel_migration.go?q=%22rawChannelInterfaceAllowed%20%3D%20map%5Bstring%5Dbool%22&ss=fuchsia%2Ffuchsia
 [example-1]: https://fxrev.dev/I195ebf4d38c4e949de2b913b8c96788275889b5a
 [example-2]: https://fxrev.dev/I36f77e139eae177890d8037ec4f0e9396496d70b
 [example-3]: https://fxrev.dev/I89ec43ffb61eb3b5a5b21f2da4835862895ee842

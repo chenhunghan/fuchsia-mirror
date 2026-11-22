@@ -4,11 +4,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use {
-    fidl_fuchsia_net as fnet, fidl_fuchsia_net_dhcpv6 as fnet_dhcpv6,
-    fidl_fuchsia_net_dhcpv6_ext as fnet_dhcpv6_ext, fidl_fuchsia_net_ext as fnet_ext,
-    fidl_fuchsia_net_name as fnet_name,
-};
+use fidl_fuchsia_net as fnet;
+use fidl_fuchsia_net_dhcpv6 as fnet_dhcpv6;
+use fidl_fuchsia_net_dhcpv6_ext as fnet_dhcpv6_ext;
+use fidl_fuchsia_net_ext as fnet_ext;
+use fidl_fuchsia_net_name as fnet_name;
 
 use anyhow::Context as _;
 use async_utils::hanging_get::client::HangingGetStream;
@@ -400,8 +400,6 @@ mod tests {
         valid_until: zx::MonotonicInstant::from_nanos(888_000_000_000),
     };
 
-    const FAKE_TOPOLOGICAL_PATH: &'static str = "/dev/foo/bar/network-device";
-
     impl InterfaceState {
         fn new_host_with_state(
             interface_naming_id: InterfaceNamingIdentifier,
@@ -423,6 +421,7 @@ mod tests {
                 }),
                 device_class,
                 provisioning,
+                metric: crate::Metric::default().into(),
             }
         }
     }
@@ -544,7 +543,7 @@ mod tests {
                         &fidl_fuchsia_net_ext::MacAddress {
                             octets: [0x1, 0x2, 0x3, 0x4, 0x5, 0x6],
                         },
-                        FAKE_TOPOLOGICAL_PATH,
+                        &[],
                     ),
                     control,
                     device_class,

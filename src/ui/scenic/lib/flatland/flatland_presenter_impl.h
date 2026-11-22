@@ -52,6 +52,10 @@ class FlatlandPresenterImpl final : public FlatlandPresenter,
                                 std::vector<zx::counter> present_fences,
                                 bool schedule_asap) override;
 
+  // |FlatlandPresenter|
+  void NotifyExpectedPresent(scheduling::SessionId session_id, zx::time expected_present_time,
+                             zx::duration frame_interval, bool schedule_asap) override;
+
   // |FlatlandPresenter|.
   std::vector<scheduling::FuturePresentationInfo> GetFuturePresentationInfos() override;
 

@@ -31,6 +31,7 @@ use crate::vm::arch_vm_aspace::{
     ArchUnmapOptions, ExistingEntryAction, NonTerminalAction, TerminalAction,
     arch_mmu_flags_uncached,
 };
+use crate::vm::mapping_cursor::{MappingCursor, VirtualAddressCursor};
 use crate::vm::page::{VmPage, VmPageDoublyLinkedList, VmPagePtr};
 use crate::vm::page_state::VmPageState;
 use crate::vm::page_state::bindings::vm_page_state;
@@ -52,11 +53,6 @@ use libarch::arm64::{TTBR0_EL1, TTBR1_EL1, isb};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop, stack_pin_init};
 use zx_status::Status;
 use zx_types::ZX_ARM64_FEATURE_ADDRESS_TAGGING_TBI;
-
-#[cfg(sanitize = "address")]
-unsafe extern "C" {
-    fn asan_map_shadow_for(start: usize, size: usize);
-}
 
 const LOCAL_TRACE: u32 = 0;
 const TRACE_CONTEXT_SWITCH: bool = false;
@@ -451,40 +447,13 @@ const fn add_parity(mut pte: u64) -> u64 {
 
 #[cold]
 #[inline(never)]
-fn panic_pte_parity(pte: u64) -> ! {
-    panic!("PTE parity error: {pte:#x}");
-}
-
-#[cold]
-#[inline(never)]
 fn panic_unexpected_pte(pte: u64) -> ! {
     panic!("unexpected pte value {pte:x}");
 }
 
-#[cold]
-#[inline(never)]
-fn panic_nonzero_invalid_pte(pte: u64) -> ! {
-    panic!("invalid pte should be zero {pte:#x}\n");
-}
-
-#[cold]
-#[inline(never)]
-fn panic_invalid_query_table_pte(
-    index_shift: u32,
-    page_size_shift: u32,
-    descriptor_type: u64,
-) -> ! {
-    panic!(
-        "index_shift {index_shift}, page_size_shift {page_size_shift}, \
-         descriptor_type {descriptor_type:#x}"
-    );
-}
-
 #[inline(always)]
 fn check_parity(pte: u64) {
-    if !compute_parity(pte) {
-        panic_pte_parity(pte);
-    }
+    assert!(compute_parity(pte), "PTE parity error: {pte:#x}");
 }
 
 #[inline(always)]
@@ -727,157 +696,6 @@ fn is_physmap_page_mapped(pa: u64) -> bool {
         /*write=*/ false,
     )
     .is_ok()
-}
-
-/// Helper that tracks a virtual address range for performing MMU operations. This can be used
-/// directly, or by as part of a `MappingCursor`.
-struct VirtualAddressCursor {
-    start_vaddr: usize,
-    vaddr: usize,
-    vaddr_rel_offset: usize,
-    size: usize,
-}
-
-impl VirtualAddressCursor {
-    const fn new(vaddr: usize, size: usize) -> Self {
-        Self { start_vaddr: vaddr, vaddr, vaddr_rel_offset: 0, size }
-    }
-
-    /// Sets offset used for `vaddr_rel` and returns true if the cursor lies within that offset and
-    /// some specified maximum. Should only be called before the cursor has started to be used.
-    fn set_vaddr_relative_offset(&mut self, rel_offset: usize, rel_max: usize) -> bool {
-        debug_assert_eq!(self.start_vaddr, self.vaddr);
-        let vaddr_rel = self.start_vaddr.wrapping_sub(rel_offset);
-
-        if self.size > rel_max || vaddr_rel > rel_max - self.size {
-            return false;
-        }
-        self.vaddr_rel_offset = rel_offset;
-        true
-    }
-
-    /// Update the cursor to skip over a not-present page table entry.
-    fn skip_entry(&mut self, ps: usize) {
-        // Cannot just increase by given size as both the current or final vaddr may not be aligned
-        // to this given size. These cases only happen as the very first or very last entry we will
-        // examine respectively, but still must be handled here.
-
-        // Calculate the amount the cursor should skip to get to the next entry at
-        // this page table level.
-        let next_entry_offset = ps - (self.vaddr & (ps - 1));
-        // If our endpoint was in the middle of this range, clamp the
-        // amount we remove from the cursor
-        let consume = if self.size > next_entry_offset { next_entry_offset } else { self.size };
-
-        debug_assert!(self.size >= consume);
-        self.size -= consume;
-        self.vaddr = self.vaddr.wrapping_add(consume);
-    }
-
-    fn consume(&mut self, ps: usize) {
-        debug_assert!(self.size >= ps);
-        self.vaddr = self.vaddr.wrapping_add(ps);
-        self.size -= ps;
-    }
-
-    /// Returns a new cursor to the, possibly empty, virtual range that has already been processed
-    /// by this cursor. The returned cursor will always be a subset of the original cursors range.
-    const fn processed_range(&self) -> Self {
-        let mut ret = Self::new(self.start_vaddr, self.vaddr.wrapping_sub(self.start_vaddr));
-        // As our new cursor is a subrange we know the relative offset will always be valid.
-        ret.vaddr_rel_offset = self.vaddr_rel_offset;
-        ret
-    }
-
-    const fn vaddr(&self) -> usize {
-        self.vaddr
-    }
-
-    const fn vaddr_rel(&self) -> usize {
-        self.vaddr.wrapping_sub(self.vaddr_rel_offset)
-    }
-
-    const fn size(&self) -> usize {
-        self.size
-    }
-}
-
-/// Helper class for MMU implementations to track physical address ranges when installing mappings.
-/// If just processing a virtual address range, such as for unmapping, then the
-/// `VirtualAddressCursor` can be used instead.
-struct MappingCursor<'a> {
-    paddrs: &'a [u64],
-    paddr_idx: usize,
-    /// We have no need to actually track the total number of elements in the paddrs array, as this
-    /// should be a simple size/paddr_size. To guard against code mistakes though, we separately
-    /// track this just in debug mode.
-    #[cfg(debug_assertions)]
-    paddr_count: usize,
-    paddr_consumed: usize,
-    page_size: usize,
-    vaddr_cursor: VirtualAddressCursor,
-}
-
-impl<'a> MappingCursor<'a> {
-    const fn new(paddrs: &'a [u64], page_size: usize, vaddr: usize) -> Self {
-        Self {
-            paddrs,
-            paddr_idx: 0,
-            #[cfg(debug_assertions)]
-            paddr_count: paddrs.len(),
-            paddr_consumed: 0,
-            page_size,
-            vaddr_cursor: VirtualAddressCursor::new(vaddr, page_size.saturating_mul(paddrs.len())),
-        }
-    }
-
-    /// See `VirtualAddressCursor::set_vaddr_relative_offset`.
-    fn set_vaddr_relative_offset(&mut self, rel_offset: usize, rel_max: usize) -> bool {
-        self.vaddr_cursor.set_vaddr_relative_offset(rel_offset, rel_max)
-    }
-
-    fn consume(&mut self, ps: usize) {
-        self.paddr_consumed += ps;
-        debug_assert!(self.paddr_consumed <= self.page_size);
-        if self.paddr_consumed == self.page_size {
-            self.paddr_idx += 1;
-            self.paddr_consumed = 0;
-            #[cfg(debug_assertions)]
-            {
-                debug_assert!(self.paddr_count > 0);
-                self.paddr_count -= 1;
-            }
-        }
-        self.vaddr_cursor.consume(ps);
-    }
-
-    fn paddr(&self) -> u64 {
-        debug_assert!(self.paddr_consumed < self.page_size);
-        self.paddrs[self.paddr_idx] + (self.paddr_consumed as u64)
-    }
-
-    const fn page_remaining(&self) -> usize {
-        self.page_size - self.paddr_consumed
-    }
-
-    /// Returns a new cursor to the, possibly empty, virtual range that has already been processed
-    /// by this cursor. The returned cursor will always be a subset of the original cursors range
-    /// and does not include the paddrs.
-    const fn processed_range(&self) -> VirtualAddressCursor {
-        self.vaddr_cursor.processed_range()
-    }
-
-    const fn vaddr(&self) -> usize {
-        self.vaddr_cursor.vaddr()
-    }
-
-    const fn vaddr_rel(&self) -> usize {
-        self.vaddr_cursor.vaddr_rel()
-    }
-
-    const fn size(&self) -> usize {
-        self.vaddr_cursor.size()
-    }
 }
 
 /// Maximum number of TLB entries we will queue before switching to ASID invalidation.
@@ -1547,7 +1365,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
         let block_size = 1usize << index_shift;
         let num_entries = 1usize << (page_size_shift - 3);
         let index_mask = num_entries - 1;
-        let mut index = (cursor.vaddr_rel() >> index_shift) & index_mask;
+        let mut index = (cursor.vaddr_rel().0 >> index_shift) & index_mask;
         let mut unmapped: u32 = 0;
 
         // SAFETY: Caller guarantees `self.aspace` is initialized and `page_table` points to a valid
@@ -1566,7 +1384,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
             // Check if this is a large page and we need to split it.
             if index_shift > page_size_shift
                 && (pte & MMU_PTE_DESCRIPTOR_MASK) == MMU_PTE_L012_DESCRIPTOR_BLOCK
-                && (!is_rounded(cursor.vaddr_rel(), block_size) || cursor.size() < block_size)
+                && (!is_rounded(cursor.vaddr_rel().0, block_size) || cursor.size() < block_size)
             {
                 // Splitting a large page may perform break-before-make, and during that window we
                 // will have temporarily unmapped beyond our range, so ensure we are permitted to
@@ -1580,7 +1398,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
                 // `index` name a valid block descriptor under `self.aspace.lock`.
                 if let Err(s) = unsafe {
                     self.split_large_page(
-                        cursor.vaddr(),
+                        cursor.vaddr().0,
                         index_shift,
                         index,
                         page_table,
@@ -1599,7 +1417,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
                     update_pte(&table[index], MMU_PTE_DESCRIPTOR_INVALID, Ordering::Relaxed);
                     unmapped += 1;
 
-                    cm.as_mut().flush_entry(cursor.vaddr(), true);
+                    cm.as_mut().flush_entry(cursor.vaddr().0, true);
                     cursor.skip_entry(block_size);
                     index += 1;
                     continue;
@@ -1615,7 +1433,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
 
                 // Recurse a level but remember where we are unmapping from in case we need to do a
                 // second pass to remove a PT.
-                let unmap_vaddr = cursor.vaddr();
+                let unmap_vaddr = cursor.vaddr().0;
                 // SAFETY: Caller guarantees `self.aspace` is initialized, and `next_page_table` is
                 // a valid lower-level page table protected by `self.aspace.lock`.
                 let (status, lower_unmapped) = unsafe {
@@ -1682,7 +1500,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
 
                 if (unmap_options & ARCH_UNMAP_OPTION_HARVEST) != 0 {
                     let pte_addr = pte & MMU_PTE_OUTPUT_ADDR_MASK;
-                    let paddr = pte_addr + ((cursor.vaddr_rel() & (block_size - 1)) as u64);
+                    let paddr = pte_addr + ((cursor.vaddr_rel().0 & (block_size - 1)) as u64);
                     if let Some(page) = pmm::paddr_to_vm_page(PAddr(paddr as usize))
                         && (pte & MMU_PTE_ATTR_AF) != 0
                     {
@@ -1692,7 +1510,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
                 }
 
                 unmapped += 1;
-                cm.as_mut().flush_entry(cursor.vaddr(), true);
+                cm.as_mut().flush_entry(cursor.vaddr().0, true);
                 cursor.consume(block_size);
             }
 
@@ -1780,7 +1598,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
             ExistingEntryAction::Error => return Err(Status::ALREADY_EXISTS),
             ExistingEntryAction::Skip => {}
             ExistingEntryAction::Upgrade => {
-                let vaddr = cursor.vaddr();
+                let vaddr = cursor.vaddr().0;
                 if (pte & MMU_PTE_OUTPUT_ADDR_MASK) == (new_pte & MMU_PTE_OUTPUT_ADDR_MASK) {
                     // Upgrading permissions in place with the same output address acts like a
                     // protect: skip when nothing changes or when permissions would only be
@@ -1789,13 +1607,13 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
                     if !ro && new_pte != (pte & !MMU_PTE_RES_PARITY) {
                         ltrace! {
                             let entry_addr = core::ptr::from_ref(entry).addr();
-                            let page_table =
-                                core::ptr::from_ref(entry).with_addr(entry_addr & !(page::SIZE - 1));
+                            let page_table = core::ptr::from_ref(entry)
+                                .with_addr(entry_addr & !(page::SIZE - 1));
                             let index =
                                 (entry_addr & (page::SIZE - 1)) / core::mem::size_of::<Pte>();
                             tracef!(
                                 "pte {page_table:p}[{index}] = {pte:#x} (paddr {:#x})\n",
-                                cursor.paddr()
+                                cursor.paddr().0
                             );
                         }
                         update_pte(entry, new_pte, Ordering::Relaxed);
@@ -1817,7 +1635,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
                         let index = (entry_addr & (page::SIZE - 1)) / core::mem::size_of::<Pte>();
                         tracef!(
                             "pte {page_table:p}[{index}] = {pte:#x} (paddr {:#x})\n",
-                            cursor.paddr()
+                            cursor.paddr().0
                         );
                     }
                     update_pte(entry, new_pte, Ordering::Relaxed);
@@ -1854,7 +1672,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
         // page table under `self.aspace.lock`.
         let table = unsafe { self.page_table_slice(page_table, page_size_shift) };
         let index_mask = table.len() - 1;
-        let mut index = (cursor.vaddr_rel() >> index_shift) & index_mask;
+        let mut index = (cursor.vaddr_rel().0 >> index_shift) & index_mask;
         let mut mapped: u32 = 0;
 
         while index < table.len() && cursor.size() != 0 {
@@ -1863,8 +1681,8 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
 
             // if we're at an unaligned address, not trying to map a block, and not at the terminal
             // level, recurse one more level of the page table tree
-            let level_valigned = is_rounded(cursor.vaddr_rel(), block_size);
-            let level_paligned = is_rounded(cursor.paddr() as usize, block_size);
+            let level_valigned = is_rounded(cursor.vaddr_rel().0, block_size);
+            let level_paligned = is_rounded(cursor.paddr().0, block_size);
             if !level_valigned
                 || !level_paligned
                 || cursor.page_remaining() < block_size
@@ -1875,9 +1693,9 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
                 let (page_table_paddr, next_page_table): (u64, *mut Pte) =
                     match pte & MMU_PTE_DESCRIPTOR_MASK {
                         MMU_PTE_DESCRIPTOR_INVALID => {
-                            // SAFETY: Caller guarantees `self.aspace` is initialized after early boot,
-                            // and `entry` is an `INVALID` non-terminal (`index_shift > page_size_shift`)
-                            // slot under `self.aspace.lock`.
+                            // SAFETY: Caller guarantees `self.aspace` is initialized after early
+                            // boot, and `entry` is an `INVALID` non-terminal
+                            // (`index_shift > page_size_shift`) slot under `self.aspace.lock`.
                             let (res, page_table_paddr) =
                                 unsafe { self.alloc_and_install_page_table(entry, cursor) };
                             if let Err(status) = res {
@@ -1885,7 +1703,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
                             }
                             mapped += 1;
                             // Tell the consistency manager that we've mapped an inner node.
-                            cm.as_mut().map_entry(cursor.vaddr(), false);
+                            cm.as_mut().map_entry(cursor.vaddr().0, false);
                             ltracef!(
                                 "pte {page_table:p}[{index}] = {:#x}\n",
                                 page_table_paddr
@@ -1940,7 +1758,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
                     return (Err(err), mapped);
                 }
             } else {
-                let mut new_pte = cursor.paddr() | attrs;
+                let mut new_pte = (cursor.paddr().0 as u64) | attrs;
                 if index_shift > page_size_shift {
                     new_pte |= MMU_PTE_L012_DESCRIPTOR_BLOCK;
                 } else {
@@ -1966,12 +1784,12 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
                     mapped += 1;
                     ltracef!(
                         "pte {page_table:p}[{index}] = {pte:#x} (paddr {:#x})\n",
-                        cursor.paddr()
+                        cursor.paddr().0
                     );
                     update_pte(entry, new_pte, Ordering::Relaxed);
 
                     // Tell the consistency manager we've mapped a new page.
-                    cm.as_mut().map_entry(cursor.vaddr(), true);
+                    cm.as_mut().map_entry(cursor.vaddr().0, true);
                     cursor.consume(block_size);
                 }
             }
@@ -2220,9 +2038,9 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
                 if do_unmap {
                     // Unmapping an exact block, which should not need enlarging and hence should
                     // never be able to fail.
-                    let mut unmap_cursor = VirtualAddressCursor::new(vaddr, chunk_size);
+                    let mut unmap_cursor = VirtualAddressCursor::new(VAddr(vaddr), chunk_size);
                     let ok = unmap_cursor
-                        .set_vaddr_relative_offset(vaddr_base, 1usize << top_size_shift);
+                        .set_vaddr_relative_offset(VAddr(vaddr_base), 1usize << top_size_shift);
                     // This should never fail as the cursor we are building is a subset of the
                     // range we have already processed, which by definition must have been valid.
                     debug_assert!(ok);
@@ -2386,9 +2204,7 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
             );
 
             if (pte & MMU_PTE_VALID) == 0 {
-                if pte != 0 {
-                    panic_nonzero_invalid_pte(pte);
-                }
+                assert!(pte == 0, "invalid pte should be zero {pte:#x}\n");
                 return Err(Status::NOT_FOUND);
             }
 
@@ -2404,9 +2220,11 @@ impl<'a, 'g> LockedAspace<'a, 'g> {
                 return Ok((paddr, mmu_flags));
             }
 
-            if index_shift <= page_size_shift || descriptor_type != MMU_PTE_L012_DESCRIPTOR_TABLE {
-                panic_invalid_query_table_pte(index_shift, page_size_shift, descriptor_type);
-            }
+            assert!(
+                index_shift > page_size_shift && descriptor_type == MMU_PTE_L012_DESCRIPTOR_TABLE,
+                "index_shift {index_shift}, page_size_shift {page_size_shift}, \
+                 descriptor_type {descriptor_type:#x}"
+            );
 
             page_table = paddr_to_pte_ptr(pte_addr);
             index_shift -= page_size_shift - 3;
@@ -2844,11 +2662,11 @@ impl ArmArchVmAspace {
 
             let locked = LockedAspace::new(self, &a);
             stack_pin_init!(let cm = ConsistencyManager::new(&locked));
-            let paddrs = [paddr];
-            let mut cursor = MappingCursor::new(&paddrs, map_size, vaddr);
+            let paddrs = [PAddr(paddr as usize)];
+            let mut cursor = MappingCursor::new(&paddrs, map_size, VAddr(vaddr));
             let vaddr_base = self.vaddr_base.load(Ordering::Relaxed);
             let top_size_shift = self.top_size_shift.load(Ordering::Relaxed);
-            if !cursor.set_vaddr_relative_offset(vaddr_base, 1usize << top_size_shift) {
+            if !cursor.set_vaddr_relative_offset(VAddr(vaddr_base), 1usize << top_size_shift) {
                 return Err(Status::OUT_OF_RANGE);
             }
             let ro = (mmu_flags & ARCH_MMU_FLAG_PERM_RWX_MASK) == ARCH_MMU_FLAG_PERM_READ;
@@ -2906,7 +2724,7 @@ impl ArmArchVmAspace {
         #[cfg(sanitize = "address")]
         if self.aspace_type == ArmAspaceType::kKernel {
             // SAFETY: `vaddr..vaddr + map_size` was just mapped into the kernel address space.
-            unsafe { asan_map_shadow_for(vaddr, map_size) };
+            unsafe { crate::instrumentation::asan::asan_map_shadow_for(vaddr, map_size) };
         }
 
         Ok(())
@@ -2922,7 +2740,7 @@ impl ArmArchVmAspace {
     pub(super) unsafe fn map(
         &self,
         vaddr: usize,
-        phys: &[u64],
+        phys: &[PAddr],
         mmu_flags: ArchMmuFlags,
         existing_action: ExistingEntryAction,
     ) -> Result<(), Status> {
@@ -2941,8 +2759,8 @@ impl ArmArchVmAspace {
             return Err(Status::OUT_OF_RANGE);
         }
         for &pa in phys {
-            debug_assert!(page::is_page_rounded(pa as usize));
-            if !page::is_page_rounded(pa as usize) {
+            debug_assert!(page::is_page_rounded(pa.0));
+            if !page::is_page_rounded(pa.0) {
                 return Err(Status::INVALID_ARGS);
             }
         }
@@ -2978,10 +2796,10 @@ impl ArmArchVmAspace {
                 for &pa in phys {
                     // Ignore non-physmap pages, such as passed-through device MMIO ranges or
                     // reserved firmware runtime regions.
-                    if !is_physmap_page_mapped(pa) {
+                    if !is_physmap_page_mapped(pa.0 as u64) {
                         continue;
                     }
-                    let kva = paddr_to_physmap(PAddr(pa as usize)).0;
+                    let kva = paddr_to_physmap(pa).0;
                     // SAFETY: `is_physmap_page_mapped` verified `[kva, kva + page::SIZE)` is
                     // mapped in the kernel physmap.
                     unsafe { cache_cm.sync_addr(kva, page::SIZE) };
@@ -2991,10 +2809,10 @@ impl ArmArchVmAspace {
 
             let locked = LockedAspace::new(self, &a);
             stack_pin_init!(let cm = ConsistencyManager::new(&locked));
-            let mut cursor = MappingCursor::new(phys, page::SIZE, vaddr);
+            let mut cursor = MappingCursor::new(phys, page::SIZE, VAddr(vaddr));
             let vaddr_base = self.vaddr_base.load(Ordering::Relaxed);
             let top_size_shift = self.top_size_shift.load(Ordering::Relaxed);
-            if !cursor.set_vaddr_relative_offset(vaddr_base, 1usize << top_size_shift) {
+            if !cursor.set_vaddr_relative_offset(VAddr(vaddr_base), 1usize << top_size_shift) {
                 return Err(Status::OUT_OF_RANGE);
             }
             let ro = (mmu_flags & ARCH_MMU_FLAG_PERM_RWX_MASK) == ARCH_MMU_FLAG_PERM_READ;
@@ -3052,7 +2870,12 @@ impl ArmArchVmAspace {
         #[cfg(sanitize = "address")]
         if self.aspace_type == ArmAspaceType::kKernel {
             // SAFETY: The kernel range starting at `vaddr` was just mapped into kernel space.
-            unsafe { asan_map_shadow_for(vaddr, count.saturating_mul(page::SIZE)) };
+            unsafe {
+                crate::instrumentation::asan::asan_map_shadow_for(
+                    vaddr,
+                    count.saturating_mul(page::SIZE),
+                );
+            }
         }
 
         Ok(())
@@ -3091,10 +2914,10 @@ impl ArmArchVmAspace {
         assert!(a.state().updates_enabled);
         let locked = LockedAspace::new(self, &a);
         stack_pin_init!(let cm = ConsistencyManager::new(&locked));
-        let mut cursor = VirtualAddressCursor::new(vaddr, count.saturating_mul(page::SIZE));
+        let mut cursor = VirtualAddressCursor::new(VAddr(vaddr), count.saturating_mul(page::SIZE));
         let vaddr_base = self.vaddr_base.load(Ordering::Relaxed);
         let top_size_shift = self.top_size_shift.load(Ordering::Relaxed);
-        if !cursor.set_vaddr_relative_offset(vaddr_base, 1usize << top_size_shift) {
+        if !cursor.set_vaddr_relative_offset(VAddr(vaddr_base), 1usize << top_size_shift) {
             return Err(Status::OUT_OF_RANGE);
         }
         let top_index_shift = self.top_index_shift.load(Ordering::Relaxed);
@@ -4149,8 +3972,7 @@ pub unsafe extern "C" fn arch_zero_page(_ptr: *mut core::ffi::c_void) {
 
 /// Translates `va` using hardware `AT` instructions and writes the resulting physical address to
 /// `*pa`.
-#[unsafe(no_mangle)]
-pub extern "C" fn arm64_mmu_translate(
+pub fn arm64_mmu_translate(
     va: VAddr,
     pa: &mut PAddr,
     user: bool,
@@ -4220,8 +4042,7 @@ pub extern "C" fn arm64_mmu_translate(
 /// # Safety
 /// Must be called at most once during single-threaded early boot on the boot CPU after CPU MMU
 /// features (`arm64_mmu_features`) have been initialized and before secondary CPUs are started.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arm64_mmu_early_init() {
+pub unsafe fn arm64_mmu_early_init() {
     root_lower_page_table_phys.store(TTBR0_EL1.read().addr(), Ordering::Relaxed);
     root_kernel_page_table_phys.store(TTBR1_EL1.read().addr(), Ordering::Relaxed);
 
@@ -4297,7 +4118,7 @@ mod tests {
             let pa = pa_typed.0 as u64;
             // SAFETY: `aspace` is initialized and never switched onto a CPU; `pa` is owned here.
             expect_ok!(unsafe {
-                aspace.map(TEST_VIRTUAL_ADDRESS, &[pa], mmu_perms, ExistingEntryAction::Error)
+                aspace.map(TEST_VIRTUAL_ADDRESS, &[pa_typed], mmu_perms, ExistingEntryAction::Error)
             });
 
             let mut query_pa = 0;
@@ -4394,7 +4215,8 @@ mod tests {
         // address.
         // SAFETY: `gPhysmapSize` is a boot-initialized read-only global variable.
         let pa = page::round_up(unsafe { bindings::gPhysmapSize }) as u64;
-        assert_false!(is_physmap_phys_addr(PAddr(pa as usize)));
+        let pa_typed = PAddr(pa as usize);
+        assert_false!(is_physmap_phys_addr(pa_typed));
 
         const RX_FLAGS: ArchMmuFlags =
             ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_EXECUTE | ARCH_MMU_FLAG_CACHED;
@@ -4402,7 +4224,7 @@ mod tests {
 
         // SAFETY: `aspace` is never switched onto a CPU so no hardware dereferences `pa`.
         expect_ok!(unsafe {
-            aspace.map(TEST_VIRTUAL_ADDRESS, &[pa], RX_FLAGS, ExistingEntryAction::Error)
+            aspace.map(TEST_VIRTUAL_ADDRESS, &[pa_typed], RX_FLAGS, ExistingEntryAction::Error)
         });
         let mut query_pa = 0;
         let mut query_flags = 0;
@@ -4422,7 +4244,7 @@ mod tests {
 
         // SAFETY: `aspace` is never switched onto a CPU so no hardware dereferences `pa`.
         expect_ok!(unsafe {
-            aspace.map(TEST_VIRTUAL_ADDRESS, &[pa], RO_FLAGS, ExistingEntryAction::Error)
+            aspace.map(TEST_VIRTUAL_ADDRESS, &[pa_typed], RO_FLAGS, ExistingEntryAction::Error)
         });
         // SAFETY: `aspace` is local and inactive.
         expect_ok!(unsafe {
@@ -4457,6 +4279,8 @@ mod tests {
             & !(2 * page::SIZE - 1)) as u64;
         let pa1 = pa0 | (page::SIZE as u64);
         assert_ne!(pa0.count_ones() % 2, pa1.count_ones() % 2);
+        let pa0_typed = PAddr(pa0 as usize);
+        let pa1_typed = PAddr(pa1 as usize);
 
         const RW_FLAGS: ArchMmuFlags =
             ARCH_MMU_FLAG_PERM_USER | ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE;
@@ -4464,7 +4288,12 @@ mod tests {
 
         // SAFETY: `aspace` is never switched onto a CPU so no hardware dereferences `pa0` or `pa1`.
         assert_ok!(unsafe {
-            aspace.map(TEST_VIRTUAL_ADDRESS, &[pa0, pa1], RW_FLAGS, ExistingEntryAction::Error)
+            aspace.map(
+                TEST_VIRTUAL_ADDRESS,
+                &[pa0_typed, pa1_typed],
+                RW_FLAGS,
+                ExistingEntryAction::Error,
+            )
         });
 
         {
@@ -4479,10 +4308,11 @@ mod tests {
             // and queue zero TLB invalidations.
             {
                 stack_pin_init!(let cm = ConsistencyManager::new(&locked));
-                let paddrs = [pa0, pa1];
-                let mut cursor = MappingCursor::new(&paddrs, page::SIZE, TEST_VIRTUAL_ADDRESS);
+                let paddrs = [pa0_typed, pa1_typed];
+                let mut cursor =
+                    MappingCursor::new(&paddrs, page::SIZE, VAddr(TEST_VIRTUAL_ADDRESS));
                 assert_true!(
-                    cursor.set_vaddr_relative_offset(vaddr_base, 1usize << top_size_shift)
+                    cursor.set_vaddr_relative_offset(VAddr(vaddr_base), 1usize << top_size_shift)
                 );
                 // SAFETY: `aspace` is initialized and `tt_virt` is protected by `guard`.
                 let (res, mapped) = unsafe {
@@ -4508,10 +4338,11 @@ mod tests {
                 cm.as_mut().flush_entry(TEST_VIRTUAL_ADDRESS + 2 * page::SIZE, true);
                 expect_eq!(cm.num_pending_tlbs, 1);
 
-                let paddrs = [pa0];
-                let mut cursor = MappingCursor::new(&paddrs, page::SIZE, TEST_VIRTUAL_ADDRESS);
+                let paddrs = [pa0_typed];
+                let mut cursor =
+                    MappingCursor::new(&paddrs, page::SIZE, VAddr(TEST_VIRTUAL_ADDRESS));
                 assert_true!(
-                    cursor.set_vaddr_relative_offset(vaddr_base, 1usize << top_size_shift)
+                    cursor.set_vaddr_relative_offset(VAddr(vaddr_base), 1usize << top_size_shift)
                 );
                 // SAFETY: `aspace` is initialized and `tt_virt` is protected by `guard`.
                 let (res, mapped) = unsafe {
@@ -4545,10 +4376,11 @@ mod tests {
                 cm.as_mut().flush_entry(TEST_VIRTUAL_ADDRESS + 2 * page::SIZE, true);
                 expect_eq!(cm.num_pending_tlbs, 1);
 
-                let paddrs = [pa1];
-                let mut cursor = MappingCursor::new(&paddrs, page::SIZE, TEST_VIRTUAL_ADDRESS);
+                let paddrs = [pa1_typed];
+                let mut cursor =
+                    MappingCursor::new(&paddrs, page::SIZE, VAddr(TEST_VIRTUAL_ADDRESS));
                 assert_true!(
-                    cursor.set_vaddr_relative_offset(vaddr_base, 1usize << top_size_shift)
+                    cursor.set_vaddr_relative_offset(VAddr(vaddr_base), 1usize << top_size_shift)
                 );
                 // SAFETY: `aspace` is initialized and `tt_virt` is protected by `guard`.
                 let (res, mapped) = unsafe {

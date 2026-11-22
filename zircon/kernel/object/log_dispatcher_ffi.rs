@@ -4,11 +4,10 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use super::DispatcherOps;
 use super::handle::KernelHandle;
 use super::log_dispatcher::{LogDispatcher, LogDispatcherState};
 use core::mem::MaybeUninit;
-use zx_types::{ZX_LOG_READABLE, zx_status_t};
+use zx_types::zx_status_t;
 
 // C++ FFI declarations
 unsafe extern "C" {
@@ -25,18 +24,3 @@ crate::object::dispatcher::impl_dispatcher_state_init!(
     LogDispatcherState,
     flags: u32
 );
-
-/// Trampoline callback for DlogReader notify.
-///
-/// # Safety
-///
-/// `cookie` must point to the `LogDispatcher`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_log_dispatcher_notify(cookie: *mut core::ffi::c_void) {
-    // SAFETY: `cookie` was passed during `DlogReader` initialization and
-    // points to the `LogDispatcher`.
-    unsafe {
-        let dispatcher = cookie.cast::<LogDispatcher>();
-        (*dispatcher).update_state(0, ZX_LOG_READABLE);
-    }
-}

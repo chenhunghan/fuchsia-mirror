@@ -11,7 +11,7 @@
 #include "src/starnix/tests/selinux/userspace/util.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 
-extern std::string DoPrePolicyLoadWork() { return "netlink_xperms_policy"; }
+extern std::string GetTestPolicyName() { return "netlink_xperms_policy"; }
 
 namespace {
 
@@ -66,13 +66,8 @@ TEST_P(NetlinkSocketXpermsTest, CheckNetlinkMsgXperms) {
   const netlink_util::NetlinkSocketTestCase& test_case = GetParam();
 
   EXPECT_TRUE(RunSubprocessAs("test_u:test_r:nlmsg_xperms_test_t:s0", [test_case]() {
-    int result = netlink_util::SendNetlinkMsg(test_case);
-
-    if (test_case.expected_result.is_ok()) {
-      EXPECT_THAT(result, SyscallSucceeds());
-    } else {
-      EXPECT_THAT(result, SyscallFailsWithErrno(test_case.expected_result.error_value()));
-    }
+    EXPECT_THAT(netlink_util::SendNetlinkMsg(test_case),
+                SyscallMatchesResult(test_case.expected_result));
   }));
 }
 

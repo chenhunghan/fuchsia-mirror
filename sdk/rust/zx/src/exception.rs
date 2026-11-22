@@ -256,6 +256,12 @@ pub enum PolicyCode {
     HandleLeak,
     NewIob,
 
+    /// The kernel detected that the thread kept a CPU busy for a long time while other runnable
+    /// threads on that CPU did not run.
+    SpinDetection {
+        cpu: u32,
+    },
+
     /// An unknown policy error.
     Unknown {
         code: u32,
@@ -288,6 +294,7 @@ impl PolicyCode {
             sys::ZX_EXCP_POLICY_CODE_PORT_TOO_MANY_OBSERVERS => Self::PortTooManyObservers,
             sys::ZX_EXCP_POLICY_CODE_HANDLE_LEAK => Self::HandleLeak,
             sys::ZX_EXCP_POLICY_CODE_NEW_IOB => Self::NewIob,
+            sys::ZX_EXCP_POLICY_CODE_SPIN_DETECTION => Self::SpinDetection { cpu: data },
             _ => Self::Unknown { code, data },
         }
     }

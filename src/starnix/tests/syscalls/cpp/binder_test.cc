@@ -1094,11 +1094,7 @@ TEST_F(BinderTest, FreezeWaitsForPendingTransactions) {
 
   // Interrupting a blocking BINDER_FREEZE with a signal fails with EINTR and rolls back the
   // freeze state.
-  struct sigaction sa = {};
-  struct sigaction old_sa = {};
-  sa.sa_handler = +[](int) {};
-  ASSERT_THAT(sigaction(SIGUSR1, &sa, &old_sa), SyscallSucceeds());
-  auto restore_sigaction = fit::defer([&] { sigaction(SIGUSR1, &old_sa, nullptr); });
+  test_helper::ScopedSigAction scoped_sigusr1(SIGUSR1, +[](int) {});
 
   std::atomic<bool> freeze_returned{false};
   pthread_t main_thread = pthread_self();
@@ -1291,6 +1287,80 @@ TEST_F(BinderTest, ScatterGatherOverlappingAndUnalignedOffsetsRejected) {
   }
 
   ASSERT_THAT(write(done_pipe.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
+// Flag of a BC_REPLY requesting that its BR_TRANSACTION_COMPLETE is returned along with the next
+// command for the replying thread, rather than on its own. It is not in the UAPI headers yet.
+constexpr uint32_t kTfDeferComplete = 0x80;
+
+// The BR_TRANSACTION_COMPLETE of a reply sent with TF_DEFER_COMPLETE is returned along with the
+// next transaction, so that a looper replies and receives the next transaction with a single
+// write/read.
+TEST_F(BinderTest, DeferredTransactionCompleteIsReadWithNextTransaction) {
+  if (!test_helper::IsStarnix()) {
+    GTEST_SKIP() << "TF_DEFER_COMPLETE is not supported by Linux yet.";
+  }
+  using namespace starnix_binder;
+  test_helper::ForkHelper fork_helper;
+  fork_helper.OnlyWaitForForkedChildren();
+  ForkContextManager(fork_helper, TestPath("binderfs"), [](const fbl::unique_fd& binder) {
+    ASSERT_TRUE(ReadUntil(binder, BR_TRANSACTION).Contains(BR_TRANSACTION));
+    const ReplyWriteBuffer reply = {.command = BC_REPLY, .data = {.flags = kTfDeferComplete}};
+    EXPECT_THAT(WriteRead(binder, &reply, sizeof(reply)).commands,
+                testing::ElementsAre(BR_TRANSACTION_COMPLETE, BR_TRANSACTION));
+    EXPECT_THAT(SendEmptyReply(binder).commands, testing::ElementsAre(BR_TRANSACTION_COMPLETE));
+  });
+
+  auto binder_and_map = OpenBinderAndMap(TestPath("binderfs"));
+  ASSERT_TRUE(binder_and_map.fd_);
+  ASSERT_THAT(binder_and_map.mapping_, SyscallResultIsOk());
+  for (int i = 0; i < 2; ++i) {
+    EXPECT_THAT(SendTwoWayTransaction(binder_and_map.fd_, kServiceManagerHandle).commands,
+                testing::ElementsAre(BR_TRANSACTION_COMPLETE, BR_REPLY));
+  }
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
+// A BR_TRANSACTION_COMPLETE deferred with TF_DEFER_COMPLETE does not make the binder readable on
+// its own: it is only read along with the next command for the replying thread.
+TEST_F(BinderTest, DeferredTransactionCompleteDoesNotMakeBinderReadable) {
+  if (!test_helper::IsStarnix()) {
+    GTEST_SKIP() << "TF_DEFER_COMPLETE is not supported by Linux yet.";
+  }
+  using namespace starnix_binder;
+  test_helper::ForkHelper fork_helper;
+  fork_helper.OnlyWaitForForkedChildren();
+  // Written to by the context manager once it has checked that its binder is not readable.
+  test_helper::ScopedPipe not_readable;
+  ForkContextManager(fork_helper, TestPath("binderfs"), [&](const fbl::unique_fd& binder) {
+    ASSERT_TRUE(ReadUntil(binder, BR_TRANSACTION).Contains(BR_TRANSACTION));
+    // Reply without reading.
+    const ReplyWriteBuffer reply = {.command = BC_REPLY, .data = {.flags = kTfDeferComplete}};
+    Write(binder, &reply, sizeof(reply));
+    struct pollfd pfd = {.fd = binder.get(), .events = POLLIN, .revents = 0};
+    EXPECT_THAT(poll(&pfd, 1, 0), SyscallSucceedsWithValue(0));
+    ASSERT_THAT(write(not_readable.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+
+    // The next transaction makes the binder readable, and is read along with the
+    // BR_TRANSACTION_COMPLETE.
+    WaitUntilReadable(binder);
+    EXPECT_THAT(WriteRead(binder, nullptr, 0).commands,
+                testing::ElementsAre(BR_TRANSACTION_COMPLETE, BR_TRANSACTION));
+    EXPECT_THAT(SendEmptyReply(binder).commands, testing::ElementsAre(BR_TRANSACTION_COMPLETE));
+  });
+
+  auto binder_and_map = OpenBinderAndMap(TestPath("binderfs"));
+  ASSERT_TRUE(binder_and_map.fd_);
+  ASSERT_THAT(binder_and_map.mapping_, SyscallResultIsOk());
+  const auto& binder = binder_and_map.fd_;
+  EXPECT_THAT(SendTwoWayTransaction(binder, kServiceManagerHandle).commands,
+              testing::ElementsAre(BR_TRANSACTION_COMPLETE, BR_REPLY));
+  // Only send the next transaction once the context manager has checked that its binder is not
+  // readable.
+  WaitUntilReadable(not_readable.ReadSide());
+  EXPECT_THAT(SendTwoWayTransaction(binder, kServiceManagerHandle).commands,
+              testing::ElementsAre(BR_TRANSACTION_COMPLETE, BR_REPLY));
   EXPECT_TRUE(fork_helper.WaitForChildren());
 }
 

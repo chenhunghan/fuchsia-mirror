@@ -364,27 +364,18 @@ func TestFFXPBArtifacts(t *testing.T) {
 }
 
 func TestEmuStartConsoleDryRunError(t *testing.T) {
-	tmpDir := t.TempDir()
-	ffxPath := filepath.Join(tmpDir, "ffx")
-	script := "#!/bin/bash\nif [[ \"$*\" == *\"--dry-run\"* ]]; then\n  echo '{\"user_error\":{\"message\":\"There are no virtual devices configured for this product bundle\"}}' >&2\n  exit 1\nfi\necho \"$@\"\n"
-	if err := os.WriteFile(ffxPath, []byte(script), os.ModePerm); err != nil {
-		t.Fatalf("failed to write mock ffx tool: %s", err)
-	}
-	ctx := context.Background()
-	sshKeys := SSHInfo{
-		SshPriv: filepath.Join(tmpDir, "privKey"),
-		SshPub:  filepath.Join(tmpDir, "pubKey"),
-	}
-	ffx, err := NewFFXInstance(ctx, ffxPath, tmpDir, []string{}, "target", &sshKeys, filepath.Join(tmpDir, "out"), UseFFXLegacy)
-	if err != nil {
-		t.Fatalf("NewFFXInstance failed: %s", err)
-	}
-	cmd, err := ffx.EmuStartConsole(ctx, tmpDir, "fuchsia-emulator", EmuTools{}, EmuStartArgs{
+	script := "#!/bin/bash\nif [[ \"$*\" == *\"--dry-run\"* && \"$*\" == *\"--machine json\"* ]]; then\n  echo '{\"user_error\":{\"message\":\"There are no virtual devices configured for this product bundle\"}}'\n  exit 1\nfi\necho \"$@\"\n"
+	ffx, tmpDir := newStrictTestFFX(t, script, "target")
+	cmd, err := ffx.EmuStartConsole(t.Context(), tmpDir, "fuchsia-emulator", EmuTools{}, EmuStartArgs{
 		Engine:        "qemu",
 		ProductBundle: filepath.Join(tmpDir, "pb"),
 	})
 	if err == nil {
-		t.Errorf("expected EmuStartConsole to fail when --dry-run fails, got nil error and cmd %v", cmd)
+		t.Fatalf("expected EmuStartConsole to fail when --dry-run fails, got nil error and cmd %v", cmd)
+	}
+	wantSubstr := "There are no virtual devices configured for this product bundle"
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Errorf("EmuStartConsole error = %q, want substring %q", err.Error(), wantSubstr)
 	}
 }
 
@@ -883,5 +874,56 @@ exit 1
 				t.Errorf("TargetList() = (%+v, nil), want non-nil error", got)
 			}
 		})
+	}
+}
+
+func TestBuildConfigs(t *testing.T) {
+	outputDir := "/tmp/ffx_outputs"
+	sshInfo := SSHInfo{SshPriv: "/tmp/priv", SshPub: "/tmp/pub"}
+
+	user, _ := buildConfigs(outputDir, "/tmp/tools/ffx", sshInfo, nil)
+	if got, want := user["shared_data"], filepath.Join(outputDir, "shared"); got != want {
+		t.Errorf("buildConfigs() user[\"shared_data\"] = %v, want %q", got, want)
+	}
+	if val, ok := user["emu.instance_dir"]; ok {
+		t.Errorf("buildConfigs() unexpectedly set emu.instance_dir = %v", val)
+	}
+
+	customEmuDir := "/tmp/custom_emu_instances"
+	userWithOverride, _ := buildConfigs(outputDir, "/tmp/tools/ffx", sshInfo, []ConfigSettings{
+		{
+			Level:    "user",
+			Settings: map[string]any{"emu.instance_dir": customEmuDir},
+		},
+	})
+	if got := userWithOverride["emu.instance_dir"]; got != customEmuDir {
+		t.Errorf("buildConfigs() override user[\"emu.instance_dir\"] = %v, want %q", got, customEmuDir)
+	}
+}
+
+func TestStrictFFXInstance_DefaultConfigs(t *testing.T) {
+	script := `#!/bin/bash
+if [[ "$*" == *"check-ssh-keys"* ]]; then
+  exit 0
+fi
+echo "$*"
+`
+	ffx, tmpDir := newStrictTestFFX(t, script, "")
+	var out bytes.Buffer
+	ffx.SetStdoutStderr(&out, &out)
+	if err := ffx.Run(t.Context(), "emu", "start"); err != nil {
+		t.Fatalf("ffx.Run() failed: %v", err)
+	}
+
+	wantSharedData := filepath.Join(tmpDir, "out", "shared")
+	if got := ffx.SharedData(); got != wantSharedData {
+		t.Errorf("SharedData() = %q, want %q", got, wantSharedData)
+	}
+	gotArgs := out.String()
+	if !strings.Contains(gotArgs, "-c shared_data="+wantSharedData) {
+		t.Errorf("ffx command args %q missing -c shared_data=%s", gotArgs, wantSharedData)
+	}
+	if strings.Contains(gotArgs, "emu.instance_dir") {
+		t.Errorf("ffx command args %q should not set emu.instance_dir", gotArgs)
 	}
 }

@@ -36,40 +36,23 @@ const TIMEOUT_WARN_THRESHOLD: f64 = 0.8;
 
 // Struct that allows a test suite to interact with the test realm.
 //
-// If the test suite needs to connect to a protocol exposed by the test realm, it MUST use the
-// context's realm_proxy and cannot use fuchsia_component::client::connect_to_protocol.
-//
-// Similarly, if the test suite needs to connect to /dev hosted by the test realm, it must use the
-// context's devfs. There is currently no way to access any other directories in the test realm. If
-// the test suite needs to access any other directories, the test realm factory implementation and
-// FIDL API will need to be changed.
+// If the test suite needs to connect to a protocol or service exposed by the test realm, it MUST
+// use the context's test_ns_prefix and cannot use fuchsia_component::client::connect_to_protocol.
 //
 // Example:
 //
 // // Create a new test realm context
-// let ctx = ctx::new(fidl_realm::WlanConfig{ ..Default::default() };
+// let ctx = TestRealmContext::new(fidl_realm::WlanConfig{ ..Default::default() }).await;
 //
 // // Connect to a protocol
-// let protocol_proxy = ctx.test_realm_proxy()
-//   .connect_to_protocol::<fidl_fuchsia_protocol::Protocol>()
-//   .await?;
-//
-// // Connect to dev/class/network in the test realm
-// let (directory, directory_server) =
-//      create_proxy::<fidl_fuchsia_io::DirectoryMarker>();
-//  fdio::service_connect_at(
-//     ctx.devfs().as_channel().as_ref(),
-//     "class/network",
-//     directory_server.into_channel(),
-//  )?;
+// let protocol_proxy = connect_to_protocol_at::<fidl_fuchsia_protocol::ProtocolMarker>(
+//     ctx.test_ns_prefix(),
+// )?;
 pub struct TestRealmContext {
     // The test namespace, which allows the test suite to connect to protocols exposed by
     // the test realm. The test namespace must outlive any dependencies on components that
     // run within it.
     test_ns: Arc<InstalledNamespace>,
-
-    // A directory proxy connected to "/dev" in the test realm.
-    devfs: fidl_fuchsia_io::DirectoryProxy,
 
     wlan_policy_moniker: Option<String>,
     wlandevicemonitor_moniker: String,
@@ -110,12 +93,6 @@ impl TestRealmContext {
         let test_ns =
             Arc::new(extend_namespace(realm_factory, dict_2).await.expect("failed to extend ns"));
 
-        let devfs = fuchsia_fs::directory::open_in_namespace(
-            &format!("{}/dev-topological", test_ns.prefix()),
-            fidl_fuchsia_io::PERM_READABLE,
-        )
-        .expect("Failed to open devfs from extended namespace");
-
         // Start the driver test realm
         let driver_test_realm_proxy =
             connect_to_protocol_at::<fidl_driver_test::RealmMarker>(&*test_ns)
@@ -144,6 +121,10 @@ impl TestRealmContext {
             }),
             fcomponent_test::Capability::Service(fcomponent_test::Service {
                 name: Some("fuchsia.wlan.tap.Service".to_string()),
+                ..Default::default()
+            }),
+            fcomponent_test::Capability::Service(fcomponent_test::Service {
+                name: Some(fidl_fuchsia_hardware_network::ServiceMarker::SERVICE_NAME.to_string()),
                 ..Default::default()
             }),
         ];
@@ -190,15 +171,11 @@ impl TestRealmContext {
             .expect("wlandevicemonitor moniker must be present")
             .clone();
 
-        Arc::new(Self { test_ns, devfs, wlan_policy_moniker, wlandevicemonitor_moniker, _tracing })
+        Arc::new(Self { test_ns, wlan_policy_moniker, wlandevicemonitor_moniker, _tracing })
     }
 
     pub fn test_ns_prefix(&self) -> &str {
         self.test_ns.prefix()
-    }
-
-    pub fn devfs(&self) -> &fidl_fuchsia_io::DirectoryProxy {
-        &self.devfs
     }
 }
 
@@ -414,16 +391,12 @@ impl TestHelper {
         self.ctx.test_ns_prefix()
     }
 
-    pub fn devfs(&self) -> &fidl_fuchsia_io::DirectoryProxy {
-        self.ctx.devfs()
-    }
-
     pub async fn start_netdevice_session(
         &mut self,
         mac: MacAddr,
     ) -> (netdevice_client::Session, netdevice_client::Port) {
         let mac = fidl_fuchsia_net::MacAddress { octets: mac.to_array() };
-        let (client, port) = netdevice_helper::create_client(self.devfs(), mac)
+        let (client, port) = netdevice_helper::create_client(self.test_ns_prefix(), mac)
             .await
             .expect("failed to create netdevice client");
         let (session, task_handle) = netdevice_helper::start_session(client, port).await;

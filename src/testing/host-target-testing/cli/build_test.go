@@ -16,12 +16,13 @@ import (
 
 func TestRepeatableBuildVarParsing(t *testing.T) {
 	for _, tc := range []struct {
-		name            string
-		kind            repeatableBuildKind
-		input           string
-		expectedValue   string
-		expectedVersion string
-		expectError     bool
+		name                      string
+		kind                      repeatableBuildKind
+		input                     string
+		expectedValue             string
+		expectedVersion           string
+		expectedProductBundleName string
+		expectError               bool
 	}{
 		{
 			name:            "build id plain",
@@ -92,6 +93,71 @@ func TestRepeatableBuildVarParsing(t *testing.T) {
 			input:       "12345:latest:lazy",
 			expectError: true,
 		},
+		{
+			name:                      "build id with product bundle name",
+			kind:                      buildIdKind,
+			input:                     "12345@core.x64",
+			expectedValue:             "12345",
+			expectedVersion:           "latest",
+			expectedProductBundleName: "core.x64",
+		},
+		{
+			name:                      "build id with version policy and product bundle name",
+			kind:                      buildIdKind,
+			input:                     "12345:fromApiLevel@core.arm64",
+			expectedValue:             "12345",
+			expectedVersion:           "fromApiLevel",
+			expectedProductBundleName: "core.arm64",
+		},
+		{
+			name:                      "builder name with product bundle name",
+			kind:                      builderNameKind,
+			input:                     "fuchsia.x64-release@core.x64",
+			expectedValue:             "fuchsia.x64-release",
+			expectedProductBundleName: "core.x64",
+		},
+		{
+			name:        "empty product bundle name error",
+			kind:        buildIdKind,
+			input:       "12345:latest@",
+			expectError: true,
+		},
+		{
+			name:        "empty build id with product bundle name error",
+			kind:        buildIdKind,
+			input:       "@core.x64",
+			expectError: true,
+		},
+		{
+			name:        "empty builder name with product bundle name error",
+			kind:        builderNameKind,
+			input:       "@core.x64",
+			expectError: true,
+		},
+		{
+			name:        "version policy after product bundle name error",
+			kind:        buildIdKind,
+			input:       "12345@core.x64:fromApiLevel",
+			expectError: true,
+		},
+		{
+			name:        "repeated product bundle name error",
+			kind:        buildIdKind,
+			input:       "12345@foo@bar",
+			expectError: true,
+		},
+		{
+			name:        "builder name with repeated product bundle name error",
+			kind:        builderNameKind,
+			input:       "fuchsia.x64-release@foo@bar",
+			expectError: true,
+		},
+		{
+			name:          "fuchsia build dir doesn't parse product bundle name",
+			kind:          fuchsiaBuildDirKind,
+			input:         "/path/to/out@default",
+			expectedValue: "/path/to/out@default",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &RepeatableBuildConfig{}
@@ -118,6 +184,49 @@ func TestRepeatableBuildVarParsing(t *testing.T) {
 			}
 			if tc.expectedVersion != "" && b.versionPolicy != tc.expectedVersion {
 				t.Fatalf("expected versionPolicy %q, got %q", tc.expectedVersion, b.versionPolicy)
+			}
+			if b.productBundleName != tc.expectedProductBundleName {
+				t.Fatalf("expected productBundleName %q, got %q", tc.expectedProductBundleName, b.productBundleName)
+			}
+		})
+	}
+}
+
+func TestRepeatableBuildProductBundleNameOr(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		build       repeatableBuild
+		defaultName string
+		want        string
+	}{
+		{
+			name:        "no names",
+			build:       repeatableBuild{},
+			defaultName: "",
+			want:        "",
+		},
+		{
+			name:        "default name only",
+			build:       repeatableBuild{},
+			defaultName: "core.x64",
+			want:        "core.x64",
+		},
+		{
+			name:        "per-build name only",
+			build:       repeatableBuild{productBundleName: "minimal.x64"},
+			defaultName: "",
+			want:        "minimal.x64",
+		},
+		{
+			name:        "per-build name overrides default name",
+			build:       repeatableBuild{productBundleName: "minimal.x64"},
+			defaultName: "core.x64",
+			want:        "minimal.x64",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.build.productBundleNameOr(tc.defaultName); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
 	}

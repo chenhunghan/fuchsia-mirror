@@ -8,7 +8,7 @@ pub mod counters;
 
 use alloc::boxed::Box;
 use core::fmt::Debug;
-use core::num::{NonZeroU8, NonZeroU16};
+use core::num::NonZeroU8;
 
 use lock_order::lock::{OrderedLockAccess, OrderedLockRef};
 use log::{debug, error, trace};
@@ -40,11 +40,11 @@ use packet_formats::icmp::ndp::{
 };
 use packet_formats::icmp::{
     IcmpDestUnreachable, IcmpEchoRequest, IcmpMessage, IcmpMessageType, IcmpPacket,
-    IcmpPacketBuilder, IcmpPacketRaw, IcmpParseArgs, IcmpTimeExceeded, IcmpZeroCode,
-    Icmpv4DestUnreachableCode, Icmpv4Packet, Icmpv4ParameterProblem, Icmpv4ParameterProblemCode,
-    Icmpv4TimeExceededCode, Icmpv6DestUnreachableCode, Icmpv6Packet, Icmpv6PacketTooBig,
-    Icmpv6ParameterProblem, Icmpv6ParameterProblemCode, Icmpv6TimeExceededCode, OriginalPacket,
-    peek_message_type,
+    IcmpPacketBuilder, IcmpPacketRaw, IcmpParseArgs, IcmpSimpleErrorPacketBuilder,
+    IcmpTimeExceeded, IcmpZeroCode, Icmpv4DestUnreachableCode, Icmpv4Packet,
+    Icmpv4ParameterProblem, Icmpv4ParameterProblemCode, Icmpv4TimeExceededCode,
+    Icmpv6DestUnreachableCode, Icmpv6Packet, Icmpv6PacketTooBig, Icmpv6ParameterProblem,
+    Icmpv6ParameterProblemCode, Icmpv6TimeExceededCode, OriginalPacket, peek_message_type,
 };
 use packet_formats::ip::{DscpAndEcn, Ipv4Proto, Ipv6Proto};
 use packet_formats::ipv4::Ipv4Header;
@@ -66,7 +66,7 @@ use crate::internal::device::{
 };
 use crate::internal::icmp::counters::{IcmpCountersIpExt, IcmpRxCounters, IcmpTxCounters};
 use crate::internal::local_delivery::{IpHeaderInfo, LocalDeliveryPacketInfo, ReceiveIpPacketMeta};
-use crate::internal::path_mtu::{PmtuDstAddr, PmtuHandler, PmtuSrcAddr};
+use crate::internal::path_mtu::{PmtuDstAddr, PmtuSrcAddr};
 use crate::internal::socket::{
     DelegatedRouteResolutionOptions, DelegatedSendOptions, IpSocketArgs, IpSocketHandler,
     OptionDelegationMarker, RouteResolutionOptions, SendOptions,
@@ -930,7 +930,6 @@ fn receive_ip_transport_icmp_error<
 impl<
     BC: IcmpBindingsContext,
     CC: InnerIcmpv4Context<BC>
-        + PmtuHandler<Ipv4, BC>
         + IpDeviceIngressStateContext<Ipv4>
         + CounterContext<IcmpRxCounters<Ipv4>>
         + CounterContext<IcmpTxCounters<Ipv4>>,
@@ -1137,104 +1136,46 @@ impl<
                     Received a Destination Unreachable message"
                 );
 
-                let error = if dest_unreachable.code()
-                    == Icmpv4DestUnreachableCode::FragmentationRequired
-                {
-                    // PMTUD applies to the path between the source and
-                    // destination of the original packet. Ignore the source
-                    // of the ICMP packet, which may well be an intermediate
-                    // router.
-                    let mtu = dest_unreachable.with_original_packet(|res| match res {
-                        Ok(original_packet) => {
-                            let (src_ip, dst_ip) = pmtu_path_from_original_packet::<Ipv4, _>(
+                dest_unreachable.with_original_packet(|res| match res {
+                    Ok(original_packet) => {
+                        let code = dest_unreachable.code();
+                        if code == Icmpv4DestUnreachableCode::FragmentationRequired {
+                            // PMTUD applies to the path between the source and
+                            // destination of the original packet. Verify the path
+                            // before dispatching the error to the transport layer.
+                            if !is_pmtu_path_valid::<Ipv4, _>(
                                 core_ctx,
                                 device,
                                 original_packet.src_ip(),
                                 original_packet.dst_ip(),
-                            )?;
-                            if let Some(next_hop_mtu) = dest_unreachable.message().next_hop_mtu() {
-                                // `update_pmtu_if_less` will only update the
-                                // PMTU if the Dest Unreachable message's MTU
-                                // field had a value that was at least the IPv4
-                                // minimum MTU (which is required by IPv4 RFC
-                                // 791).
-                                core_ctx.update_pmtu_if_less(
-                                    bindings_ctx,
-                                    src_ip,
-                                    dst_ip,
-                                    Mtu::new(u32::from(next_hop_mtu.get())),
-                                )
-                            } else {
-                                // If the Next-Hop MTU from an incoming ICMP
-                                // message is `0`, then we assume the source
-                                // node of the ICMP message does not implement
-                                // RFC 1191 and therefore does not actually use
-                                // the Next-Hop MTU field and still considers it
-                                // as an unused field.
-                                //
-                                // In this case, the only information we have is
-                                // the size of the original IP packet that was
-                                // too big (the original packet header should be
-                                // included in the ICMP response). Here we will
-                                // simply reduce our PMTU estimate to a value
-                                // less than the total length of the original
-                                // packet. See RFC 1191 Section 5.
-                                //
-                                // `update_pmtu_next_lower` may return an error,
-                                // but it will only happen if no valid lower
-                                // value exists from the original packet's
-                                // length. It is safe to silently ignore the
-                                // error when we have no valid lower PMTU value
-                                // as the node from `src_ip` would not be IP RFC
-                                // compliant and we expect this to be very rare
-                                // (for IPv4, the lowest MTU value for a link
-                                // can be 68 bytes).
-                                let total_len = original_packet.total_len();
-
-                                trace!(
-                                    "<IcmpIpTransportContext as IpTransportContext<Ipv4>>::\
-                                    receive_ip_packet: Next-Hop MTU is 0 so using the next best \
-                                    PMTU value from {total_len}"
-                                );
-
-                                core_ctx.update_pmtu_next_lower(
-                                    bindings_ctx,
-                                    src_ip,
-                                    dst_ip,
-                                    Mtu::new(u32::from(total_len)),
-                                )
+                            ) {
+                                return;
                             }
                         }
-                        Err(_) => {
-                            // Ok to silently ignore as RFC 792 requires nodes
-                            // to send the original IP packet header + 64 bytes
-                            // of the original IP packet's body so the node
-                            // itself is already violating the RFC.
-                            debug!(
-                                "Ignoring Fragmentation Required with an unparseable original \
-                                IPv4 packet"
-                            );
-                            None
-                        }
-                    });
-                    mtu.and_then(|mtu| {
-                        let mtu = u16::try_from(mtu.get()).unwrap_or(u16::MAX);
-                        let mtu = NonZeroU16::new(mtu)?;
-                        Some(Icmpv4ErrorCode::DestUnreachable(
-                            dest_unreachable.code(),
-                            IcmpDestUnreachable::new_for_frag_req(mtu),
-                        ))
-                    })
-                } else {
-                    Some(Icmpv4ErrorCode::DestUnreachable(
-                        dest_unreachable.code(),
-                        *dest_unreachable.message(),
-                    ))
-                };
-
-                if let Some(error) = error {
-                    receive_icmpv4_error(core_ctx, bindings_ctx, device, &dest_unreachable, error);
-                }
+                        let error = Icmpv4ErrorCode::DestUnreachable {
+                            code,
+                            message: *dest_unreachable.message(),
+                            original_packet_length: original_packet.total_len(),
+                        };
+                        receive_icmpv4_error(
+                            core_ctx,
+                            bindings_ctx,
+                            device,
+                            &dest_unreachable,
+                            error,
+                        );
+                    }
+                    Err(_) => {
+                        // Ok to silently ignore as RFC 792 requires nodes to
+                        // send the original IP packet header + 64 bytes of the
+                        // original IP packet's body so the node itself is
+                        // already violating the RFC.
+                        debug!(
+                            "Ignoring Destination Unreachable with an unparseable original IPv4 \
+                            packet"
+                        );
+                    }
+                });
             }
             Icmpv4Packet::TimeExceeded(time_exceeded) => {
                 CounterContext::<IcmpRxCounters<Ipv4>>::counters(core_ctx)
@@ -1945,7 +1886,6 @@ impl<
         + Ipv6DeviceHandler<BC>
         + IpDeviceHandler<Ipv6, BC>
         + IpDeviceIngressStateContext<Ipv6>
-        + PmtuHandler<Ipv6, BC>
         + NudIpHandler<Ipv6, BC>
         + IpLayerHandler<Ipv6, BC>
         + CounterContext<IcmpRxCounters<Ipv6>>
@@ -2097,44 +2037,31 @@ impl<
                 trace!(
                     "<IcmpIpTransportContext as IpTransportContext<Ipv6>>::receive_ip_packet: Received a Packet Too Big message"
                 );
-                // PMTUD applies to the path between the source and
-                // destination of the original packet. Ignore the source
-                // of the ICMP packet, which may well be an intermediate
-                // router.
-                //
-                // `update_pmtu_if_less` will only update the PMTU if the
-                // Packet Too Big message's MTU field had a value that was
-                // at least the IPv6 minimum MTU (which is required by IPv6
-                // RFC 8200).
-                let mtu = packet_too_big.with_original_packet(|res| match res {
+                packet_too_big.with_original_packet(|res| match res {
                     Ok(original_packet) => {
-                        let (src_ip, dst_ip) = pmtu_path_from_original_packet::<Ipv6, _>(
+                        // PMTUD applies to the path between the source and
+                        // destination of the original packet. Verify the path
+                        // before dispatching the error to the transport layer.
+                        if !is_pmtu_path_valid::<Ipv6, _>(
                             core_ctx,
                             device,
                             original_packet.src_ip(),
                             original_packet.dst_ip(),
-                        )?;
-                        core_ctx.update_pmtu_if_less(
+                        ) {
+                            return;
+                        }
+                        receive_icmpv6_error(
+                            core_ctx,
                             bindings_ctx,
-                            src_ip,
-                            dst_ip,
-                            Mtu::new(packet_too_big.message().mtu()),
-                        )
+                            device,
+                            &packet_too_big,
+                            Icmpv6ErrorCode::PacketTooBig(Mtu::new(packet_too_big.message().mtu())),
+                        );
                     }
                     Err(_) => {
                         debug!("Ignoring Packet Too Big with an unparseable original IPv6 packet");
-                        None
                     }
                 });
-                if let Some(mtu) = mtu {
-                    receive_icmpv6_error(
-                        core_ctx,
-                        bindings_ctx,
-                        device,
-                        &packet_too_big,
-                        Icmpv6ErrorCode::PacketTooBig(mtu),
-                    );
-                }
             }
             Icmpv6Packet::Mld(packet) => {
                 core_ctx.receive_mld_packet(
@@ -2257,9 +2184,9 @@ fn send_icmp_reply<I, BC, CC, S, F, O>(
         })
 }
 
-/// Validates the addresses of the original packet included in a PMTU error
-/// (IPv4 Fragmentation Required or IPv6 Packet Too Big) received on `device`,
-/// returning the path they identify.
+/// Returns whether the addresses of the original packet included in a PMTU
+/// error (IPv4 Fragmentation Required or IPv6 Packet Too Big) received on
+/// `device` identify a valid PMTU path.
 ///
 /// The original packet must have been sent by this node for the error to be
 /// meaningful, so its source must be a unicast address assigned to `device`.
@@ -2267,23 +2194,23 @@ fn send_icmp_reply<I, BC, CC, S, F, O>(
 /// and may be multicast: PMTUD applies to multicast as well as unicast
 /// destinations (RFC 8201 section 1).
 ///
-/// Returns `None` if the addresses do not meet these requirements, in which
+/// Returns `false` if the addresses do not meet these requirements, in which
 /// case the error should be ignored.
-fn pmtu_path_from_original_packet<I: IpLayerIpExt, CC: IpDeviceIngressStateContext<I>>(
+fn is_pmtu_path_valid<I: IpLayerIpExt, CC: IpDeviceIngressStateContext<I>>(
     core_ctx: &mut CC,
     device: &CC::DeviceId,
     original_src_ip: I::Addr,
     original_dst_ip: I::Addr,
-) -> Option<(PmtuSrcAddr<I::Addr>, PmtuDstAddr<I::Addr>)> {
+) -> bool {
     let Some(src_ip) = PmtuSrcAddr::new(original_src_ip) else {
         debug!("ignoring PMTU error for original packet with invalid source {original_src_ip}");
-        return None;
+        return false;
     };
     let Some(dst_ip) = PmtuDstAddr::new(original_dst_ip) else {
         debug!(
             "ignoring PMTU error for original packet with invalid destination {original_dst_ip}"
         );
-        return None;
+        return false;
     };
     let assigned = match core_ctx.address_status_for_device(src_ip.into(), device) {
         AddressStatus::Present(status) => crate::internal::base::is_unicast_assigned::<I>(&status),
@@ -2294,9 +2221,9 @@ fn pmtu_path_from_original_packet<I: IpLayerIpExt, CC: IpDeviceIngressStateConte
             "ignoring PMTU error for path {src_ip} -> {dst_ip}: source is not assigned to \
             {device:?}"
         );
-        return None;
+        return false;
     }
-    Some((src_ip, dst_ip))
+    true
 }
 
 /// Receive an ICMP(v4) error message.
@@ -2424,42 +2351,39 @@ fn send_icmpv4_error_message<BC, CC>(
 
     let tx_metadata: BC::TxMetadata = Default::default();
 
-    macro_rules! send {
-        ($message:expr, $code:expr) => {{
-            // TODO(https://fxbug.dev/42177877): Improve source address selection for ICMP
-            // errors sent from unnumbered/router interfaces.
-            let _ = try_send_error!(
-                core_ctx,
-                bindings_ctx,
-                core_ctx.send_oneshot_ip_packet_with_dyn_serializer(
-                    bindings_ctx,
-                    IpSocketArgs {
-                        device: device.map(EitherDeviceId::Strong),
-                        local_ip: None,
-                        remote_ip: original_src_ip,
-                        proto: Ipv4Proto::Icmp,
-                        options: &WithMarks(marks),
-                    },
-                    tx_metadata,
-                    |local_ip| {
-                        IcmpPacketBuilder::<Ipv4, _>::new(
-                            local_ip.addr(),
-                            original_src_ip.addr(),
-                            $code,
-                            $message,
-                        )
-                        .wrap_body(original_packet)
-                    },
-                )
-            );
-        }};
-    }
-
-    match message {
-        Icmpv4ErrorMessage::TimeExceeded { message, code } => send!(message, code),
-        Icmpv4ErrorMessage::ParameterProblem { message, code } => send!(message, code),
-        Icmpv4ErrorMessage::DestUnreachable { message, code } => send!(message, code),
-    }
+    // TODO(https://fxbug.dev/42177877): Improve source address selection for
+    // ICMP errors sent from unnumbered/router interfaces.
+    let _ = try_send_error!(
+        core_ctx,
+        bindings_ctx,
+        core_ctx.send_oneshot_ip_packet_with_dyn_serializer(
+            bindings_ctx,
+            IpSocketArgs {
+                device: device.map(EitherDeviceId::Strong),
+                local_ip: None,
+                remote_ip: original_src_ip,
+                proto: Ipv4Proto::Icmp,
+                options: &WithMarks(marks),
+            },
+            tx_metadata,
+            |local_ip| {
+                let src_ip = local_ip.addr();
+                let dst_ip = original_src_ip.addr();
+                let icmp_builder = match message {
+                    Icmpv4ErrorMessage::TimeExceeded { message, code } => {
+                        IcmpSimpleErrorPacketBuilder::new_from_msg(src_ip, dst_ip, message, code)
+                    }
+                    Icmpv4ErrorMessage::ParameterProblem { message, code } => {
+                        IcmpSimpleErrorPacketBuilder::new_from_msg(src_ip, dst_ip, message, code)
+                    }
+                    Icmpv4ErrorMessage::DestUnreachable { message, code } => {
+                        IcmpSimpleErrorPacketBuilder::new_from_msg(src_ip, dst_ip, message, code)
+                    }
+                };
+                icmp_builder.wrap_body(original_packet)
+            },
+        )
+    );
 }
 
 // NB: Use a concrete `Buf<&mut [u8]>` instead of being generic over `B:
@@ -2496,7 +2420,7 @@ fn send_icmpv6_error_message<BC, CC>(
     impl<'a> OptionDelegationMarker for Icmpv6ErrorOptions<'a> {}
     impl<'a> DelegatedSendOptions<Ipv6> for Icmpv6ErrorOptions<'a> {
         fn mtu(&self) -> Mtu {
-            Ipv6::MINIMUM_LINK_MTU
+            Ipv6::MINIMUM_LINK_MTU.get()
         }
     }
     impl<'a> DelegatedRouteResolutionOptions<Ipv6> for Icmpv6ErrorOptions<'a> {
@@ -2508,49 +2432,48 @@ fn send_icmpv6_error_message<BC, CC>(
 
     let tx_metadata: BC::TxMetadata = Default::default();
 
-    macro_rules! send {
-        ($message:expr, $code:expr) => {{
-            // TODO(https://fxbug.dev/42177877): Improve source address selection for ICMP
-            // errors sent from unnumbered/router interfaces.
-            let _ = try_send_error!(
-                core_ctx,
-                bindings_ctx,
-                core_ctx.send_oneshot_ip_packet_with_dyn_serializer(
-                    bindings_ctx,
-                    IpSocketArgs {
-                        device: device.map(EitherDeviceId::Strong),
-                        local_ip: None,
-                        remote_ip: original_src_ip,
-                        proto: Ipv6Proto::Icmpv6,
-                        options: &Icmpv6ErrorOptions(marks),
-                    },
-                    tx_metadata,
-                    |local_ip| {
-                        let icmp_builder = IcmpPacketBuilder::<Ipv6, _>::new(
-                            local_ip.addr(),
-                            original_src_ip.addr(),
-                            $code,
-                            $message,
-                        );
+    // TODO(https://fxbug.dev/42177877): Improve source address selection for
+    // ICMP errors sent from unnumbered/router interfaces.
+    let _ = try_send_error!(
+        core_ctx,
+        bindings_ctx,
+        core_ctx.send_oneshot_ip_packet_with_dyn_serializer(
+            bindings_ctx,
+            IpSocketArgs {
+                device: device.map(EitherDeviceId::Strong),
+                local_ip: None,
+                remote_ip: original_src_ip,
+                proto: Ipv6Proto::Icmpv6,
+                options: &Icmpv6ErrorOptions(marks),
+            },
+            tx_metadata,
+            |local_ip| {
+                let src_ip = local_ip.addr();
+                let dst_ip = original_src_ip.addr();
+                let icmp_builder = match message {
+                    Icmpv6ErrorMessage::TimeExceeded { message, code } => {
+                        IcmpSimpleErrorPacketBuilder::new_from_msg(src_ip, dst_ip, message, code)
+                    }
+                    Icmpv6ErrorMessage::PacketTooBig { message, code } => {
+                        IcmpSimpleErrorPacketBuilder::new_from_msg(src_ip, dst_ip, message, code)
+                    }
+                    Icmpv6ErrorMessage::ParameterProblem { message, code } => {
+                        IcmpSimpleErrorPacketBuilder::new_from_msg(src_ip, dst_ip, message, code)
+                    }
+                    Icmpv6ErrorMessage::DestUnreachable { message, code } => {
+                        IcmpSimpleErrorPacketBuilder::new_from_msg(src_ip, dst_ip, message, code)
+                    }
+                };
 
-                        // Per RFC 4443, body contains as much of the original body as
-                        // possible without exceeding IPv6 minimum MTU.
-                        icmp_builder.wrap_body(TruncatingSerializer::new(
-                            original_packet,
-                            TruncateDirection::DiscardBack,
-                        ))
-                    },
-                )
-            );
-        }};
-    }
-
-    match message {
-        Icmpv6ErrorMessage::TimeExceeded { message, code } => send!(message, code),
-        Icmpv6ErrorMessage::PacketTooBig { message, code } => send!(message, code),
-        Icmpv6ErrorMessage::ParameterProblem { message, code } => send!(message, code),
-        Icmpv6ErrorMessage::DestUnreachable { message, code } => send!(message, code),
-    }
+                // Per RFC 4443, body contains as much of the original body as
+                // possible without exceeding IPv6 minimum MTU.
+                icmp_builder.wrap_body(TruncatingSerializer::new(
+                    original_packet,
+                    TruncateDirection::DiscardBack,
+                ))
+            },
+        )
+    );
 }
 
 /// Should we send an ICMP(v4) response?
@@ -3167,8 +3090,6 @@ mod tests {
             false
         }
     }
-    impl_pmtu_handler!(FakeIcmpCoreCtx<Ipv4>, FakeIcmpBindingsCtx<Ipv4>, Ipv4);
-    impl_pmtu_handler!(FakeIcmpCoreCtx<Ipv6>, FakeIcmpBindingsCtx<Ipv6>, Ipv6);
 
     impl<I: IcmpTestIpExt> IpSocketHandler<I, FakeIcmpBindingsCtx<I>> for FakeIcmpCoreCtx<I> {
         fn new_ip_socket<O>(
@@ -3474,6 +3395,7 @@ mod tests {
             ))
             .serialize_vec_outer(&mut NetworkSerializationContext::default())
             .unwrap();
+        let original_packet_length = u16::try_from(buffer.as_ref().len()).unwrap();
 
         test_receive_icmpv4_error_helper(
             buffer.as_mut(),
@@ -3487,10 +3409,11 @@ mod tests {
                     core_ctx.icmp.rx_counters.dest_unreachable.dest_network_unreachable.get(),
                     1
                 );
-                let err = Icmpv4ErrorCode::DestUnreachable(
-                    Icmpv4DestUnreachableCode::DestNetworkUnreachable,
-                    IcmpDestUnreachable::default(),
-                );
+                let err = Icmpv4ErrorCode::DestUnreachable {
+                    code: Icmpv4DestUnreachableCode::DestNetworkUnreachable,
+                    message: IcmpDestUnreachable::default(),
+                    original_packet_length,
+                };
                 assert_eq!(core_ctx.icmp.receive_icmp_error, [err]);
             },
         );
@@ -3542,6 +3465,7 @@ mod tests {
         .wrap_body(EmptyBuf)
         .serialize_vec_outer(&mut NetworkSerializationContext::default())
         .unwrap();
+        let original_packet_length = u16::try_from(buffer.as_ref().len()).unwrap();
 
         test_receive_icmpv4_error_helper(
             buffer.as_mut(),
@@ -3555,10 +3479,11 @@ mod tests {
                     core_ctx.icmp.rx_counters.dest_unreachable.dest_network_unreachable.get(),
                     1
                 );
-                let err = Icmpv4ErrorCode::DestUnreachable(
-                    Icmpv4DestUnreachableCode::DestNetworkUnreachable,
-                    IcmpDestUnreachable::default(),
-                );
+                let err = Icmpv4ErrorCode::DestUnreachable {
+                    code: Icmpv4DestUnreachableCode::DestNetworkUnreachable,
+                    message: IcmpDestUnreachable::default(),
+                    original_packet_length,
+                };
                 assert_eq!(core_ctx.icmp.receive_icmp_error, [err]);
             },
         );
@@ -3609,6 +3534,7 @@ mod tests {
         .wrap_body(EmptyBuf)
         .serialize_vec_outer(&mut NetworkSerializationContext::default())
         .unwrap();
+        let original_packet_length = u16::try_from(buffer.as_ref().len()).unwrap();
 
         test_receive_icmpv4_error_helper(
             buffer.as_mut(),
@@ -3622,10 +3548,11 @@ mod tests {
                     core_ctx.icmp.rx_counters.dest_unreachable.dest_network_unreachable.get(),
                     1
                 );
-                let err = Icmpv4ErrorCode::DestUnreachable(
-                    Icmpv4DestUnreachableCode::DestNetworkUnreachable,
-                    IcmpDestUnreachable::default(),
-                );
+                let err = Icmpv4ErrorCode::DestUnreachable {
+                    code: Icmpv4DestUnreachableCode::DestNetworkUnreachable,
+                    message: IcmpDestUnreachable::default(),
+                    original_packet_length,
+                };
                 assert_eq!(core_ctx.icmp.receive_icmp_error, [err]);
             },
         );

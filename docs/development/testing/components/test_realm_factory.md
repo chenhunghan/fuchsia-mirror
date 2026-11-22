@@ -20,7 +20,7 @@ the generated test.
 
 See the list of [examples](#examples) below for additional help.
 
-## Test topology
+## Test topology {#test-topology}
 
 Rather than directly using RealmBuilder, tests should use FIDL to call a test
 realm factory component which creates the test realm. The realm factory
@@ -29,7 +29,9 @@ connect to the realm's exposed capabilities. By convention, RealmFactory FIDL
 protocols accept a test specific `RealmOptions` FIDL table as an argument to
 support configuration.
 
-![trf_topology.png](images/trf_topology.png)
+![Test suite calls RealmFactory/CreateRealm on test realm factory, which uses
+RealmBuilder to create test realm for
+fuchsia.testing.harness.RealmProxy.](images/trf_topology.png)
 
 ### Package structure
 
@@ -38,9 +40,10 @@ allows releasing the test suite's package in CTF without also releasing the test
 realm factory. At build time, subpackaging combines both components into a
 single package.
 
-![trf_ctf_packages.png](images/trf_ctf_packages.png)
+![Test root and test realm factory in package 1, test suite in package 2,
+both children of the test root.](images/trf_ctf_packages.png)
 
-### RealmFactory SDK requirements
+### RealmFactory SDK requirements {#realmfactory-sdk-requirements}
 
 If a RealmFactory FIDL protocol will be used by CTF tests, it should have
 [FIDL availability] annotations. The protocol must also be added to the
@@ -57,7 +60,9 @@ protocol to the test suite. The test suite connects to the protocol using the
 RealmProxy connection, and the puppet interacts with the other components in
 the realm by following commands sent from the test suite.
 
-![trf_toplogy_with_puppet.png](images/trf_topology_with_puppet.png)
+![Test realm holding the component under test and a puppet; the test suite
+drives the puppet over the Puppet FIDL protocol through
+RealmProxy.](images/trf_topology_with_puppet.png)
 
 Puppets allow a test to interact with the test realm without exposing the
 realm's implementation details. For example, a puppet could be used to provide
@@ -103,7 +108,7 @@ test realm run in different processes. Instead, consider creating a
 [puppet](#puppets) component that the test suite can use to send stub requests
 or responses to the component under test.
 
-## Examples
+## Examples {#examples}
 
 Below are some examples of test suites and test realm factory components.
 

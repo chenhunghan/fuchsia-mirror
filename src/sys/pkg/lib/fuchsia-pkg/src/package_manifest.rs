@@ -825,6 +825,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::{Value, json};
     use tempfile::{NamedTempFile, TempDir};
+    use test_case::test_case;
 
     const FAKE_ABI_REVISION: version_history::AbiRevision =
         version_history::AbiRevision::from_u64(0x323dd69d73d957a7);
@@ -1054,15 +1055,16 @@ mod tests {
         assert_eq!(Some(FAKE_ABI_REVISION), package_manifest.abi_revision());
     }
 
-    #[test]
-    fn test_from_blobs_dir() {
+    #[test_case(DeliveryBlobType::Type1)]
+    #[test_case(DeliveryBlobType::Type2)]
+    fn test_from_blobs_dir(delivery_blob_type: DeliveryBlobType) {
         let temp = TempDir::new().unwrap();
         let temp_dir = Utf8Path::from_path(temp.path()).unwrap();
 
         let gen_dir = temp_dir.join("gen");
         std::fs::create_dir_all(&gen_dir).unwrap();
 
-        let blobs_dir = temp_dir.join("blobs/1");
+        let blobs_dir = temp_dir.join(format!("blobs/{}", u32::from(delivery_blob_type)));
         std::fs::create_dir_all(&blobs_dir).unwrap();
 
         let manifests_dir = temp_dir.join("manifests");
@@ -1075,7 +1077,7 @@ mod tests {
             let path = blobs_dir.join(hash.to_string());
 
             let blob_file = File::create(&path).unwrap();
-            delivery_blob::generate_to(DeliveryBlobType::Type1, contents, &blob_file).unwrap();
+            delivery_blob::generate_to(delivery_blob_type, contents, &blob_file).unwrap();
 
             (path, hash)
         };
@@ -1090,7 +1092,7 @@ mod tests {
         let gen_meta_far_path = temp_dir.join("meta.far");
         let _package_manifest = package_builder.build(&gen_dir, &gen_meta_far_path).unwrap();
 
-        // Compute the meta.far hash, and generate a delivery blob in the blobs/1/ directory.
+        // Compute the meta.far hash, and generate a delivery blob in the blobs/<type>/ directory.
         let meta_far_bytes = std::fs::read(&gen_meta_far_path).unwrap();
         let (meta_far_path, meta_far_hash) = write_blob(&meta_far_bytes);
 
@@ -1099,7 +1101,7 @@ mod tests {
         assert_eq!(
             PackageManifest::from_blobs_dir(
                 blobs_dir.as_std_path().parent().unwrap(),
-                Some(DeliveryBlobType::Type1),
+                Some(delivery_blob_type),
                 meta_far_hash,
                 manifests_dir.as_std_path()
             )
@@ -1132,7 +1134,7 @@ mod tests {
                 subpackages: vec![],
                 repository: None,
                 blob_sources_relative: RelativeTo::WorkingDir,
-                delivery_blob_type: Some(DeliveryBlobType::Type1),
+                delivery_blob_type: Some(delivery_blob_type),
                 abi_revision: Some(FAKE_ABI_REVISION),
             }))
         );

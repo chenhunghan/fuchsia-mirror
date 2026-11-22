@@ -9,22 +9,53 @@ use init::{LkInitFlags, LkInitLevel, LkInitStruct};
 
 const LOCAL_TRACE: u32 = 0;
 
-fn get_init_structs() -> &'static [LkInitStruct] {
-    unsafe extern "C" {
-        #[link_name = "__start_lk_init"]
-        static START_LK_INIT: LkInitStruct;
-        #[link_name = "__stop_lk_init"]
-        static STOP_LK_INIT: LkInitStruct;
-    }
-    // SAFETY: These are defined by the linker script to bound the lk_init section.
+/// Returns `(start_addr, count)` for the linker-collected `.data.rel.ro.lk_init` table.
+fn lk_init_bounds() -> (usize, usize) {
+    let start_addr: usize;
+    let stop_addr: usize;
+    // SAFETY: Reads the linker-defined hidden section boundary addresses `__start_lk_init` and
+    // `__stop_lk_init` without dereferencing memory or modifying registers/stack.
     unsafe {
-        let start = &START_LK_INIT as *const LkInitStruct;
-        let stop = &STOP_LK_INIT as *const LkInitStruct;
-        let count = (stop as usize - start as usize) / core::mem::size_of::<LkInitStruct>();
-        core::slice::from_raw_parts(start, count)
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!(
+            "adrp {start}, __start_lk_init",
+            "add {start}, {start}, :lo12:__start_lk_init",
+            "adrp {stop}, __stop_lk_init",
+            "add {stop}, {stop}, :lo12:__stop_lk_init",
+            start = out(reg) start_addr,
+            stop = out(reg) stop_addr,
+            options(nomem, nostack, preserves_flags),
+        );
+        #[cfg(target_arch = "riscv64")]
+        core::arch::asm!(
+            "lla {start}, __start_lk_init",
+            "lla {stop}, __stop_lk_init",
+            start = out(reg) start_addr,
+            stop = out(reg) stop_addr,
+            options(nomem, nostack, preserves_flags),
+        );
+        #[cfg(target_arch = "x86_64")]
+        core::arch::asm!(
+            "lea __start_lk_init(%rip), {start}",
+            "lea __stop_lk_init(%rip), {stop}",
+            start = out(reg) start_addr,
+            stop = out(reg) stop_addr,
+            options(att_syntax, nomem, nostack, preserves_flags),
+        );
     }
+    let count = (stop_addr - start_addr) / size_of::<LkInitStruct>();
+    (start_addr, count)
 }
 
+/// Runs registered kernel initialization hooks matching `required_flag` in level order from
+/// `start_level` through `stop_level` (inclusive).
+///
+/// # Safety
+///
+/// Must only be called in the intended kernel boot/CPU-bringup sequence with all preconditions of
+/// the hooks in `[start_level, stop_level]` satisfied.
+// SAFETY: Exported symbol matches `extern "C" void lk_init_level(...)` in `<lk/init.h>` and has no
+// other definition.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lk_init_level(
     required_flag: LkInitFlags,
@@ -41,7 +72,7 @@ pub unsafe extern "C" fn lk_init_level(
     let mut last_called_level = LkInitLevel(start_level.0 - 1);
     let mut last: Option<*const LkInitStruct> = None;
 
-    let init_structs = get_init_structs();
+    let (start_addr, init_count) = lk_init_bounds();
 
     loop {
         // Search for the lowest uncalled hook to call.
@@ -54,16 +85,22 @@ pub unsafe extern "C" fn lk_init_level(
         let mut found: Option<&LkInitStruct> = None;
         let mut seen_last = false;
 
-        for ptr in init_structs {
+        for i in 0..init_count {
+            let entry_addr = start_addr + i * size_of::<LkInitStruct>();
+            // SAFETY: Each `LkInitStruct` entry in `.data.rel.ro.lk_init` is an initialized,
+            // read-only `'static` registration whose address is materialized individually rather
+            // than forming a cross-allocation slice.
+            let ptr = unsafe { &*core::ptr::with_exposed_provenance::<LkInitStruct>(entry_addr) };
             ltracef!(
                 "looking at {:p} {:?} level {:#x}, flags {:#x}, seen_last {}\n",
                 ptr,
+                // SAFETY: `ptr.name` is a static NUL-terminated C string from `lk_init_hook!`.
                 unsafe { core::ffi::CStr::from_ptr(ptr.name) },
                 ptr.level.0,
                 ptr.flags as u32,
                 seen_last
             );
-            let ptr_addr = ptr as *const LkInitStruct;
+            let ptr_addr = core::ptr::from_ref(ptr);
             if Some(ptr_addr) == last {
                 seen_last = true;
             }
@@ -108,6 +145,7 @@ pub unsafe extern "C" fn lk_init_level(
             "INIT: cpu {}, calling hook {:?} {:?} at level {:#x}, flags {:#x}\n",
             crate::arch_rs::curr_cpu_num(),
             found_ref.hook,
+            // SAFETY: `found_ref.name` is a static NUL-terminated C string from `lk_init_hook!`.
             unsafe { core::ffi::CStr::from_ptr(found_ref.name) },
             found_ref.level.0,
             found_ref.flags as u32
@@ -115,6 +153,19 @@ pub unsafe extern "C" fn lk_init_level(
         (found_ref.hook)(found_ref.level);
 
         last_called_level = found_ref.level;
-        last = Some(found_ref as *const LkInitStruct);
+        last = Some(core::ptr::from_ref(found_ref));
     }
+}
+
+/// Runs primary CPU initialization hooks from `start_level` through `stop_level`.
+///
+/// # Safety
+///
+/// Must only be called on the primary CPU in ascending boot-level order with all preconditions of
+/// the hooks in `[start_level, stop_level]` satisfied.
+#[inline]
+pub unsafe fn lk_primary_cpu_init_level(start_level: LkInitLevel, stop_level: LkInitLevel) {
+    // SAFETY: Caller upholds the primary-CPU boot ordering invariants for
+    // `[start_level, stop_level]`.
+    unsafe { lk_init_level(LkInitFlags::PrimaryCpu, start_level, stop_level) };
 }

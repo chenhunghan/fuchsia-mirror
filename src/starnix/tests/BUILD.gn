@@ -14,6 +14,7 @@ group("tests") {
 
   deps = [
     "alpine:tests",
+    "battery_manager:tests",
     "consent_sync:tests",
     "cpufreq:tests",
     "crash_reports:tests",
@@ -99,6 +100,10 @@ expect_includes("starnix_test") {
 
 expect_includes("starnix_test_with_expectations") {
   includes = [ "starnix_test_with_expectations.shard.cml" ]
+}
+
+expect_includes("machina_test_with_expectations") {
+  includes = [ "machina_test_with_expectations.shard.cml" ]
 }
 
 expect_includes("starnix_benchmark") {
@@ -207,7 +212,6 @@ fuchsia_test_package("starnix_magma_tests") {
     }
     environments = [
       atlas_env,
-      nuc7_env,
       nuc11_env,
       sorrel_env,
       vim3_env,

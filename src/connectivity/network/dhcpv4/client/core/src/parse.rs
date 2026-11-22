@@ -394,6 +394,19 @@ fn collect_common_fields<T: Copy>(
     let mut soft_errors = SoftParseErrors::default();
 
     for option in options {
+        // A subnet mask of 0.0.0.0 (prefix length 0) claims that the entire
+        // IPv4 address space is on-link. Accepting it would cause an on-link
+        // 0.0.0.0/0 subnet route to be installed, which is preferred over
+        // every off-link (gateway) default route regardless of metric. Drop
+        // the option before recording it as seen so that the message is
+        // treated as though it omitted the Subnet Mask option entirely.
+        if let DhcpOption::SubnetMask(prefix_len) = &option {
+            if prefix_len.get() == 0 {
+                log::warn!("dropping invalid subnet mask option with prefix length 0");
+                continue;
+            }
+        }
+
         let code = option.code();
         let newly_seen = builder.add_seen_option_and_return_whether_newly_added(code);
         if !newly_seen && !option_can_be_duplicated(code) {
@@ -1180,6 +1193,18 @@ mod test {
         op: dhcp_protocol::OpCode::BOOTREPLY,
         yiaddr: YIADDR,
         message_type: Some(dhcp_protocol::MessageType::DHCPOFFER),
+        server_identifier: Some(SERVER_IP),
+        subnet_mask: Some(prefix_length_v4!(0)),
+        lease_length_secs: Some(LEASE_LENGTH_SECS),
+        include_duplicate_option: false,
+        include_illegal_option: false,
+    } => Err(SelectingIncomingMessageError::MissingRequiredOption(
+        dhcp_protocol::OptionCode::SubnetMask,
+    )); "rejects offer with zero-length subnet mask")]
+    #[test_case(VaryingOfferFields {
+        op: dhcp_protocol::OpCode::BOOTREPLY,
+        yiaddr: YIADDR,
+        message_type: Some(dhcp_protocol::MessageType::DHCPOFFER),
         server_identifier: None,
         subnet_mask: Some(TEST_SUBNET_MASK),
         lease_length_secs: Some(LEASE_LENGTH_SECS),
@@ -1496,6 +1521,21 @@ mod test {
         } => Err(IncomingResponseToRequestError::MissingRequiredOption(
             dhcp_protocol::OptionCode::SubnetMask
         )); "rejects DHCPACK without required subnet mask")]
+    #[test_case(VaryingReplyToRequestFields {
+        op: dhcp_protocol::OpCode::BOOTREPLY,
+        yiaddr: YIADDR,
+        message_type: Some(dhcp_protocol::MessageType::DHCPACK),
+        server_identifier: Some(SERVER_IP),
+        subnet_mask: Some(prefix_length_v4!(0)),
+        lease_length_secs: Some(LEASE_LENGTH_SECS),
+        renewal_time_secs: None,
+        rebinding_time_secs: None,
+        message: None,
+        include_duplicate_option: false,
+        include_illegal_option: false,
+    } => Err(IncomingResponseToRequestError::MissingRequiredOption(
+        dhcp_protocol::OptionCode::SubnetMask
+    )); "rejects DHCPACK with zero-length subnet mask")]
     #[test_case(VaryingReplyToRequestFields {
         op: dhcp_protocol::OpCode::BOOTREPLY,
         yiaddr: YIADDR,

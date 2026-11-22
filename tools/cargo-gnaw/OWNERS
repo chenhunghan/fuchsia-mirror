@@ -1,2 +1,1 @@
-include /third_party/rust_crates/OWNERS
-# COMPONENT: Rust>tools>cargo-gnaw
+file:/third_party/rust_crates/OWNERS

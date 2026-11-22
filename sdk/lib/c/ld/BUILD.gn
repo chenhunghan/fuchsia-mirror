@@ -38,7 +38,7 @@ libc_source_set("ld-start-main") {
 }
 
 libc_source_set("ld-start-compiler-abi") {
-  # TODO(https://fxbug.dev/342469121): This won't need to be its own basic_abi
+  # TODO(https://fxbug.dev/349433421): This won't need to be its own basic_abi
   # hermetic set here once startup:musl-glue is removed.  Instead, it can just
   # be a plain libc_source_set in deps of startup:start-compiler-abi.
   basic_abi = true
@@ -56,7 +56,7 @@ libc_source_set("ld-start-compiler-abi") {
 # This implements the ThreadStorage methods that handle ELF TLS via the
 # <sdk/lib/ld/abi.h> passive ABI.
 libc_source_set("ld-tls") {
-  # TODO(https://fxbug.dev/342469121): This won't need to be its own basic_abi
+  # TODO(https://fxbug.dev/349433421): This won't need to be its own basic_abi
   # hermetic set here once startup:musl-glue is removed.
   basic_abi = true
   global_symbols = [
@@ -172,7 +172,6 @@ libc_test("log-tests") {
   deps = [
     ":log.headers",
     "../test:safe-zero-construction",
-    "//zircon/system/ulib/zxtest",
   ]
 }
 
@@ -191,10 +190,12 @@ libc_source_set("ld-on-tls-segments") {
   sources = [ "ld-on-tls-segments.cc" ]
   deps = [
     "../threads:thread",
-    "../threads:thread-storage",
     "//zircon/third_party/ulib/musl:musl_internal",
   ]
-  libc_deps = [ ":ld-abi" ]
+  libc_deps = [
+    ":ld-abi",
+    "../threads:thread-storage",
+  ]
 }
 
 # This is linked into the legacy libc.so to satisfy references from the old

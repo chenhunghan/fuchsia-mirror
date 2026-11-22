@@ -1,7 +1,13 @@
-# This file gives Bazel migration reviewers who are not Build team members
-# OWNERS approval rights on Bazel migration related files.
+# This file grants Bazel migration reviewers temporary power to approve changes
+# to BUILD.bazel and BUILD.gn files in Bazel migration CLs.
+# Ensure everyone listed understands the power that inclusion grants and are
+# careful to avoid unintended approval when publishing and CR+2'ing
+# non-migration CLs.
 #
-# TODO(jayzhuang): Remove these patterns after the majority of migration is done.
+# TODO(jayzhuang): Remove this file after the majority of migration is done.
+
+file:/build/BUILD_OWNERS
+
 aniramakri@google.com
 brunodalbo@google.com
 haydennix@google.com
@@ -9,3 +15,4 @@ lindkvist@google.com
 mjramos@google.com
 waynechou@google.com
 weijliao@google.com
+wittrock@google.com

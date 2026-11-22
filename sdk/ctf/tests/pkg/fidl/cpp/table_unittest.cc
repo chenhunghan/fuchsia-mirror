@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fidl/test/misc/cpp/fidl.h>
 #include <lib/fidl/cpp/comparison.h>
 
-#include <fidl/test/misc/cpp/fidl.h>
 #include <zxtest/zxtest.h>
 
 namespace fidl {
@@ -33,7 +33,7 @@ TEST(Table, ChainComplexSetters) {
   test::misc::SimpleTable simple;
   simple.set_x(10);
 
-  test::misc::SampleXUnion u1, u2;
+  test::misc::SampleUnion u1, u2;
   u1.set_i(32);
   u1.Clone(&u2);
 

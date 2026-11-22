@@ -17,14 +17,15 @@ declare_args() {
   fxfs_blob = true
 }
 
-# Generates a config CML file for fshost.
-# The name of the config CML is "{component_name}_config.cml" and the config
-# values can be routed from it.
+# Generates a structured configuration component for fshost from
+# //src/storage/fshost/meta/config.cml.
+# The name of the compiled component is "{component_name}_config.cm" and the
+# config capabilities can be routed from it.
 #
 # Parameters:
 #
 #   component_name (optional)
-#     [string] The name of the component for which to produce config, defaults to "fshost".
+#     [string] The name of the component for which to produce config, defaults to "fshost_config".
 #
 #   options (optional)
 #     [scope] A block of fshost configuration options to include in the config file.
@@ -32,26 +33,23 @@ declare_args() {
 #     values override all other values, including defaults and build args.
 #
 template("generated_fshost_config") {
-  _manifest_target = "${target_name}_manifest"
   _component_name = "fshost_config"
   if (defined(invoker.component_name)) {
     _component_name = invoker.component_name
   }
 
-  fuchsia_component_manifest(_manifest_target) {
-    component_name = _component_name
-    manifest = "//src/storage/fshost/meta/config.cml"
-    metadata = {
-      # we don't want this in the packaged output, it's just to give cmc
-      # something to work with
-      distribution_entries_barrier = []
-    }
-  }
+  _schema = "//src/storage/fshost/meta/config.cml"
+  _values_target = "${target_name}_values"
+  _values_json = "${target_gen_dir}/${target_name}_values.json"
+  _manifest_target = "${target_name}_manifest"
+  _generated_cml = "${target_gen_dir}/${target_name}.cml"
 
-  fuchsia_structured_config_values2(target_name) {
-    output_component_name = _component_name + "_config"
-    cm_label = ":$_manifest_target"
-    values = {
+  generated_file(_values_target) {
+    forward_variables_from(invoker, [ "testonly" ])
+    visibility = [ ":*" ]
+    outputs = [ _values_json ]
+    output_conversion = "json"
+    contents = {
       # Defaults
       blobfs = true
       blob_max_bytes = 0
@@ -77,12 +75,49 @@ template("generated_fshost_config") {
       starnix_volume_name = ""
       inline_crypto = false
       provision_fxfs = false
-      use_driver_blob_paging = false
       startup_profiling_seconds = 0
 
       if (defined(invoker.options)) {
         forward_variables_from(invoker.options, "*")
       }
+
+      # `fxfs_blob` defaults to `true` above, but `invoker.options` may override
+      # it. Default `use_driver_blob_paging` to the resultant value of
+      # `fxfs_blob` unless explicitly overridden in `invoker.options`.
+      if (!defined(use_driver_blob_paging)) {
+        use_driver_blob_paging = fxfs_blob
+      }
     }
+  }
+
+  python_action(_manifest_target) {
+    forward_variables_from(invoker, [ "testonly" ])
+    visibility = [ ":*" ]
+    binary_label = "//src/starnix/build:generate_container_config_component"
+    inputs = [
+      _schema,
+      _values_json,
+    ]
+    outputs = [ _generated_cml ]
+    args = [
+      "--schema",
+      rebase_path(_schema, root_build_dir),
+      "--overrides",
+      rebase_path(_values_json, root_build_dir),
+      "--output",
+      rebase_path(_generated_cml, root_build_dir),
+    ]
+    deps = [ ":$_values_target" ]
+  }
+
+  fuchsia_component(target_name) {
+    forward_variables_from(invoker,
+                           [
+                             "testonly",
+                             "visibility",
+                           ])
+    component_name = _component_name + "_config"
+    manifest = _generated_cml
+    manifest_deps = [ ":$_manifest_target" ]
   }
 }

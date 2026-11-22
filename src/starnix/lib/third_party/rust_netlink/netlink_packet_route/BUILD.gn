@@ -2,12 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components/fuchsia_unittest_package.gni")
-
-fuchsia_unittest_package("netlink_packet_route_test_package") {
-  deps = [ ":netlink_packet_route_test" ]
-}
-
 group("tests") {
   testonly = true
   deps = [ ":netlink_packet_route_test_package" ]
@@ -276,6 +270,11 @@ rustc_library("netlink_packet_route") {
   crate_name = "netlink_packet_route"
   edition = "2024"
   test_deps = [ "//third_party/rust_crates:assert_matches" ]
+  visibility = [
+    ":*",
+    "//src/connectivity/network/netlink/*",
+    "//src/starnix/*",
+  ]
   with_unit_tests = true
   deps = [
     "//src/starnix/lib/third_party/rust_netlink/netlink_packet_core",
@@ -288,4 +287,10 @@ rustc_library("netlink_packet_route") {
     "//third_party/rust_crates:thiserror",
     "//third_party/rust_crates:zerocopy",
   ]
+}
+
+fuchsia_unittest_package("netlink_packet_route_test_package") {
+  package_name = "netlink_packet_route_test_package-gn"
+  component_name = "netlink_packet_route_test_package"
+  deps = [ ":netlink_packet_route_test" ]
 }

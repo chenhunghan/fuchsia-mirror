@@ -98,6 +98,7 @@ rustc_test(
         "//third_party/rust_crates/vendor:pretty_assertions",
         "//third_party/rust_crates/vendor:rand",
         "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:test-case",
     ],
 )
 

@@ -97,6 +97,9 @@ class OtRadioDevice : public DeviceType {
   bool ShouldRetryReset();
   bool IsHardResetting();
   void SetMaxInboundAllowance();
+  void SetInboundFrameAvailableForTest(bool available) {
+    inbound_frame_available_.store(available);
+  }
 
   zx::port port_;
   zx::interrupt interrupt_;
@@ -150,8 +153,8 @@ class OtRadioDevice : public DeviceType {
   class LowpanSpinelDeviceFidlImpl : public fidl::WireServer<fuchsia_lowpan_spinel::Device> {
    public:
     LowpanSpinelDeviceFidlImpl(OtRadioDevice& ot_radio);
-    void Bind(async_dispatcher_t* dispatcher,
-              fidl::ServerEnd<fuchsia_lowpan_spinel::Device> channel);
+    fidl::ServerBindingRef<fuchsia_lowpan_spinel::Device> Bind(
+        async_dispatcher_t* dispatcher, fidl::ServerEnd<fuchsia_lowpan_spinel::Device> channel);
 
    private:
     // FIDL request handlers
@@ -169,8 +172,10 @@ class OtRadioDevice : public DeviceType {
   std::atomic<uint32_t> outbound_allowance_ = kOutboundAllowanceInit;
   uint64_t inbound_cnt_ = 0;
   uint64_t outbound_cnt_ = 0;
-  std::optional<fidl::ServerBindingRef<fuchsia_lowpan_spinel::Device>> fidl_binding_;
-  std::unique_ptr<LowpanSpinelDeviceFidlImpl> fidl_impl_obj_ = 0;
+  fbl::Mutex fidl_lock_;
+  std::optional<fidl::ServerBindingRef<fuchsia_lowpan_spinel::Device>> fidl_binding_
+      __TA_GUARDED(fidl_lock_);
+  std::unique_ptr<LowpanSpinelDeviceFidlImpl> fidl_impl_obj_ __TA_GUARDED(fidl_lock_);
   ot_radio_power_status_e power_status_ = OT_SPINEL_DEVICE_OFF;
   std::atomic<bool> inbound_frame_available_ = false;
   std::atomic<zx_time_t> hard_reset_end_ = 0;

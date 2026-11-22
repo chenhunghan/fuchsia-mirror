@@ -2,31 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be found
 # in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_library.gni")
-import("//build/rust/rustc_test.gni")
-
 group("tests") {
   testonly = true
 
   deps = [
-    ":diagnostics-log-tests",
+    ":diagnostics-log-tests-package",
     ":diagnostics_log_lib_test($host_toolchain)",
     "tests",
   ]
-}
-
-fuchsia_unittest_package("diagnostics-log-tests") {
-  test_specs = {
-    log_settings = {
-      max_severity = "ERROR"
-    }
-  }
-  deps = [
-    ":diagnostics_log_lib_test",
-    "rust-crasher:component",
-  ]
-  manifest = "meta/test.cml"
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -160,4 +143,29 @@ rustc_test("diagnostics_log_lib_test") {
     deps += [ "//third_party/rust_crates:regex" ]
   }
   deps += LIB_ASPECT_HINTS
+}
+
+fuchsia_component_manifest("diagnostics-log-tests-manifest") {
+  testonly = true
+  component_name = "diagnostics-log-tests"
+  manifest = "meta/test.cml"
+}
+
+fuchsia_test_component("diagnostics-log-tests-component") {
+  cm_label = ":diagnostics-log-tests-manifest"
+  deps = [ ":diagnostics_log_lib_test" ]
+}
+
+fuchsia_test_package("diagnostics-log-tests-package") {
+  package_name = "diagnostics-log-tests-gn"
+  test_components = [ ":diagnostics-log-tests-component" ]
+  deps = [
+    "//src/lib/diagnostics/log/rust/rust-crasher:component",
+    "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+  ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
 }

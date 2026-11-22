@@ -4,8 +4,15 @@
 
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":terminal_lib_tests"],
+    visibility = ["//src/lib/ui:__pkg__"],
+)
 
 rustc_library(
     name = "terminal",
@@ -42,4 +49,9 @@ rustc_test(
     deps = [
         "//third_party/rust_crates/vendor:anyhow",
     ],
+)
+
+fx_unittest_package(
+    name = "terminal_lib_tests",
+    unit_tests = [":terminal_test"],
 )

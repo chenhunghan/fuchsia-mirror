@@ -8,6 +8,8 @@
 #include <lib/magma_service/util/accessor.h>
 #include <lib/magma_service/util/command_buffer.h>
 
+#include <limits>
+
 #include "gpu_mapping.h"
 #include "instructions.h"
 #include "msd_vsi_context.h"
@@ -60,9 +62,23 @@ class CommandBuffer : public magma::CommandBuffer<MsdVsiContext, GpuMapping> {
   }
 
   // Returns the offset into the batch buffer that points to the end of the user data.
-  uint32_t GetBatchBufferWriteOffset() {
-    uint64_t length = magma::round_up(GetLength(), sizeof(uint64_t));
-    return magma::to_uint32(batch_start_offset() + length);
+  std::optional<uint64_t> GetBatchBufferWriteOffset() const {
+    if (batch_buffer_index() >= exec_resources_.size()) {
+      DASSERT(false);
+      return std::nullopt;
+    }
+    if (GetLength() > std::numeric_limits<uint64_t>::max() - (sizeof(uint64_t) - 1)) {
+      return std::nullopt;
+    }
+    uint64_t aligned_length = magma::round_up(GetLength(), sizeof(uint64_t));
+
+    uint64_t write_offset;
+    if (__builtin_add_overflow(exec_resources_[batch_buffer_index()].offset, batch_start_offset(),
+                               &write_offset) ||
+        __builtin_add_overflow(write_offset, aligned_length, &write_offset)) {
+      return std::nullopt;
+    }
+    return write_offset;
   }
 
   // Returns a pointer to the resource for the context state buffer.
@@ -104,13 +120,22 @@ class CommandBuffer : public magma::CommandBuffer<MsdVsiContext, GpuMapping> {
                 mapping->length(), GetLength(), kAdditionalBytes);
       return false;
     }
+    auto maybe_write_offset = GetBatchBufferWriteOffset();
+    auto* batch_buffer = GetBatchBuffer();
+    if (!maybe_write_offset || !batch_buffer ||
+        !CheckOverflowAndRange(*maybe_write_offset, 0, batch_buffer->size())) {
+      MAGMA_LOG(ERROR, "insufficient buffer space for LINK command");
+      return false;
+    }
 
     auto csb = GetContextStateBufferResource();
     if (csb) {
       // Check that the mapped length can fit the user data and also an additional LINK command.
       auto csb_mapping = GetContextStateBufferMapping();
       DASSERT(csb_mapping);
-      if (!CheckOverflowAndRange(0, csb->length, csb_mapping->length())) {
+      if (!CheckOverflowAndRange(0, csb->length, csb_mapping->length()) ||
+          !CheckOverflowAndRange(csb->offset, csb->length,
+                                 csb->buffer->platform_buffer()->size())) {
         MAGMA_LOG(ERROR, "CSB: insufficient space for LINK command, mapped %lu used %lu need %u\n",
                   csb_mapping->length(), csb->length, kAdditionalBytes);
         return false;

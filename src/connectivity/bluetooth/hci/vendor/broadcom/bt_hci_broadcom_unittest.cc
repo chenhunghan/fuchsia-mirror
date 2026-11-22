@@ -51,7 +51,7 @@ const std::vector<uint8_t> kFirmware = {
     0x03,  // payload
 };
 constexpr uint16_t kTestFirmwareOpCode = 0x0201;
-const std::vector<std::string> kFirmwarePaths = {"BCM4345C5.hcd", "BCM4381A1.hcd"};
+const std::vector<std::string> kFirmwarePaths = {"BCM4345C5.hcd", "BCM4381A1.hcd", "BCM4390B1.hcd"};
 
 constexpr uint8_t kNoFastDownloadChipId = 173;
 constexpr uint8_t kFastDownloadChipId = 174;
@@ -817,6 +817,25 @@ TEST_F(BtHciBroadcomTest, EnablesLowPowerMode) {
     ASSERT_EQ(sleep_cmd.mode().Read(), SleepMode::UART);
     ASSERT_EQ(sleep_cmd.idle_threshold_device().Read(), 5);
     ASSERT_EQ(sleep_cmd.idle_threshold_host().Read(), 1);
+  });
+}
+
+TEST_F(BtHciBroadcomTest, InitializesBcm4390B1) {
+  SetMacAddressMetadata();
+  driver_test().RunInEnvironmentTypeContext(
+      [](TestEnvironment& env) { env.transport_device_.SetSerialPid(PDEV_PID_BCM4390B1); });
+  SetFirmware();
+
+  ASSERT_TRUE(StartDriver().is_ok());
+
+  driver_test().RunInEnvironmentTypeContext([](TestEnvironment& env) {
+    auto fw_packet = env.transport_device_.LastPacketByOpCode(kTestFirmwareOpCode);
+    ASSERT_TRUE(fw_packet.has_value());
+    EXPECT_EQ(*fw_packet, kFirmware);
+    EXPECT_FALSE(env.transport_device_.HasReceivedOpCode(
+        static_cast<uint16_t>(BroadcomOpCode::SET_POWER_CAP)));
+    EXPECT_FALSE(env.transport_device_.HasReceivedOpCode(
+        static_cast<uint16_t>(BroadcomOpCode::WRITE_SLEEP_MODE)));
   });
 }
 

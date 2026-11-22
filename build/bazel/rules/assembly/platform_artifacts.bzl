@@ -73,7 +73,7 @@ def _platform_artifacts_impl(ctx):
         ctx.file._fvm_tool,
         ctx.file._zbi_tool,
         ctx.executable._cmc_tool,
-        ctx.file._fxfs_pbtool,
+        ctx.executable._fxfs_pbtool,
     ]
 
     for tool in host_tools:
@@ -129,11 +129,12 @@ platform_artifacts = rule(
             cfg = "exec",
         ),
         "_fxfs_pbtool": attr.label(
-            default = "@gn_targets//toolchain_host_x64/src/storage/fxfs/fxfs_pbtool:fxfs_pbtool",
-            allow_single_file = True,
+            default = "//src/storage/fxfs/fxfs_pbtool:fxfs_pbtool",
+            executable = True,
+            cfg = "exec",
         ),
         "_tool": attr.label(
-            default = "@gn_targets//toolchain_host_x64/build/assembly/tools/assembly_config:assembly_config",
+            default = "//build/assembly/tools/assembly_config",
             executable = True,
             cfg = "exec",
         ),

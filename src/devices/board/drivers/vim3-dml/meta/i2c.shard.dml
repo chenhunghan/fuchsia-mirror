@@ -10,7 +10,7 @@
         },
         {
             name: "i2c-1c000",
-            id: 2,
+            id: 1,
             compatible: "amlogic,meson-axg-i2c",
         },
     ],
@@ -97,13 +97,13 @@
                         name: "default",
                         pins: [
                             {
-                                pin: 30,
+                                pin: 31,
                                 call: {
                                     pin_config: { function: 2 },
                                 },
                             },
                             {
-                                pin: 31,
+                                pin: 30,
                                 call: {
                                     pin_config: { function: 2 },
                                 },

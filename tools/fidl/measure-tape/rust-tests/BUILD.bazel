@@ -14,8 +14,6 @@ load("//tools/fidl/measure-tape:measure_tape.bzl", "measure_tape")
 
 package(default_applicable_licenses = ["//:license"])
 
-# LINT.IfChange
-
 # Types to enable for Rust measure tape tests.
 # Ideally this wouldn't be needed and all tests would be enabled
 # (or a denylist would be used), but given the significant number of
@@ -138,7 +136,7 @@ _SUPPORTED_CONFORMANCE_TYPES = [
     "test.conformance/Regression4",
     "test.conformance/Regression5",
     "test.conformance/Regression6",
-    "test.conformance/Regression7TableUnionXUnion",
+    "test.conformance/Regression7TableUnionFlexibleUnion",
     "test.conformance/ReverseOrdinalUnionStruct",
     "test.conformance/Sandwich1",
     "test.conformance/Sandwich1Message",
@@ -185,7 +183,7 @@ _SUPPORTED_CONFORMANCE_TYPES = [
     "test.conformance/StructOfReverseOrdinalTable",
     "test.conformance/StructOfTableWithGaps",
     "test.conformance/StructOfTableWithStringAndVector",
-    "test.conformance/StructOfTableWithXUnion",
+    "test.conformance/StructOfTableWithUnion",
     "test.conformance/StructOfUnionOfTable",
     "test.conformance/StructSize16Align8",
     "test.conformance/StructSize3Align1",
@@ -199,8 +197,8 @@ _SUPPORTED_CONFORMANCE_TYPES = [
     "test.conformance/TableUnionWithVectorStructSandwichStruct",
     "test.conformance/TableWithReservedFieldThenUnionStruct",
     "test.conformance/TestAddEthernetDeviceRequest",
-    "test.conformance/TestInlineXUnionInStruct",
-    "test.conformance/TestXUnionInTable",
+    "test.conformance/TestInlineUnionInStruct",
+    "test.conformance/TestUnionInTable",
     "test.conformance/ThreeByte",
     "test.conformance/ThreeByteInArray",
     "test.conformance/ThreeByteInStruct",
@@ -232,8 +230,8 @@ _SUPPORTED_CONFORMANCE_TYPES = [
     "test.conformance/VectorOfStrings",
     "test.conformance/VectorWithLimit",
     "test.conformance/VectorWrapper",
-    "test.conformance/XUnionWithStructStruct",
-    "test.conformance/XUnionWithXUnionStruct",
+    "test.conformance/UnionWithStructStruct",
+    "test.conformance/FlexibleUnionWithFlexibleUnionStruct",
 
     # Measure tape generated code won't build for these types.
     # TODO(https://fxbug.dev/42052426) Fix this.
@@ -273,10 +271,10 @@ _SUPPORTED_CONFORMANCE_TYPES = [
     # "test.conformance/StructWithArrays",
     # "test.conformance/StructWithVectors",
     # "test.conformance/StructWithOptionals",
-    # "test.conformance/TestOptionalFlexibleXUnionInStruct",
-    # "test.conformance/TestOptionalStrictXUnionInStruct",
-    # "test.conformance/TestOptionalXUnionInStruct",
-    # "test.conformance/TestStrictXUnionInStruct",
+    # "test.conformance/TestOptionalFlexibleUnionInStruct",
+    # "test.conformance/TestOptionalStrictUnionInStruct",
+    # "test.conformance/TestOptionalUnionInStruct",
+    # "test.conformance/TestStrictUnionInStruct",
     # "test.conformance/UnionWithBoundStringStruct",
 
     # These types build, but tests that use them fail.
@@ -314,7 +312,7 @@ _SUPPORTED_CONFORMANCE_TYPES = [
     # "test.conformance/StructOfSimpleTable",
     # "test.conformance/TableFieldInlinedStruct",
     # "test.conformance/TableFieldUnknownStruct",
-    # "test.conformance/TestFlexibleXUnionInStruct",
+    # "test.conformance/TestFlexibleUnionInStruct",
 ]
 
 measure_tape(
@@ -363,5 +361,3 @@ fx_unittest_package(
     unit_tests = [":fidl_rust_measure_tape_tests_bin"],
     visibility = ["//tools/fidl/measure-tape:__pkg__"],
 )
-
-# LINT.ThenChange(BUILD.gn)

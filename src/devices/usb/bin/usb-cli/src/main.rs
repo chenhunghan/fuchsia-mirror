@@ -32,12 +32,25 @@ enum SubCommand {
 
 #[derive(FromArgs, PartialEq, Debug)]
 /// Simulates a physical USB-C cable unplug/replug by opening CC1/CC2 terminations in the TCPC
-/// (e.g. `usb-cli cable-breaker --duration 10s`).
+/// (e.g. `usb-cli cable-breaker --duration 10s` or `usb-cli cable-breaker --reconnect`).
 #[argh(subcommand, name = "cable-breaker")]
 struct CableBreakerArgs {
-    /// duration before automatically waking and reconnecting CC lines (e.g. "10s" or "10")
-    #[argh(option, short = 'd')]
-    duration: Option<String>,
+    /// duration before automatically waking and reconnecting CC lines, with a unit suffix
+    /// ("500000000ns", "500us", "250ms", "10s") or in whole seconds ("10"), measured from the
+    /// request rather than from the CC drop. Values under the Type-C CC debounce (~200ms) may
+    /// not register as an unplug. Without it, the cable stays broken until
+    /// `usb-cli cable-breaker --reconnect`.
+    #[argh(option, short = 'd', from_str_fn(parse_duration_nanos))]
+    duration: Option<i64>,
+
+    /// restores the USB-C cable connection after a prior `cable-breaker`, cancelling any
+    /// pending automatic reconnect.
+    #[argh(switch, short = 'r')]
+    reconnect: bool,
+
+    /// waits for the automatic reconnect to finish before exiting (requires `--duration`).
+    #[argh(switch, short = 'w')]
+    wait: bool,
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -278,41 +291,96 @@ async fn run_diagnostics(verbose: bool) -> Result<(), Error> {
     Ok(())
 }
 
-fn parse_duration_seconds(duration: &str) -> Result<u64, Error> {
+/// Parses a cable-breaker duration into nanoseconds. Accepts "ns", "us", "ms", or "s" suffixes,
+/// or bare whole seconds (e.g. "500000000ns", "500us", "250ms", "10s", or "10").
+fn parse_duration_nanos(duration: &str) -> Result<i64, String> {
     let trimmed = duration.trim();
-    let numeric = trimmed.strip_suffix('s').unwrap_or(trimmed);
-    let secs: u64 = numeric.parse().with_context(|| {
-        format!("Invalid duration '{duration}': expected seconds (e.g. '10s' or '10')")
+    let (numeric, nanos_per_unit) = if let Some(ns) = trimmed.strip_suffix("ns") {
+        (ns, 1i64)
+    } else if let Some(us) = trimmed.strip_suffix("us") {
+        (us, 1_000i64)
+    } else if let Some(ms) = trimmed.strip_suffix("ms") {
+        (ms, 1_000_000i64)
+    } else {
+        (trimmed.strip_suffix('s').unwrap_or(trimmed), 1_000_000_000i64)
+    };
+    let count: i64 = numeric.parse().map_err(|_| {
+        format!(
+            "Invalid duration '{duration}': expected e.g. '500000000ns', '500us', '250ms', \
+             '10s', or '10'"
+        )
     })?;
-    if secs == 0 {
-        anyhow::bail!("Duration must be greater than 0 seconds");
+    if count <= 0 {
+        return Err("Duration must be greater than 0".to_string());
     }
-    Ok(secs)
+    count.checked_mul(nanos_per_unit).ok_or_else(|| "Duration is too large".to_string())
+}
+
+fn format_duration_nanos(nanos: i64) -> String {
+    if nanos % 1_000_000_000 == 0 {
+        format!("{}s", nanos / 1_000_000_000)
+    } else if nanos % 1_000_000 == 0 {
+        format!("{}ms", nanos / 1_000_000)
+    } else if nanos % 1_000 == 0 {
+        format!("{}us", nanos / 1_000)
+    } else {
+        format!("{nanos}ns")
+    }
 }
 
 async fn execute_cable_breaker(
     config_client: &usb_policy::ConfigurationProxy,
     args: &CableBreakerArgs,
 ) -> Result<(), Error> {
-    let duration_nanos = if let Some(duration_str) = &args.duration {
-        let secs = parse_duration_seconds(duration_str)?;
-        let secs_i64 = i64::try_from(secs).context("Duration is too large")?;
+    if args.reconnect {
+        if args.duration.is_some() {
+            anyhow::bail!("Cannot specify both --reconnect and --duration");
+        }
+        if args.wait {
+            anyhow::bail!("Cannot specify both --reconnect and --wait");
+        }
+        println!("Restoring Type-C cable connection (closing CC1/CC2)...");
+        config_client
+            .connect_cable()
+            .await
+            .context("Failed FIDL call connect_cable")?
+            .map_err(zx::Status::err_from_raw)
+            .context("ConnectCable returned an error status")?;
+        println!("Type-C cable connection restored.");
+        return Ok(());
+    }
+
+    if args.wait && args.duration.is_none() {
+        anyhow::bail!("Cannot specify --wait without --duration");
+    }
+
+    let duration_nanos = if let Some(nanos) = args.duration {
+        if nanos <= 0 {
+            anyhow::bail!("Duration must be greater than 0");
+        }
+        let action = if args.wait { "waiting for" } else { "scheduling" };
         println!(
-            "Breaking Type-C cable connection (opening CC1/CC2) and scheduling wake alarm reconnect ({secs}s)..."
+            "Breaking Type-C cable connection (opening CC1/CC2) and {action} wake alarm \
+             reconnect ({})...",
+            format_duration_nanos(nanos)
         );
-        zx::MonotonicDuration::from_seconds(secs_i64).into_nanos()
+        nanos
     } else {
         println!("Breaking Type-C cable connection (opening CC1/CC2)...");
         0
     };
 
     config_client
-        .disconnect_cable(duration_nanos)
+        .disconnect_cable(duration_nanos, args.wait)
         .await
         .context("Failed FIDL call disconnect_cable")?
         .map_err(zx::Status::err_from_raw)
         .context("DisconnectCable returned an error status")?;
-    println!("Type-C cable connection broken.");
+    if args.wait {
+        println!("Type-C cable connection restored.");
+    } else {
+        println!("Type-C cable connection broken.");
+    }
     Ok(())
 }
 
@@ -350,7 +418,11 @@ mod tests {
         assert_eq!(
             cb_default,
             UsbCliArgs {
-                subcommand: SubCommand::CableBreaker(CableBreakerArgs { duration: None })
+                subcommand: SubCommand::CableBreaker(CableBreakerArgs {
+                    duration: None,
+                    reconnect: false,
+                    wait: false,
+                })
             }
         );
 
@@ -360,7 +432,9 @@ mod tests {
             cb_duration,
             UsbCliArgs {
                 subcommand: SubCommand::CableBreaker(CableBreakerArgs {
-                    duration: Some("10s".to_string()),
+                    duration: Some(10_000_000_000),
+                    reconnect: false,
+                    wait: false,
                 })
             }
         );
@@ -370,30 +444,141 @@ mod tests {
             cb_short,
             UsbCliArgs {
                 subcommand: SubCommand::CableBreaker(CableBreakerArgs {
-                    duration: Some("15".to_string()),
+                    duration: Some(15_000_000_000),
+                    reconnect: false,
+                    wait: false,
                 })
             }
         );
 
-        assert_eq!(parse_duration_seconds("10s").unwrap(), 10);
-        assert_eq!(parse_duration_seconds("10").unwrap(), 10);
-        assert!(parse_duration_seconds("0s").is_err());
-        assert!(parse_duration_seconds("10m").is_err());
+        let cb_ms = UsbCliArgs::from_args(&["usb-cli"], &["cable-breaker", "-d", "250ms"]).unwrap();
+        assert_eq!(
+            cb_ms,
+            UsbCliArgs {
+                subcommand: SubCommand::CableBreaker(CableBreakerArgs {
+                    duration: Some(250_000_000),
+                    reconnect: false,
+                    wait: false,
+                })
+            }
+        );
+
+        let cb_us = UsbCliArgs::from_args(&["usb-cli"], &["cable-breaker", "-d", "500us"]).unwrap();
+        assert_eq!(
+            cb_us,
+            UsbCliArgs {
+                subcommand: SubCommand::CableBreaker(CableBreakerArgs {
+                    duration: Some(500_000),
+                    reconnect: false,
+                    wait: false,
+                })
+            }
+        );
+
+        let cb_ns =
+            UsbCliArgs::from_args(&["usb-cli"], &["cable-breaker", "-d", "500000000ns"]).unwrap();
+        assert_eq!(
+            cb_ns,
+            UsbCliArgs {
+                subcommand: SubCommand::CableBreaker(CableBreakerArgs {
+                    duration: Some(500_000_000),
+                    reconnect: false,
+                    wait: false,
+                })
+            }
+        );
+
+        let cb_wait =
+            UsbCliArgs::from_args(&["usb-cli"], &["cable-breaker", "-d", "5s", "--wait"]).unwrap();
+        assert_eq!(
+            cb_wait,
+            UsbCliArgs {
+                subcommand: SubCommand::CableBreaker(CableBreakerArgs {
+                    duration: Some(5_000_000_000),
+                    reconnect: false,
+                    wait: true,
+                })
+            }
+        );
+
+        let cb_wait_short =
+            UsbCliArgs::from_args(&["usb-cli"], &["cable-breaker", "-d", "5s", "-w"]).unwrap();
+        assert_eq!(
+            cb_wait_short,
+            UsbCliArgs {
+                subcommand: SubCommand::CableBreaker(CableBreakerArgs {
+                    duration: Some(5_000_000_000),
+                    reconnect: false,
+                    wait: true,
+                })
+            }
+        );
+
+        let cb_reconnect =
+            UsbCliArgs::from_args(&["usb-cli"], &["cable-breaker", "--reconnect"]).unwrap();
+        assert_eq!(
+            cb_reconnect,
+            UsbCliArgs {
+                subcommand: SubCommand::CableBreaker(CableBreakerArgs {
+                    duration: None,
+                    reconnect: true,
+                    wait: false,
+                })
+            }
+        );
+
+        let cb_reconnect_short =
+            UsbCliArgs::from_args(&["usb-cli"], &["cable-breaker", "-r"]).unwrap();
+        assert_eq!(
+            cb_reconnect_short,
+            UsbCliArgs {
+                subcommand: SubCommand::CableBreaker(CableBreakerArgs {
+                    duration: None,
+                    reconnect: true,
+                    wait: false,
+                })
+            }
+        );
+
+        assert_eq!(parse_duration_nanos("10s").unwrap(), 10_000_000_000);
+        assert_eq!(parse_duration_nanos("10").unwrap(), 10_000_000_000);
+        assert_eq!(parse_duration_nanos("250ms").unwrap(), 250_000_000);
+        assert_eq!(parse_duration_nanos(" 1ms ").unwrap(), 1_000_000);
+        assert_eq!(parse_duration_nanos("500us").unwrap(), 500_000);
+        assert_eq!(parse_duration_nanos("500000000ns").unwrap(), 500_000_000);
+        assert!(parse_duration_nanos("0s").is_err());
+        assert!(parse_duration_nanos("0ms").is_err());
+        assert!(parse_duration_nanos("0us").is_err());
+        assert!(parse_duration_nanos("0ns").is_err());
+        assert!(parse_duration_nanos("-5s").is_err());
+        assert!(parse_duration_nanos("10m").is_err());
+        assert!(parse_duration_nanos("1.5s").is_err());
+        assert!(parse_duration_nanos("99999999999999999999s").is_err());
+        assert!(UsbCliArgs::from_args(&["usb-cli"], &["cable-breaker", "-d", "0s"]).is_err());
     }
 
     /// Serves `fuchsia.usb.policy.Configuration` until the client closes it, replying to
-    /// `DisconnectCable` with `disconnect_result`. Returns the requests it received, in order.
+    /// `DisconnectCable` and `ConnectCable` with `result`. Returns the requests it received,
+    /// in order.
     fn serve_configuration(
         mut stream: usb_policy::ConfigurationRequestStream,
-        disconnect_result: Result<(), zx::Status>,
+        result: Result<(), zx::Status>,
     ) -> fuchsia_async::Task<Vec<String>> {
         fuchsia_async::Task::local(async move {
             let mut events = Vec::new();
             while let Some(Ok(request)) = stream.next().await {
                 match request {
-                    usb_policy::ConfigurationRequest::DisconnectCable { duration, responder } => {
-                        events.push(format!("disconnect_cable:{duration}"));
-                        responder.send(disconnect_result.map_err(zx::Status::into_raw)).unwrap();
+                    usb_policy::ConfigurationRequest::DisconnectCable {
+                        duration,
+                        wait,
+                        responder,
+                    } => {
+                        events.push(format!("disconnect_cable:{duration}:{wait}"));
+                        responder.send(result.map_err(zx::Status::into_raw)).unwrap();
+                    }
+                    usb_policy::ConfigurationRequest::ConnectCable { responder } => {
+                        events.push("connect_cable".to_string());
+                        responder.send(result.map_err(zx::Status::into_raw)).unwrap();
                     }
                     request => panic!("Unexpected request: {request:?}"),
                 }
@@ -410,13 +595,140 @@ mod tests {
 
         execute_cable_breaker(
             &config_proxy,
-            &CableBreakerArgs { duration: Some("10s".to_string()) },
+            &CableBreakerArgs { duration: Some(10_000_000_000), reconnect: false, wait: false },
         )
         .await
         .expect("execute_cable_breaker should succeed");
         drop(config_proxy);
 
-        assert_eq!(server_task.await, vec!["disconnect_cable:10000000000"]);
+        assert_eq!(server_task.await, vec!["disconnect_cable:10000000000:false"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_execute_cable_breaker_with_subsecond_duration() {
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task = serve_configuration(config_stream, Ok(()));
+
+        execute_cable_breaker(
+            &config_proxy,
+            &CableBreakerArgs { duration: Some(250_000_000), reconnect: false, wait: false },
+        )
+        .await
+        .expect("execute_cable_breaker should succeed");
+        drop(config_proxy);
+
+        assert_eq!(server_task.await, vec!["disconnect_cable:250000000:false"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_execute_cable_breaker_with_wait() {
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task = serve_configuration(config_stream, Ok(()));
+
+        execute_cable_breaker(
+            &config_proxy,
+            &CableBreakerArgs { duration: Some(250_000_000), reconnect: false, wait: true },
+        )
+        .await
+        .expect("execute_cable_breaker --wait should succeed");
+        drop(config_proxy);
+
+        assert_eq!(server_task.await, vec!["disconnect_cable:250000000:true"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_execute_cable_breaker_wait_requires_duration() {
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task = serve_configuration(config_stream, Ok(()));
+
+        assert!(
+            execute_cable_breaker(
+                &config_proxy,
+                &CableBreakerArgs { duration: None, reconnect: false, wait: true },
+            )
+            .await
+            .is_err()
+        );
+        drop(config_proxy);
+
+        assert_eq!(server_task.await, Vec::<String>::new());
+    }
+
+    #[fuchsia::test]
+    async fn test_execute_cable_breaker_wait_conflicts_with_reconnect() {
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task = serve_configuration(config_stream, Ok(()));
+
+        assert!(
+            execute_cable_breaker(
+                &config_proxy,
+                &CableBreakerArgs { duration: None, reconnect: true, wait: true },
+            )
+            .await
+            .is_err()
+        );
+        drop(config_proxy);
+
+        assert_eq!(server_task.await, Vec::<String>::new());
+    }
+
+    #[fuchsia::test]
+    async fn test_execute_cable_breaker_reconnect() {
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task = serve_configuration(config_stream, Ok(()));
+
+        execute_cable_breaker(
+            &config_proxy,
+            &CableBreakerArgs { duration: None, reconnect: true, wait: false },
+        )
+        .await
+        .expect("execute_cable_breaker --reconnect should succeed");
+        drop(config_proxy);
+
+        assert_eq!(server_task.await, vec!["connect_cable"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_execute_cable_breaker_reconnect_failure() {
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task = serve_configuration(config_stream, Err(zx::Status::UNAVAILABLE));
+
+        assert!(
+            execute_cable_breaker(
+                &config_proxy,
+                &CableBreakerArgs { duration: None, reconnect: true, wait: false },
+            )
+            .await
+            .is_err()
+        );
+        drop(config_proxy);
+
+        assert_eq!(server_task.await, vec!["connect_cable"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_execute_cable_breaker_reconnect_conflicts_with_duration() {
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task = serve_configuration(config_stream, Ok(()));
+
+        assert!(
+            execute_cable_breaker(
+                &config_proxy,
+                &CableBreakerArgs { duration: Some(10_000_000_000), reconnect: true, wait: false },
+            )
+            .await
+            .is_err()
+        );
+        drop(config_proxy);
+
+        assert_eq!(server_task.await, Vec::<String>::new());
     }
 
     #[fuchsia::test]
@@ -425,12 +737,15 @@ mod tests {
             fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
         let server_task = serve_configuration(config_stream, Ok(()));
 
-        execute_cable_breaker(&config_proxy, &CableBreakerArgs { duration: None })
-            .await
-            .expect("execute_cable_breaker should succeed");
+        execute_cable_breaker(
+            &config_proxy,
+            &CableBreakerArgs { duration: None, reconnect: false, wait: false },
+        )
+        .await
+        .expect("execute_cable_breaker should succeed");
         drop(config_proxy);
 
-        assert_eq!(server_task.await, vec!["disconnect_cable:0"]);
+        assert_eq!(server_task.await, vec!["disconnect_cable:0:false"]);
     }
 
     #[fuchsia::test]
@@ -442,14 +757,14 @@ mod tests {
         assert!(
             execute_cable_breaker(
                 &config_proxy,
-                &CableBreakerArgs { duration: Some("10s".to_string()) },
+                &CableBreakerArgs { duration: Some(10_000_000_000), reconnect: false, wait: false },
             )
             .await
             .is_err()
         );
         drop(config_proxy);
 
-        assert_eq!(server_task.await, vec!["disconnect_cable:10000000000"]);
+        assert_eq!(server_task.await, vec!["disconnect_cable:10000000000:false"]);
     }
 
     #[test]

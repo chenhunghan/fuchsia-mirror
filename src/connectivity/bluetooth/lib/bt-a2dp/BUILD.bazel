@@ -71,6 +71,7 @@ rustc_test(
     target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
         "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+        "//src/connectivity/bluetooth/lib/profile-client:test-profile-server",
         "//src/connectivity/bluetooth/testing/bt-channel-test-support",
         "//src/lib/async-utils",
         "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",

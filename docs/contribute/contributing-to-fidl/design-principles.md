@@ -149,7 +149,7 @@ However, this goes a step too far. There are valid reasons for using different
 naming styles, for example in describing the Kernel API, where `snake_case`
 methods are strongly preferred.
 
-## Canonical representation
+## Canonical representation {#canonical-representation}
 
 From [RFC-0131: Design principles of the FIDL wire format][rfc-0131]:
 

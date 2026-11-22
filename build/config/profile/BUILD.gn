@@ -154,6 +154,9 @@ group("runtime-deps") {
 }
 
 variant("coverage") {
+  # Note: In-tree Bazel coverage matches GN's ../../<path> contract via
+  # use_default_build_flags-gated 11-entry -fcoverage-prefix-map in
+  # toolchain_utils.bzl in C/C++ compiles.
   configs = [ ":variant-libprefix" ]
 
   # Only instrument C/C++ when C-family files are targeted.
@@ -303,15 +306,12 @@ variant("profile") {
 
   rustflags = []
 
-  # LINT.IfChange
   # We need to link the profile runtime manually into Rust binaries to satisfy
   # compiler generated symbol references in the instrumented C++ code.
   if (clang_target_toolchain_info.libclang_rt_profile_a != "") {
     libclang_rt_profile = "${rebased_clang_dir}/${clang_target_toolchain_info.libclang_rt_profile_a}"
     rustflags += [ "-Clink-arg=${libclang_rt_profile}" ]
   }
-
-  # LINT.ThenChange(//build/config/clang/generate_config_json.py)
 
   if (is_fuchsia || is_kernel) {
     # TODO(https://fxbug.dev/42053322): Value profiling isn't supported by the runtime.
@@ -322,7 +322,10 @@ variant("profile") {
   }
 }
 
-# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/toolchain_utils.bzl:profile)
+# LINT.ThenChange(
+#   //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/toolchain_utils.bzl:profile,
+#   //build/config/clang/generate_config_json.py,
+# )
 
 # LINT.IfChange(rust_profile)
 # Enable PGO instrumentation to collect profiles for Rust.
@@ -365,6 +368,5 @@ variant("profile-use-rust") {
 
 variant("heapdump") {
   configs = [ ":variant-libprefix" ]
-  executable_deps =
-      [ "//src/performance/memory/heapdump/instrumentation:autobind" ]
+  executable_deps = [ "//src/memory/heapdump/instrumentation:autobind" ]
 }

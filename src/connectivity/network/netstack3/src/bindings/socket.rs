@@ -644,7 +644,8 @@ impl IntoErrno for IpSockCreationError {
 impl IntoErrno for IpSockSendError {
     fn to_errno(&self) -> Errno {
         match self {
-            IpSockSendError::Mtu | IpSockSendError::IllegalLoopbackAddress => Errno::Einval,
+            IpSockSendError::Mtu => Errno::Emsgsize,
+            IpSockSendError::IllegalLoopbackAddress => Errno::Einval,
             IpSockSendError::Unroutable(e) => e.to_errno(),
             IpSockSendError::BroadcastNotAllowed => Errno::Eacces,
         }
@@ -658,9 +659,6 @@ impl IntoErrno for udp::SendToError {
             Self::LocalAddress(err) => err.to_errno(),
             Self::CreateSock(err) => err.to_errno(),
             Self::Zone(err) => err.to_errno(),
-            // NB: Mapping MTU to EMSGSIZE is different from the impl on
-            // `IpSockSendError` which maps to EINVAL instead.
-            Self::Send(IpSockSendError::Mtu) => Errno::Emsgsize,
             Self::Send(err) => err.to_errno(),
             Self::RemotePortUnset => Errno::Einval,
             Self::RemoteUnexpectedlyMapped => Errno::Enetunreach,
@@ -672,9 +670,6 @@ impl IntoErrno for udp::SendToError {
 impl IntoErrno for udp::SendError {
     fn to_errno(&self) -> Errno {
         match self {
-            // NB: Mapping MTU to EMSGSIZE is different from the impl on
-            // `IpSockSendError` which maps to EINVAL instead.
-            Self::IpSock(IpSockSendError::Mtu) => Errno::Emsgsize,
             Self::IpSock(err) => err.to_errno(),
             Self::NotWriteable => Errno::Epipe,
             Self::RemotePortUnset => Errno::Edestaddrreq,
@@ -740,5 +735,17 @@ impl IntoErrno for SetDualStackEnabledError {
 impl IntoErrno for NotDualStackCapableError {
     fn to_errno(&self) -> Errno {
         Errno::Enoprotoopt
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ip_sock_send_error_mtu_to_errno() {
+        assert_eq!(IpSockSendError::Mtu.to_errno(), Errno::Emsgsize);
+        assert_eq!(udp::SendError::IpSock(IpSockSendError::Mtu).to_errno(), Errno::Emsgsize);
+        assert_eq!(udp::SendToError::Send(IpSockSendError::Mtu).to_errno(), Errno::Emsgsize);
     }
 }

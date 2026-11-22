@@ -86,7 +86,7 @@ class AdjustLoadBiasAdaptor : public ModuleMemory {
   Elf::Addr load_bias_ = 0;
 };
 
-// TODO(https://fxbug.dev/324136435): Share SetTLs implementation with
+// TODO(https://fxbug.dev/342484765): Share SetTls implementation with
 // //sdk/lib/ld/include/lib/ld/decoded-module.h
 std::optional<TlsModule> SetTls(auto& diag, const Elf::Phdr& tls_phdr, auto& memory) {
   using PhdrError = elfldltl::internal::PhdrError<elfldltl::ElfPhdrType::kTls>;

@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::debian_guest::DataMount;
+use crate::debian_guest::{DataMount, DebianGuest};
 use anyhow::{Context as _, Error, anyhow};
+use cm_types::NamespacePath;
 use fidl::endpoints;
 use fidl::endpoints::{Proxy, create_proxy};
 use fidl_fuchsia_component_runner as frunner;
@@ -22,10 +23,12 @@ use gtest_runner_lib::parser::read_file;
 use log::debug;
 use namespace::Namespace;
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
 
 pub const SYSCALL_TEST_DEPS_ROMFS_PATH: &str = "data/syscall_test_deps.romfs";
 pub const MOUNT_SYSCALL_DEPS_SCRIPT_PATH: &str = "/pkg/data/mount_syscall_deps.sh";
+const PACKAGE_META_CONTENTS_PATH: &str = "meta/contents";
 const GUEST_TEST_ROOT: &str = "/";
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -37,7 +40,6 @@ pub enum TestType {
     Gunit,
     SeLinux,
     SingleTest,
-    SyscallGtest,
     SyscallLibtest,
     VtsBinary,
 }
@@ -75,7 +77,7 @@ pub fn take_opt_str_value_from_dict(
     name: &str,
 ) -> Result<Option<String>, Error> {
     match take_value(dict, name) {
-        Some(fdata::DictionaryValue::Str(value)) => Ok(Some(value.clone())),
+        Some(fdata::DictionaryValue::Str(value)) => Ok(Some(value)),
         Some(_) => Err(anyhow!("{} must a string", name)),
         _ => Ok(None),
     }
@@ -415,9 +417,7 @@ pub fn start_top_level_report(
 
 pub fn format_arg(test_type: TestType, test_arg: &str) -> String {
     match test_type {
-        TestType::Gtest | TestType::GtestXmlOutput | TestType::SyscallGtest => {
-            format!("--gtest_{}", test_arg)
-        }
+        TestType::Gtest | TestType::GtestXmlOutput => format!("--gtest_{}", test_arg),
         TestType::Gunit => format!("--gunit_{}", test_arg),
         _ => panic!("unexpected test type"),
     }
@@ -450,9 +450,7 @@ pub fn unique_test_result_filename() -> String {
 }
 
 /// Opens the syscall test dependencies ROMFS and mount script, returning a `DataMount`.
-pub async fn get_syscall_data_mount(
-    test_pkg_dir: &fio::DirectoryProxy,
-) -> Result<DataMount, Error> {
+async fn get_syscall_data_mount(test_pkg_dir: &fio::DirectoryProxy) -> Result<DataMount, Error> {
     let romfs_file =
         directory::open_file(test_pkg_dir, SYSCALL_TEST_DEPS_ROMFS_PATH, fio::PERM_READABLE)
             .await
@@ -478,61 +476,334 @@ pub fn get_guest_syscall_test_output_path(guest_output_filename: &str) -> PathBu
     Path::new(GUEST_TEST_ROOT).join(guest_output_filename)
 }
 
-/// Gets the absolute guest filepath for the test binary when running syscall tests on a guest.
-pub fn get_guest_syscall_test_binary_path(
-    start_info: &frunner::ComponentStartInfo,
+/// Prepares `debian_guest` to execute a syscall test binary by ensuring test dependencies are
+/// mounted, and the test binary has been pushed to the guest.
+pub async fn prepare_guest_syscall_test(
+    test_start_info: &mut frunner::ComponentStartInfo,
+    debian_guest: &DebianGuest,
 ) -> Result<PathBuf, Error> {
-    let host_binary_location = runner::get_program_binary(start_info)?;
-    let binary_name = Path::new(&host_binary_location)
+    let host_binary_location = runner::get_program_binary(test_start_info)?;
+    let guest_binary_path =
+        get_guest_syscall_test_binary_path(test_start_info, &host_binary_location)?;
+
+    let namespace_entries =
+        test_start_info.ns.take().ok_or_else(|| anyhow!("Missing namespace."))?;
+    let mut test_component_ns = Namespace::try_from(namespace_entries)?;
+    test_start_info.ns = Some(test_component_ns.clone().try_into()?);
+    let test_pkg_dir = test_component_ns
+        .remove(&NamespacePath::new("/pkg")?)
+        .ok_or_else(|| anyhow!("Could not find /pkg in namespace!"))?
+        .into_proxy();
+
+    if !debian_guest.is_bootstrapped() {
+        let data_mount = get_syscall_data_mount(&test_pkg_dir).await?;
+        debian_guest.configure_data_mount(data_mount);
+    }
+
+    let content_hash = read_package_file_hash(&test_pkg_dir, &host_binary_location).await;
+    // TODO(https://fxbug.dev/585583492): Stage each component in its own isolated guest directory.
+    debian_guest
+        .push_data_to_guest_once(&guest_binary_path, content_hash.as_deref(), async || {
+            open_guest_syscall_test_binary(&test_pkg_dir, &host_binary_location).await
+        })
+        .await?;
+
+    Ok(guest_binary_path)
+}
+
+/// Attempts to read the binary's Merkle hash, returning `None` if it cannot be read or the package
+/// metadata does not contain the Merkle content entry.
+async fn read_package_file_hash(
+    pkg_dir: &fio::DirectoryProxy,
+    package_relative_path: &str,
+) -> Option<String> {
+    // Read `meta/contents` instead of the package-wide `/pkg/meta` root so that rebuilding a single
+    // binary in a multi-binary test package only invalidates the single binary's cached entry.
+    let meta_contents = match directory::read_file_to_string(pkg_dir, PACKAGE_META_CONTENTS_PATH)
+        .await
+    {
+        Ok(contents) => contents,
+        Err(err) => {
+            log::warn!(
+                err:?,
+                path = PACKAGE_META_CONTENTS_PATH;
+                "Failed to read package meta/contents; staging guest test binary unconditionally"
+            );
+            return None;
+        }
+    };
+
+    let normalized_path = package_relative_path.trim_start_matches("./");
+    let content_hash = meta_contents.lines().find_map(|line| {
+        let (path, hash) = line.rsplit_once('=')?;
+        if path == normalized_path && !hash.is_empty() { Some(hash.to_string()) } else { None }
+    });
+    if content_hash.is_none() {
+        log::warn!(
+            binary_path = package_relative_path;
+            "Package meta/contents missing entry for test binary; staging unconditionally"
+        );
+    }
+    content_hash
+}
+
+/// Gets the absolute guest filepath for the test binary when running syscall tests on a guest.
+///
+/// Appends a hash of the component's `resolved_url` and package-relative binary path so distinct
+/// test components with identical executable basenames do not collide on the shared guest.
+// TODO(https://fxbug.dev/585583492): Give each test component an isolated directory on the guest
+// (reusing the mounted dependencies) instead of hash-mangling binary filenames in `/`.
+fn get_guest_syscall_test_binary_path(
+    start_info: &frunner::ComponentStartInfo,
+    host_binary_location: &str,
+) -> Result<PathBuf, Error> {
+    let resolved_url =
+        start_info.resolved_url.as_deref().ok_or_else(|| anyhow!("Missing resolved URL"))?;
+    let binary_name = Path::new(host_binary_location)
         .file_name()
+        .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("Binary path format was unexpected."))?;
-    Ok(Path::new(GUEST_TEST_ROOT).join(binary_name))
+
+    let mut hasher = DefaultHasher::new();
+    resolved_url.hash(&mut hasher);
+    host_binary_location.hash(&mut hasher);
+    let identity_hash = hasher.finish();
+
+    Ok(Path::new(GUEST_TEST_ROOT).join(format!("{}_{:016x}", binary_name, identity_hash)))
 }
 
 /// Opens the test binary from the package directory to push to a guest for syscall testing.
-pub async fn open_guest_syscall_test_binary(
+async fn open_guest_syscall_test_binary(
     pkg_dir: &fio::DirectoryProxy,
-    start_info: &frunner::ComponentStartInfo,
+    host_binary_location: &str,
 ) -> Result<endpoints::ClientEnd<fio::FileMarker>, Error> {
-    let host_binary_location = runner::get_program_binary(start_info)?;
-    directory::open_file(pkg_dir, &host_binary_location, fio::PERM_READABLE)
+    directory::open_file(pkg_dir, host_binary_location, fio::PERM_READABLE)
         .await?
         .into_client_end()
         .map_err(|_| anyhow!("Converting test bin file to client end failed"))
 }
 
 #[cfg(test)]
+pub(crate) struct TestPackageDir {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl TestPackageDir {
+    pub(crate) fn new(prefix: &str) -> Self {
+        let path = PathBuf::from(format!("/tmp/{}-{}", prefix, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create temp pkg dir");
+        Self { path }
+    }
+
+    pub(crate) fn with_guest_binary(binary_rel_path: &str) -> Self {
+        let pkg = Self::new("test-guest-pkg");
+        pkg.write_file(SYSCALL_TEST_DEPS_ROMFS_PATH, b"mock romfs");
+        pkg.write_file(binary_rel_path, b"mock binary");
+        pkg.write_file(
+            PACKAGE_META_CONTENTS_PATH,
+            format!(
+                "{binary_rel_path}=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            ),
+        );
+        pkg
+    }
+
+    pub(crate) fn write_file(&self, rel_path: &str, contents: impl AsRef<[u8]>) {
+        let full_path = self.path.join(rel_path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dirs");
+        }
+        std::fs::write(full_path, contents).expect("write fixture file");
+    }
+
+    pub(crate) fn remove_file(&self, rel_path: &str) {
+        std::fs::remove_file(self.path.join(rel_path)).expect("remove fixture file");
+    }
+
+    pub(crate) fn open_proxy(&self) -> fio::DirectoryProxy {
+        directory::open_in_namespace(
+            self.path.to_str().expect("valid UTF-8 temp path"),
+            fio::PERM_READABLE,
+        )
+        .expect("open temp pkg dir")
+    }
+
+    pub(crate) fn start_info(
+        &self,
+        resolved_url: &str,
+        binary: &str,
+        extra_program_entries: &[(&str, &str)],
+    ) -> frunner::ComponentStartInfo {
+        let pkg_client = self.open_proxy().into_client_end().expect("pkg dir client end");
+        let mut entries = vec![fdata::DictionaryEntry {
+            key: "binary".to_string(),
+            value: Some(Box::new(fdata::DictionaryValue::Str(binary.to_string()))),
+        }];
+        for (key, value) in extra_program_entries {
+            entries.push(fdata::DictionaryEntry {
+                key: (*key).to_string(),
+                value: Some(Box::new(fdata::DictionaryValue::Str((*value).to_string()))),
+            });
+        }
+        frunner::ComponentStartInfo {
+            resolved_url: Some(resolved_url.to_string()),
+            program: Some(fdata::Dictionary { entries: Some(entries), ..Default::default() }),
+            ns: Some(vec![ComponentNamespaceEntry {
+                path: Some("/pkg".to_string()),
+                directory: Some(pkg_client),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestPackageDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::debian_guest::test_helpers::MockDebianGuest;
 
     #[fuchsia::test]
     async fn test_get_syscall_data_mount_missing_romfs_errs() {
-        let temp_dir_path =
-            format!("/tmp/test-get-syscall-data-mount-missing-{}", uuid::Uuid::new_v4());
-        std::fs::create_dir_all(&temp_dir_path).expect("create temp dir");
-        let pkg_dir = fuchsia_fs::directory::open_in_namespace(&temp_dir_path, fio::PERM_READABLE)
-            .expect("open temp dir");
-
-        let result = get_syscall_data_mount(&pkg_dir).await;
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&temp_dir_path);
+        let pkg = TestPackageDir::new("test-get-syscall-data-mount-missing");
+        let pkg_dir = pkg.open_proxy();
+        assert!(get_syscall_data_mount(&pkg_dir).await.is_err());
     }
 
     #[fuchsia::test]
     async fn test_get_syscall_data_mount_success() {
-        let temp_dir_path =
-            format!("/tmp/test-get-syscall-data-mount-success-{}", uuid::Uuid::new_v4());
-        let data_dir = format!("{}/data", temp_dir_path);
-        std::fs::create_dir_all(&data_dir).expect("create data dir");
-        std::fs::write(format!("{}/syscall_test_deps.romfs", data_dir), b"mock romfs")
-            .expect("write romfs file");
-        let pkg_dir = fuchsia_fs::directory::open_in_namespace(&temp_dir_path, fio::PERM_READABLE)
-            .expect("open temp dir");
+        let pkg = TestPackageDir::new("test-get-syscall-data-mount-success");
+        pkg.write_file(SYSCALL_TEST_DEPS_ROMFS_PATH, b"mock romfs");
+        let pkg_dir = pkg.open_proxy();
+        assert!(get_syscall_data_mount(&pkg_dir).await.is_ok());
+    }
 
-        let result = get_syscall_data_mount(&pkg_dir).await;
-        assert!(result.is_ok());
+    #[fuchsia::test]
+    async fn test_prepare_guest_syscall_test_stages_and_invalidates_binary() {
+        const BINARY_PATH: &str = "data/tests/starnix_linux_foo_bin";
+        let pkg = TestPackageDir::new("test-prepare-guest-syscall-test");
+        pkg.write_file(BINARY_PATH, b"mock binary v1");
+        pkg.write_file(
+            PACKAGE_META_CONTENTS_PATH,
+            format!(
+                "data/tests/other_bin=0000000000000000000000000000000000000000000000000000000000000000\n\
+                 {BINARY_PATH}=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            ),
+        );
 
-        let _ = std::fs::remove_dir_all(&temp_dir_path);
+        let first_url = "fuchsia-pkg://fuchsia.com/pkg_a#meta/foo.cm";
+
+        // An unbootstrapped guest requires the dependency ROMFS to configure its data mount.
+        let unbootstrapped_guest = DebianGuest::new("unbootstrapped_test_guest".to_string());
+        let mut unbootstrapped_start_info = pkg.start_info(first_url, BINARY_PATH, &[]);
+        assert!(
+            prepare_guest_syscall_test(&mut unbootstrapped_start_info, &unbootstrapped_guest)
+                .await
+                .is_err()
+        );
+
+        // Once bootstrapped (`MockDebianGuest` uses a pre-bootstrapped proxy), preparing tests
+        // skips re-opening the dependency ROMFS altogether.
+        let mock = MockDebianGuest::with_put_file_handler(|remote_path, _attempt| {
+            assert!(remote_path.starts_with("/starnix_linux_foo_bin_"));
+            zx::sys::ZX_OK
+        });
+
+        let mut first_start_info = pkg.start_info(first_url, BINARY_PATH, &[]);
+        let first_path = prepare_guest_syscall_test(&mut first_start_info, &mock.guest)
+            .await
+            .expect("first chunk prepares guest binary");
+        assert!(
+            first_path
+                .to_str()
+                .expect("valid UTF-8 guest path")
+                .starts_with("/starnix_linux_foo_bin_")
+        );
+        assert_eq!(mock.put_file_count(), 1);
+
+        // Changing an unrelated entry in `meta/contents` must keep `BINARY_PATH` cached and
+        // short-circuit before opening the binary or pushing over vsock again.
+        pkg.write_file(
+            PACKAGE_META_CONTENTS_PATH,
+            format!(
+                "data/tests/other_bin=1111111111111111111111111111111111111111111111111111111111111111\n\
+                 {BINARY_PATH}=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            ),
+        );
+        pkg.remove_file(BINARY_PATH);
+        let mut second_start_info = pkg.start_info(first_url, BINARY_PATH, &[]);
+        let second_path = prepare_guest_syscall_test(&mut second_start_info, &mock.guest)
+            .await
+            .expect("second chunk reuses staged binary");
+        assert_eq!(second_path, first_path);
+        assert_eq!(mock.put_file_count(), 1);
+        pkg.write_file(BINARY_PATH, b"mock binary v2");
+
+        // Rebuilding the test binary changes its hash in `meta/contents` (while other earlier
+        // entries remain); the runner re-pushes to the same guest path and caches the new hash.
+        pkg.write_file(
+            PACKAGE_META_CONTENTS_PATH,
+            format!(
+                "data/tests/other_bin=1111111111111111111111111111111111111111111111111111111111111111\n\
+                 {BINARY_PATH}=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+            ),
+        );
+        let mut rebuilt_start_info = pkg.start_info(first_url, BINARY_PATH, &[]);
+        let rebuilt_path = prepare_guest_syscall_test(&mut rebuilt_start_info, &mock.guest)
+            .await
+            .expect("rebuilt binary is re-pushed");
+        assert_eq!(rebuilt_path, first_path);
+        assert_eq!(mock.put_file_count(), 2);
+
+        // A distinct component with an identical executable basename gets an isolated guest path
+        // and stages its own binary rather than colliding with the first component.
+        let mut distinct_start_info =
+            pkg.start_info("fuchsia-pkg://fuchsia.com/pkg_b#meta/foo.cm", BINARY_PATH, &[]);
+        let distinct_path = prepare_guest_syscall_test(&mut distinct_start_info, &mock.guest)
+            .await
+            .expect("distinct component stages its own binary");
+        assert_ne!(distinct_path, first_path);
+        assert_eq!(mock.put_file_count(), 3);
+
+        // If `meta/contents` is readable but has an empty hash or omits `BINARY_PATH`,
+        // `read_package_file_hash` must return `None` rather than caching an empty string.
+        pkg.write_file(
+            PACKAGE_META_CONTENTS_PATH,
+            format!(
+                "data/tests/other_bin=1111111111111111111111111111111111111111111111111111111111111111\n\
+                 {BINARY_PATH}=\n"
+            ),
+        );
+        assert_eq!(read_package_file_hash(&pkg.open_proxy(), BINARY_PATH).await, None);
+
+        pkg.write_file(
+            PACKAGE_META_CONTENTS_PATH,
+            "data/tests/other_bin=1111111111111111111111111111111111111111111111111111111111111111\n",
+        );
+        assert_eq!(read_package_file_hash(&pkg.open_proxy(), BINARY_PATH).await, None);
+
+        // Without `meta/contents`, the runner falls back to pushing unconditionally on every call.
+        pkg.remove_file(PACKAGE_META_CONTENTS_PATH);
+        let mut unhashed_first = pkg.start_info(first_url, BINARY_PATH, &[]);
+        prepare_guest_syscall_test(&mut unhashed_first, &mock.guest)
+            .await
+            .expect("first missing meta/contents push succeeds");
+        assert_eq!(mock.put_file_count(), 4);
+
+        let mut unhashed_second = pkg.start_info(first_url, BINARY_PATH, &[]);
+        prepare_guest_syscall_test(&mut unhashed_second, &mock.guest)
+            .await
+            .expect("second missing meta/contents push is not cached");
+        assert_eq!(mock.put_file_count(), 5);
+
+        mock.finish().await;
     }
 }

@@ -1,0 +1,180 @@
+{
+    "name": "discovery_and_descriptors",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 255,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "type": "stat_dev"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "idVendor"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "idProduct"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "bcdDevice"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "bDeviceClass"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "bDeviceSubClass"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "bDeviceProtocol"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "bNumConfigurations"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "bConfigurationValue"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "busnum"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "devnum"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "speed"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "uevent"
+        },
+        {
+            "type": "read_sysfs",
+            "attr": "descriptors"
+        },
+        {
+            "type": "open",
+            "fd": "fd_ro",
+            "mode": "rdonly"
+        },
+        {
+            "type": "read",
+            "fd": "fd_ro",
+            "size": 64
+        },
+        {
+            "type": "read",
+            "fd": "fd_ro",
+            "size": 64
+        },
+        {
+            "type": "lseek",
+            "fd": "fd_ro",
+            "offset": 18,
+            "whence": "SEEK_SET"
+        },
+        {
+            "type": "read",
+            "fd": "fd_ro",
+            "size": 9
+        },
+        {
+            "type": "pread",
+            "fd": "fd_ro",
+            "offset": 0,
+            "size": 18
+        },
+        {
+            "type": "lseek",
+            "fd": "fd_ro",
+            "offset": -1,
+            "whence": "SEEK_SET"
+        },
+        {
+            "type": "get_speed",
+            "fd": "fd_ro"
+        },
+        {
+            "type": "open",
+            "fd": "fd_rw",
+            "mode": "rdwr"
+        },
+        {
+            "type": "write",
+            "fd": "fd_rw",
+            "data": [
+                1,
+                2,
+                3,
+                4
+            ]
+        },
+        {
+            "type": "get_speed",
+            "fd": "fd_rw"
+        },
+        {
+            "type": "get_capabilities",
+            "fd": "fd_rw",
+            "arg_ptr": "valid"
+        },
+        {
+            "type": "connectinfo",
+            "fd": "fd_rw",
+            "arg_ptr": "valid"
+        },
+        {
+            "type": "close",
+            "fd": "fd_ro"
+        },
+        {
+            "type": "close",
+            "fd": "fd_rw"
+        }
+    ]
+}

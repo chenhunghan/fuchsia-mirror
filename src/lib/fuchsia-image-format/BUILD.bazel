@@ -42,7 +42,6 @@ rustc_test(
 # @bazel2gn:skip
 fx_unittest_package(
     name = "fuchsia-image-format-tests",
-    package_name = "fuchsia-image-format-tests",
     unit_tests = [":fuchsia-image-format_test"],
     visibility = ["//src/lib:__pkg__"],
 )

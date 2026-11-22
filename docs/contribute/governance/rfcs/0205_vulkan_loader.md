@@ -71,12 +71,12 @@ team and at Security team office hours.
 ## Design
 
 On Fuchsia, the Vulkan loader is split into two parts: the
-[libvulkan.so](#libvulkanso) shared library that is loaded into the application,
-and a loader service ([vulkan_loader](#vulkan_loader)) that is responsible for
-loading ICD VMOs and transferring them to `libvulkan.so`. They communicate using
-the [fuchsia.vulkan.loader.Loader][loader-protocol] protocol.
+[libvulkan.so](#libvulkan-so) shared library that is loaded into the
+application, and a loader service ([vulkan_loader](#vulkan-loader)) that is
+responsible for loading ICD VMOs and transferring them to `libvulkan.so`. They
+communicate using the [fuchsia.vulkan.loader.Loader][loader-protocol] protocol.
 
-### libvulkan.so
+### libvulkan.so {:#libvulkan-so}
 
 [Khronos][khronos] is the standards body for the Vulkan API. They provide a
 [loader shared library implementation][loaderrepo] that's used on Linux,
@@ -219,7 +219,7 @@ The loader searches for config files by default in
 overridden by environment variables or an [override layer][override-layer], the
 same as on Linux.
 
-### vulkan_loader
+### vulkan_loader {:#vulkan-loader}
 
 `vulkan_loader` is  a service that is responsible for determining what ICDs are
 available, loading them, and serving them to applications. It's hosted at
@@ -256,7 +256,7 @@ SwiftShader) often have JITs and require the ability to write to executable
 memory; because of that, they may not be usable on production systems where that
 capability is tightly controlled for security reasons.
 
-#### Filesystem serving
+#### Filesystem serving {:#filesystem-serving}
 
 `vulkan_loader` serves multiple filesystems to clients, including the _manifest
 fs_ and _device fs_.  It creates these filesystems based on the contents of

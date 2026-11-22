@@ -54,6 +54,7 @@ if (is_host) {
       "__init__.py",
       "lib.py",
     ]
+    imports = [ ".." ]
     visibility = [
       ":*",
       "//scripts/debug/zxdb_cli/cli:*",
@@ -68,5 +69,6 @@ if (is_host) {
       "//scripts/lib/async_utils",
       "//scripts/lib/build_dir",
     ]
+    enable_mypy = false
   }
 }

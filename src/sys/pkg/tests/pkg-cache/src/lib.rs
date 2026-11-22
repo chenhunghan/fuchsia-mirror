@@ -9,9 +9,9 @@
 use anyhow::anyhow;
 use assert_matches::assert_matches;
 use blobfs_ramdisk::BlobfsRamdisk;
+use delivery_blob::DeliveryBlobType;
 use diagnostics_assertions::TreeAssertion;
 use fidl::endpoints::DiscoverableProtocolMarker as _;
-use fidl_fuchsia_boot as fboot;
 use fidl_fuchsia_component_resolution as fcomponent_resolution;
 use fidl_fuchsia_fxfs as ffxfs;
 use fidl_fuchsia_io as fio;
@@ -116,11 +116,17 @@ async fn compress_and_write_blob(
     contents: &[u8],
     blob: ffxfs::BlobWriterProxy,
 ) -> Result<(), blob_writer::WriteError> {
-    write_blob(
-        &delivery_blob::Type1Blob::generate(contents, delivery_blob::CompressionMode::Attempt),
-        blob,
-    )
-    .await
+    compress_and_write_blob_with_type(DeliveryBlobType::Type1, contents, blob).await
+}
+
+/// Compresses `contents` using `delivery_type` then writes the compressed bytes to `blob`. `blob`
+/// should have been opened as a `Delivery` blob.
+async fn compress_and_write_blob_with_type(
+    delivery_type: DeliveryBlobType,
+    contents: &[u8],
+    blob: ffxfs::BlobWriterProxy,
+) -> Result<(), blob_writer::WriteError> {
+    write_blob(&delivery_blob::generate(delivery_type, contents), blob).await
 }
 
 // Calls fuchsia.pkg/NeededBlobs.GetMissingBlobs and reads from the iterator until it ends.
@@ -379,6 +385,7 @@ trait Blobfs {
     fn svc_dir(&self) -> fio::DirectoryProxy;
     fn blob_creator_proxy(&self) -> Option<ffxfs::BlobCreatorProxy>;
     fn blob_reader_proxy(&self) -> ffxfs::BlobReaderProxy;
+    fn use_driver_blob_paging(&self) -> bool;
 }
 
 impl Blobfs for BlobfsRamdisk {
@@ -393,6 +400,9 @@ impl Blobfs for BlobfsRamdisk {
     }
     fn blob_reader_proxy(&self) -> ffxfs::BlobReaderProxy {
         self.blob_reader_proxy().unwrap()
+    }
+    fn use_driver_blob_paging(&self) -> bool {
+        self.implementation() == blobfs_ramdisk::Implementation::Fxblob
     }
 }
 
@@ -409,8 +419,7 @@ struct TestEnvBuilder<BlobfsAndSystemImageFut> {
     blob_network_body_timeout_seconds: Option<u32>,
     blob_implementation: Option<blobfs_ramdisk::Implementation>,
     bootfs_blobs: HashMap<Hash, Vec<u8>>,
-    use_driver_blob_paging: bool,
-    mapper: Option<fstorage_block::MapperProxy>,
+    use_driver_blob_paging: Option<bool>,
 }
 
 impl TestEnvBuilder<BoxFuture<'static, (BlobfsRamdisk, Option<Hash>)>> {
@@ -437,8 +446,7 @@ impl TestEnvBuilder<BoxFuture<'static, (BlobfsRamdisk, Option<Hash>)>> {
             blob_network_body_timeout_seconds: None,
             blob_implementation: None,
             bootfs_blobs: HashMap::new(),
-            use_driver_blob_paging: false,
-            mapper: None,
+            use_driver_blob_paging: None,
         }
     }
 }
@@ -479,7 +487,6 @@ where
             blob_implementation: self.blob_implementation,
             bootfs_blobs: self.bootfs_blobs,
             use_driver_blob_paging: self.use_driver_blob_paging,
-            mapper: self.mapper,
         }
     }
 
@@ -522,7 +529,6 @@ where
             blob_implementation: Some(blobfs_ramdisk::Implementation::from_env()),
             bootfs_blobs: self.bootfs_blobs,
             use_driver_blob_paging: self.use_driver_blob_paging,
-            mapper: self.mapper,
         }
     }
 
@@ -531,12 +537,7 @@ where
     }
 
     fn use_driver_blob_paging(self, enabled: bool) -> Self {
-        Self { use_driver_blob_paging: enabled, ..self }
-    }
-
-    fn mapper(self, mapper: fstorage_block::MapperProxy) -> Self {
-        assert_matches!(self.mapper, None);
-        Self { mapper: Some(mapper), ..self }
+        Self { use_driver_blob_paging: Some(enabled), ..self }
     }
 
     fn enable_upgradable_packages(self) -> Self {
@@ -654,59 +655,6 @@ where
                 .unwrap();
         }
 
-        let has_custom_mapper = self.mapper.is_some();
-        if let Some(mapper_proxy) = self.mapper {
-            local_child_svc_dir
-                .add_entry(
-                    fstorage_block::MapperMarker::PROTOCOL_NAME,
-                    vfs::service::host(move |stream: fstorage_block::MapperRequestStream| {
-                        let mapper_proxy = mapper_proxy.clone();
-                        async move {
-                            let mut stream = stream;
-                            while let Ok(Some(request)) = stream.try_next().await {
-                                match request {
-                                    fstorage_block::MapperRequest::OpenSession {
-                                        session,
-                                        mapping_vmo,
-                                        port,
-                                        delivery_queue,
-                                        responder,
-                                    } => {
-                                        let res = mapper_proxy
-                                            .open_session(
-                                                session,
-                                                mapping_vmo,
-                                                port,
-                                                delivery_queue,
-                                            )
-                                            .await;
-                                        match res {
-                                            Ok(res) => {
-                                                let _ = responder.send(res);
-                                            }
-                                            Err(error) => {
-                                                log::error!(
-                                                    error:?;
-                                                    "Failed to forward OpenSession to real Mapper"
-                                                );
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    fstorage_block::MapperRequest::_UnknownMethod {
-                                        ordinal,
-                                        ..
-                                    } => {
-                                        log::warn!(ordinal; "Unknown Mapper request ordinal");
-                                    }
-                                }
-                            }
-                        }
-                    }),
-                )
-                .unwrap();
-        }
-
         let bootfs_blobs = {
             // The capability is optional, so if there are no bootfs blobs give pkg-cache a broken
             // proxy.
@@ -752,6 +700,8 @@ where
         } else {
             "".to_string()
         };
+        let use_driver_blob_paging =
+            self.use_driver_blob_paging.unwrap_or_else(|| blobfs.use_driver_blob_paging());
         for (name, value) in [
             ("fuchsia.zircon.system.pkgfs.cmd", system_image_value.into()),
             ("fuchsia.pkgcache.AllPackagesExecutable", false.into()),
@@ -774,7 +724,7 @@ where
                 self.blob_network_body_timeout_seconds.unwrap_or(30).into(),
             ),
             ("fuchsia.pkgcache.BlobDownloadResumptionAttemptsLimit", 50u32.into()),
-            ("fuchsia.pkgcache.UseDriverBlobPaging", self.use_driver_blob_paging.into()),
+            ("fuchsia.pkgcache.UseDriverBlobPaging", use_driver_blob_paging.into()),
             ("fuchsia.fshost.StartupProfilingSeconds", 0u32.into()),
         ] {
             builder
@@ -802,7 +752,7 @@ where
             .await
             .unwrap();
         let http_client = builder
-            .add_child("http_client", "#meta/http-client.cm", ChildOptions::new())
+            .add_child("http_client", "http-client#meta/http-client.cm", ChildOptions::new())
             .await
             .unwrap();
 
@@ -848,7 +798,6 @@ where
             .add_route(
                 Route::new()
                     .capability(Capability::protocol::<fmetrics::MetricEventLoggerFactoryMarker>())
-                    .capability(Capability::protocol::<fboot::ArgumentsMarker>())
                     .capability(
                         Capability::protocol::<fidl_fuchsia_tracing_provider::RegistryMarker>(),
                     )
@@ -867,12 +816,6 @@ where
             )
             .await
             .unwrap();
-        let mapper_capability = if has_custom_mapper {
-            Capability::protocol::<fstorage_block::MapperMarker>()
-        } else {
-            Capability::protocol::<fstorage_block::MapperMarker>()
-                .path(format!("/blob-svc/{}", fstorage_block::MapperMarker::PROTOCOL_NAME))
-        };
         builder
             .add_route(
                 Route::new()
@@ -892,8 +835,13 @@ where
                             ),
                         ),
                     )
+                    .capability(
+                        Capability::protocol::<fstorage_block::MapperMarker>().path(format!(
+                            "/blob-svc/{}",
+                            fstorage_block::MapperMarker::PROTOCOL_NAME
+                        )),
+                    )
                     .capability(Capability::protocol::<fpkg::AuthorityMarker>())
-                    .capability(mapper_capability)
                     .from(&service_reflector)
                     .to(&pkg_cache),
             )
@@ -1476,12 +1424,27 @@ impl MockPkgAuthority {
         config: &fpkg_ext::RepositoryConfig,
         pkgs: &[&fuchsia_pkg_testing::Package],
     ) -> Self {
+        Self::from_repo_config_and_packages_with_type(config, pkgs, DeliveryBlobType::Type1)
+    }
+
+    fn from_repo_config_and_packages_with_type(
+        config: &fpkg_ext::RepositoryConfig,
+        pkgs: &[&fuchsia_pkg_testing::Package],
+        delivery_blob_type: DeliveryBlobType,
+    ) -> Self {
         let index = pkgs
             .iter()
             .map(|p| {
                 (
                     format!("{}/{}", config.repo_url(), p.name()),
-                    Ok((*p.hash(), format!("{}/1", config.mirrors()[0].blob_mirror_url()))),
+                    Ok((
+                        *p.hash(),
+                        format!(
+                            "{}/{}",
+                            config.mirrors()[0].blob_mirror_url(),
+                            u32::from(delivery_blob_type)
+                        ),
+                    )),
                 )
             })
             .collect();

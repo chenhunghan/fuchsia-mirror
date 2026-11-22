@@ -502,6 +502,10 @@ void FakeWlanix::Select(SelectCompleter::Sync& completer) {
   AppendCommand(Command{.tag = CommandTag::kSupplicantStaNetworkSelect});
 }
 
+void FakeWlanix::Disable(DisableCompleter::Sync& completer) {
+  AppendCommand(Command{.tag = CommandTag::kSupplicantStaNetworkDisable});
+}
+
 void FakeWlanix::handle_unknown_method(
     fidl::UnknownMethodMetadata<fuchsia_wlan_wlanix::SupplicantStaNetwork> metadata,
     fidl::UnknownMethodCompleter::Sync& completer) {

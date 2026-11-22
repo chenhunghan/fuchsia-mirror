@@ -18,7 +18,7 @@ struct Lc3DecoderParams {
   // Sample rate in Hz.
   const int sr_hz;
   const int nbytes;
-  std::vector<fuchsia::media::AudioChannelId2> channels;
+  std::vector<fuchsia_media::AudioChannelId2> channels;
 };
 
 class CodecAdapterLc3Decoder : public CodecAdapterSWImpl<Lc3DecoderParams> {
@@ -27,19 +27,19 @@ class CodecAdapterLc3Decoder : public CodecAdapterSWImpl<Lc3DecoderParams> {
   ~CodecAdapterLc3Decoder() = default;
 
  protected:
-  std::pair<fuchsia::media::FormatDetails, size_t> OutputFormatDetails()
+  std::pair<fuchsia_media::FormatDetails, size_t> OutputFormatDetails()
       __TA_EXCLUDES(lock_) override;
   CodecAdapterLc3Decoder::InputLoopStatus ProcessFormatDetails(
-      const fuchsia::media::FormatDetails& format_details) __TA_EXCLUDES(lock_) override;
+      const fuchsia_media::FormatDetails& format_details) __TA_EXCLUDES(lock_) override;
   int ProcessInputChunkData(const uint8_t* input_data, size_t input_data_size,
                             uint8_t* output_buffer, size_t output_buffer_size) override;
   size_t InputChunkSize() override;
   size_t MinOutputBufferSize() override;
-  fuchsia::sysmem::BufferCollectionConstraints BufferCollectionConstraints(CodecPort port)
+  fuchsia_sysmem2::BufferCollectionConstraints BufferCollectionConstraints(CodecPort port)
       __TA_REQUIRES(lock_) override;
 
   TimestampExtrapolator CreateTimestampExtrapolator(
-      const fuchsia::media::FormatDetails& format_details) override {
+      const fuchsia_media::FormatDetails& format_details) override {
     return TimestampExtrapolator();
   }
 };

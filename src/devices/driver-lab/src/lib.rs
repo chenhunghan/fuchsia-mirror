@@ -21,7 +21,7 @@ struct LabProxy {
     _node: Node,
     _scope: fasync::Scope,
     state: SharedState,
-    irq_cancellers: Mutex<Vec<zx::Interrupt>>,
+    irq_cancellers: Vec<zx::Interrupt>,
 }
 
 driver_register!(LabProxy);
@@ -220,14 +220,12 @@ impl Driver for LabProxy {
         }
 
         info!("LabProxy started; serving fuchsia.driver.lab");
-        Ok(Self { _node: node, _scope: scope, state, irq_cancellers: Mutex::new(irq_cancellers) })
+        Ok(Self { _node: node, _scope: scope, state, irq_cancellers })
     }
 
-    async fn stop(&self) {
-        if let Ok(mut cancellers) = self.irq_cancellers.lock() {
-            for irq in cancellers.drain(..) {
-                let _ = irq.destroy();
-            }
+    async fn stop(self) {
+        for irq in self.irq_cancellers {
+            let _ = irq.destroy();
         }
         self.state.abort_token.store(true, std::sync::atomic::Ordering::SeqCst);
         let mut state = self.state.inner.lock().unwrap();

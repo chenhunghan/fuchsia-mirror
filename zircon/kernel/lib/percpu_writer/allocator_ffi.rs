@@ -7,26 +7,12 @@
 //! FFI bindings for `percpu_writer::KernelAspaceAllocator`.
 
 use super::KernelAspaceAllocator;
-use core::ffi::{CStr, c_char};
 use core::ptr::{self, NonNull};
 
 /// Allocates and maps a pinned region of `size` bytes in the kernel address space.
-///
-/// # Safety
-///
-/// `buffer_name` must be null or a valid pointer to a NUL-terminated C string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_percpu_writer_kernel_aspace_allocator_allocate(
-    size: u32,
-    buffer_name: *const c_char,
-) -> *mut u8 {
-    let name = if buffer_name.is_null() {
-        b""
-    } else {
-        // SAFETY: The caller guarantees `buffer_name` is a valid NUL-terminated C string.
-        unsafe { CStr::from_ptr(buffer_name).to_bytes() }
-    };
-    KernelAspaceAllocator::allocate(size, name).map_or(ptr::null_mut(), NonNull::as_ptr)
+pub extern "C" fn rust_percpu_writer_kernel_aspace_allocator_allocate(size: u32) -> *mut u8 {
+    KernelAspaceAllocator::allocate(size).map_or(ptr::null_mut(), NonNull::as_ptr)
 }
 
 /// Frees a kernel address space region previously allocated by

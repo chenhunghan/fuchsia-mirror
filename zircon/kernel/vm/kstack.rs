@@ -16,7 +16,7 @@ use crate::counters::define_kcounter;
 use crate::thread_stack::internal::STACK_GUARD_REGION_SIZE;
 use boot_options::BootOptions;
 use core::ffi::{c_int, c_void};
-use core::mem::MaybeUninit;
+use core::mem::{DropGuard, MaybeUninit};
 use core::ops::Deref;
 use core::ptr;
 use debug::{dprintf, ltracef};
@@ -150,8 +150,7 @@ fn map(
     debug_assert!(map.vmar.is_none());
 
     // get a handle to the root vmar
-    let vmar =
-        VmAspace::kernel_aspace().root_vmar().and_then(|root| root.as_vm_address_region()).unwrap();
+    let vmar = VmAspace::kernel_aspace().root_vmar().unwrap();
 
     // create a vmar with enough padding for a page before and after the stack
     let kstack_vmar = vmar.create_sub_vmar(
@@ -164,14 +163,14 @@ fn map(
 
     // destroy the vmar if we early abort
     // this will also clean up any mappings that may get placed on the vmar
-    let mut vmar_cleanup = zr::defer(|| {
+    let kstack_vmar = DropGuard::new(kstack_vmar, |kstack_vmar| {
         let _ = kstack_vmar.destroy();
     });
 
     ltracef!("{} vmar at {:#x}\n", stack.name, kstack_vmar.base().0);
 
     // create a mapping offset lower_guard_size_bytes into the vmar we created
-    let mapping_result = kstack_vmar.create_vm_mapping(
+    let mapping_result = kstack_vmar.create_vm_mapping_no_overwrite(
         stack.lower_guard_size_bytes as usize,
         stack.size_bytes as usize,
         0,
@@ -179,7 +178,6 @@ fn map(
         VmObjectPaged::into_vm_object(vmo.clone()),
         *offset,
         ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-        stack.name.as_bytes(),
     )?;
 
     ltracef!("{} mapping at {:#x}\n", stack.name, mapping_result.base);
@@ -197,8 +195,7 @@ fn map(
 
     // Cancel the cleanup handler on the vmar since we're about to save a
     // reference to it.
-    vmar_cleanup.cancel();
-    drop(vmar_cleanup);
+    let kstack_vmar = DropGuard::dismiss(kstack_vmar);
 
     // save the relevant bits
     map.vmar = Some(kstack_vmar);

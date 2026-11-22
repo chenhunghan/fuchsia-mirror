@@ -5,7 +5,7 @@
 //! Implements fuchsia.posix.socket.Provider and fuchsia.posix.socket.raw.Provider.
 
 use anyhow::{Context as _, Error};
-use fidl::endpoints::{ClientEnd, ProtocolMarker, Proxy as _};
+use fidl::endpoints::{ClientEnd, DiscoverableProtocolMarker, ProtocolMarker, Proxy as _};
 use fidl_fuchsia_net::{self as fnet, MarkDomain};
 use fidl_fuchsia_posix as fposix;
 use fidl_fuchsia_posix_socket::{
@@ -24,9 +24,6 @@ use std::sync::Arc;
 /// Manages the following inspect nodes:
 /// socket_provider:
 ///   sockets = 0
-///   datagram:
-///     proxied = 0
-///     unmarked = 0
 ///   raw:
 ///     proxied = 0
 ///     unmarked = 0
@@ -41,7 +38,6 @@ struct SocketProviderInspect {
     sockets: u32,
     stream: PerType,
     synchronous_datagram: PerType,
-    datagram: PerType,
     raw: PerType,
 }
 
@@ -86,7 +82,6 @@ macro_rules! impl_markable {
 impl_markable!(
     fposix_socket::StreamSocketProxy,
     fposix_socket::SynchronousDatagramSocketProxy,
-    fposix_socket::DatagramSocketProxy,
     fposix_socket_raw::SocketProxy,
 );
 
@@ -124,17 +119,58 @@ where
     }
 }
 
+pub(crate) trait ProtocolConnector<M: ProtocolMarker>: Send + Sync {
+    fn connect(&self) -> Result<M::Proxy, Error>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct NamespaceConnector;
+
+impl<M: DiscoverableProtocolMarker> ProtocolConnector<M> for NamespaceConnector {
+    fn connect(&self) -> Result<M::Proxy, Error> {
+        connect_to_protocol::<M>()
+            .with_context(|| format!("Failed to connect to {}", M::PROTOCOL_NAME))
+    }
+}
+
 #[derive(Inspect, Clone)]
-pub(crate) struct SocketProvider {
+pub(crate) struct SocketProvider<C = NamespaceConnector> {
     marks: Arc<Mutex<IValue<crate::SocketMarks>>>,
 
     #[inspect(forward)]
     metrics: Arc<Mutex<IValue<SocketProviderInspect>>>,
+
+    connect_inner_provider: C,
 }
 
 impl SocketProvider {
     pub(crate) fn new(mark: Arc<Mutex<IValue<crate::SocketMarks>>>) -> Self {
-        Self { marks: mark, metrics: Default::default() }
+        Self {
+            marks: mark,
+            metrics: Default::default(),
+            connect_inner_provider: NamespaceConnector,
+        }
+    }
+}
+
+impl<C: ProtocolConnector<fposix_socket::ProviderMarker>> SocketProvider<C> {
+    #[cfg(test)]
+    pub(crate) fn new_with_connector(
+        marks: Arc<Mutex<IValue<crate::SocketMarks>>>,
+        connect_inner_provider: C,
+    ) -> Self {
+        Self { marks, metrics: Default::default(), connect_inner_provider }
+    }
+
+    pub(crate) fn with_marks(&self, marks: Arc<Mutex<IValue<crate::SocketMarks>>>) -> Self
+    where
+        C: Clone,
+    {
+        Self {
+            marks,
+            metrics: Arc::clone(&self.metrics),
+            connect_inner_provider: self.connect_inner_provider.clone(),
+        }
     }
 
     /// Run an instance of fuchsia.posix.socket.Provider.
@@ -142,8 +178,7 @@ impl SocketProvider {
         &self,
         stream: fposix_socket::ProviderRequestStream,
     ) -> Result<(), Error> {
-        let inner_provider = connect_to_protocol::<fposix_socket::ProviderMarker>()
-            .context("Failed to connect to inner server")?;
+        let inner_provider = self.connect_inner_provider.connect()?;
         stream
             .map(|result| result.context("failed request"))
             .try_for_each(|request| async {
@@ -221,20 +256,19 @@ impl SocketProvider {
                             .await?
                             .map(|response| {
                                 match response {
-                                ProviderDatagramSocketWithOptionsResponse::DatagramSocket(client_end)
-                                => {
-                                    metrics.datagram.track(marks);
-                                    ProviderDatagramSocketResponse::DatagramSocket(client_end)
+                                    ProviderDatagramSocketWithOptionsResponse::SynchronousDatagramSocket(
+                                        client_end,
+                                    ) => {
+                                        metrics.synchronous_datagram.track(marks);
+                                        ProviderDatagramSocketResponse::SynchronousDatagramSocket(
+                                            client_end,
+                                        )
+                                    }
+                                    #[allow(unreachable_patterns)]
+                                    _ => {
+                                        unimplemented!("DatagramSocket is no longer supported")
+                                    }
                                 }
-                                ProviderDatagramSocketWithOptionsResponse::SynchronousDatagramSocket(
-                                    client_end,
-                                ) => {
-                                    metrics.synchronous_datagram.track(marks);
-                                    ProviderDatagramSocketResponse::SynchronousDatagramSocket(
-                                    client_end,
-                                    )
-                                },
-                            }
                             });
                         responder.send(datagram_socket)?
                     }
@@ -264,13 +298,11 @@ impl SocketProvider {
                                 .await?
                             .map(|response| {
                                 match response {
-                                ProviderDatagramSocketWithOptionsResponse::DatagramSocket(_)
-                                => {
-                                    metrics.datagram.track(marks);
-                                }
-                                ProviderDatagramSocketWithOptionsResponse::SynchronousDatagramSocket(_) => {
-                                    metrics.synchronous_datagram.track(marks);
-                                },
+                                    ProviderDatagramSocketWithOptionsResponse::SynchronousDatagramSocket(_) => {
+                                        metrics.synchronous_datagram.track(marks);
+                                    }
+                                    #[allow(unreachable_patterns)]
+                                    _ => {}
                                 };
                                 response
                             });
@@ -298,14 +330,15 @@ impl SocketProvider {
             })
             .await
     }
+}
 
+impl<C: ProtocolConnector<fposix_socket_raw::ProviderMarker>> SocketProvider<C> {
     /// Run an instance of fuchsia.posix.socket.raw.Provider.
     pub(crate) async fn run_raw(
         &self,
         stream: fposix_socket_raw::ProviderRequestStream,
     ) -> Result<(), Error> {
-        let inner_provider = connect_to_protocol::<fposix_socket_raw::ProviderMarker>()
-            .context("Failed to connect to inner server")?;
+        let inner_provider = self.connect_inner_provider.connect()?;
         stream
             .map(|result| result.context("failed request"))
             .try_for_each(|request| async {

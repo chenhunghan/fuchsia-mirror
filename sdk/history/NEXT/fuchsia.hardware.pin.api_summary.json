@@ -31,6 +31,12 @@
     },
     {
         "kind": "table/member",
+        "name": "fuchsia.hardware.pin/Configuration.input_buffer_enabled",
+        "ordinal": "10",
+        "type": "bool"
+    },
+    {
+        "kind": "table/member",
         "name": "fuchsia.hardware.pin/Configuration.power_source",
         "ordinal": "5",
         "type": "uint64"

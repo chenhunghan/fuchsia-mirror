@@ -190,7 +190,6 @@
                     // process is used in userdebug builds to launch
                     // shell binaries. It uses PackageResolver to resolve tools from packages.
                     "/bootstrap/process_resolver",
-                    "/core/process_resolver",
                 ],
             },
             {
@@ -284,7 +283,7 @@
                 source_name: "fuchsia.pkg.PackageResolver-base",
                 capability: "protocol",
                 target_monikers: [
-                    "/core/process_resolver",
+                    "/bootstrap/process_resolver",
                 ],
             },
             {
@@ -482,5 +481,21 @@
                 ],
             },
         ],
+        child_policy: {
+            eager_startup: [
+                "/bootstrap/auto-slot-committer",
+                "/bootstrap/netsvc",
+                "/bootstrap/tee",
+                "/bootstrap/tee/binder-proxy",
+                "/bootstrap/vsock-sshd-host",
+                "/core/adb",
+                "/core/fastboot-tcp",
+                "/core/fastboot-usb",
+                "/core/fdomain-uart-driver",
+                "/core/remote-control",
+                "/core/sshd-host",
+                "/core/usb-policy",
+            ],
+        },
     },
 }

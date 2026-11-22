@@ -99,6 +99,11 @@ class BasicElementRunner : public fidl::Server<fuchsia_power_broker::ElementRunn
 ///     * Retrieves the tokens of any dependencies via
 ///       `fuchsia.hardware.power/PowerTokenProvider` instances
 ///     * Adds the power element via `fuchsia.power.broker/Topology`
+///     * If a config sets a non-zero `initial_level`, atomically acquires a
+///       lease at that level. The lease is held by
+///       `ElementDesc::initial_lease_token_client` and remains active for as
+///       long as the caller retains that token; dropping `ElementDesc` without
+///       moving the token out releases the lease immediately.
 ///
 /// In effect, this function converts the provided |power_configs| into their
 /// corresponding `ElementDesc` objects and returns them.
@@ -176,10 +181,14 @@ fit::result<Error, TokenMap> GetDependencyTokens(const PowerElementConfiguration
 /// Error
 ///   - Error::DEPENDENCY_NOT_FOUND if there is a dependency specified by
 ///     `config` which is to found in `tokens`.
-///   - Error::INVALID_ARGS if `config` appears to be invalid, we fail to
-///     duplicate a token and therefore assume it must have been invalid, or
-///     the call to power broker fails for any reason *other* than a closed
-///     channel.
+///   - Error::NOT_AUTHORIZED if Power Broker rejects adding the element due to
+///     authorization failure.
+///   - Error::INVALID_ARGS if `config` appears to be invalid,
+///     `initial_lease_token` is invalid or provided without a non-zero
+///     effective initial level, the effective initial level is not in `config`,
+///     we fail to duplicate a token and therefore assume it must have been
+///     invalid, or the call to power broker fails for any reason *other* than
+///     a closed channel or authorization failure.
 fit::result<Error> AddElement(
     const fidl::ClientEnd<fuchsia_power_broker::Topology>& power_broker,
     const PowerElementConfiguration& config, TokenMap tokens,
@@ -188,7 +197,9 @@ fit::result<Error> AddElement(
     std::optional<fidl::ServerEnd<fuchsia_power_broker::ElementControl>> element_control,
     std::optional<fidl::UnownedClientEnd<fuchsia_power_broker::ElementControl>>
         element_control_client,
-    std::optional<fidl::ClientEnd<fuchsia_power_broker::ElementRunner>> element_runner);
+    std::optional<fidl::ClientEnd<fuchsia_power_broker::ElementRunner>> element_runner,
+    std::optional<fuchsia_power_broker::LeaseToken> initial_lease_token = std::nullopt,
+    std::optional<uint8_t> initial_current_level = std::nullopt);
 
 /// Call `AddElement` on the `power_broker` channel passed in.
 /// This function uses `ElementDescription` passed in to make the proper call
@@ -198,10 +209,14 @@ fit::result<Error> AddElement(
 /// Error
 ///   - Error::DEPENDENCY_NOT_FOUND if there is a dependency specified by
 ///     `config` which is to found in `tokens`.
-///   - Error::INVALID_ARGS if `config` appears to be invalid, we fail to
-///     duplicate a token and therefore assume it must have been invalid, or
-///     the call to power broker fails for any reason *other* than a closed
-///     channel.
+///   - Error::NOT_AUTHORIZED if Power Broker rejects adding the element due to
+///     authorization failure.
+///   - Error::INVALID_ARGS if `config` appears to be invalid,
+///     `description.initial_lease_token_broker` is invalid or provided without
+///     a non-zero `description.element_config.initial_level`, we fail to
+///     duplicate a token and therefore assume it must have been invalid, or the
+///     call to power broker fails for any reason *other* than a closed channel
+///     or authorization failure.
 fit::result<Error> AddElement(fidl::ClientEnd<fuchsia_power_broker::Topology>& power_broker,
                               ElementDesc& description);
 

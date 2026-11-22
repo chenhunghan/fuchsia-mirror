@@ -7,17 +7,16 @@
 
 use crate::fuchsia::component::map_to_raw_status;
 use crate::fuchsia::directory::FxDirectory;
-use crate::fuchsia::dirent_cache::DirentCacheKey;
 use crate::fuchsia::fxblob::blob::FxBlob;
 use crate::fuchsia::fxblob::mapping_provider::BlobMappingProvider;
 use crate::fuchsia::fxblob::writer::{BlobStorageFormat, DeliveryBlobWriter};
 use crate::fuchsia::node::{FxNode, GetResult, OpenedNode};
 use crate::fuchsia::volume::{FxVolume, RootDir};
-use anyhow::{Context as _, Error, anyhow, ensure};
+use anyhow::{Context as _, Error, anyhow};
 use fidl::endpoints::{ClientEnd, DiscoverableProtocolMarker, ServerEnd, create_request_stream};
 use fidl_fuchsia_fxfs::{
-    BlobCreatorMarker, BlobCreatorRequest, BlobCreatorRequestStream, BlobReaderMarker,
-    BlobReaderRequest, BlobReaderRequestStream, BlobWriterMarker, CreateBlobError,
+    BlobCreatorMarker, BlobCreatorRequest, BlobCreatorRequestStream, BlobWriterMarker,
+    CreateBlobError,
 };
 use fidl_fuchsia_io::{self as fio, FilesystemInfo, NodeMarker, WatchMask};
 use fidl_fuchsia_storage_block as fblock;
@@ -29,7 +28,6 @@ use fxfs::object_store::transaction::{LockKey, lock_keys};
 use fxfs::object_store::{self, HandleOptions, ObjectDescriptor, ObjectStore, StoreObjectHandle};
 use fxfs_macros::ToWeakNode;
 use fxfs_trace::{TraceFutureExt, trace_future_args};
-use std::str::FromStr;
 use std::sync::Arc;
 use vfs::directory::dirents_sink;
 use vfs::directory::entry::{DirectoryEntry, EntryInfo, GetEntryInfo, OpenRequest};
@@ -52,29 +50,7 @@ use zx::Status;
 #[derive(ToWeakNode)]
 pub struct BlobDirectory {
     directory: Arc<FxDirectory>,
-}
-
-/// Instead of constantly switching back and forth between strings and hashes. Do it once and then
-/// just pass around a reference to that.
-pub struct Identifier {
-    pub string: String,
-    pub hash: Hash,
-}
-
-impl TryFrom<&str> for Identifier {
-    type Error = FxfsError;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Ok(Self {
-            string: value.to_owned(),
-            hash: Hash::from_str(value).map_err(|_| FxfsError::InvalidArgs)?,
-        })
-    }
-}
-
-impl From<Hash> for Identifier {
-    fn from(hash: Hash) -> Self {
-        Self { string: hash.to_string(), hash }
-    }
+    mapping_provider: BlobMappingProvider,
 }
 
 impl RootDir for BlobDirectory {
@@ -98,18 +74,12 @@ impl RootDir for BlobDirectory {
             vfs::service::host(move |r| this.clone().handle_blob_creator_requests(r)),
         )?;
 
-        let mapping_provider = Arc::new(BlobMappingProvider::new(self.clone())?);
+        let this = self.clone();
         svc_dir.add_entry(
             MappingProviderMarker::PROTOCOL_NAME,
             vfs::service::host(move |r| {
-                mapping_provider.clone().handle_mapping_provider_requests(r)
+                BlobMappingProvider::handle_mapping_provider_requests(this.clone(), r)
             }),
-        )?;
-
-        let this = self.clone();
-        svc_dir.add_entry(
-            BlobReaderMarker::PROTOCOL_NAME,
-            vfs::service::host(move |r| this.clone().handle_blob_reader_requests(r)),
         )?;
 
         svc_dir.add_entry(
@@ -132,7 +102,11 @@ impl RootDir for BlobDirectory {
 
 impl BlobDirectory {
     fn new(directory: FxDirectory) -> Self {
-        Self { directory: Arc::new(directory) }
+        Self { directory: Arc::new(directory), mapping_provider: BlobMappingProvider::new() }
+    }
+
+    pub fn mapping_provider(&self) -> &BlobMappingProvider {
+        &self.mapping_provider
     }
 
     pub fn directory(&self) -> &Arc<FxDirectory> {
@@ -147,125 +121,49 @@ impl BlobDirectory {
         self.directory.store()
     }
 
-    /// Open blob and get the child vmo. This allows the creation of the child vmo to be atomic with
-    /// the open.
-    pub(crate) async fn open_blob_get_vmo(
+    /// Wraps [`Self::open_blob_locked`] while taking the locks.
+    pub async fn open_blob(
         self: &Arc<Self>,
-        id: &Identifier,
-    ) -> Result<(Arc<FxBlob>, zx::Vmo), Error> {
-        let store = self.store();
-        let fs = store.filesystem();
-        let keys = lock_keys![LockKey::object(store.store_object_id(), self.directory.object_id())];
-        // A lock needs to be held over searching the directory and incrementing the open count.
-        let _guard = fs.lock_manager().read_lock(keys.clone()).await;
-        if self.volume().use_driver_blob_paging() {
-            log::warn!(
-                "BlobReader.GetVmo called with driver blob paging enabled; \
-                 falling back to Fxfs blob pager"
-            );
-            self.volume().set_use_driver_blob_paging(false);
-        }
-        let blob = self.open_blob_locked(id).await?.ok_or(FxfsError::NotFound)?;
-        let vmo = blob.create_child_vmo()?;
-        // Downgrade from an OpenedNode<Node> to a Node.
-        Ok((blob.clone(), vmo))
-    }
-
-    /// Wraps ['open_blob_locked'] while taking the locks.
-    pub(crate) async fn open_blob(
-        self: &Arc<Self>,
-        id: &Identifier,
+        hash: Hash,
     ) -> Result<Option<OpenedNode<FxBlob>>, Error> {
         let store = self.store();
         let fs = store.filesystem();
         let keys = lock_keys![LockKey::object(store.store_object_id(), self.directory.object_id())];
+
         // A lock needs to be held over searching the directory and incrementing the open count.
-        let _guard = fs.lock_manager().read_lock(keys.clone()).await;
-        self.open_blob_locked(id).await
+        let _guard = fs.lock_manager().read_lock(keys).await;
+        self.open_blob_locked(hash).await
     }
 
-    /// Attempt to open and cache the blob with `id` in this directory. Returns `Ok(None)` if no
-    /// blob matching `id` was found. Requires holding locks for at least the object store and
+    /// Attempt to open and cache the blob with `hash` in this directory. Returns `Ok(None)` if no
+    /// blob matching `hash` was found. Requires holding locks for at least the object store and
     /// directory object.
     async fn open_blob_locked(
         self: &Arc<Self>,
-        id: &Identifier,
+        hash: Hash,
     ) -> Result<Option<OpenedNode<FxBlob>>, Error> {
-        let node = match self.directory.directory().owner().dirent_cache().lookup(&(
-            self.directory.object_id(),
-            &id.string,
-            false,
-        )) {
-            Some(node) => Some(node),
-            None => {
-                if let Some((object_id, _, _)) =
-                    self.directory.directory().lookup(&id.string).await?
-                {
-                    let node = self.get_or_load_node(object_id, &id).await?;
-                    self.directory.directory().owner().dirent_cache().insert(
-                        DirentCacheKey::new(self.directory.object_id(), id.string.clone(), false),
-                        node.clone(),
-                    );
-                    Some(node)
-                } else {
-                    None
-                }
-            }
-        };
-        let Some(node) = node else {
+        let name = hash.to_string();
+        let Some((object_id, object_descriptor, _)) =
+            self.directory.directory().lookup(&name).await?
+        else {
             return Ok(None);
         };
-        if node.object_descriptor() != ObjectDescriptor::File {
+        if object_descriptor != ObjectDescriptor::File {
             return Err(FxfsError::Inconsistent)
-                .with_context(|| format!("Blob {} has invalid object descriptor!", id.string));
+                .with_context(|| format!("Blob {name} has invalid object descriptor!"));
         }
-        let mut blob = node
-            .into_any()
-            .downcast::<FxBlob>()
-            .map_err(|_| FxfsError::Inconsistent)
-            .with_context(|| format!("Blob {} has incorrect node type!", id.string))?;
-        if !self.volume().use_driver_blob_paging() && !blob.has_fxfs_pager() {
-            let object_id = blob.object_id();
-            self.volume().cache().remove(blob.as_ref());
-            drop(blob);
-            let node = self.get_or_load_node(object_id, id).await?;
-            self.directory.directory().owner().dirent_cache().insert(
-                DirentCacheKey::new(self.directory.object_id(), id.string.clone(), false),
-                node.clone(),
-            );
-            blob = node
-                .into_any()
-                .downcast::<FxBlob>()
-                .map_err(|_| FxfsError::Inconsistent)
-                .with_context(|| format!("Blob {} has incorrect node type!", id.string))?;
-        }
-        Ok(Some(OpenedNode::new(blob)))
+        let node = self.get_or_load_node(object_id).await?;
+        Ok(Some(OpenedNode::new(node)))
     }
 
-    // Attempts to get a node from the node cache. If the node wasn't present in the cache, loads
-    // the object from the object store, installing the returned node into the cache and returns the
-    // newly created FxNode backed by the loaded object.
-    async fn get_or_load_node(
-        self: &Arc<Self>,
-        object_id: u64,
-        id: &Identifier,
-    ) -> Result<Arc<dyn FxNode>, Error> {
+    // Attempts to get a node from the node cache. If the node wasn't present in the cache,
+    // installs a new FxBlob into the cache and returns it.
+    async fn get_or_load_node(self: &Arc<Self>, object_id: u64) -> Result<Arc<FxBlob>, Error> {
         let volume = self.volume();
         match volume.cache().get_or_reserve(object_id).await {
-            GetResult::Node(node) => {
-                // Protecting against the scenario where a directory entry points to another node
-                // which has already been loaded and verified with the correct hash. We need to
-                // verify that the hash for the blob that is cached here matches the requested hash.
-                let blob = node.into_any().downcast::<FxBlob>().map_err(|_| {
-                    anyhow!(FxfsError::Inconsistent).context("Loaded non-blob from cache")
-                })?;
-                ensure!(
-                    blob.root() == id.hash,
-                    anyhow!(FxfsError::Inconsistent)
-                        .context("Loaded blob by node that did not match the given hash")
-                );
-                Ok(blob as Arc<dyn FxNode>)
-            }
+            GetResult::Node(node) => node.into_any().downcast::<FxBlob>().map_err(|_| {
+                anyhow!(FxfsError::Inconsistent).context("Loaded non-blob from cache")
+            }),
             GetResult::Placeholder(placeholder) => {
                 let handle = StoreObjectHandle::new(
                     volume.clone(),
@@ -274,8 +172,8 @@ impl BlobDirectory {
                     HandleOptions::default(),
                     /*trace=*/ false,
                 );
-                let node = FxBlob::new(handle, id.hash).await? as Arc<dyn FxNode>;
-                placeholder.commit(&node);
+                let node = FxBlob::new(handle);
+                placeholder.commit(&(node.clone() as Arc<dyn FxNode>));
                 Ok(node)
             }
         }
@@ -289,17 +187,20 @@ impl BlobDirectory {
         hash: Hash,
         allow_existing: bool,
     ) -> Result<ClientEnd<BlobWriterMarker>, CreateBlobError> {
-        let id = hash.into();
-        let blob_exists = self
-            .open_blob(&id)
-            .await
-            .map_err(|e| {
-                log::error!("Failed to lookup blob: {:?}", e);
-                CreateBlobError::Internal
-            })?
-            .is_some();
-        if blob_exists && !allow_existing {
-            return Err(CreateBlobError::AlreadyExists);
+        if !allow_existing {
+            let blob_exists = self
+                .directory
+                .directory()
+                .lookup(&hash.to_string())
+                .await
+                .map_err(|e| {
+                    log::error!("Failed to lookup blob: {:?}", e);
+                    CreateBlobError::Internal
+                })?
+                .is_some();
+            if blob_exists {
+                return Err(CreateBlobError::AlreadyExists);
+            }
         }
         let (client_end, request_stream) = create_request_stream::<BlobWriterMarker>();
         let writer = DeliveryBlobWriter::new(self, hash, BlobStorageFormat::DeliveryBlob)
@@ -320,19 +221,11 @@ impl BlobDirectory {
         return Ok(client_end);
     }
 
-    async fn needs_overwrite(&self, blob_hash: Identifier) -> Result<bool, Error> {
+    async fn needs_overwrite(&self, blob_hash: Hash) -> Result<bool, Error> {
         // We don't take a lock here because this will only look up existence for now. If we
         // actually start fetching the blob or info about it after looking it up this will need to
         // take a reader lock on the directory and maybe also the object.
-        if self
-            .volume()
-            .dirent_cache()
-            .lookup(&(self.object_id(), &blob_hash.string, false))
-            .is_some()
-        {
-            return Ok(false);
-        }
-        match self.directory.directory().lookup(&blob_hash.string).await? {
+        match self.directory.directory().lookup(&blob_hash.to_string()).await? {
             Some(_) => Ok(false),
             None => Err(FxfsError::NotFound.into()),
         }
@@ -355,7 +248,7 @@ impl BlobDirectory {
                 BlobCreatorRequest::NeedsOverwrite { blob_hash, responder } => {
                     async {
                         let _ = responder.send(
-                            self.needs_overwrite(Hash::from(blob_hash).into())
+                            self.needs_overwrite(Hash::from(blob_hash))
                                 .await
                                 .map_err(map_to_raw_status),
                         );
@@ -364,28 +257,6 @@ impl BlobDirectory {
                     .await;
                 }
             }
-        }
-    }
-
-    async fn handle_blob_reader_requests(self: Arc<Self>, mut requests: BlobReaderRequestStream) {
-        while let Ok(Some(request)) = requests.try_next().await {
-            match request {
-                BlobReaderRequest::GetVmo { blob_hash, responder } => {
-                    async {
-                        responder
-                            .send(
-                                self.get_blob_vmo(blob_hash.into())
-                                    .await
-                                    .map_err(map_to_raw_status),
-                            )
-                            .unwrap_or_else(|error| {
-                                log::error!(error:?; "failed to send GetVmo response");
-                            });
-                    }
-                    .trace(trace_future_args!("BlobReader::GetVmo"))
-                    .await;
-                }
-            };
         }
     }
 
@@ -551,22 +422,20 @@ impl From<object_store::Directory<FxVolume>> for BlobDirectory {
 mod tests {
     use super::*;
     use crate::fuchsia::fxblob::testing::{BlobFixture, new_blob_fixture, open_blob_fixture};
+    use crate::fuchsia::testing::{TestFixture, TestFixtureOptions};
     use assert_matches::assert_matches;
     use blob_writer::BlobWriter;
     use delivery_blob::{CompressionMode, Type1Blob};
-    use fidl_fuchsia_fxfs::BlobReaderMarker;
+    use fidl_fuchsia_storage_mapping::MappingProviderMarker;
     use fuchsia_async::{DurationExt as _, TimeoutExt as _};
     use fuchsia_component_client::connect_to_protocol_at_dir_svc;
     use fuchsia_fs::directory::{
-        DirEntry, DirentKind, WatchEvent, WatchMessage, Watcher, readdir_inclusive,
+        DirEntry, DirentKind, WatchEvent, WatchMessage, Watcher, open_directory_async,
+        readdir_inclusive,
     };
-
     use futures::StreamExt as _;
     use std::path::PathBuf;
-
-    use crate::fuchsia::testing::{TestFixture, TestFixtureOptions};
-    use fidl_fuchsia_storage_mapping::MappingProviderMarker;
-    use fuchsia_fs::directory::open_directory_async;
+    use std::str::FromStr;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
 
@@ -789,13 +658,11 @@ mod tests {
             let _vmo = fixture.get_blob_vmo(hash).await;
 
             // Open the malicious link
-            let blob_reader =
-                connect_to_protocol_at_dir_svc::<BlobReaderMarker>(fixture.volume_out_dir())
-                    .expect("failed to connect to the BlobReader service");
-            blob_reader
-                .get_vmo(&evil_hash.into())
+            fixture
+                .blob_pager()
+                .unwrap()
+                .create_vmo(&evil_hash.into())
                 .await
-                .expect("transport error on BlobReader.GetVmo")
                 .expect_err("Hashes should mismatch");
         }
         fixture.close().await;
@@ -810,25 +677,6 @@ mod tests {
         let blob_creator =
             connect_to_protocol_at_dir_svc::<BlobCreatorMarker>(fixture.volume_out_dir())
                 .expect("failed to connect to the BlobCreator service");
-        // Do it once to fetch it fresh after clearing the cache.
-        fixture.volume().volume().dirent_cache().clear();
-        assert!(
-            !blob_creator
-                .needs_overwrite(&hash.into())
-                .await
-                .expect("fidl transport")
-                .expect("Find new blob")
-        );
-
-        // Get it into the cache and then check again.
-        let blob_reader =
-            connect_to_protocol_at_dir_svc::<BlobReaderMarker>(fixture.volume_out_dir())
-                .expect("failed to connect to the BlobReader service");
-        blob_reader
-            .get_vmo(&hash.into())
-            .await
-            .expect("transport error on BlobReader.GetVmo")
-            .expect("Opening blob");
         assert!(
             !blob_creator
                 .needs_overwrite(&hash.into())

@@ -9,7 +9,7 @@ use cm_rust::{
     RunnerRegistration, UseDecl, UseDeclCommon,
 };
 use cm_types::RelativePath;
-use fidl_fuchsia_io as fio;
+use fidl_fuchsia_io_common as fio;
 use moniker::Moniker;
 
 pub trait ToRequest {

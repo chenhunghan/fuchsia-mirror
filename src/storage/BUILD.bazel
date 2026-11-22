@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -14,26 +14,60 @@ test_suite(
     tests = [
         "//src/storage/benchmarks:storage-benchmarks-framework-tests",
         "//src/storage/conformance:tests",
+        "//src/storage/crypt/fxfs:tests",
+        "//src/storage/crypt/fxfs/common:tests",
+        "//src/storage/crypt/starnix:tests",
         "//src/storage/crypt/zxcrypt:tests",
+        "//src/storage/erofs:tests",
+        "//src/storage/erofs/component:tests",
         "//src/storage/erofs/serializer:tests",
         "//src/storage/ext4/lib/parser:tests",
+        "//src/storage/ext4/server:tests",
+        "//src/storage/f2fs_reader:tests",
+        "//src/storage/f2fs_reader/migrate:tests",
         "//src/storage/fxfs/remote_volume:fxfs-remote-volume-tests",
+        "//src/storage/fxfs/test:tests",
         "//src/storage/fxfs/trace:fxfs-trace-tests-package",
+        "//src/storage/lib/blob_metadata:tests",
+        "//src/storage/lib/blob_writer:tests",
+        "//src/storage/lib/block_server:tests",
+        "//src/storage/lib/buffer/test:tests",
+        "//src/storage/lib/fscrypt:tests",
+        "//src/storage/lib/fsverity-merkle:tests",
         "//src/storage/lib/key-bag:key-bag-tests",
+        "//src/storage/lib/operation/test:tests",
+        "//src/storage/lib/ptr_slice:tests",
         "//src/storage/lib/range/test:range-test-pkg",
         "//src/storage/lib/sparse/rust:sparse-test",
+        "//src/storage/lib/storage_xts:tests",
         "//src/storage/lib/super_parser:super_parser_tests",
         "//src/storage/lib/trace:tests",
         "//src/storage/lib/units:storage-units-tests",
+        "//src/storage/lib/vfs/cpp:tests",
+        "//src/storage/lib/vfs/rust/name:tests",
+        "//src/storage/lib/watchdog:tests",
+    ],
+)
+
+# Storage tests defined in Bazel that require Fxfs (cannot run on minfs).
+# Exported through `:bazel_fxfs_required_tests` in BUILD.gn.
+test_suite(
+    name = "fxfs_required_target_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//src/storage/io_stress:tests",
     ],
 )
 
 test_suite(
     name = "host_tests",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
         "//src/storage/fxfs/trace:fxfs-trace-host-tests",
+        "//src/storage/lib/fsverity-merkle:host_tests",
+        "//src/storage/lib/ptr_slice:host_tests",
         "//src/storage/lib/sparse/rust:lib_test",
+        "//src/storage/lib/storage_xts:host_tests",
         "//src/storage/lib/trace:host_tests",
         "//src/storage/lib/units:units_host_test",
     ],

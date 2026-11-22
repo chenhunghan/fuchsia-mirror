@@ -5,6 +5,5 @@
 import("//build/bazel/export_fuchsia_package_to_bazel.gni")
 
 export_fuchsia_package_to_bazel("package") {
-  testonly = true
   package = "//src/connectivity/network/testing/netemul/runner:package"
 }

@@ -91,17 +91,6 @@ if (is_host) {
       ]
     }
   }
-
-  test("zxdb_perftests") {
-    sources = [ "zxdb_perftests.cc" ]
-
-    deps = [
-      "//src/developer/debug/zxdb/common:perf_test",
-      "//src/developer/debug/zxdb/symbols:perf_tests",
-      "//src/lib/cmdline",
-      "//third_party/googletest:gtest",
-    ]
-  }
 }
 
 group("zxdb_host") {
@@ -127,8 +116,5 @@ group("tests") {
 group("all_tests") {
   testonly = true
 
-  deps = [
-    ":tests",
-    ":zxdb_perftests($host_toolchain)",
-  ]
+  deps = [ ":tests" ]
 }

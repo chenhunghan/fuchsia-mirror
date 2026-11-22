@@ -61,7 +61,7 @@ class DataProvider : public fidl::Server<fuchsia_feedback::DataProvider>,
                      public DataProviderInternal {
  public:
   DataProvider(async_dispatcher_t* dispatcher, std::shared_ptr<sys::ServiceDirectory> services,
-               timekeeper::Clock* clock, RedactorBase* redactor, bool is_first_instance,
+               timekeeper::Clock* clock, RedactorBase* redactor,
                const std::set<std::string>& default_snapshot_annotations,
                const feedback::AttachmentKeys& attachment_allowlist, cobalt::Logger* cobalt,
                feedback::AnnotationManager* annotation_manager,

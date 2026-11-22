@@ -23,17 +23,21 @@ fx build --host //zircon/skills/zpo
 ZPO=$(fx get-build-dir)/host-tools/zpo
 ```
 
-zpo needs a board file (`boards/<name>.json`) from an extension directory; see
-[README.md](README.md#extensions).
+zpo reads the CPU domains and roles from the device (`cpuctl describe` and
+`/boot/config/profiles/`), so it needs an eng build on the device; see
+[README.md](README.md#prerequisites).
 
 ## Analyze an existing trace
 
-The trace must include `kernel:meta,kernel:sched,kernel:ipc,kernel:irq` (add
-`kernel:power` for exact processing rates).
+The trace must include these categories:
+`kernel:meta,kernel:sched,kernel:ipc,kernel:irq,kernel:power`.
+
+The CPU topology comes from the connected device, or from a measurement with
+`--topology <measurement.json>`.
 
 ```sh
 $ZPO analyze --trace t.fxt --task "events:irq:716->ipc-in:fuchsia.input.report/InputReportsReaderV2.OnInputReports" \
-    [--board <name>] [--window 850us] [--json out.json] [--dump-job -1]
+    [--topology m.json] [--window 850us] [--json out.json] [--dump-job -1]
 ```
 
 Task forms: `events:<start>-><end>` (events `irq:<n>`, `ipc:<Method>`,
@@ -59,4 +63,13 @@ $ZPO gate --session ~/zpo/touch --candidate candidate-1
 ```
 
 Manual loads need a person at the device: say so instead of measuring without
-one. `zpo ui` serves the same flow in a browser.
+one. `zpo ui start` serves the same flow in a browser.
+
+After `zpo ui start` returns, its server keeps running in the background:
+
+- Run `zpo ui stop` when you are done.
+- A later `zpo ui start` finds the running server and, without a TTY, reuses it
+  and prints its link instead of asking.
+- Pass `--yes`, or use `zpo ui restart`, to replace it. The new server keeps the
+  old one's sessions dir, port, address and checkout unless you pass them again;
+  `zpo ui stop` then `zpo ui start` goes back to the defaults.

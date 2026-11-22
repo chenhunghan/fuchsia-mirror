@@ -4,7 +4,7 @@
 
 #include "intel-dsp-code-loader.h"
 
-#include <lib/ddk/hw/arch_ops.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <stdio.h>
 #include <string.h>
 #include <zircon/assert.h>
@@ -125,13 +125,13 @@ zx_status_t IntelDspCodeLoader::TransferFirmware(const fzl::PinnedVmo& pinned_fw
   REG_WR(&regs_->spbfctl, ADSP_REG_CL_SPBFCTL_SPIBE);
   REG_WR(&regs_->spib, fw_size);
 
-  hw_wmb();
+  WriteDataMemoryBarrier();
 
   // Start DMA
   constexpr uint32_t SET = HDA_SD_REG_CTRL_RUN | HDA_SD_REG_CTRL_IOCE | HDA_SD_REG_CTRL_FEIE |
                            HDA_SD_REG_CTRL_DEIE | HDA_SD_REG_STS32_ACK;
   REG_SET_BITS(&regs_->stream.ctl_sts.w, SET);
-  hw_wmb();
+  WriteDataMemoryBarrier();
 
   return ZX_OK;
 }

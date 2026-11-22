@@ -6,6 +6,7 @@ use crate::ap::authenticator::Authenticator;
 use crate::ap::event::*;
 use crate::ap::remote_client::RemoteClient;
 use crate::ap::{Context, RsnCfg, aid};
+use crate::sec_assoc_update_name;
 use anyhow::{ensure, format_err};
 
 use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
@@ -334,7 +335,9 @@ impl RsnaLinkState {
                         self.negotiation_timeout = None;
                     }
                 }
-                update => error!("Unhandled association update: {:?}", update),
+                update => {
+                    error!("Unhandled association update: {:?}", sec_assoc_update_name(update))
+                }
             }
         }
     }
@@ -750,6 +753,7 @@ mod tests {
     use crate::ap::test_utils::MockAuthenticator;
     use crate::{MlmeRequest, MlmeSink, MlmeStream, test_utils};
     use assert_matches::assert_matches;
+    use fidl_fuchsia_wlan_internal as fidl_internal;
     use futures::channel::mpsc;
     use ieee80211::{MacAddr, MacAddrBytes, Ssid};
     use std::sync::LazyLock;
@@ -765,6 +769,20 @@ mod tests {
 
     fn make_remote_client() -> RemoteClient {
         RemoteClient::new(*CLIENT_ADDR)
+    }
+
+    fn make_rsn_cfg() -> RsnCfg {
+        create_rsn_cfg(
+            &Ssid::try_from("coolnet").unwrap(),
+            fidl_internal::Authentication {
+                protocol: fidl_internal::Protocol::Wpa2Personal,
+                credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                    fidl_internal::WpaCredentials::Passphrase(b"password".to_vec()),
+                ))),
+            },
+        )
+        .unwrap()
+        .unwrap()
     }
 
     fn make_env() -> (Context, MlmeStream, timer::EventStream<Event>) {
@@ -1108,8 +1126,7 @@ mod tests {
             .transition_to(Authenticated { _timeout_event: EventHandle::new_test(1) })
             .into();
 
-        let mut rsn_cfg =
-            create_rsn_cfg(&Ssid::try_from("coolnet").unwrap(), b"password").unwrap().unwrap();
+        let mut rsn_cfg = make_rsn_cfg();
         rsn_cfg.rsne = Rsne {
             group_data_cipher_suite: Some(CIPHER_GCMP_256),
             pairwise_cipher_suites: vec![CIPHER_CCMP_128],
@@ -1172,8 +1189,7 @@ mod tests {
             .transition_to(Authenticated { _timeout_event: EventHandle::new_test(1) })
             .into();
 
-        let rsn_cfg =
-            create_rsn_cfg(&Ssid::try_from("coolnet").unwrap(), b"password").unwrap().unwrap();
+        let rsn_cfg = make_rsn_cfg();
 
         let mut s_rsne_vec = Vec::with_capacity(rsn_cfg.rsne.len());
         rsn_cfg.rsne.write_into(&mut s_rsne_vec).expect("error writing RSNE");
@@ -1224,8 +1240,7 @@ mod tests {
             .transition_to(Authenticated { _timeout_event: EventHandle::new_test(1) })
             .into();
 
-        let rsn_cfg =
-            create_rsn_cfg(&Ssid::try_from("coolnet").unwrap(), b"password").unwrap().unwrap();
+        let rsn_cfg = make_rsn_cfg();
 
         let mut s_rsne_vec = Vec::with_capacity(rsn_cfg.rsne.len());
         rsn_cfg.rsne.write_into(&mut s_rsne_vec).expect("error writing RSNE");
@@ -1356,8 +1371,7 @@ mod tests {
         let mut r_sta = make_remote_client();
         let (mut ctx, mut mlme_stream, mut time_stream) = make_env();
 
-        let rsn_cfg =
-            create_rsn_cfg(&Ssid::try_from("coolnet").unwrap(), b"password").unwrap().unwrap();
+        let rsn_cfg = make_rsn_cfg();
 
         let s_rsne = Rsne::wpa2_rsne();
         let mut s_rsne_vec = Vec::with_capacity(s_rsne.len());
@@ -1415,8 +1429,7 @@ mod tests {
         let mut r_sta = make_remote_client();
         let (mut ctx, mut mlme_stream, _) = make_env();
 
-        let rsn_cfg =
-            create_rsn_cfg(&Ssid::try_from("coolnet").unwrap(), b"password").unwrap().unwrap();
+        let rsn_cfg = make_rsn_cfg();
 
         let s_rsne = Rsne::wpa2_rsne();
         let mut s_rsne_vec = Vec::with_capacity(s_rsne.len());
@@ -1468,8 +1481,7 @@ mod tests {
         let mut r_sta = make_remote_client();
         let (mut ctx, _, _) = make_env();
 
-        let rsn_cfg =
-            create_rsn_cfg(&Ssid::try_from("coolnet").unwrap(), b"password").unwrap().unwrap();
+        let rsn_cfg = make_rsn_cfg();
 
         let s_rsne = Rsne::wpa2_rsne();
         let mut s_rsne_vec = Vec::with_capacity(s_rsne.len());
@@ -1514,8 +1526,7 @@ mod tests {
         let mut r_sta = make_remote_client();
         let (mut ctx, mut mlme_stream, _) = make_env();
 
-        let rsn_cfg =
-            create_rsn_cfg(&Ssid::try_from("coolnet").unwrap(), b"password").unwrap().unwrap();
+        let rsn_cfg = make_rsn_cfg();
 
         let s_rsne = Rsne::wpa2_rsne();
         let mut s_rsne_vec = Vec::with_capacity(s_rsne.len());

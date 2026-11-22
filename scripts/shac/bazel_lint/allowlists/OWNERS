@@ -1,2 +1,13 @@
-# Build owners can approve additions and other changes to the allowlists.
-per-file *.json = file: /build/OWNERS
+# Require //build/bazel/BAZEL_OWNERS review of migration allowlists to prevent unreviewed annotations.
+per-file bazel_migration*.json = set noparent
+per-file bazel_migration*.json = file: /build/bazel/BAZEL_OWNERS
+
+# //build/bazel/BAZEL_OWNERS can approve additions and other changes to all allowlists.
+per-file *.json = file: /build/bazel/BAZEL_OWNERS
+
+# Build owners can approve additions and other changes to specific allowlists.
+per-file *_host_constraints.json = file: /build/BUILD_OWNERS
+per-file *_paths.json = file: /build/BUILD_OWNERS
+per-file *_root_package_labels.json = file: /build/BUILD_OWNERS
+per-file *_visibility*.json = file: /build/BUILD_OWNERS
+per-file *_wrappers.json = file: /build/BUILD_OWNERS

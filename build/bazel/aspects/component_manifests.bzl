@@ -26,21 +26,19 @@ _DEP_ATTRS = [
     "shared_library",
 ]
 
-def _collect_component_manifests_aspect_impl(target, aspect_ctx):
-    # Stop propagating manifest shards across component boundaries so a parent
-    # component does not inherit a child component's expected includes or runner
-    # shards, matching GN's `expect_includes_barrier = []` on
-    # `fuchsia_component`.
-    if FuchsiaComponentInfo in target:
-        return [
-            FuchsiaRunnerShardInfo(shards = depset()),
-            FuchsiaExpectedIncludesInfo(
-                enforced_shards = depset(),
-                auto_include_shards = depset(),
-                transitive_shards = depset(),
-            ),
-        ]
+FuchsiaComponentRequiredPackageComponentsInfo = provider(
+    doc = """Components that every package containing this component must also contain.
 
+    Returned by `collect_component_manifests_aspect` on component targets.
+    """,
+    fields = {
+        "required_package_components": """depset[Label] of the
+        `required_package_components` of the `expect_includes()` targets in this
+        component's transitive dependencies.""",
+    },
+)
+
+def _collect_component_manifests_aspect_impl(target, aspect_ctx):
     # The current target is an fx_runner_shard() or expect_includes() target
     # visited through a regular dependency. Exit immediately to avoid a
     # duplicate provider error.
@@ -51,6 +49,29 @@ def _collect_component_manifests_aspect_impl(target, aspect_ctx):
         aspect_ctx.rule.attr,
         attr_names = _DEP_ATTRS + ["aspect_hints"],
     )
+
+    # Stop propagating manifest shards across component boundaries so a parent
+    # component does not inherit a child component's expected includes or runner
+    # shards, matching GN's `expect_includes_barrier = []` on
+    # `fuchsia_component`. The component's own required package components are
+    # returned separately for `fx_package()` to check.
+    if FuchsiaComponentInfo in target:
+        return [
+            FuchsiaRunnerShardInfo(shards = depset()),
+            FuchsiaExpectedIncludesInfo(
+                enforced_shards = depset(),
+                auto_include_shards = depset(),
+                transitive_shards = depset(),
+                required_package_components = depset(),
+            ),
+            FuchsiaComponentRequiredPackageComponentsInfo(
+                required_package_components = depset(transitive = [
+                    dep[FuchsiaExpectedIncludesInfo].required_package_components
+                    for dep in deps
+                    if FuchsiaExpectedIncludesInfo in dep
+                ]),
+            ),
+        ]
 
     runner_shards = [
         dep[FuchsiaRunnerShardInfo].shards
@@ -72,6 +93,11 @@ def _collect_component_manifests_aspect_impl(target, aspect_ctx):
         for dep in deps
         if FuchsiaExpectedIncludesInfo in dep
     ]
+    required_package_components = [
+        dep[FuchsiaExpectedIncludesInfo].required_package_components
+        for dep in deps
+        if FuchsiaExpectedIncludesInfo in dep
+    ]
 
     return [
         FuchsiaRunnerShardInfo(
@@ -81,11 +107,12 @@ def _collect_component_manifests_aspect_impl(target, aspect_ctx):
             enforced_shards = depset(transitive = enforced_shards),
             auto_include_shards = depset(transitive = auto_include_shards),
             transitive_shards = depset(transitive = transitive_shards),
+            required_package_components = depset(transitive = required_package_components),
         ),
     ]
 
 collect_component_manifests_aspect = aspect(
-    doc = "An aspect that collects FuchsiaRunnerShardInfo and FuchsiaExpectedIncludesInfo providers from transitive dependencies.",
+    doc = "An aspect that collects FuchsiaRunnerShardInfo and FuchsiaExpectedIncludesInfo providers from transitive dependencies, and FuchsiaComponentRequiredPackageComponentsInfo on components.",
     implementation = _collect_component_manifests_aspect_impl,
     attr_aspects = _DEP_ATTRS,
 )

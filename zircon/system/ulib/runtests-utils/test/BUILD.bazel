@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":service-proxy-dir-test-pkg"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+fidl_library(
+    name = "fidl.test.echo",
+    testonly = True,
+    srcs = ["echo.test.fidl"],
+)
+
+fx_cc_test_binary(
+    name = "service-proxy-dir",
+    srcs = ["service-proxy-dir.cc"],
+    disable_build_flags = ["//build/config/fuchsia:fdio_config"],
+    gn_output_name = "service-proxy-dir-test",
+    deps = [
+        ":fidl.test.echo_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fidl",
+        "//src/storage/lib/vfs/cpp",
+        "//zircon/system/ulib/runtests-utils",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "service-proxy-dir-test-pkg",
+    package_name = "service-proxy-dir-test",
+    unit_tests = [":service-proxy-dir"],
+)

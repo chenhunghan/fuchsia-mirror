@@ -4,8 +4,8 @@
 
 #include "hardware_status_page.h"
 
-#include <lib/magma/platform/platform_barriers.h>
 #include <lib/magma/util/dlog.h>
+#include <lib/memory_barriers/memory_barriers.h>
 
 void GlobalHardwareStatusPage::ReadContextStatus(uint64_t& read_index,
                                                  std::optional<bool>* idle_out) {
@@ -73,7 +73,7 @@ void GlobalHardwareStatusPage::ReadContextStatusGen12(uint64_t& read_index,
   DLOG("%s count %ld last_written_status_index %lu read_index %lu", name, count,
        last_written_status_index, read_index);
 
-  magma::barriers::ReadBarrier();
+  ReadDataSynchronizationBarrier();
 
   for (int64_t i = 0; i < count; i++) {
     // Each entry is two dwords (64 bits)

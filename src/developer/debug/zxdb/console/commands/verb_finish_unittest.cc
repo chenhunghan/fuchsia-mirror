@@ -69,7 +69,7 @@ TEST_F(VerbFinishTest, ReturnValue) {
   // Indicate a stop at the call site. This is the breakpoint that the "finish" controller will set.
   std::vector<debug_ipc::BreakpointStats> hit_breakpoints;
   hit_breakpoints.emplace_back();
-  hit_breakpoints[0].id = mock_remote_api()->last_breakpoint_id();
+  hit_breakpoints[0].id = static_cast<uint32_t>(mock_remote_api()->last_breakpoint_id());
   frames.push_back(std::move(return_frame));
   InjectExceptionWithStack(ConsoleTest::kProcessKoid, ConsoleTest::kThreadKoid,
                            debug_ipc::ExceptionType::kSoftwareBreakpoint, std::move(frames), true,

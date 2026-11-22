@@ -2,13 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef MSD_ARM_CONNECTION_H
-#define MSD_ARM_CONNECTION_H
+#ifndef SRC_GRAPHICS_DRIVERS_MSD_ARM_MALI_SRC_MSD_ARM_CONNECTION_H_
+#define SRC_GRAPHICS_DRIVERS_MSD_ARM_MALI_SRC_MSD_ARM_CONNECTION_H_
 
 #include <lib/fit/function.h>
 #include <lib/fit/thread_safety.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/magma/util/short_macros.h>
+#include <lib/magma/util/utils.h>
 #include <lib/magma_service/msd.h>
 #include <lib/magma_service/msd_defs.h>
 #include <lib/magma_service/util/address_space_allocator.h>
@@ -64,6 +65,9 @@ class MsdArmConnection : public std::enable_shared_from_this<MsdArmConnection>,
   };
 
   static std::shared_ptr<MsdArmConnection> Create(msd::msd_client_id_t client_id, Owner* owner);
+  static uint64_t max_jit_pages() {
+    return (1ul << AddressSpace::kVirtualAddressSize) / magma::page_size();
+  }
 
   virtual ~MsdArmConnection();
 
@@ -282,4 +286,4 @@ class MsdArmAbiConnection : public msd::Connection {
   uint32_t magic_;
 };
 
-#endif  // MSD_ARM_CONNECTION_H
+#endif  // SRC_GRAPHICS_DRIVERS_MSD_ARM_MALI_SRC_MSD_ARM_CONNECTION_H_

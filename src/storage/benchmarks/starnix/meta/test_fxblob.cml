@@ -18,7 +18,12 @@
             rights: [ "rx*" ],
             path: "/erofs_blobs",
         },
-        { protocol: "fuchsia.process.lifecycle.Lifecycle" },
+        {
+            protocol: [
+                "fuchsia.process.lifecycle.Lifecycle",
+                "fuchsia.storage.mapping.FileMapper",
+            ],
+        },
     ],
     use: [
         {
@@ -36,7 +41,10 @@
             from: "self",
         },
         {
-            protocol: "fuchsia.process.lifecycle.Lifecycle",
+            protocol: [
+                "fuchsia.process.lifecycle.Lifecycle",
+                "fuchsia.storage.mapping.FileMapper",
+            ],
             from: "self",
         },
     ],

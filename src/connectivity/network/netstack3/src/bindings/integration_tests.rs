@@ -29,6 +29,7 @@ use fidl_fuchsia_netemul_network as net;
 use fidl_fuchsia_posix_socket as fposix_socket;
 use fidl_fuchsia_posix_socket_packet as fposix_socket_packet;
 use fidl_fuchsia_posix_socket_raw as fposix_socket_raw;
+use fidl_fuchsia_power_system as fpower_system;
 use fuchsia_async as fasync;
 use futures::channel::mpsc;
 use futures::{FutureExt, StreamExt as _, TryFutureExt as _};
@@ -50,7 +51,7 @@ use test_case::{test_case, test_matrix};
 use crate::bindings::ctx::BindingsCtx;
 use crate::bindings::devices::{BindingId, Devices};
 use crate::bindings::util::{ConversionContext as _, IntoFidl as _, TryIntoFidlWithContext as _};
-use crate::bindings::{Ctx, InspectPublisher, LOOPBACK_NAME, routes};
+use crate::bindings::{Ctx, InspectPublisher, LOOPBACK_NAME, SuspendBlockerSource, routes};
 
 /// Install a logger for tests.
 pub(crate) fn set_logger_for_test() {
@@ -333,9 +334,16 @@ impl TestStack {
         spy_interface_event_sink: Option<
             mpsc::UnboundedSender<crate::bindings::interfaces_watcher::InterfaceEvent>,
         >,
+        suspend_blocker_stream: Option<
+            mpsc::UnboundedReceiver<fpower_system::SuspendBlockerRequestStream>,
+        >,
     ) -> Self {
         let mut seed = crate::bindings::NetstackSeed::default();
         seed.interfaces_worker.run_options.spy_interface_events = spy_interface_event_sink;
+        let suspend_blocker_source = match suspend_blocker_stream {
+            Some(stream) => SuspendBlockerSource::new_for_test(stream),
+            None => SuspendBlockerSource::System,
+        };
 
         let (services_sink, services) = mpsc::unbounded();
         let inspector = Arc::new(fuchsia_inspect::Inspector::default());
@@ -345,7 +353,7 @@ impl TestStack {
         let scope = fasync::Scope::new_with_name("TestStack");
         let _: fasync::JoinHandle<()> = scope.spawn(async move {
             let inspect_publisher = InspectPublisher::new_for_test(&inspector_cloned);
-            seed.serve(services, inspect_publisher).await
+            seed.serve(services, inspect_publisher, suspend_blocker_source).await
         });
 
         Self {
@@ -436,6 +444,20 @@ impl TestSetup {
         port.get_device(server_end).expect("get device");
         let port_id = port.get_info().await.expect("get port info").id.expect("missing port id");
         (device, port_id)
+    }
+
+    /// Creates a [`net::FakeEndpointProxy`] attached to the test network.
+    pub(crate) async fn create_fake_endpoint(&mut self) -> net::FakeEndpointProxy {
+        let netm = self.sandbox().get_network_manager().expect("get network manager");
+        let network = netm
+            .get_network("test_net")
+            .await
+            .expect("get_network FIDL error")
+            .expect("test_net must exist")
+            .into_proxy();
+        let (fake_ep, server_end) = fidl::endpoints::create_proxy::<net::FakeEndpointMarker>();
+        network.create_fake_endpoint(server_end).expect("create_fake_endpoint");
+        fake_ep
     }
 
     /// Creates a new empty `TestSetup`.
@@ -542,8 +564,9 @@ impl TestSetupBuilder {
         // configure all the stacks:
         for stack_cfg in self.stacks.into_iter() {
             println!("Adding stack: {:?}", stack_cfg);
-            let StackSetupBuilder { spy_interface_event_sink, endpoints } = stack_cfg;
-            let mut stack = TestStack::new(spy_interface_event_sink);
+            let StackSetupBuilder { spy_interface_event_sink, suspend_blocker_stream, endpoints } =
+                stack_cfg;
+            let mut stack = TestStack::new(spy_interface_event_sink, suspend_blocker_stream);
             let binding_id = stack.wait_for_loopback_id().await;
             assert_eq!(stack.endpoint_ids.insert(LOOPBACK_NAME.to_string(), binding_id), None);
 
@@ -682,12 +705,14 @@ pub(crate) struct StackSetupBuilder {
     endpoints: Vec<(String, Option<AddrSubnetEither>)>,
     spy_interface_event_sink:
         Option<mpsc::UnboundedSender<crate::bindings::interfaces_watcher::InterfaceEvent>>,
+    suspend_blocker_stream:
+        Option<mpsc::UnboundedReceiver<fpower_system::SuspendBlockerRequestStream>>,
 }
 
 impl StackSetupBuilder {
     /// Creates a new empty stack (no endpoints) configuration.
     pub(crate) fn new() -> Self {
-        Self { endpoints: Vec::new(), spy_interface_event_sink: None }
+        Self { endpoints: Vec::new(), spy_interface_event_sink: None, suspend_blocker_stream: None }
     }
 
     /// Adds endpoint number  `index` with optional address configuration
@@ -718,6 +743,19 @@ impl StackSetupBuilder {
     ) -> Self {
         assert_matches::assert_matches!(
             self.spy_interface_event_sink.replace(spy_interface_event_sink),
+            None
+        );
+        self
+    }
+
+    /// Configures a custom [`fpower_system::SuspendBlockerRequestStream`] source
+    /// for this stack's [`crate::bindings::power::PowerWorker`].
+    pub(crate) fn with_suspend_blocker(
+        mut self,
+        suspend_blocker_stream: mpsc::UnboundedReceiver<fpower_system::SuspendBlockerRequestStream>,
+    ) -> Self {
+        assert_matches::assert_matches!(
+            self.suspend_blocker_stream.replace(suspend_blocker_stream),
             None
         );
         self

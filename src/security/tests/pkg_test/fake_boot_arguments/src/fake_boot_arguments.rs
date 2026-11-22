@@ -93,7 +93,7 @@ async fn run_boot_items(
     while let Some(request) = stream.next().await {
         match request.unwrap() {
             fidl_fuchsia_boot::ItemsRequest::Get { type_, extra, responder } => {
-                assert_eq!(type_, zbi::Type::StorageRamdisk as u32);
+                assert_eq!(type_, zbi::Type::STORAGE_RAMDISK.as_raw());
                 assert_eq!(extra, 0);
                 let response_vmo = vmo.as_ref().map(|vmo| {
                     vmo.create_child(zx::VmoChildOptions::SLICE, 0, vmo.get_size().unwrap())
@@ -102,7 +102,7 @@ async fn run_boot_items(
                 responder.send(response_vmo, 0).unwrap();
             }
             fidl_fuchsia_boot::ItemsRequest::Get2 { type_, extra, responder } => {
-                assert_eq!(type_, zbi::Type::StorageRamdisk as u32);
+                assert_eq!(type_, zbi::Type::STORAGE_RAMDISK.as_raw());
                 assert_eq!((*extra.unwrap()).n, 0);
                 responder.send(Ok(Vec::new())).unwrap();
             }

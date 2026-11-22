@@ -1,19 +1,85 @@
-// Copyright 2026 The Fuchsia Authors
+// Copyright 2020 The Fuchsia Authors
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! Kernel Address Sanitizer (KASAN) poison constants, shadow FFI bindings, and heap quarantine.
+//! Kernel Address Sanitizer (KASAN) is a tool to detect use-after-free, use-out-of-bounds, and
+//! other common memory errors in kernel.
+//! See: //zircon/kernel/lib/instrumentation/asan/README.md for more context.
 
-mod asan_ffi;
+#[cfg(sanitize = "address")]
+cfg_select! {
+    target_arch = "x86_64" => {
+        #[path = "asan_init_x86.rs"]
+        mod arch;
+    }
+    target_arch = "aarch64" => {
+        #[path = "asan_init_arm64.rs"]
+        mod arch;
+    }
+    target_arch = "riscv64" => {
+        compile_error!("KASAN is not yet supported on riscv64");
+    }
+}
+
+#[cfg(sanitize = "address")]
+mod asan_init;
+#[cfg(sanitize = "address")]
+pub(crate) mod asan_internal;
+#[cfg(sanitize = "address")]
+mod asan_poisoning;
+#[cfg(sanitize = "address")]
+mod asan_stubs;
 
 use core::mem::{align_of, size_of};
 use core::ptr;
 
-#[cfg(sanitize = "address")]
-pub use asan_ffi::{asan_heap_redzone_size, asan_poison_shadow, asan_unpoison_shadow};
+use crate::arch_rs::KERNEL_ASPACE_BASE;
 
+#[cfg(sanitize = "address")]
+pub use arch::asan_map_shadow_for;
+#[cfg(sanitize = "address")]
+pub use asan_poisoning::{
+    asan_address_is_poisoned, asan_entire_region_is_poisoned, asan_heap_redzone_size,
+    asan_poison_shadow, asan_region_is_poisoned, asan_unpoison_shadow,
+};
+
+// LINT.IfChange
+/// 1 shadow byte covers `2^3` bytes (`ASAN_MAPPING_SCALE`).
+pub const ASAN_MAPPING_SCALE: usize = 3;
+
+/// Base offset used by the compiler to compute the shadow address of `addr` as
+/// `ASAN_MAPPING_OFFSET + (addr >> ASAN_MAPPING_SCALE)`.
+pub const ASAN_MAPPING_OFFSET: usize = 0xdfff_fff0_0000_0000;
+// LINT.ThenChange(BUILD.gn)
+
+/// Start virtual address of the KASAN shadow map covering
+/// `[KERNEL_ASPACE_BASE, +KERNEL_ASPACE_SIZE)`.
+pub const KASAN_SHADOW_OFFSET: usize =
+    ASAN_MAPPING_OFFSET.wrapping_add(KERNEL_ASPACE_BASE >> ASAN_MAPPING_SCALE);
+
+/// Number of 1 GiB PDP entries reserved for the x86-64 KASAN shadow map.
+#[cfg(target_arch = "x86_64")]
+pub const X86_KERNEL_KASAN_PDP_ENTRIES: usize = 64;
+
+// Distinguished kasan poison values.
+// LLVM defines userspace equivalents of these in compiler-rt/lib/asan/asan_internal.h
+// There are some differences - kernel ASAN has distinguished states for Pmm free, for example.
+
+// These constants are reserved by the compiler for stack poisoning.
+/// KASAN poison byte for stack left redzones (`kAsanStackLeftRedzoneMagic`).
+pub const ASAN_STACK_LEFT_REDZONE_MAGIC: u8 = 0xf1;
+/// KASAN poison byte for stack middle redzones (`kAsanStackMidRedzoneMagic`).
+pub const ASAN_STACK_MID_REDZONE_MAGIC: u8 = 0xf2;
+/// KASAN poison byte for stack right redzones (`kAsanStackRightRedzoneMagic`).
+pub const ASAN_STACK_RIGHT_REDZONE_MAGIC: u8 = 0xf3;
+/// KASAN poison byte for stack use-after-return (`kAsanStackAfterReturnMagic`).
+pub const ASAN_STACK_AFTER_RETURN_MAGIC: u8 = 0xf5;
+/// KASAN poison byte for stack use-after-scope (`kAsanStackUseAfterScopeMagic`).
+pub const ASAN_STACK_USE_AFTER_SCOPE_MAGIC: u8 = 0xf8;
+
+// These constants are only known to the asan runtime.
 /// KASAN poison byte for C++ `operator new[]` array cookies (`kAsanArrayCookie`).
 pub const ASAN_ARRAY_COOKIE: u8 = 0xac;
 /// KASAN poison byte for internal heap bookkeeping metadata (`kAsanInternalHeapMagic`).
@@ -37,8 +103,8 @@ pub const QUARANTINE_ELEMENTS: usize = 65536;
 /// Fixed-size FIFO ring buffer delaying reuse of freed heap allocations under KASAN.
 #[repr(C)]
 pub struct Quarantine<T> {
-    queue: [*mut T; QUARANTINE_ELEMENTS],
-    pos: usize,
+    pub(super) queue: [*mut T; QUARANTINE_ELEMENTS],
+    pub(super) pos: usize,
 }
 
 zr::static_assert!(size_of::<Quarantine<u8>>() == 524296);
@@ -51,16 +117,5 @@ impl<T> Quarantine<T> {
     /// on an 8 KiB kernel thread stack.
     pub const fn new() -> Self {
         Self { queue: [ptr::null_mut(); QUARANTINE_ELEMENTS], pos: 0 }
-    }
-
-    /// Pushes `allocation` that was going to be freed into the quarantine, increasing reuse
-    /// distance. Returns null if the quarantine was not yet full, or the oldest pushed allocation
-    /// if a slot was evicted (which the caller is then responsible for freeing).
-    #[cfg_attr(sanitize = "address", sanitize(address = "off"))]
-    #[inline]
-    pub fn push(&mut self, allocation: *mut T) -> *mut T {
-        let idx = self.pos % QUARANTINE_ELEMENTS;
-        self.pos = self.pos.wrapping_add(1);
-        core::mem::replace(&mut self.queue[idx], allocation)
     }
 }

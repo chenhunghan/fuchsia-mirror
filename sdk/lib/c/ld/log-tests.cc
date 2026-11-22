@@ -2,9 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <zxtest/zxtest.h>
-
 #include "../test/safe-zero-construction.h"
+#include "../test/unittest.h"
 #include "log.h"
 
 namespace {

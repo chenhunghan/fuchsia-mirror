@@ -5,7 +5,9 @@
 use core::ffi::c_void;
 use core::ptr::NonNull;
 use std::num::NonZero;
-use std::sync::{Arc, OnceLock};
+use std::rc::Rc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use log::{debug, error, warn};
 use zx::Status;
@@ -41,11 +43,14 @@ pub struct DriverServer<T> {
     /// Holds the lifecycle channel until [`Self::message_loop`] hands it to the fidl_next server.
     server_handle: OnceLock<Channel<[fidl_next::Chunk]>>,
     root_dispatcher: DriverDispatcherRef<'static>,
-    /// The running driver, wrapped in [`Arc`] so health check tasks spawned on the local
-    /// scope can hold a reference to it without `unsafe` lifetime extension. The health scope
-    /// is cancelled before the driver is taken out of here to be stopped or dropped, so
-    /// [`Driver::stop`] never runs concurrently with a health check.
-    driver: OnceLock<Arc<T>>,
+    /// A pointer to the running driver, which is owned by the [`LifecycleHandler`] on the
+    /// fuchsia-async thread. Published once the driver has started and cleared before it is
+    /// stopped or dropped. Only used by [`Self::testing_get_driver`].
+    ///
+    /// The driver itself is deliberately not stored here: `DriverServer` is moved onto the
+    /// fuchsia-async thread, so anything it holds must be `Send`, and sharing the driver with
+    /// health check tasks (`Arc<T>`) would then require `T: Sync`.
+    driver_for_testing: AtomicPtr<T>,
 }
 
 impl<T: Driver> DriverServer<T> {
@@ -76,7 +81,7 @@ impl<T: Driver> DriverServer<T> {
         let server_ptr = Box::into_raw(Box::new(Self {
             server_handle,
             root_dispatcher: root_dispatcher.clone(),
-            driver: OnceLock::default(),
+            driver_for_testing: AtomicPtr::new(core::ptr::null_mut()),
         }));
 
         // Reconstitute the pointer to the `DriverServer` as a mut reference to use it in the main
@@ -161,6 +166,7 @@ impl<T: Driver> DriverServer<T> {
         let fidl_server = server.server();
         let handler = LifecycleHandler {
             server: Some(self),
+            driver: None,
             health_alert_reporter: HealthAlertReporter::new(fidl_server.clone()),
             fidl_server,
             health_tasks: Some(fuchsia_async::Scope::new_with_name("driver-health")),
@@ -181,16 +187,11 @@ impl<T: Driver> DriverServer<T> {
 
     /// Handles the start message by initializing logging and calling the [`Driver::start`] with
     /// a constructed [`DriverContext`].
-    ///
-    /// # Panics
-    ///
-    /// This method panics if the start message has already been received.
-    /// [`LifecycleHandler::start`] rejects a second start before reaching this method.
     async fn handle_start(
         &self,
         start_args: DriverStartArgs,
         health_alert_reporter: HealthAlertReporter,
-    ) -> Result<(), Status> {
+    ) -> Result<T, Status> {
         let context = DriverContext::new(
             AsyncDispatcher::new(&self.root_dispatcher),
             start_args,
@@ -200,38 +201,24 @@ impl<T: Driver> DriverServer<T> {
 
         log::debug!("driver starting");
 
-        let driver = T::start(context).await.map_err(DriverError::log_to_status)?;
-        self.driver
-            .set(Arc::new(driver))
-            .map_err(|_| ())
-            .expect("Driver received start message twice");
-        Ok(())
-    }
-
-    async fn handle_stop(&mut self) {
-        log::debug!("driver stopping");
-        match self.driver.take() {
-            Some(driver) => driver.stop().await,
-            None => warn!("received stop message without a running driver"),
-        }
-    }
-
-    async fn handle_suspend(&self) -> Result<(), Status> {
-        log::debug!("driver suspending");
-        let driver = self.driver.get().ok_or(Status::BAD_STATE)?;
-        driver.system_suspend().await.map_err(DriverError::log_to_status)
-    }
-
-    async fn handle_resume(&self, lease: Option<zx::EventPair>) -> Result<(), Status> {
-        log::debug!("driver resuming");
-        let driver = self.driver.get().ok_or(Status::BAD_STATE)?;
-        driver.system_resume(lease).await.map_err(DriverError::log_to_status)
+        T::start(context).await.map_err(DriverError::log_to_status)
     }
 
     /// Returns a reference to the driver, if it has been started.
     /// This is meant to be used only for testing.
-    pub(crate) fn testing_get_driver(&self) -> Option<&'_ T> {
-        self.driver.get().map(Arc::as_ref)
+    ///
+    /// # Safety
+    ///
+    /// The returned reference must not be used after the driver has been stopped.
+    pub(crate) unsafe fn testing_get_driver(&self) -> Option<&'_ T>
+    where
+        T: Sync,
+    {
+        let driver = self.driver_for_testing.load(Ordering::Acquire);
+        // SAFETY: `driver_for_testing` is either null or points to the driver owned by the
+        // `LifecycleHandler`, which clears it before stopping or dropping the driver. `T: Sync`
+        // makes it sound to observe the driver from this (possibly different) thread.
+        unsafe { driver.as_ref() }
     }
 }
 
@@ -241,6 +228,12 @@ struct LifecycleHandler<'a, T> {
     /// `None` once the driver has stopped or failed to start, after which the server must not be
     /// touched: the driver host is free to destroy it as soon as the channel closes.
     server: Option<&'a mut DriverServer<T>>,
+    /// The running driver. The handler only ever lives on the fuchsia-async thread (it is run
+    /// with `run_local`), so the driver is shared with health check tasks through an [`Rc`],
+    /// which requires neither `T: Send` nor `T: Sync`. The health scope is cancelled before the
+    /// driver is taken out of here to be stopped or dropped, so [`Driver::stop`] never runs
+    /// concurrently with a health check.
+    driver: Option<Rc<T>>,
     fidl_server: Server<DriverProtocol, Transport>,
     /// The reporter handed to the driver through its [`DriverContext`].
     health_alert_reporter: HealthAlertReporter,
@@ -257,18 +250,36 @@ impl<T: Driver> LifecycleHandler<'_, T> {
         }
     }
 
+    /// Takes the running driver out of the handler, hiding it from
+    /// [`DriverServer::testing_get_driver`] first.
+    fn take_driver(&mut self) -> Option<Rc<T>> {
+        if let Some(server) = self.server.as_deref() {
+            server.driver_for_testing.store(core::ptr::null_mut(), Ordering::Release);
+        }
+        self.driver.take()
+    }
+
     /// Tears down the driver and closes the channel. This is the last thing the handler does
     /// with the server: the driver host treats the channel closing as the signal that the driver
     /// is fully stopped.
     async fn finish(&mut self) {
         self.health_alert_reporter.close();
         self.cancel_health_tasks().await;
-        if let Some(server) = self.server.take() {
-            // The driver is dropped here, on the fuchsia-async thread and inside its executor,
-            // so that it can release any async resources it holds.
-            drop(server.driver.take());
-        }
+        // The driver is dropped here, on the fuchsia-async thread and inside its executor,
+        // so that it can release any async resources it holds.
+        drop(self.take_driver());
+        self.server = None;
         self.fidl_server.close();
+    }
+}
+
+impl<T> Drop for LifecycleHandler<'_, T> {
+    fn drop(&mut self) {
+        // The handler can be dropped without `finish` if the channel fails. Make sure the
+        // server never hands out a reference to a driver that is about to be dropped.
+        if let Some(server) = self.server.as_deref() {
+            server.driver_for_testing.store(core::ptr::null_mut(), Ordering::Release);
+        }
     }
 }
 
@@ -289,14 +300,19 @@ impl<T: Driver> DriverLocalServerHandler<Transport> for LifecycleHandler<'_, T> 
         };
         // A second start is rejected without disturbing the running driver. It must not go
         // through `handle_start`, whose failure closes the channel below.
-        if server.driver.get().is_some() {
+        if self.driver.is_some() {
             error!("Driver received start message twice");
             log_reply("Start", responder.respond_err(Status::BAD_STATE).await);
             return;
         }
         let res = server
             .handle_start(request.payload().start_args, self.health_alert_reporter.clone())
-            .await;
+            .await
+            .map(|driver| {
+                let driver = Rc::new(driver);
+                server.driver_for_testing.store(Rc::as_ptr(&driver).cast_mut(), Ordering::Release);
+                self.driver = Some(driver);
+            });
         let reply = match res {
             Ok(()) => responder.respond(()).await,
             Err(status) => responder.respond_err(status).await,
@@ -315,17 +331,32 @@ impl<T: Driver> DriverLocalServerHandler<Transport> for LifecycleHandler<'_, T> 
         // calling `Driver::stop`.
         self.health_alert_reporter.close();
         self.cancel_health_tasks().await;
-        if let Some(server) = self.server.as_deref_mut() {
-            server.handle_stop().await;
+        if self.server.is_some() {
+            log::debug!("driver stopping");
+            match self.take_driver() {
+                Some(driver) => {
+                    // Health checks were cancelled above, and they hold the only other
+                    // references to the driver, so it can be handed to `stop` by value.
+                    let driver = Rc::into_inner(driver)
+                        .expect("no other references to the driver remain when it is stopped");
+                    driver.stop().await;
+                }
+                None => warn!("received stop message without a running driver"),
+            }
         }
         self.finish().await;
     }
 
     async fn suspend(&mut self, responder: Responder<driver::Suspend, Transport>) {
-        let Some(server) = self.server.as_deref() else {
+        if self.server.is_none() {
             return;
+        }
+        log::debug!("driver suspending");
+        let res = match &self.driver {
+            Some(driver) => driver.system_suspend().await.map_err(DriverError::log_to_status),
+            None => Err(Status::BAD_STATE),
         };
-        let reply = match server.handle_suspend().await {
+        let reply = match res {
             Ok(()) => responder.respond(()).await,
             Err(status) => responder.respond_err(status).await,
         };
@@ -337,11 +368,16 @@ impl<T: Driver> DriverLocalServerHandler<Transport> for LifecycleHandler<'_, T> 
         request: Request<driver::Resume, Transport>,
         responder: Responder<driver::Resume, Transport>,
     ) {
-        let Some(server) = self.server.as_deref() else {
+        if self.server.is_none() {
             return;
-        };
+        }
+        log::debug!("driver resuming");
         let lease = request.payload().power_element_lease;
-        let reply = match server.handle_resume(lease).await {
+        let res = match &self.driver {
+            Some(driver) => driver.system_resume(lease).await.map_err(DriverError::log_to_status),
+            None => Err(Status::BAD_STATE),
+        };
+        let reply = match res {
             Ok(()) => responder.respond(()).await,
             Err(status) => responder.respond_err(status).await,
         };
@@ -354,15 +390,15 @@ impl<T: Driver> DriverLocalServerHandler<Transport> for LifecycleHandler<'_, T> 
         responder: Responder<driver::HealthCheck, Transport>,
     ) {
         let request = request.payload().request;
-        let running =
-            self.server.as_deref().and_then(|server| Some((server, server.driver.get()?)));
-        let (Some((server, driver)), Some(health_tasks)) = (running, &self.health_tasks) else {
+        let (Some(server), Some(driver), Some(health_tasks)) =
+            (self.server.as_deref(), &self.driver, &self.health_tasks)
+        else {
             if let Err(e) = responder.respond_err(HealthCheckError::InvalidState).await {
                 debug!("Failed to reply to HealthCheck: {e}");
             }
             return;
         };
-        let driver = Arc::clone(driver);
+        let driver = Rc::clone(driver);
         let root_dispatcher = server.root_dispatcher.clone();
         // Run the check as its own task so that it cannot hold up the requests that follow it,
         // including `Stop`. The task owns the responder and replies when the check completes.
@@ -417,7 +453,7 @@ mod tests {
             println!("driver start message: {start_args:?}");
             Ok(Self::default())
         }
-        async fn stop(&self) {
+        async fn stop(self) {
             println!("driver stop message");
         }
         async fn system_suspend(&self) -> Result<(), DriverError> {
@@ -501,7 +537,7 @@ mod tests {
         async fn start(_context: DriverContext) -> Result<Self, DriverError> {
             Ok(Self)
         }
-        async fn stop(&self) {}
+        async fn stop(self) {}
     }
 
     #[test]
@@ -549,7 +585,7 @@ mod tests {
         async fn start(_context: DriverContext) -> Result<Self, DriverError> {
             Err(anyhow::anyhow!(Status::INVALID_ARGS).into())
         }
-        async fn stop(&self) {}
+        async fn stop(self) {}
     }
 
     #[test]
@@ -597,7 +633,7 @@ mod tests {
         async fn start(_context: DriverContext) -> Result<Self, DriverError> {
             Err(anyhow::anyhow!("some generic error").into())
         }
-        async fn stop(&self) {}
+        async fn stop(self) {}
     }
 
     #[test]
@@ -710,6 +746,43 @@ mod tests {
         });
     }
 
+    /// A driver that is neither `Send` nor `Sync`. `Driver` must not require either.
+    struct NotSendSyncDriver {
+        state: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl Driver for NotSendSyncDriver {
+        const NAME: &str = "not_send_sync_driver";
+
+        async fn start(_context: DriverContext) -> Result<Self, DriverError> {
+            let state = std::rc::Rc::new(std::cell::Cell::new(0));
+            // Hold `!Send` state across an await point.
+            futures::future::ready(()).await;
+            Ok(Self { state })
+        }
+        async fn stop(self) {
+            futures::future::ready(()).await;
+            self.state.set(self.state.get() + 1);
+        }
+    }
+
+    #[test]
+    fn test_not_send_sync_driver() {
+        with_driver_server::<NotSendSyncDriver, _, _>(
+            "not send/sync driver",
+            |client, _alerts| async move {
+                client.start(DriverStartArgs::default()).await.unwrap().unwrap();
+                client.suspend().await.unwrap().unwrap();
+                client.resume(None::<zx::EventPair>).await.unwrap().unwrap();
+                assert_eq!(
+                    client.health_check(HealthCheckRequest::Ping).await.unwrap(),
+                    Ok(HealthCheckResponse::default())
+                );
+                client.stop().await.unwrap();
+            },
+        );
+    }
+
     #[test]
     fn test_requests_queued_behind_start() {
         with_driver_server::<TestDriver, _, _>(
@@ -774,7 +847,7 @@ mod tests {
         async fn start(_context: DriverContext) -> Result<Self, DriverError> {
             Ok(Self)
         }
-        async fn stop(&self) {}
+        async fn stop(self) {}
 
         async fn health_check(&self, request: HealthCheckRequest) -> HealthCheckResult {
             if request == HealthCheckRequest::Deep {
@@ -831,7 +904,7 @@ mod tests {
         async fn start(_context: DriverContext) -> Result<Self, DriverError> {
             Ok(Self)
         }
-        async fn stop(&self) {}
+        async fn stop(self) {}
 
         async fn health_check(&self, _request: HealthCheckRequest) -> HealthCheckResult {
             if let Some(tx) = HUNG_HEALTH_CHECK_STARTED.lock().take() {
@@ -872,7 +945,7 @@ mod tests {
         async fn start(_context: DriverContext) -> Result<Self, DriverError> {
             Ok(Self)
         }
-        async fn stop(&self) {}
+        async fn stop(self) {}
 
         async fn health_check(&self, _request: HealthCheckRequest) -> HealthCheckResult {
             futures::future::pending().await
@@ -919,7 +992,7 @@ mod tests {
             *ALERTING_DRIVER_LATCH.lock() = Some(context.health_alert_latch());
             Ok(Self)
         }
-        async fn stop(&self) {}
+        async fn stop(self) {}
     }
 
     #[test]

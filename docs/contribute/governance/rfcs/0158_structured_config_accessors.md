@@ -204,7 +204,7 @@ header as an [implementation header] for their component.
 When building accessors support in the SDK we will ensure that users can
 configure the include directory layout to match any style guidance they have.
 
-[implementation header]: /docs/development/languages/c-cpp/naming.md#implementation_headers
+[implementation header]: /docs/development/languages/c-cpp/naming.md#implementation-headers
 
 #### Rust
 

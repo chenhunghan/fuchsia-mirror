@@ -80,7 +80,7 @@ fn record_periph_ranges(_level: init::LkInitLevel) {
     const EXPECTED_MAX: usize = 4;
 
     let mut count = 0usize;
-    // SAFETY: `gPhysHandoff` stays valid until `EndHandoff` clears it, which is after the
+    // SAFETY: `gPhysHandoff` stays valid until `end_handoff` clears it, which is after the
     // `LK_INIT_LEVEL_EARLIEST` hooks run, and `count` is a live local that the callee fills in.
     let ranges = unsafe { cpp_phys_handoff_periph_ranges(&mut count) };
     PERIPH_RANGES.store(ranges.cast_mut(), Ordering::Relaxed);

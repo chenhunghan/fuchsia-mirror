@@ -23,10 +23,10 @@
 
 #include "re2/re2.h"
 
+using fidl::test::compatibility::this_is_a_flexible_union;
 using fidl::test::compatibility::this_is_a_struct;
 using fidl::test::compatibility::this_is_a_table;
 using fidl::test::compatibility::this_is_a_union;
-using fidl::test::compatibility::this_is_a_xunion;
 
 namespace fidl_test_compatibility_helpers {
 
@@ -210,8 +210,8 @@ class DataGenerator {
   }
 
   template <typename T>
-  std::enable_if_t<std::is_same_v<T, this_is_a_xunion>, T> next() {
-    this_is_a_xunion value{};
+  std::enable_if_t<std::is_same_v<T, this_is_a_flexible_union>, T> next() {
+    this_is_a_flexible_union value{};
     if (next<bool>()) {
       value.set_b(next<bool>());
     } else {

@@ -5,7 +5,7 @@
 #ifndef SRC_MEDIA_CODEC_CODECS_TEST_TEST_FAKE_CODEC_ADAPTER_EVENTS_H_
 #define SRC_MEDIA_CODEC_CODECS_TEST_TEST_FAKE_CODEC_ADAPTER_EVENTS_H_
 
-#include <fuchsia/media/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
 #include <lib/media/codec_impl/codec_adapter_events.h>
 
 #include <condition_variable>
@@ -30,7 +30,7 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
     cv_.notify_all();
   }
 
-  void onCoreCodecFailStream(fuchsia::media::StreamError error) override {
+  void onCoreCodecFailStream(fuchsia_media::StreamError error) override {
     std::lock_guard<std::mutex> lock(mu_);
     fail_stream_count_++;
     cv_.notify_all();

@@ -8,7 +8,49 @@ use example_tester::{
     Client, Proxy, Server, TestKind, assert_filtered_logs_eq_to_golden, logs_to_str, run_test,
 };
 use fidl::prelude::*;
-use fuchsia_component_test::{ChildRef, RealmBuilder};
+use fuchsia_component_test::{Capability, ChildRef, RealmBuilder, Ref, Route};
+
+async fn set_client_config(
+    builder: &RealmBuilder,
+    client: &ChildRef,
+    do_in_process: bool,
+    augend: u8,
+    addend: u8,
+) -> Result<(), Error> {
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.exampletester.DoInProcess".parse()?,
+            value: do_in_process.into(),
+        }))
+        .await?;
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.exampletester.Augend".parse()?,
+            value: augend.into(),
+        }))
+        .await?;
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.exampletester.Addend".parse()?,
+            value: addend.into(),
+        }))
+        .await?;
+    let config_capabilities = [
+        "fuchsia.exampletester.DoInProcess",
+        "fuchsia.exampletester.Augend",
+        "fuchsia.exampletester.Addend",
+    ];
+    builder
+        .add_route(
+            config_capabilities
+                .into_iter()
+                .fold(Route::new(), |route, name| route.capability(Capability::configuration(name)))
+                .from(Ref::self_())
+                .to(client),
+        )
+        .await?;
+    Ok(())
+}
 
 // Tests the framework for a single component running locally. This is useful for testing things
 // like local logging and persistent FIDL.
@@ -20,10 +62,7 @@ async fn test_one_component_log_by_log() -> Result<(), Error> {
         fidl_test_exampletester::SimpleMarker::PROTOCOL_NAME,
         TestKind::StandaloneComponent { client: &client },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
-            builder.set_config_value(&client, "do_in_process", true.into()).await?;
-            builder.set_config_value(&client, "augend", 1u8.into()).await?;
-            builder.set_config_value(&client, "addend", 3u8.into()).await?;
+            set_client_config(&builder, &client, true, 1, 3).await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {
@@ -59,10 +98,7 @@ async fn test_one_component() -> Result<(), Error> {
         fidl_test_exampletester::SimpleMarker::PROTOCOL_NAME,
         TestKind::StandaloneComponent { client: &client },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
-            builder.set_config_value(&client, "do_in_process", true.into()).await?;
-            builder.set_config_value(&client, "augend", 10u8.into()).await?;
-            builder.set_config_value(&client, "addend", 30u8.into()).await?;
+            set_client_config(&builder, &client, true, 10, 30).await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {
@@ -89,10 +125,7 @@ async fn test_two_component_log_by_log() -> Result<(), Error> {
         fidl_test_exampletester::SimpleMarker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
-            builder.set_config_value(&client, "do_in_process", false.into()).await?;
-            builder.set_config_value(&client, "augend", augend.into()).await?;
-            builder.set_config_value(&client, "addend", addend.into()).await?;
+            set_client_config(&builder, &client, false, augend, addend).await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {
@@ -142,10 +175,7 @@ async fn test_two_component() -> Result<(), Error> {
         fidl_test_exampletester::SimpleMarker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
-            builder.set_config_value(&client, "do_in_process", false.into()).await?;
-            builder.set_config_value(&client, "augend", 10u8.into()).await?;
-            builder.set_config_value(&client, "addend", 20u8.into()).await?;
+            set_client_config(&builder, &client, false, 10, 20).await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {
@@ -175,10 +205,7 @@ async fn test_three_component_log_by_log() -> Result<(), Error> {
         fidl_test_exampletester::SimpleMarker::PROTOCOL_NAME,
         TestKind::ClientProxyAndServer { client: &client, proxy: &proxy, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
-            builder.set_config_value(&client, "do_in_process", false.into()).await?;
-            builder.set_config_value(&client, "augend", augend.into()).await?;
-            builder.set_config_value(&client, "addend", addend.into()).await?;
+            set_client_config(&builder, &client, false, augend, addend).await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {
@@ -230,10 +257,7 @@ async fn test_three_component() -> Result<(), Error> {
         fidl_test_exampletester::SimpleMarker::PROTOCOL_NAME,
         TestKind::ClientProxyAndServer { client: &client, proxy: &proxy, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
-            builder.set_config_value(&client, "do_in_process", false.into()).await?;
-            builder.set_config_value(&client, "augend", 40u8.into()).await?;
-            builder.set_config_value(&client, "addend", 50u8.into()).await?;
+            set_client_config(&builder, &client, false, 40, 50).await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {

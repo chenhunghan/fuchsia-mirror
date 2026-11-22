@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 
 	"go.starlark.net/syntax"
@@ -376,9 +378,11 @@ type packagedBinaryRecord struct {
 //     `fx_component_manifest_with_expectations()` statement referenced via
 //     `compiled_manifest` only by an unconverted test component or a skipped
 //     component in the same file when not referenced by any un-skipped
-//     converted component or `fuchsia_structured_config_rust_lib()`.
+//     converted component, `fuchsia_structured_config_rust_lib()`, or
+//     `fuchsia_structured_config_cpp_elf_lib()`.
 //  2. Hoists any manifest statement that appears after an earlier converted
-//     component or `fuchsia_structured_config_rust_lib()` referencing it via
+//     component, `fuchsia_structured_config_rust_lib()`, or
+//     `fuchsia_structured_config_cpp_elf_lib()` referencing it via
 //     `:manifest`, since GN's `get_target_outputs(cm_label)` requires the
 //     manifest target to be evaluated earlier in `BUILD.gn`.
 //  3. Resolves `fx_packaged_binary()` targets referenced by converted
@@ -390,6 +394,10 @@ type packagedBinaryRecord struct {
 //     rewriting the `fx_packaged_binary()` into a GN `renamed_binary()` target
 //     otherwise (when supported by the rule).
 func resolveComponentTargets(f *syntax.File) error {
+	return resolveComponentTargetsWithConfig(f, nil)
+}
+
+func resolveComponentTargetsWithConfig(f *syntax.File, cfg *Config) error {
 	if err := checkCompiledManifestConsumers(f); err != nil {
 		return err
 	}
@@ -403,7 +411,7 @@ func resolveComponentTargets(f *syntax.File) error {
 		return err
 	}
 
-	gnBins, err := indexGNBinaries(f)
+	gnBins, err := indexGNBinariesWithConfig(f, cfg)
 	if err != nil {
 		return err
 	}
@@ -455,8 +463,23 @@ func resolveComponentTargets(f *syntax.File) error {
 			continue
 		}
 		fn, ok := call.Fn.(*syntax.Ident)
-		if !ok || !isConvertedFxComponentRule(fn.Name) {
+		if !ok {
 			continue
+		}
+		var targetAttrs []string
+		switch {
+		case isConvertedFxComponentRule(fn.Name):
+			targetAttrs = []string{"deps"}
+		case fn.Name == "fx_unittest_package" || fn.Name == internalFxTestPackageRule || fn.Name == "fuchsia_package_resource_collection":
+			targetAttrs = []string{"resources"}
+		case isResourceRule(fn.Name):
+			targetAttrs = []string{"data_deps"}
+		default:
+			if ruleCfg, ok := cfg.lookupRule(fn.Name); ok && len(ruleCfg.UnwrapPackagedBinaryAttrs) > 0 {
+				targetAttrs = ruleCfg.UnwrapPackagedBinaryAttrs
+			} else {
+				continue
+			}
 		}
 		skip, err := hasSkipAnnotation(stmt)
 		if err != nil {
@@ -475,7 +498,7 @@ func resolveComponentTargets(f *syntax.File) error {
 				continue
 			}
 			attr, ok := attrName(arg)
-			if !ok || attr != "deps" {
+			if !ok || !slices.Contains(targetAttrs, attr) {
 				continue
 			}
 			kv := arg.(*syntax.BinaryExpr)
@@ -539,8 +562,8 @@ func checkCompiledManifestConsumers(f *syntax.File) error {
 // skipBazelOnlyComponentManifests omits any un-skipped `fx_component_manifest`
 // or `fx_component_manifest_with_expectations` statement referenced via
 // `compiled_manifest` by an unconverted test component or a skipped component
-// in the same file and not by any un-skipped converted component or
-// `fuchsia_structured_config_rust_lib`.
+// in the same file and not by any un-skipped converted component,
+// `fuchsia_structured_config_rust_lib`, or `fuchsia_structured_config_cpp_elf_lib`.
 func skipBazelOnlyComponentManifests(f *syntax.File) error {
 	convertedConsumers := map[string]bool{}
 	bazelOnlyConsumers := map[string]bool{}
@@ -556,11 +579,11 @@ func skipBazelOnlyComponentManifests(f *syntax.File) error {
 		}
 		var cmAttr string
 		switch fn.Name {
-		case "fx_component",
+		case "fx_component", "icu_fuchsia_component",
 			"fx_test_component", internalFxTestComponentRule,
 			"fx_test_component_with_expectations", internalFxTestComponentWithExpectationsRule:
 			cmAttr = "compiled_manifest"
-		case "fuchsia_structured_config_rust_lib":
+		case "fuchsia_structured_config_rust_lib", "fuchsia_structured_config_cpp_elf_lib":
 			cmAttr = "cm_label"
 		default:
 			continue
@@ -665,9 +688,9 @@ func hoistComponentManifests(f *syntax.File) error {
 		}
 		var cmAttr string
 		switch {
-		case isConvertedFxComponentRule(fn.Name):
+		case isConvertedFxComponentRule(fn.Name) || fn.Name == "icu_fuchsia_component":
 			cmAttr = "compiled_manifest"
-		case fn.Name == "fuchsia_structured_config_rust_lib":
+		case fn.Name == "fuchsia_structured_config_rust_lib" || fn.Name == "fuchsia_structured_config_cpp_elf_lib":
 			cmAttr = "cm_label"
 		default:
 			continue
@@ -751,6 +774,10 @@ type gnBinaryOutput struct {
 // defined in `f` to the output filename and default distribution destination
 // produced by its converted GN target.
 func indexGNBinaries(f *syntax.File) (map[string]gnBinaryOutput, error) {
+	return indexGNBinariesWithConfig(f, nil)
+}
+
+func indexGNBinariesWithConfig(f *syntax.File, cfg *Config) (map[string]gnBinaryOutput, error) {
 	outputs := map[string]gnBinaryOutput{}
 	for _, stmt := range f.Stmts {
 		call, ok := callOfStmt(stmt)
@@ -758,7 +785,7 @@ func indexGNBinaries(f *syntax.File) (map[string]gnBinaryOutput, error) {
 			continue
 		}
 		fn, ok := call.Fn.(*syntax.Ident)
-		if !ok || bazelRuleToGNTemplate[fn.Name] == noGNEquivalent {
+		if !ok || cfg.isNoGNEquivalent(fn.Name) {
 			continue
 		}
 		skip, err := hasSkipAnnotation(stmt)
@@ -774,15 +801,20 @@ func indexGNBinaries(f *syntax.File) (map[string]gnBinaryOutput, error) {
 		}
 
 		rawOut, hasRawOut := rawOutputNameFromStmt(stmt, call)
-		// `gn_output_name` on `fx_cc_binary` and `fx_cc_test_binary` sets the GN `output_name`.
-		if fn.Name == "fx_cc_binary" || fn.Name == "fx_cc_test_binary" {
+		// `gn_output_name` on `fx_cc_binary`, `fx_cc_test_binary`, `icu_executable`, `vulkan_executable`, and `vulkan_test` sets the GN `output_name`.
+		if fn.Name == "fx_cc_binary" || fn.Name == "fx_cc_test_binary" || fn.Name == "icu_executable" || fn.Name == "vulkan_executable" || fn.Name == "vulkan_test" {
 			if out, ok := unskippedCallStringAttr(call, "gn_output_name"); ok && out != "" {
+				rawOut, hasRawOut = out, true
+			}
+		}
+		if fn.Name == "icu_executable" {
+			if out, ok := unskippedCallStringAttr(call, "output_name"); ok && out != "" {
 				rawOut, hasRawOut = out, true
 			}
 		}
 
 		switch fn.Name {
-		case "cc_binary", "fx_cc_binary", "fx_cc_test_binary":
+		case "cc_binary", "fx_cc_binary", "fx_cc_test_binary", "icu_executable", "vulkan_executable", "vulkan_test":
 			// GN `executable()` and `cc_test_executable()` (which
 			// `fx_cc_test_binary()` becomes) both install to `"bin/"`.
 			outName := name
@@ -1163,4 +1195,177 @@ func resolvePackagedBinaryRecord(
 	rec.call.Args = newArgs
 	rec.emittedName = true
 	return ":" + pkgBinName, nil
+}
+
+// mergeDepExprsToGN converts one or two dep-list attribute assignments to a single GN attribute.
+func mergeDepExprsToGN(gnName string, first, second *syntax.BinaryExpr) ([]string, error) {
+	if first == nil && second == nil {
+		return nil, nil
+	}
+	var expr syntax.Expr
+	if first != nil && second != nil {
+		l1, ok1 := unwrapParenExpr(first.Y).(*syntax.ListExpr)
+		l2, ok2 := unwrapParenExpr(second.Y).(*syntax.ListExpr)
+		if ok1 && ok2 {
+			combined := make([]syntax.Expr, 0, len(l1.List)+len(l2.List))
+			combined = append(combined, l1.List...)
+			combined = append(combined, l2.List...)
+			expr = &syntax.ListExpr{List: combined}
+		} else {
+			var lines []string
+			part1, err := exprToGN(first.Y, []transformer{bazelDepToGN})
+			if err != nil {
+				return nil, err
+			}
+			part1[0] = gnName + " = " + part1[0]
+			lines = append(lines, part1...)
+			part2, err := exprToGN(second.Y, []transformer{bazelDepToGN})
+			if err != nil {
+				return nil, err
+			}
+			part2[0] = gnName + " += " + part2[0]
+			lines = append(lines, part2...)
+			return lines, nil
+		}
+	} else if first != nil {
+		expr = first.Y
+	} else {
+		expr = second.Y
+	}
+	lines, err := exprToGN(expr, []transformer{bazelDepToGN})
+	if err != nil {
+		return nil, err
+	}
+	lines[0] = gnName + " = " + lines[0]
+	return lines, nil
+}
+
+// icuFuchsiaPackageToGN converts an `icu_fuchsia_package()` target to GN.
+func icuFuchsiaPackageToGN(call *syntax.CallExpr) ([]string, error) {
+	var name, packageName string
+	var components, resources, icuComponents, icuResources, subpackages, testonly, visArg *syntax.BinaryExpr
+	var validateElfBinaries, validateStructuredConfig *syntax.BinaryExpr
+	var wrappingConditions []string
+
+	for _, arg := range call.Args {
+		binaryExpr, ok := arg.(*syntax.BinaryExpr)
+		if !ok || binaryExpr.Op != syntax.EQ {
+			return nil, fmt.Errorf("icu_fuchsia_package only accepts keyword arguments, got %T", arg)
+		}
+		shouldSkip, err := hasSkipAnnotation(binaryExpr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check skip annotation: %v", err)
+		}
+		if shouldSkip {
+			continue
+		}
+		ident, ok := binaryExpr.X.(*syntax.Ident)
+		if !ok {
+			return nil, fmt.Errorf("expected identifier for argument name in icu_fuchsia_package, got %T", binaryExpr.X)
+		}
+
+		switch ident.Name {
+		case "name":
+			name, err = stringLiteralValue(binaryExpr.Y)
+			if err != nil {
+				return nil, fmt.Errorf("icu_fuchsia_package name: %v", err)
+			}
+		case "package_name":
+			packageName, err = stringLiteralValue(binaryExpr.Y)
+			if err != nil {
+				return nil, fmt.Errorf("icu_fuchsia_package package_name: %v", err)
+			}
+		case "components":
+			components = binaryExpr
+		case "resources":
+			resources = binaryExpr
+		case "icu_components":
+			icuComponents = binaryExpr
+		case "icu_resources":
+			icuResources = binaryExpr
+		case "subpackages":
+			subpackages = binaryExpr
+		case "validate_elf_binaries":
+			validateElfBinaries = binaryExpr
+		case "validate_structured_config":
+			validateStructuredConfig = binaryExpr
+		case "testonly":
+			testonly = binaryExpr
+		case "visibility":
+			visArg = binaryExpr
+		case "target_compatible_with":
+			wrappingConditions, err = targetCompatibleWithToGNConditions(binaryExpr.Y)
+			if err != nil {
+				return nil, fmt.Errorf("converting target_compatible_with of icu_fuchsia_package: %v", err)
+			}
+		default:
+			return nil, fmt.Errorf("bazel2gn does not support attribute %q of icu_fuchsia_package", ident.Name)
+		}
+	}
+
+	if name == "" {
+		return nil, errors.New("missing `name` attribute in icu_fuchsia_package")
+	}
+
+	var body []string
+	if packageName != "" {
+		body = append(body, fmt.Sprintf("package_name = %s", strconv.Quote(packageName)))
+	}
+	for _, pair := range []struct {
+		gnName string
+		first  *syntax.BinaryExpr
+		second *syntax.BinaryExpr
+	}{
+		{"icu_deps", icuComponents, icuResources},
+		{"deps", components, resources},
+		{"subpackages", subpackages, nil},
+	} {
+		lines, err := mergeDepExprsToGN(pair.gnName, pair.first, pair.second)
+		if err != nil {
+			return nil, fmt.Errorf("converting icu_fuchsia_package %q %s: %v", name, pair.gnName, err)
+		}
+		body = append(body, lines...)
+	}
+
+	if validateElfBinaries != nil {
+		rhs, ok := unwrapParenExpr(validateElfBinaries.Y).(*syntax.Ident)
+		if !ok || (rhs.Name != "True" && rhs.Name != "False") {
+			return nil, fmt.Errorf("icu_fuchsia_package %q validate_elf_binaries must be True or False", name)
+		}
+		body = append(body, fmt.Sprintf("disable_elf_binaries_checks = %t", rhs.Name == "False"))
+	}
+	if validateStructuredConfig != nil {
+		rhs, ok := unwrapParenExpr(validateStructuredConfig.Y).(*syntax.Ident)
+		if !ok || (rhs.Name != "True" && rhs.Name != "False") {
+			return nil, fmt.Errorf("icu_fuchsia_package %q validate_structured_config must be True or False", name)
+		}
+		body = append(body, fmt.Sprintf("validate_structured_config = %t", rhs.Name == "True"))
+	}
+	if testonly != nil {
+		lines, err := exprToGN(testonly.Y, nil)
+		if err != nil {
+			return nil, fmt.Errorf("converting icu_fuchsia_package %q testonly: %v", name, err)
+		}
+		lines[0] = "testonly = " + lines[0]
+		body = append(body, lines...)
+	}
+	if visArg != nil {
+		lines, err := exprToGN(visArg.Y, []transformer{bazelVisibilityToGN})
+		if err != nil {
+			return nil, fmt.Errorf("converting icu_fuchsia_package %q visibility: %v", name, err)
+		}
+		lines[0] = "visibility = " + lines[0]
+		body = append(body, lines...)
+	}
+
+	ret := []string{fmt.Sprintf("icu_fuchsia_package(%q) {", name)}
+	ret = append(ret, indent(body, 1)...)
+	ret = append(ret, "}")
+	if len(wrappingConditions) > 0 {
+		ret = append([]string{
+			fmt.Sprintf("if (%s) {", strings.Join(wrappingConditions, " && ")),
+		}, indent(ret, 1)...)
+		ret = append(ret, "}")
+	}
+	return ret, nil
 }

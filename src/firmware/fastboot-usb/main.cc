@@ -5,6 +5,7 @@
 #include <fidl/fuchsia.hardware.fastboot/cpp/wire.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
+#include <lib/component/incoming/cpp/directory.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/component/incoming/cpp/service_member_watcher.h>
 #include <lib/fastboot/fastboot.h>
@@ -12,6 +13,8 @@
 #include <lib/zx/clock.h>
 #include <lib/zx/time.h>
 #include <zircon/syscalls.h>
+
+#include "src/firmware/fastboot-usb/fastboot_usb_config.h"
 
 namespace {
 
@@ -93,6 +96,9 @@ class UsbPacketTransport : public fastboot::Transport {
     }
 
     auto res = (*device_)->Send(mapper.Release());
+    if (!res.ok()) {
+      return zx::error(res.status());
+    }
     if (res->is_error()) {
       return res->take_error();
     }
@@ -107,53 +113,98 @@ class UsbPacketTransport : public fastboot::Transport {
 
 int main(int argc, const char **argv) {
   FX_LOGS(INFO) << "Starting fastboot usb";
-  auto connect_device =
-      component::SyncServiceMemberWatcher<fuchsia_hardware_fastboot::Service::Fastboot>()
-          .GetNextInstance(false);
-  if (connect_device.is_error()) {
-    FX_LOGS(ERROR) << "Failed to connect to usb fastboot device" << connect_device.status_string();
-    return 1;
-  }
-  fidl::WireSyncClient<fuchsia_hardware_fastboot::FastbootImpl> device(
-      std::move(connect_device.value()));
-
-  fastboot::Fastboot fastboot;
-  LogLimiter log_limiter;
+  const auto config = fastboot_usb_config::Config::TakeFromStartupHandle();
+  component::SyncServiceMemberWatcher<fuchsia_hardware_fastboot::Service::Fastboot> watcher;
   while (true) {
-    // Note: fastboot.remaining_download_size() returns 0 in command stage.
-    size_t request_size =
-        std::min(fastboot.remaining_download_size(), static_cast<size_t>(512 * 1024));
-
-    auto response = device->Receive(request_size);
-    if (response.status() != ZX_OK) {
-      log_limiter.LogError(response.status(), "Failed to receive packet (transport error)");
-      continue;
+    auto connect_device = watcher.GetNextInstance(false);
+    if (connect_device.is_error()) {
+      FX_LOGS(ERROR) << "Failed to watch usb fastboot service: " << connect_device.status_string();
+      return 1;
     }
-    if (response->is_error()) {
-      log_limiter.LogError(response->error_value(), "Failed while receiving packet");
-      continue;
-    }
-    log_limiter.Flush();
+    FX_LOGS(INFO) << "Connected to usb fastboot device";
+    fidl::WireSyncClient<fuchsia_hardware_fastboot::FastbootImpl> device(
+        std::move(connect_device.value()));
 
-    const auto &packet = *response;
-    fzl::VmoMapper mapper;
-    zx_status_t status = mapper.Map(packet->data);
-    if (status != ZX_OK) {
-      FX_LOGS(ERROR) << "Failed to map packet vmo" << zx_status_get_string(status);
-      continue;
-    }
+    LogLimiter log_limiter;
+    bool device_connected = true;
+    while (device_connected) {
+      fidl::ClientEnd<fuchsia_io::Directory> misc_dir;
+      if (config.use_android_bcb()) {
+        if (zx::result res = component::OpenDirectory("/misc"); res.is_ok()) {
+          misc_dir = std::move(*res);
+        } else {
+          FX_LOGS(WARNING) << "Failed to open /misc: " << res.status_string();
+        }
+      }
+      fastboot::Fastboot fastboot(std::move(misc_dir));
+      while (true) {
+        // Note: fastboot.remaining_download_size() returns 0 in command stage.
+        size_t request_size =
+            std::min(fastboot.remaining_download_size(), static_cast<size_t>(512 * 1024));
 
-    size_t packet_size = 0;
-    if (zx_status_t status = packet->data.get_prop_content_size(&packet_size); status != ZX_OK) {
-      FX_LOGS(ERROR) << "Failed to get content size " << zx_status_get_string(status);
-      continue;
-    }
+        auto response = device->Receive(request_size);
+        if (!response.ok()) {
+          log_limiter.Flush();
+          if (response.is_peer_closed() || response.is_canceled()) {
+            FX_LOGS(INFO) << "USB fastboot device disconnected (" << response.status_string()
+                          << "), waiting for next instance";
+          } else {
+            FX_LOGS(WARNING) << "Failed to receive packet (transport error): "
+                             << response.status_string() << ", reconnecting";
+          }
+          device_connected = false;
+          break;
+        }
+        if (response->is_error()) {
+          const zx_status_t error = response->error_value();
+          // FastbootImpl has no online status event and returns ZX_ERR_UNAVAILABLE immediately
+          // while USB is unconfigured or unplugged; sleep briefly to avoid busy-spinning.
+          if (error == ZX_ERR_UNAVAILABLE || error == ZX_ERR_CANCELED ||
+              error == ZX_ERR_IO_NOT_PRESENT) {
+            zx::nanosleep(zx::deadline_after(zx::msec(50)));
+          } else {
+            log_limiter.LogError(error, "Failed while receiving packet");
+          }
+          if (fastboot.state() == fastboot::FastbootBase::State::kDownload) {
+            FX_LOGS(WARNING) << "Failed to receive packet during download ("
+                             << zx_status_get_string(error) << "), resetting state";
+            break;
+          }
+          continue;
+        }
+        log_limiter.Flush();
 
-    std::string_view data{reinterpret_cast<const char *>(mapper.start()), packet_size};
-    UsbPacketTransport transport(device, data);
-    auto fastboot_res = fastboot.ProcessPacket(&transport);
-    if (fastboot_res.is_error()) {
-      FX_LOGS(ERROR) << "Failed to process fastboot packet " << fastboot_res.status_string();
+        const auto &packet = *response;
+        fzl::VmoMapper mapper;
+        zx_status_t status = mapper.Map(packet->data);
+        if (status != ZX_OK) {
+          FX_LOGS(ERROR) << "Failed to map packet vmo: " << zx_status_get_string(status);
+          if (fastboot.state() == fastboot::FastbootBase::State::kDownload) {
+            break;
+          }
+          continue;
+        }
+
+        size_t packet_size = 0;
+        if (zx_status_t status = packet->data.get_prop_content_size(&packet_size);
+            status != ZX_OK) {
+          FX_LOGS(ERROR) << "Failed to get content size: " << zx_status_get_string(status);
+          if (fastboot.state() == fastboot::FastbootBase::State::kDownload) {
+            break;
+          }
+          continue;
+        }
+
+        std::string_view data{reinterpret_cast<const char *>(mapper.start()), packet_size};
+        UsbPacketTransport transport(device, data);
+        auto fastboot_res = fastboot.ProcessPacket(&transport);
+        if (fastboot_res.is_error()) {
+          FX_LOGS(ERROR) << "Failed to process fastboot packet: " << fastboot_res.status_string();
+          if (fastboot.state() == fastboot::FastbootBase::State::kDownload) {
+            break;
+          }
+        }
+      }
     }
   }
 

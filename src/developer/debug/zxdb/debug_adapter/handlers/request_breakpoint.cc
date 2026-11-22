@@ -57,7 +57,7 @@ dap::ResponseOrError<dap::SetBreakpointsResponse> OnRequestBreakpoint(
     BreakpointSettings settings;
 
     std::vector<InputLocation> locations;
-    locations.emplace_back(FileLine(path, request_bp.line));
+    locations.emplace_back(FileLine(path, static_cast<int>(request_bp.line)));
     settings.locations = locations;
     if (request_bp.condition.has_value()) {
       settings.condition = request_bp.condition.value();

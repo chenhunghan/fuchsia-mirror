@@ -54,7 +54,7 @@ void TestFunction::Connect(ConnectRequest& request, ConnectCompleter::Sync& comp
 zx::result<std::vector<uint8_t>> TestFunction::DoControl(const fdescriptor::UsbSetup& setup,
                                                          std::vector<uint8_t> write_data) {
   if (!expect_control_) {
-    return zx::ok(std::vector<uint8_t>{});
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
   }
 
   if (setup.b_request() != 0xFF) {

@@ -605,6 +605,7 @@ mod tests {
                     flags: ModeFlags::empty(),
                 },
             ],
+            mode_vrr_configs: Vec::new(),
             pixel_format: vec![FidlPixelFormat::R8G8B8A8],
             manufacturer_name: "Manufacturer".to_string(),
             monitor_name: "Monitor".to_string(),

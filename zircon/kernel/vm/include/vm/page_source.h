@@ -7,21 +7,20 @@
 #ifndef ZIRCON_KERNEL_VM_INCLUDE_VM_PAGE_SOURCE_H_
 #define ZIRCON_KERNEL_VM_INCLUDE_VM_PAGE_SOURCE_H_
 
+#include <lib/zx/result.h>
+#include <zircon/compiler.h>
 #include <zircon/types.h>
 
-#include <fbl/intrusive_wavl_tree.h>
+#include <fbl/recycler.h>
 #include <fbl/ref_counted.h>
 #include <fbl/ref_ptr.h>
 #include <kernel/event.h>
-#include <kernel/lockdep.h>
+#include <kernel/ffi.h>
 #include <kernel/mutex.h>
 #include <ktl/optional.h>
-#include <ktl/unique_ptr.h>
 #include <vm/anonymous_page_request.h>
 #include <vm/page.h>
-#include <vm/pmm.h>
-#include <vm/pmm_node.h>
-#include <vm/vm.h>
+#include <vm/vm_constants.h>
 
 // At the high level the goal of the objects here is to
 // 1. Trigger external entities to do work based on VMO operations, such as asking a pager to supply
@@ -33,8 +32,6 @@
 //
 // The different objects can be summarized as:
 //  * PageRequest: Caller allocated object that the caller uses to perform the Wait.
-//  * PageRequestInterface: A reference to an object implementing this interface is held by the
-//    PageRequest and provides a way for the PageRequest to interact with the underlying PageSource.
 //  * PageSource: Performs request and overlap tracking, forwarding unique ranges of requests to the
 //    underlying PageProvider.
 //  * PageProvider: Asynchronously performs requests. Requests are completed by actions being
@@ -49,11 +46,9 @@
 //    or may not notify the underlying PageProvider that some work needs to be done (the page
 //    provider will complete this asynchronously somehow).
 //  * VMO returns ZX_ERR_SHOULD_WAIT and then the top level calls PageRequest::Wait
-//  * PageRequest::Wait uses the PageRequestInterface to ask the underlying PageSource how to Wait
-//    for the operation to complete
+//  * PageRequest::Wait asks the underlying PageSource how to Wait for the operation to complete
 //  # As an optional path, if the PageRequest was not Waited on for some reason, the PageRequest
-//    will also use the PageRequestInterface to inform the PageSource that this request is no longer
-//    needed and can be canceled.
+//    will also inform the PageSource that this request is no longer needed and can be canceled.
 // For the other side, while the Wait is happening some other thread will
 //  * Call a VMO operation, such as VmObject::SupplyPages
 //  * VMO will perform the operation, and then let the PageSource know by the corresponding
@@ -65,9 +60,15 @@
 // PageRequest serves as the allocation of all data needed for all parties. Therefore every layer
 // needs to be told when requests are coming and going to ensure they update any lists and do not
 // refer to out of scope stack variables.
+//
+// PageSource, PageRequest, LazyPageRequest and MultiPageRequest are implemented in Rust (see
+// page_source.rs). The C++ classes below are shells that forward to the Rust implementation.
 
 class PageRequest;
 class PageSource;
+class PageProvider;
+class LazyPageRequest;
+class MultiPageRequest;
 
 struct VmoDebugInfo {
   uint64_t vmo_id;
@@ -81,19 +82,6 @@ enum page_request_type : uint32_t {
   WRITEBACK,  // Request to write back modified page contents back to the source.
   COUNT       // Number of page request types.
 };
-
-inline const char* PageRequestTypeToString(page_request_type type) {
-  switch (type) {
-    case page_request_type::READ:
-      return "READ";
-    case page_request_type::DIRTY:
-      return "DIRTY";
-    case page_request_type::WRITEBACK:
-      return "WRITEBACK";
-    default:
-      return "UNKNOWN";
-  }
-}
 
 // These properties are constant per PageProvider type, so a given VmCowPages can query and cache
 // these properties once (if it has a PageSource) and know they won't change after that.  This also
@@ -118,17 +106,42 @@ struct PageSourceProperties {
   const bool supports_request_type[page_request_type::COUNT];
 };
 
+extern "C" {
+// Rust PageSource methods exposed to C++. See page_source.rs.
+zx_status_t rust_page_source_create(PageProvider* page_provider, PageSource** out);
+void rust_page_source_recycle(PageSource* src);
+void rust_page_source_on_pages_supplied(PageSource* src, uint64_t offset, uint64_t len);
+void rust_page_source_on_pages_failed(PageSource* src, uint64_t offset, uint64_t len,
+                                      zx_status_t error_status);
+bool rust_page_source_is_valid_internal_failure_code(zx_status_t error_status) __PURE;
+bool rust_page_source_should_trap_dirty_transitions(const PageSource* src) __PURE;
+zx_status_t rust_page_source_request_dirty_transition(PageSource* src, PageRequest* request,
+                                                      uint64_t offset, uint64_t len,
+                                                      VmoDebugInfo vmo_debug_info);
+void rust_page_source_on_pages_dirtied(PageSource* src, uint64_t offset, uint64_t len);
+void rust_page_source_detach(PageSource* src);
+void rust_page_source_close(PageSource* src);
+PageSourceProperties rust_page_source_properties(const PageSource* src) __PURE;
+void rust_page_source_dump(const PageSource* src, uint depth, uint32_t max_items);
+bool rust_page_source_is_detached(const PageSource* src);
+Lock<Mutex>* rust_page_source_paged_vmo_lock(PageSource* src);
+bool rust_page_source_get_provider_koid(const PageSource* src, zx_koid_t* out_koid);
+
+// Rust LazyPageRequest and MultiPageRequest methods exposed to C++.
+PageRequest* rust_lazy_page_request_get(LazyPageRequest* req);
+void rust_multi_page_request_init(MultiPageRequest* req, bool early_wake);
+void rust_multi_page_request_destroy(MultiPageRequest* req);
+zx_status_t rust_multi_page_request_wait(MultiPageRequest* req, bool suspendable);
+AnonymousPageRequest* rust_multi_page_request_get_anonymous(MultiPageRequest* req);
+LazyPageRequest* rust_multi_page_request_get_lazy_dirty_request(MultiPageRequest* req);
+void rust_multi_page_request_made_dirty_request(MultiPageRequest* req);
+void rust_multi_page_request_cancel_requests(MultiPageRequest* req);
+}
+
 // Interface for providing pages to a VMO through page requests.
 class PageProvider : public fbl::RefCounted<PageProvider> {
  public:
   virtual ~PageProvider() = default;
-
- protected:
-  // Methods a PageProvider implementation can use to retrieve fields from a PageRequest.
-  static page_request_type GetRequestType(const PageRequest* request);
-  static uint64_t GetRequestOffset(const PageRequest* request);
-  static uint64_t GetRequestLen(const PageRequest* request);
-  static uint64_t GetRequestVmoId(const PageRequest* request);
 
  private:
   // The returned properties can assumed to be const and never change. As such the caller may cache
@@ -177,30 +190,9 @@ class PageProvider : public fbl::RefCounted<PageProvider> {
   // Retrieves the debug name for this page provider, if it has one.
   virtual void GetDebugName(char (&name)[ZX_MAX_NAME_LEN]) const { name[0] = '\0'; }
 
-  friend PageSource;
-};
-
-// Interface used by the page requests to communicate with the PageSource. Due to the nature of
-// intrusive containers the RefCounted needs to be here and not on the PageSource to allow the
-// PageRequest to hold a RefPtr just to this interface.
-class PageRequestInterface : public fbl::RefCounted<PageRequestInterface> {
- public:
-  virtual ~PageRequestInterface() = default;
-
- protected:
-  PageRequestInterface() = default;
-
- private:
-  friend PageRequest;
-  // Instruct the page source that this request has been cancelled.
-  virtual void CancelRequest(PageRequest* request) = 0;
-  // Ask the page source to wait on this request, typically by forwarding to the page provider.
-  // Note this gets called without a lock and so due to races the implementation needs to be
-  // tolerant of having already been detached/closed. The waiting thread can return early from
-  // the wait due to a suspend signal only if |suspendable| is true.
-  virtual zx_status_t WaitOnRequest(PageRequest* request, bool suspendable) = 0;
-  // Retrieves the debug name of the backing page provider, if any.
-  virtual void GetProviderDebugName(char (&name)[ZX_MAX_NAME_LEN]) const = 0;
+  // Rust reaches the private virtual interface above through the cpp_page_provider_* shims in
+  // page_source_ffi.cc, which PageProviderFfi forwards on their behalf.
+  friend struct PageProviderFfi;
 };
 
 // A page source is responsible for fulfilling page requests from a VMO with backing pages.
@@ -230,33 +222,20 @@ class PageRequestInterface : public fbl::RefCounted<PageRequestInterface> {
 // similar to what can happen with a normal PageProvider where pages can be read and then
 // decommitted before the caller queries the vm object again.
 
-extern "C" void cpp_page_source_free(PageSource* src);
-
 // Object which provides pages to a vm_object.
-class PageSource final : public PageRequestInterface {
+class PageSource final : public fbl::RefCounted<PageSource>, public fbl::Recyclable<PageSource> {
  public:
   PageSource() = delete;
-  explicit PageSource(fbl::RefPtr<PageProvider>&& page_provider);
 
-  // Sends a request to the backing source to provide the requested page at |offset|.
-  //
-  // Returns ZX_ERR_NOT_FOUND if the request cannot be fulfilled.
-  // Returns ZX_ERR_SHOULD_WAIT if the request will be asynchronously fulfilled and the caller
-  // should wait on |req|.
-  zx_status_t GetPages(uint64_t offset, uint64_t len, PageRequest* req,
-                       VmoDebugInfo vmo_debug_info) {
-    return PopulateRequest(req, offset, len, vmo_debug_info, page_request_type::READ);
+  // Creates a PageSource that forwards page requests to |page_provider|.
+  static zx::result<fbl::RefPtr<PageSource>> Create(fbl::RefPtr<PageProvider>&& page_provider) {
+    PageSource* ptr = nullptr;
+    zx_status_t status = rust_page_source_create(fbl::ExportToRawPtr(&page_provider), &ptr);
+    if (status != ZX_OK) {
+      return zx::error(status);
+    }
+    return zx::ok(fbl::ImportFromRawPtr(ptr));
   }
-
-  // Frees |pages|.
-  void FreePages(VmPageDoublyLinkedList* pages);
-
-  // For asserting purposes only.  This gives the PageProvider a chance to check that a page is
-  // consistent with any rules the PageProvider has re. which pages can go where in the VmCowPages.
-  // PhysicalPageProvider implements this to verify that page at offset makes sense with respect to
-  // phys_base_, since VmCowPages can't do that on its own due to lack of knowledge of phys_base_
-  // and lack of awareness of contiguous.
-  bool DebugIsPageOk(vm_page_t* page, uint64_t offset);
 
   // Updates the request tracking metadata to account for pages [offset, offset + len) having
   // been supplied to the owning vmo.
@@ -268,48 +247,38 @@ class PageSource final : public PageRequestInterface {
   // newly supplied ranges.
   // TODO(rashaeqbal): Consider relaxing this constraint by more precise tracking of fulfilled
   // offsets with a bitmap. Might require capping the max permissible length of a page request.
-  void OnPagesSupplied(uint64_t offset, uint64_t len);
+  void OnPagesSupplied(uint64_t offset, uint64_t len) {
+    rust_page_source_on_pages_supplied(this, offset, len);
+  }
 
   // Fails outstanding page requests in the range [offset, offset + len). Events associated with the
   // failed page requests are signaled with the |error_status|, and any waiting threads are
   // unblocked.
-  void OnPagesFailed(uint64_t offset, uint64_t len, zx_status_t error_status);
-
-  // Returns true if |error_status| is a valid ZX_PAGER_OP_FAIL failure error code (input, specified
-  // by user mode pager).  These codes can be used with |OnPagesFailed| (and so can any failure
-  // codes for which IsValidInternalFailureCode() returns true).
-  //
-  // Not every error code is supported, since these errors can get returned via a zx_vmo_read() or a
-  // zx_vmo_op_range(), if those calls resulted in a page fault.  So the |error_status| should be a
-  // supported return error code for those syscalls _and_ be an error code that we want to be
-  // supported for the user mode pager to specify via ZX_PAGER_OP_FAIL.  Currently,
-  // IsValidExternalFailureCode(ZX_ERR_NO_MEMORY) returns false, as we don't want ZX_ERR_NO_MEMORY
-  // to be specified via ZX_PAGER_OP_FAIL (at least so far).
-  static bool IsValidExternalFailureCode(zx_status_t error_status);
+  void OnPagesFailed(uint64_t offset, uint64_t len, zx_status_t error_status) {
+    rust_page_source_on_pages_failed(this, offset, len, error_status);
+  }
 
   // Returns true if |error_status| is a valid provider failure error code, which can be used with
   // |OnPagesFailed|.
   //
-  // This returns true for every error code that IsValidExternalFailureCode() returns true for, plus
-  // any additional error codes that are valid as an internal PageProvider status but not valid for
-  // ZX_PAGER_OP_FAIL.
+  // This returns true for every error code that PageSource::is_valid_external_failure_code (in
+  // page_source.rs) returns true for, plus any additional error codes that are valid as an
+  // internal PageProvider status but not valid for ZX_PAGER_OP_FAIL.
   //
-  // ZX_ERR_NO_MEMORY will return true, unlike IsValidExternalFailureCode(ZX_ERR_NO_MEMORY) which
-  // returns false.
+  // ZX_ERR_NO_MEMORY will return true, unlike
+  // PageSource::is_valid_external_failure_code(Status::NO_MEMORY) which returns false.
   //
   // Not every error code is supported, since these errors can get returned via a zx_vmo_read() or a
   // zx_vmo_op_range(), if those calls resulted in a page fault.  So the |error_status| should be a
   // supported return error code for those syscalls.  An error code need not be specifiable via
   // ZX_PAGER_OP_FAIL for this function to return true.
-  static bool IsValidInternalFailureCode(zx_status_t error_status);
-
-  bool SupportsPageRequestType(page_request_type type) const {
-    return properties().supports_request_type[type];
+  static bool IsValidInternalFailureCode(zx_status_t error_status) {
+    return rust_page_source_is_valid_internal_failure_code(error_status);
   }
 
   // Whether transitions from clean to dirty should be trapped.
   bool ShouldTrapDirtyTransitions() const {
-    return SupportsPageRequestType(page_request_type::DIRTY);
+    return rust_page_source_should_trap_dirty_transitions(this);
   }
 
   // Request the page provider for clean pages in the range [offset, offset + len) to become dirty,
@@ -319,7 +288,7 @@ class PageSource final : public PageRequestInterface {
   // [offset, offset + len).
   zx_status_t RequestDirtyTransition(PageRequest* request, uint64_t offset, uint64_t len,
                                      VmoDebugInfo vmo_debug_info) {
-    return PopulateRequest(request, offset, len, vmo_debug_info, page_request_type::DIRTY);
+    return rust_page_source_request_dirty_transition(this, request, offset, len, vmo_debug_info);
   }
 
   // Updates the request tracking metadata to account for pages [offset, offset + len) having
@@ -332,299 +301,57 @@ class PageSource final : public PageRequestInterface {
   // newly dirtied ranges.
   // TODO(rashaeqbal): Consider relaxing this constraint by more precise tracking of fulfilled
   // offsets with a bitmap. Might require capping the max permissible length of a page request.
-  void OnPagesDirtied(uint64_t offset, uint64_t len);
+  void OnPagesDirtied(uint64_t offset, uint64_t len) {
+    rust_page_source_on_pages_dirtied(this, offset, len);
+  }
 
   // Detaches the source from the VMO. All future calls into the page source will fail. All
   // pending read transactions are aborted. Pending flush transactions will still
   // be serviced.
-  void Detach();
+  void Detach() { rust_page_source_detach(this); }
 
   // Closes the source. Will call Detach() if the source is not already detached. All pending
   // transactions will be aborted and all future calls will fail.
-  void Close();
+  void Close() { rust_page_source_close(this); }
 
   // The returned properties can assumed to be const and never change. As such the caller may cache
   // them.
-  PageSourceProperties properties() const { return page_provider_properties_; }
+  PageSourceProperties properties() const { return rust_page_source_properties(this); }
 
   // Prints state of the page source and any pending requests. The maximum number of requests
   // printed is capped by |max_items|.
-  void Dump(uint depth, uint32_t max_items) const;
-  // Similar to Dump, but only dumps information about this exact object, and will not forward the
-  // Dump request to the related PageProvider.
-  void DumpSelf(uint depth, uint32_t max_items) const;
+  void Dump(uint depth, uint32_t max_items) const { rust_page_source_dump(this, depth, max_items); }
 
-  bool is_detached() const {
-    Guard<Mutex> guard{&page_source_mtx_};
-    return detached_;
-  }
+  bool is_detached() const { return rust_page_source_is_detached(this); }
 
   // Method for the VmCowPages to retrieve the lock for paged VMOs.
   // See VmCowPages::DeferredOps.
-  Lock<Mutex>* paged_vmo_lock() { return &paged_vmo_mutex_; }
+  Lock<Mutex>* paged_vmo_lock() { return rust_page_source_paged_vmo_lock(this); }
 
   // Retrieves any koid for the linked page provider.
-  ktl::optional<zx_koid_t> GetProviderKoid() const { return page_provider_->GetKoid(); }
-
- protected:
-  // destructor should only be invoked from RefPtr
-  virtual ~PageSource();
-  friend fbl::RefPtr<PageSource>;
-  friend void ::cpp_page_source_free(PageSource* src);
-
- private:
-  fbl::Canary<fbl::magic("VMPS")> canary_;
-
-  // Lock used by the VMO to perform synchronization across its hierarchy. This lock does not
-  // strictly belong here, but this is a convenient and efficient place to put it.
-  // See VmCowPages::DeferredOps for more.
-  DECLARE_MUTEX(PageSource) paged_vmo_mutex_;
-
-  mutable DECLARE_MUTEX(PageSource) page_source_mtx_;
-  bool detached_ TA_GUARDED(page_source_mtx_) = false;
-  bool closed_ TA_GUARDED(page_source_mtx_) = false;
-  // We cache the immutable page_provider_->properties() to avoid many virtual calls.
-  const PageSourceProperties page_provider_properties_;
-
-  // Trees of outstanding requests which have been sent to the PageProvider, one for each supported
-  // page request type. These lists are keyed by the end offset of the requests (not the start
-  // offsets).
-  fbl::WAVLTree<uint64_t, PageRequest*> outstanding_requests_[page_request_type::COUNT] TA_GUARDED(
-      page_source_mtx_);
-
-  // PageProvider instance that will provide pages asynchronously (e.g. a userspace pager, see
-  // PagerProxy for details).
-  const fbl::RefPtr<PageProvider> page_provider_;
-
-  void GetProviderDebugName(char (&name)[ZX_MAX_NAME_LEN]) const override {
-    page_provider_->GetDebugName(name);
+  ktl::optional<zx_koid_t> GetProviderKoid() const {
+    zx_koid_t koid;
+    if (!rust_page_source_get_provider_koid(this, &koid)) {
+      return ktl::nullopt;
+    }
+    return koid;
   }
 
-  // Helper that adds the span of |len| pages at |offset| to |request| and forwards it to the
-  // provider. |request| must already be initialized, and its page_request_type must be set to
-  // |type|. |offset| must be page-aligned.
-  //
-  // This function will always return |ZX_ERR_SHOULD_WAIT|.
-  zx_status_t PopulateRequestLocked(PageRequest* request, uint64_t offset, uint64_t len,
-                                    VmoDebugInfo vmo_debug_info, page_request_type type)
-      TA_REQ(page_source_mtx_);
-
-  // Sends a request to the backing source, or adds the request to the overlap_ list if
-  // the needed region has already been requested from the source.
-  void SendRequestToProviderLocked(PageRequest* request) TA_REQ(page_source_mtx_);
-
-  // Wakes up the given PageRequest and all overlapping requests.
-  void CompleteRequestLocked(PageRequest* request) TA_REQ(page_source_mtx_);
-
-  // Helper that updates request tracking metadata to resolve requests of |type| in the range
-  // [offset, offset + len).
-  void ResolveRequestsLocked(page_request_type type, uint64_t offset, uint64_t len,
-                             zx_status_t error_status) TA_REQ(page_source_mtx_);
-
-  // Helper to perform early waking on a request and any overlapping requests. The provided range
-  // should be in local request space, and this method is only valid to be called if
-  // |request->wake_offset_ == req_start|.
-  void EarlyWakeRequestLocked(PageRequest* request, uint64_t req_start, uint64_t req_end)
-      TA_REQ(page_source_mtx_);
-
-  // Removes |request| from any internal tracking. Called by a PageRequest if
-  // it needs to abort itself.
-  void CancelRequest(PageRequest* request) override TA_EXCL(page_source_mtx_);
-
-  void CancelRequestLocked(PageRequest* request) TA_REQ(page_source_mtx_);
-
-  zx_status_t PopulateRequest(PageRequest* request, uint64_t offset, uint64_t len,
-                              VmoDebugInfo vmo_debug_info, page_request_type type);
-
-  zx_status_t WaitOnRequest(PageRequest* request, bool suspendable) override;
-
-  // Helper that takes an existing request and a new request range and returns whether the new
-  // range is any kind of continuation of the existing request. This is used for a mixture of
-  // correctness validation and supporting early wake requests.
-  enum class ContinuationType {
-    NotContinuation,
-    SameRequest,
-    SameSource,
-  };
-  ContinuationType RequestContinuationTypeLocked(const PageRequest* request, uint64_t offset,
-                                                 uint64_t len, page_request_type type)
-      TA_REQ(page_source_mtx_);
+  // The object is allocated and freed by Rust once the last reference is dropped.
+  void fbl_recycle() { rust_page_source_recycle(this); }
 };
-
-// The PageRequest provides the ability to be in two difference linked list. One owned by the page
-// source (for overlapping requests), and one owned by the page provider (for tracking outstanding
-// requests). These tags provide a way to distinguish between the two containers.
-struct PageSourceTag;
-struct PageProviderTag;
-// Object which is used to make delayed page requests to a PageSource
-class PageRequest : public fbl::WAVLTreeContainable<PageRequest*>,
-                    public fbl::ContainableBaseClasses<
-                        fbl::TaggedDoublyLinkedListable<PageRequest*, PageSourceTag>,
-                        fbl::TaggedDoublyLinkedListable<PageRequest*, PageProviderTag>> {
- public:
-  PageRequest() : PageRequest(false) {}
-  // If early_wake is true then the caller is asking to be woken up once some of the request is
-  // satisfied, potentially before all of it is satisfied. This is intended to allow users to
-  // process partial amounts of data as they come in before continuing to Wait for the rest with
-  // only a single PageRequest sent to the PageSource.
-  explicit PageRequest(bool early_wake) : early_wake_(early_wake) {}
-  ~PageRequest();
-
-  // Returns ZX_OK on success, or a permitted error code if the backing page provider explicitly
-  // failed this page request. Returns ZX_ERR_INTERNAL_INTR_KILLED if the thread was killed.
-  // Returns ZX_ERR_INTERNAL_INTR_RETRY if |suspendable| is true and the thread was suspended; the
-  // thread cannot be suspended in the wait if |suspendable| is false.
-  // If this page requested is allowed to early wake then this can return success with the request
-  // still active and queued with a PageSource. In this case it is invalid to attempt to use this
-  // request with any other PageSource or for any other range without first doing CancelRequest.
-  zx_status_t Wait(bool suspendable);
-
-  // Asks the underlying PageRequestInterface to abort this request, by calling
-  // PageRequestInterface::CancelRequest. As this can be called from non PageSource paths, and hence
-  // without the PageSource lock held, the PageRequestInterface must always be invoked to
-  // synchronize with this request being completed by another thread.
-  // This method is not thread safe and cannot be called in parallel with Init.
-  void CancelRequest();
-
-  DISALLOW_COPY_ASSIGN_AND_MOVE(PageRequest);
-
- private:
-  // TODO: PageSource and AnonymousPageRequest should not have direct access, but should rather have
-  // their access mediate by the PageRequestInterface class that they derive from.
-  friend PageSource;
-
-  friend PageProvider;
-  friend fbl::DefaultKeyedObjectTraits<uint64_t, PageRequest>;
-
-  // PageRequests are initialized separately to being constructed to facilitate any PageSource
-  // specific logic. This method makes three assumptions on how it is called:
-  //  1. If previously initialized it has been separately uninitialized via `CancelRequest` or
-  //     similar.
-  //  2. It is invoked under the src lock.
-  //  3. It is called on the thread that owns the PageRequest and is not thread safe with parallel
-  //     invocations of CancelRequest.
-  void Init(fbl::RefPtr<PageRequestInterface> src, uint64_t offset, page_request_type type,
-            VmoDebugInfo vmo_debug_info);
-
-  bool IsInitialized() const { return offset_ != UINT64_MAX; }
-
-  uint64_t GetEnd() const {
-    // Assert on overflow, since it means vmobject made an out-of-bounds request.
-    uint64_t unused;
-    DEBUG_ASSERT(!add_overflow(offset_, len_, &unused));
-
-    return offset_ + len_;
-  }
-
-  uint64_t GetKey() const { return GetEnd(); }
-
-  bool RangeOverlaps(uint64_t start, uint64_t end) const {
-    return end > offset_ && start < GetEnd();
-  }
-
-  // Converts a [start,end) range in provider (aka VMO) space to the sub range that overlaps with
-  // this request and returns it relative to this requests offset_.
-  ktl::pair<uint64_t, uint64_t> TrimRangeToRequestSpace(uint64_t start, uint64_t end) const;
-
-  // The type of the page request.
-  page_request_type type_;
-
-  // PageRequests are active if offset_ is not UINT64_MAX. In an inactive request, the
-  // only other valid field is src_. Whilst a request is with a PageProvider (i.e. SendAsyncRequest
-  // has been called), these fields must be kept constant so the PageProvider can read them. Once
-  // the request has been cleared either by SwapAsyncRequest or ClearAsyncRequest they can be
-  // modified again. The provider_owned_ bool is used for assertions to validate this flow, but
-  // otherwise has no functional affect.
-  bool provider_owned_ = false;
-
-  // Set on construction if the user of the PageRequest supports, and wants to be, woken early. If
-  // this is true then wake_offset_ will be set to zero when a request is initialized. Early waking
-  // is intended to allow for an optimization under the assumption that large requests will be
-  // filled sequentially, allowing for a single request to be made to the underlying page source,
-  // but processing being able to start before the entire request has been completed.
-  // When an early_wake_ request is signaled the user cannot assume that the request is fully
-  // complete, and as a consequence must not attempt to use the PageRequest in a new context without
-  // first cancelling it.
-  const bool early_wake_;
-
-  // The offset into the request at which the event_ should next be signaled. This is request
-  // relative, so a value of 0 indicates that it should be signaled when the page at offset_ is
-  // provided. After being triggered, the wake_offset_ increments by the amount provided so that it
-  // can potentially get triggered again.
-  uint64_t wake_offset_ = UINT64_MAX;
-
-  // Tracks any error that we will send to the waiter when the request is completed. This allows for
-  // partial failure of a request, where we report the status of the first page in the request so
-  // that any partially provided pages can be processed.
-  zx_status_t complete_status_ = ZX_OK;
-
-  // The page source this request is currently associated with. This may only be modified by Init
-  // and must otherwise be constant, allowing the PageRequest to safely inspect this value without
-  // races.
-  fbl::RefPtr<PageRequestInterface> src_;
-  // Event signaled when the request is fulfilled.
-  AutounsignalEvent event_;
-  uint64_t offset_ = UINT64_MAX;
-  // The total length of the request.
-  uint64_t len_ = 0;
-  // The vmobject this page request is for.
-  VmoDebugInfo vmo_debug_info_ = {};
-
-  // Keeps track of the size of the request that still needs to be fulfilled. This
-  // can become incorrect if some pages get supplied, decommitted, and then
-  // re-supplied. If that happens, then it will cause the page request to complete
-  // prematurely. However, page source clients should be operating in a loop to handle
-  // evictions, so this will simply result in some redundant read requests to the
-  // page source. Given the rarity in which this situation should arise, it's not
-  // worth the complexity of tracking it.
-  uint64_t pending_size_ = 0;
-
-  // Linked list for overlapping requests.
-  fbl::TaggedDoublyLinkedList<PageRequest*, PageSourceTag> overlap_;
-};
-
-// Declare page provider helpers inline now that PageRequest has been defined.
-inline page_request_type PageProvider::GetRequestType(const PageRequest* request) {
-  DEBUG_ASSERT(request->provider_owned_);
-  return request->type_;
-}
-inline uint64_t PageProvider::GetRequestOffset(const PageRequest* request) {
-  DEBUG_ASSERT(request->provider_owned_);
-  return request->offset_;
-}
-inline uint64_t PageProvider::GetRequestLen(const PageRequest* request) {
-  DEBUG_ASSERT(request->provider_owned_);
-  return request->len_;
-}
-inline uint64_t PageProvider::GetRequestVmoId(const PageRequest* request) {
-  DEBUG_ASSERT(request->provider_owned_);
-  return request->vmo_debug_info_.vmo_id;
-}
 
 // Wrapper around PageRequest that performs construction on first access. This is useful when a
 // PageRequest needs to be allocated eagerly in case it is used, even if the common case is that it
 // will not be needed.
 class LazyPageRequest {
  public:
-  // Construct a page request that does not support early waking.
-  LazyPageRequest() : LazyPageRequest(false) {}
-  // Construct a page request that optionally supports early waking. See PageRequest constructor.
-  explicit LazyPageRequest(bool early_wake) : early_wake_(early_wake) {}
-  ~LazyPageRequest() = default;
+  LazyPageRequest() = delete;
+  ~LazyPageRequest() = delete;
+  DISALLOW_COPY_ASSIGN_AND_MOVE(LazyPageRequest);
 
   // Initialize and return the internal PageRequest.
-  PageRequest* get();
-
-  PageRequest* operator->() { return get(); }
-
-  PageRequest& operator*() { return *get(); }
-
-  bool is_initialized() const { return request_.has_value(); }
-
- private:
-  // Early wake parameter to be passed onto the PageRequest constructor.
-  bool early_wake_;
-  ktl::optional<PageRequest> request_ = ktl::nullopt;
+  PageRequest* get() { return rust_lazy_page_request_get(this); }
 };
 
 // Wrapper around tracking multiple different page requests that might need waiting. Only one
@@ -637,56 +364,39 @@ class LazyPageRequest {
 // TODO(adanis): Implement an enforcement strategy.
 class MultiPageRequest {
  public:
-  MultiPageRequest() = default;
-  explicit MultiPageRequest(bool early_wake) : page_request_(early_wake) {}
+  MultiPageRequest() : MultiPageRequest(false) {}
+  explicit MultiPageRequest(bool early_wake) { rust_multi_page_request_init(this, early_wake); }
+  ~MultiPageRequest() { rust_multi_page_request_destroy(this); }
 
   // Wait on the currently active page request. The waiting thread is suspendable by default.
-  zx_status_t Wait(bool suspendable = true);
+  zx_status_t Wait(bool suspendable = true) {
+    return rust_multi_page_request_wait(this, suspendable);
+  }
 
   // Retrieve the anonymous page request. The caller may or may not arm the AnonymousPageRequest, if
   // it does the anonymous request becomes considered active and no other request may be retrieved.
-  AnonymousPageRequest* GetAnonymous() {
-    DEBUG_ASSERT(NoRequestActive());
-    return &anonymous_;
-  }
-
-  // Retrieve and commit to initializing the page request for read. After calling this it is assumed
-  // that the page request will be made waitable and no other request may be retrieved.
-  PageRequest* GetReadRequest() {
-    DEBUG_ASSERT(NoRequestActive());
-    read_active_ = true;
-    return page_request_.get();
-  }
+  AnonymousPageRequest* GetAnonymous() { return rust_multi_page_request_get_anonymous(this); }
 
   // Retrieve a lazy accessor to page request. If a dirty request is generated the caller must
   // then call MadeDirtyRequest so that this helper knows that the page request is active and
   // should be waited on.
   LazyPageRequest* GetLazyDirtyRequest() {
-    DEBUG_ASSERT(NoRequestActive());
-    return &page_request_;
+    return rust_multi_page_request_get_lazy_dirty_request(this);
   }
 
   // Indicate that the page request retrieved by GetLazyDirtyRequest was used and should be waited
   // on.
-  void MadeDirtyRequest() {
-    DEBUG_ASSERT(NoRequestActive());
-    dirty_active_ = true;
-  }
+  void MadeDirtyRequest() { rust_multi_page_request_made_dirty_request(this); }
 
   // Cancel all requests and have no active request.
-  void CancelRequests();
+  void CancelRequests() { rust_multi_page_request_cancel_requests(this); }
+
+  DISALLOW_COPY_ASSIGN_AND_MOVE(MultiPageRequest);
 
  private:
-  bool NoRequestActive() const {
-    return !anonymous_.is_active() && !read_active_ && !dirty_active_;
-  }
-  // Track which request is active. This is multiple bools for consistency since the anonymous
-  // request being active is tracked directly in the AnonymousPageRequest and could not be part of
-  // an enum.
-  bool read_active_ = false;
-  bool dirty_active_ = false;
-  AnonymousPageRequest anonymous_;
-  LazyPageRequest page_request_;
+  // Storage for the Rust MultiPageRequest. The Rust functions are passed |this|, which is the
+  // address of this (only) member.
+  [[maybe_unused]] OpaqueStorage<kMultiPageRequestSize, kMultiPageRequestAlign> storage_;
 };
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_PAGE_SOURCE_H_

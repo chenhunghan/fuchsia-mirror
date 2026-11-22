@@ -1,3 +1,7 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 //! Rubric lints: syntax-level checks on the changed files that don't need a
 //! C++/Rust pairing.
 //!

@@ -4,8 +4,9 @@
 
 from typing import Any, ClassVar, Final, Literal
 
+from pydantic import Field
 from pydap.dap_types import SteppingGranularity
-from shared.protocol.base import BaseRequest
+from shared.protocol.base import THREAD_ID_ALIAS, BaseRequest
 
 COMMAND_NAME: Final = "next"
 
@@ -14,7 +15,7 @@ class NextRequest(BaseRequest[dict[str, Any]]):
     """Request to step over to the next line of code."""
 
     command: Literal["next"] = COMMAND_NAME
-    thread_id: int
+    thread_id: int = Field(validation_alias=THREAD_ID_ALIAS)
     single_thread: bool | None = None
     granularity: SteppingGranularity | None = None
     response_type: ClassVar[Any] = dict[str, Any]

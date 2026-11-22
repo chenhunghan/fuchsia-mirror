@@ -59,7 +59,7 @@ impl Driver for FakeInterconnectDriver {
         Ok(Self { node, child_controller, scope })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }
 
 struct Connection {

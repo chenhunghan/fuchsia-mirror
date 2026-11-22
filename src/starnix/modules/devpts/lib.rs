@@ -147,7 +147,7 @@ pub fn tty_device_init(kernel: &Kernel) -> Result<(), Errno> {
         /* parent = */ None,
         tty_class.clone(),
         build_device_directory,
-    );
+    )?;
     registry.add_major_device(
         kernel,
         "ptmx".into(),
@@ -155,7 +155,7 @@ pub fn tty_device_init(kernel: &Kernel) -> Result<(), Errno> {
         /* parent = */ None,
         tty_class,
         build_device_directory,
-    );
+    )?;
     Ok(())
 }
 
@@ -913,7 +913,7 @@ mod tests {
     use super::*;
     use crate::tty_device_init;
     use starnix_core::fs::tmpfs::TmpFs;
-    use starnix_core::task::{ExitStatus, KernelFeatures};
+    use starnix_core::task::{DelayedReleaser, ExitStatus, KernelFeatures};
     use starnix_core::testing::*;
     use starnix_core::vfs::buffers::{VecInputBuffer, VecOutputBuffer};
     use starnix_core::vfs::fs_args::MountParams;
@@ -1067,7 +1067,6 @@ mod tests {
                         name,
                         mode!(IFCHR, 0o666),
                         DeviceId::new(DEVPTS_FIRST_MAJOR, 0),
-                        FsCred::root(),
                     )
                 })
                 .expect("custom_pts");
@@ -1810,6 +1809,61 @@ mod tests {
                 .expect("leader TIOCNOTTY should succeed");
             assert!(leader.thread_group().controlling_terminal().is_none());
             assert!(terminal.read().controlling_session().is_none());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_exit_with_controlling_terminal_holding_last_pts_fs() {
+        spawn_kernel_and_run(async |init| {
+            let kernel = init.kernel();
+            tty_device_init(kernel).expect("tty_device_init");
+
+            for exit_as_leader in [true, false] {
+                let fs = new_pts_fs(kernel);
+                let ptmx = open_ptmx_and_unlock(init, &fs).expect("ptmx");
+                let pts = open_file(init, &fs, "0".into()).expect("open file");
+                std::mem::drop(ptmx);
+                init.trigger_delayed_releaser();
+                std::mem::drop(fs);
+
+                let kernel = Arc::clone(kernel);
+                std::thread::spawn(move || {
+                    let leader = create_task(&kernel, "leader");
+                    set_controlling_terminal(&leader, &pts, false)
+                        .expect("set_controlling_terminal");
+                    let expected_device = leader
+                        .thread_group()
+                        .controlling_terminal()
+                        .expect("controlling_terminal")
+                        .terminal
+                        .device();
+                    std::mem::drop(pts);
+                    leader.trigger_delayed_releaser();
+
+                    if exit_as_leader {
+                        let leader_tg = Arc::clone(leader.thread_group());
+                        std::mem::drop(leader);
+                        assert!(leader_tg.controlling_terminal().is_none());
+                        assert_eq!(leader_tg.read().controlling_terminal_device(), None);
+                        std::mem::drop(leader_tg);
+                    } else {
+                        let child = leader.clone_task_for_test(0, None);
+                        let child_tg = Arc::clone(child.thread_group());
+                        std::mem::drop(child);
+                        assert!(child_tg.controlling_terminal().is_none());
+                        assert_eq!(
+                            child_tg.read().controlling_terminal_device(),
+                            Some(expected_device),
+                        );
+                        std::mem::drop(child_tg);
+                        std::mem::drop(leader);
+                    }
+                    DelayedReleaser::finalize();
+                })
+                .join()
+                .expect("task exit and DelayedReleaser::finalize should not panic");
+            }
         })
         .await;
     }

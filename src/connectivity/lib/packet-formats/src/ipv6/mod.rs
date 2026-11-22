@@ -559,7 +559,7 @@ impl<B: SplitByteSlice> Ipv6Packet<B> {
         let split_point = routing_point.or(hbh_point);
         let (meta, next_header) = match split_point {
             Some((position, next_header_offset, next_header)) => (
-                Some(Ipv6PerFragmentMeta {
+                Some(Ipv6ExtensionHeadersMeta {
                     ext_hdrs: self.extension_hdrs.bytes()[..position - IPV6_FIXED_HDR_LEN].to_vec(),
                     first_ext_hdr: Ipv6ExtHdrType::from(self.fixed_hdr.next_hdr),
                     last_next_hdr_offset: next_header_offset - IPV6_FIXED_HDR_LEN,
@@ -575,7 +575,41 @@ impl<B: SplitByteSlice> Ipv6Packet<B> {
         let mut prefix_builder = self.builder();
         prefix_builder.proto = Ipv6Proto::from(next_header);
 
-        Ipv6PerFragmentHeaderBuilder { prefix_builder, meta }
+        Ipv6PerFragmentHeaderBuilder(Ipv6PacketBuilderWithExtensionHeaders { prefix_builder, meta })
+    }
+
+    /// Consumes this packet and returns a builder that reproduces its fixed
+    /// header and extension headers verbatim, e.g. to emit packets carrying
+    /// the same headers but a different body.
+    ///
+    /// Returns `None` if the packet has a Fragment header. A Fragment header
+    /// describes the body that follows it (its offset within the original
+    /// packet, whether more fragments follow, and the packet it belongs to),
+    /// so reproducing it verbatim in front of a different body would yield an
+    /// invalid fragment. Extension headers past it are also not parsed.
+    pub fn into_builder_with_extension_headers(
+        self,
+    ) -> Option<Ipv6PacketBuilderWithExtensionHeaders<B>> {
+        let prefix_builder = self.builder();
+        let Self { fixed_hdr, extension_hdrs, body: _, proto: _ } = self;
+        let first_ext_hdr = Ipv6ExtHdrType::from(fixed_hdr.next_hdr);
+
+        // Find the offset of the Next Header field of the last extension
+        // header; it's the one that must be patched to point at the body.
+        let mut iter = extension_hdrs.iter();
+        let mut last_next_hdr_offset = None;
+        while let Some(ext_hdr) = iter.next() {
+            if matches!(ext_hdr, Ipv6ExtensionHeader::Fragment { .. }) {
+                return None;
+            }
+            last_next_hdr_offset = Some(iter.context().next_header_offset);
+        }
+        let meta = last_next_hdr_offset.map(|next_header_offset| Ipv6ExtensionHeadersMeta {
+            ext_hdrs: extension_hdrs.into_bytes(),
+            first_ext_hdr,
+            last_next_hdr_offset: next_header_offset - IPV6_FIXED_HDR_LEN,
+        });
+        Some(Ipv6PacketBuilderWithExtensionHeaders { prefix_builder, meta })
     }
 
     /// The size of the fixed header plus extension headers.
@@ -1555,25 +1589,28 @@ where
     }
 }
 
-/// Metadata about extension headers for the `Ipv6PerFragmentHeaderBuilder`.
+/// Metadata about the extension headers of an
+/// [`Ipv6PacketBuilderWithExtensionHeaders`].
 #[derive(Debug, Clone, Eq, PartialEq)]
-struct Ipv6PerFragmentMeta<B> {
+struct Ipv6ExtensionHeadersMeta<B> {
     ext_hdrs: B,
     first_ext_hdr: Ipv6ExtHdrType,
     last_next_hdr_offset: usize,
 }
 
-/// A builder for IPv6 packets containing the per-fragment extension headers.
+/// A builder for IPv6 packets carrying a verbatim copy of a set of extension
+/// headers.
 ///
-/// Generally, this should be wrapped with an
-/// [`Ipv6PacketBuilderWithFragmentHeader`].
+/// Unlike an [`Ipv6PerFragmentHeaderBuilder`], this can't be wrapped with an
+/// [`Ipv6PacketBuilderWithFragmentHeader`], since its extension headers may
+/// include ones that must follow a Fragment header.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Ipv6PerFragmentHeaderBuilder<B> {
+pub struct Ipv6PacketBuilderWithExtensionHeaders<B> {
     prefix_builder: Ipv6PacketBuilder,
-    meta: Option<Ipv6PerFragmentMeta<B>>,
+    meta: Option<Ipv6ExtensionHeadersMeta<B>>,
 }
 
-impl<B: AsRef<[u8]>> Ipv6PerFragmentHeaderBuilder<B> {
+impl<B: AsRef<[u8]>> Ipv6PacketBuilderWithExtensionHeaders<B> {
     /// Returns the length of the header (fixed header and extension headers).
     pub fn header_len(&self) -> usize {
         self.extension_headers_len() + IPV6_FIXED_HDR_LEN
@@ -1581,22 +1618,22 @@ impl<B: AsRef<[u8]>> Ipv6PerFragmentHeaderBuilder<B> {
 
     /// Converts `self` into an identical builder with references to the
     /// underlying extension header bytes.
-    pub fn as_ref(&self) -> Ipv6PerFragmentHeaderBuilder<&[u8]> {
+    pub fn as_ref(&self) -> Ipv6PacketBuilderWithExtensionHeaders<&[u8]> {
         let Self { prefix_builder, meta } = self;
         let meta = meta.as_ref().map(
-            |Ipv6PerFragmentMeta { ext_hdrs, first_ext_hdr, last_next_hdr_offset }| {
-                Ipv6PerFragmentMeta {
+            |Ipv6ExtensionHeadersMeta { ext_hdrs, first_ext_hdr, last_next_hdr_offset }| {
+                Ipv6ExtensionHeadersMeta {
                     ext_hdrs: ext_hdrs.as_ref(),
                     first_ext_hdr: *first_ext_hdr,
                     last_next_hdr_offset: *last_next_hdr_offset,
                 }
             },
         );
-        Ipv6PerFragmentHeaderBuilder { prefix_builder: prefix_builder.clone(), meta }
+        Ipv6PacketBuilderWithExtensionHeaders { prefix_builder: prefix_builder.clone(), meta }
     }
 }
 
-impl<B: AsRef<[u8]>> Ipv6HeaderBuilder for Ipv6PerFragmentHeaderBuilder<B> {
+impl<B: AsRef<[u8]>> Ipv6HeaderBuilder for Ipv6PacketBuilderWithExtensionHeaders<B> {
     fn fixed_header(&self) -> &Ipv6PacketBuilder {
         &self.prefix_builder
     }
@@ -1604,7 +1641,7 @@ impl<B: AsRef<[u8]>> Ipv6HeaderBuilder for Ipv6PerFragmentHeaderBuilder<B> {
     fn extension_headers_len(&self) -> usize {
         self.meta
             .as_ref()
-            .map(|Ipv6PerFragmentMeta { ext_hdrs, .. }| ext_hdrs.as_ref().len())
+            .map(|Ipv6ExtensionHeadersMeta { ext_hdrs, .. }| ext_hdrs.as_ref().len())
             .unwrap_or(0)
     }
 
@@ -1617,7 +1654,7 @@ impl<B: AsRef<[u8]>> Ipv6HeaderBuilder for Ipv6PerFragmentHeaderBuilder<B> {
         let Self { prefix_builder, meta } = self;
         match meta {
             None => prefix_builder.serialize_header(buffer, next_header, payload_len),
-            Some(Ipv6PerFragmentMeta { ext_hdrs, first_ext_hdr, last_next_hdr_offset }) => {
+            Some(Ipv6ExtensionHeadersMeta { ext_hdrs, first_ext_hdr, last_next_hdr_offset }) => {
                 let ext_hdrs = ext_hdrs.as_ref();
                 let ext_hdrs_len = ext_hdrs.len();
                 prefix_builder.serialize_header(
@@ -1632,6 +1669,66 @@ impl<B: AsRef<[u8]>> Ipv6HeaderBuilder for Ipv6PerFragmentHeaderBuilder<B> {
                 ext_hdr_buf[*last_next_hdr_offset] = u8::from(next_header);
             }
         }
+    }
+}
+
+impl<B: AsRef<[u8]>> NestablePacketBuilder for Ipv6PacketBuilderWithExtensionHeaders<B> {
+    impl_packet_builder_base! {}
+}
+
+impl<B: AsRef<[u8]>, C: IpSerializationContext<Ipv6>> PacketBuilder<C>
+    for Ipv6PacketBuilderWithExtensionHeaders<B>
+{
+    impl_packet_builder! {}
+}
+
+impl<B: AsRef<[u8]>, C: IpSerializationContext<Ipv6>> PartialPacketBuilder<C>
+    for Ipv6PacketBuilderWithExtensionHeaders<B>
+{
+    impl_partial_packet_builder! {}
+}
+
+/// A builder for IPv6 packets containing the per-fragment extension headers.
+///
+/// Generally, this should be wrapped with an
+/// [`Ipv6PacketBuilderWithFragmentHeader`].
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Ipv6PerFragmentHeaderBuilder<B>(Ipv6PacketBuilderWithExtensionHeaders<B>);
+
+impl<B: AsRef<[u8]>> Ipv6PerFragmentHeaderBuilder<B> {
+    /// Returns the length of the header (fixed header and extension headers).
+    pub fn header_len(&self) -> usize {
+        let Self(builder) = self;
+        builder.header_len()
+    }
+
+    /// Converts `self` into an identical builder with references to the
+    /// underlying extension header bytes.
+    pub fn as_ref(&self) -> Ipv6PerFragmentHeaderBuilder<&[u8]> {
+        let Self(builder) = self;
+        Ipv6PerFragmentHeaderBuilder(builder.as_ref())
+    }
+}
+
+impl<B: AsRef<[u8]>> Ipv6HeaderBuilder for Ipv6PerFragmentHeaderBuilder<B> {
+    fn fixed_header(&self) -> &Ipv6PacketBuilder {
+        let Self(builder) = self;
+        builder.fixed_header()
+    }
+
+    fn extension_headers_len(&self) -> usize {
+        let Self(builder) = self;
+        builder.extension_headers_len()
+    }
+
+    fn serialize_header<BB: SplitByteSliceMut, BV: BufferViewMut<BB>>(
+        &self,
+        buffer: &mut BV,
+        next_header: NextHeader,
+        payload_len: usize,
+    ) {
+        let Self(builder) = self;
+        builder.serialize_header(buffer, next_header, payload_len)
     }
 }
 
@@ -2951,6 +3048,63 @@ mod tests {
         assert_eq!(copied_bytes, expected_bytes);
     }
 
+    #[rustfmt::skip]
+    fn build_routing_header(nh: u8) -> [u8; 40] {
+        [
+            nh, 4,  0,  0,  0,  0,  0,  0,
+            1,  2,  3,  4,  5,  6,  7,  8,
+            9,  10, 11, 12, 13, 14, 15, 16,
+            17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31, 32
+        ]
+    }
+    fn build_hop_by_hop_header(nh: u8) -> [u8; 8] {
+        [nh, 0, 0, 1, 0, 1, 1, 0]
+    }
+    #[rustfmt::skip]
+    fn build_destination_options_header(nh: u8) -> [u8; 16] {
+        [
+            nh, 1, 0, 1, 0, 1, 1, 0,
+            1,  6, 0, 0, 0, 0, 0, 0
+        ]
+    }
+    fn build_fragment_header(nh: u8, id: u32) -> [u8; 8] {
+        let [id1, id2, id3, id4] = id.to_be_bytes();
+        [nh, 0, 0, 0, id1, id2, id3, id4]
+    }
+    fn build_header_bytes(ext_hdrs: &[Ipv6ExtHdrType], final_header: u8) -> Vec<u8> {
+        // Prepare the fixed header.
+        let mut fixed_hdr = new_fixed_hdr();
+        if ext_hdrs.is_empty() {
+            fixed_hdr.next_hdr = final_header;
+        } else {
+            fixed_hdr.next_hdr = u8::from(ext_hdrs[0]);
+        }
+
+        // Prepare the extension headers.
+        let mut ext_hdr_bytes = Vec::new();
+        for i in 0..ext_hdrs.len() {
+            let next_header =
+                if i + 1 >= ext_hdrs.len() { final_header } else { u8::from(ext_hdrs[i + 1]) };
+            match ext_hdrs[i] {
+                Ipv6ExtHdrType::DestinationOptions => {
+                    ext_hdr_bytes.extend_from_slice(&build_destination_options_header(next_header))
+                }
+                Ipv6ExtHdrType::Routing => {
+                    ext_hdr_bytes.extend_from_slice(&build_routing_header(next_header))
+                }
+                Ipv6ExtHdrType::HopByHopOptions => {
+                    ext_hdr_bytes.extend_from_slice(&build_hop_by_hop_header(next_header))
+                }
+                h => panic!("unexpected header type: {h}"),
+            }
+        }
+
+        let mut bytes = fixed_hdr_to_bytes(fixed_hdr).to_vec();
+        bytes.extend_from_slice(&ext_hdr_bytes[..]);
+        bytes
+    }
+
     #[test_case(
         &[],
         &[],
@@ -2998,62 +3152,6 @@ mod tests {
         expected_ext_hdrs: &[Ipv6ExtHdrType],
         expected_next_hdr: Option<Ipv6ExtHdrType>,
     ) {
-        #[rustfmt::skip]
-        fn build_routing_header(nh: u8) -> [u8; 40] {
-            [
-                nh, 4,  0,  0,  0,  0,  0,  0,
-                1,  2,  3,  4,  5,  6,  7,  8,
-                9,  10, 11, 12, 13, 14, 15, 16,
-                17, 18, 19, 20, 21, 22, 23, 24,
-                25, 26, 27, 28, 29, 30, 31, 32
-            ]
-        }
-        fn build_hop_by_hop_header(nh: u8) -> [u8; 8] {
-            [nh, 0, 0, 1, 0, 1, 1, 0]
-        }
-        #[rustfmt::skip]
-        fn build_destination_options_header(nh: u8) -> [u8; 16] {
-            [
-                nh, 1, 0, 1, 0, 1, 1, 0,
-                1,  6, 0, 0, 0, 0, 0, 0
-            ]
-        }
-        fn build_fragment_header(nh: u8, id: u32) -> [u8; 8] {
-            let [id1, id2, id3, id4] = id.to_be_bytes();
-            [nh, 0, 0, 0, id1, id2, id3, id4]
-        }
-        fn build_header_bytes(ext_hdrs: &[Ipv6ExtHdrType], final_header: u8) -> Vec<u8> {
-            // Prepare the fixed header.
-            let mut fixed_hdr = new_fixed_hdr();
-            if ext_hdrs.is_empty() {
-                fixed_hdr.next_hdr = final_header;
-            } else {
-                fixed_hdr.next_hdr = u8::from(ext_hdrs[0]);
-            }
-
-            // Prepare the extension headers.
-            let mut ext_hdr_bytes = Vec::new();
-            for i in 0..ext_hdrs.len() {
-                let next_header =
-                    if i + 1 >= ext_hdrs.len() { final_header } else { u8::from(ext_hdrs[i + 1]) };
-                match ext_hdrs[i] {
-                    Ipv6ExtHdrType::DestinationOptions => ext_hdr_bytes
-                        .extend_from_slice(&build_destination_options_header(next_header)),
-                    Ipv6ExtHdrType::Routing => {
-                        ext_hdr_bytes.extend_from_slice(&build_routing_header(next_header))
-                    }
-                    Ipv6ExtHdrType::HopByHopOptions => {
-                        ext_hdr_bytes.extend_from_slice(&build_hop_by_hop_header(next_header))
-                    }
-                    h => panic!("unexpected header type: {h}"),
-                }
-            }
-
-            let mut bytes = fixed_hdr_to_bytes(fixed_hdr).to_vec();
-            bytes.extend_from_slice(&ext_hdr_bytes[..]);
-            bytes
-        }
-
         // Generate the original packet.
         const BODY: [u8; 5] = [1, 2, 3, 4, 5];
         let payload_header = u8::from(IpProto::Tcp);
@@ -3101,6 +3199,65 @@ mod tests {
         expected_bytes.as_mut_slice()[IPV6_PAYLOAD_LEN_BYTE_RANGE]
             .copy_from_slice(&len.to_be_bytes());
         assert_eq!(serialized.as_ref(), &expected_bytes[..]);
+    }
+
+    #[test_case(&[]; "no_ext_hdrs")]
+    #[test_case(&[Ipv6ExtHdrType::HopByHopOptions]; "hop_by_hop")]
+    #[test_case(&[Ipv6ExtHdrType::DestinationOptions]; "dst_options")]
+    #[test_case(
+        &[
+            Ipv6ExtHdrType::HopByHopOptions,
+            Ipv6ExtHdrType::DestinationOptions,
+            Ipv6ExtHdrType::Routing,
+            Ipv6ExtHdrType::DestinationOptions,
+        ];
+        "all_ext_hdrs"
+    )]
+    fn test_into_builder_with_extension_headers(ext_hdrs: &[Ipv6ExtHdrType]) {
+        const BODY: [u8; 5] = [1, 2, 3, 4, 5];
+        const NEW_BODY: [u8; 9] = [9, 8, 7, 6, 5, 4, 3, 2, 1];
+        let mut bytes = build_header_bytes(ext_hdrs, IpProto::Tcp.into());
+        let header_len = bytes.len();
+        bytes.extend_from_slice(&BODY);
+        let len = u16::try_from(bytes.len() - IPV6_FIXED_HDR_LEN).expect("should fit in a u16");
+        bytes.as_mut_slice()[IPV6_PAYLOAD_LEN_BYTE_RANGE].copy_from_slice(&len.to_be_bytes());
+        let mut buf = &bytes[..];
+        let packet = buf.parse::<Ipv6Packet<_>>().expect("parse should succeed");
+
+        // Serializing a different body behind the builder reproduces the
+        // original headers exactly, save for the payload length.
+        let builder =
+            packet.into_builder_with_extension_headers().expect("packet has no Fragment header");
+        assert_eq!(builder.header_len(), header_len);
+        let serialized = builder
+            .wrap_body(NEW_BODY.into_serializer())
+            .serialize_vec_outer(&mut NoOpSerializationContext)
+            .unwrap()
+            .unwrap_b();
+        let mut expected_bytes = bytes[..header_len].to_vec();
+        expected_bytes.extend_from_slice(&NEW_BODY);
+        let len =
+            u16::try_from(expected_bytes.len() - IPV6_FIXED_HDR_LEN).expect("should fit in a u16");
+        expected_bytes[IPV6_PAYLOAD_LEN_BYTE_RANGE].copy_from_slice(&len.to_be_bytes());
+        assert_eq!(serialized.as_ref(), &expected_bytes[..]);
+    }
+
+    #[test]
+    fn test_into_builder_with_extension_headers_rejects_fragment_header() {
+        let builder = Ipv6PacketBuilderWithFragmentHeader::new(
+            new_builder(),
+            FragmentOffset::ZERO,
+            false,
+            1234,
+        );
+        let bytes = builder
+            .wrap_body([1, 2, 3, 4, 5].into_serializer())
+            .serialize_vec_outer(&mut NoOpSerializationContext)
+            .unwrap()
+            .unwrap_b();
+        let mut buf = bytes.as_ref();
+        let packet = buf.parse::<Ipv6Packet<_>>().expect("parse should succeed");
+        assert_eq!(packet.into_builder_with_extension_headers(), None);
     }
 
     #[test]

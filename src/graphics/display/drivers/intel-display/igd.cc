@@ -4,8 +4,8 @@
 
 #include "src/graphics/display/drivers/intel-display/igd.h"
 
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/logging/cpp/logger.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/zircon-internal/align.h>
 #include <lib/zx/resource.h>
 #include <lib/zx/result.h>

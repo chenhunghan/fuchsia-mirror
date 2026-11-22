@@ -329,7 +329,21 @@ void UITestRealm::ConfigureAccessibility() {
 }
 
 void UITestRealm::ConfigureScenic() {
+  std::string renderer;
+  switch (config_.renderer) {
+    case RendererType::NULL_RENDERER:
+      renderer = "null";
+      break;
+    case RendererType::VULKAN:
+      renderer = "vulkan";
+      break;
+  }
+
   std::vector<component_testing::ConfigCapability> configurations;
+  configurations.push_back({
+      .name = "fuchsia.scenic.Renderer",
+      .value = ConfigValue(std::move(renderer)),
+  });
   configurations.push_back({
       .name = "fuchsia.scenic.DisplayComposition",
       .value = ConfigValue::Bool(false),
@@ -340,6 +354,7 @@ void UITestRealm::ConfigureScenic() {
   });
 
   std::vector<component_testing::Capability> self_capabilities = {
+      component_testing::Config{.name = "fuchsia.scenic.Renderer"},
       component_testing::Config{.name = "fuchsia.scenic.DisplayComposition"},
       component_testing::Config{.name = "fuchsia.scenic.DisplayRotation"},
   };

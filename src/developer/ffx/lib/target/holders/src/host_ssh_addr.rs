@@ -4,9 +4,9 @@
 
 use std::ops::Deref;
 
+use crate::target_interface;
 use ffx_ssh::parse::HostAddr;
-use fho::{FhoEnvironment, TryFromEnv};
-use target_behavior::target_interface;
+use fho::{FhoEnvironment, TargetNeed, TryFromEnv};
 
 #[derive(Clone, Debug)]
 pub struct HostAddrHolder(Option<HostAddr>);
@@ -44,10 +44,11 @@ impl From<String> for HostAddrHolder {
 }
 
 impl TryFromEnv for HostAddrHolder {
+    const TARGET_NEED: TargetNeed = TargetNeed::Required;
     type Error = ffx_command_error::Error;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         let target_env = target_interface(env);
-        let connector = target_env.init_connection_behavior(env.environment_context()).await?;
+        let connector = target_env.init(env.environment_context());
         let (resolution, conn) = connector.connect(env.environment_context()).await?;
         let host_addr_info = match conn.host_ssh_address() {
             Some(addr) => Some(addr),

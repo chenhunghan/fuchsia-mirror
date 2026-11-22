@@ -6,6 +6,7 @@ mod commands;
 mod governor;
 use crate::commands::{CmdHelper, Command, ReplControl};
 use anyhow::{Error, format_err};
+use bstr::{BStr, ByteSlice as _, ByteVec as _};
 use fidl_fuchsia_power_battery as fpower;
 use fidl_fuchsia_power_battery_test as spower;
 use fidl_fuchsia_power_battery_test::BatterySimulatorProxy;
@@ -13,9 +14,7 @@ use fuchsia_async as fasync;
 use fuchsia_component::client::connect_to_protocol;
 use futures::channel::mpsc::{SendError, channel};
 use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
-use rustyline::{CompletionType, Config, EditMode, Editor};
+use line_editor::{ColumnWidth, Config, DEFAULT_COLUMN_COUNT, Editor, ReadlineError};
 use std::pin::pin;
 use std::time::Duration;
 use std::{fmt, thread};
@@ -287,15 +286,23 @@ async fn parse_and_handle_cmd(
     }
 }
 
-/// Generates a rustyline `Editor` in a separate thread to manage user input. This input is returned
-/// as a `Stream` of lines entered by the user.
+/// Adds `line` to `editor`'s history if it is non-empty and does not start with
+/// whitespace (matching `history_ignore_space` behavior).
+fn record_history(editor: &mut Editor, line: &BStr) {
+    if !line.is_empty() && !line.starts_with(b" ") && !line.starts_with(b"\t") {
+        let _ = editor.add_history(line);
+    }
+}
+
+/// Generates a line_editor `Editor` in a separate thread to manage user input. This input is
+/// returned as a `Stream` of lines entered by the user.
 ///
 /// The thread exits and the `Stream` is exhausted when an error occurs on stdin or the user
 /// sends a ctrl-c or ctrl-d sequence.
 ///
-/// Because rustyline shares control over output to the screen with other parts of the system, a
+/// Because the editor shares control over output to the screen with other parts of the system, a
 /// `Sink` is passed to the caller to send acknowledgements that a command has been processed and
-/// that rustyline should handle the next line of input.
+/// that the editor should handle the next line of input.
 fn cmd_stream() -> (impl Stream<Item = String>, impl Sink<(), Error = SendError>) {
     // Editor thread and command processing thread must be synchronized so that output
     // is printed in the correct order.
@@ -304,20 +311,16 @@ fn cmd_stream() -> (impl Stream<Item = String>, impl Sink<(), Error = SendError>
     thread::spawn(move || -> Result<(), Error> {
         let mut exec = fasync::LocalExecutor::default();
         let fut = async {
-            let config = Config::builder()
-                .auto_add_history(true)
-                .history_ignore_space(true)
-                .completion_type(CompletionType::List)
-                .edit_mode(EditMode::Vi)
-                .build();
-            let mut rl: Editor<CmdHelper, DefaultHistory> = Editor::with_config(config)?;
-            // Add tab completion
-            let c = CmdHelper::new();
-            rl.set_helper(Some(c));
+            let config =
+                Config::default().with_column_width(ColumnWidth::Fixed(DEFAULT_COLUMN_COUNT));
+            let mut rl = Editor::with_config(config);
+            CmdHelper::new().install(&mut rl);
             loop {
                 let readline = rl.readline(PROMPT);
                 match readline {
                     Ok(line) => {
+                        record_history(&mut rl, line.as_bstr());
+                        let line = Vec::from(line).into_string_lossy();
                         cmd_sender.try_send(line)?;
                     }
                     Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => {
@@ -382,6 +385,22 @@ async fn main() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bstr::BString;
+
+    #[fuchsia::test]
+    fn record_history_ignores_empty_and_leading_space_lines() {
+        let mut editor = Editor::new();
+        record_history(&mut editor, BStr::new(""));
+        record_history(&mut editor, BStr::new(" secret"));
+        record_history(&mut editor, BStr::new("\tsecret"));
+        record_history(&mut editor, BStr::new("get"));
+        record_history(&mut editor, BStr::new("set BatteryPercentage 50"));
+
+        assert_eq!(
+            editor.history().entries(),
+            &[BString::from("get"), BString::from("set BatteryPercentage 50")]
+        );
+    }
 
     #[fuchsia::test]
     async fn test_disconnect() {

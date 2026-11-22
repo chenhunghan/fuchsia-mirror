@@ -21,7 +21,7 @@
     {
       "name": "test.driveroneway/OneWay",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
         "line": 12,
         "column": 17,
         "length": 6
@@ -45,7 +45,7 @@
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
                 "line": 11,
                 "column": 12,
                 "length": 8
@@ -53,7 +53,7 @@
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
             "line": 11,
             "column": 1,
             "length": 20
@@ -69,7 +69,7 @@
           "name": "Send",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
             "line": 13,
             "column": 12,
             "length": 4
@@ -107,7 +107,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
         "line": 13,
         "column": 17,
         "length": 39
@@ -131,7 +131,7 @@
           },
           "name": "payload",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
             "line": 14,
             "column": 9,
             "length": 7
@@ -161,7 +161,7 @@
         "Payload"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
         "line": 7,
         "column": 6,
         "length": 7
@@ -184,7 +184,7 @@
           },
           "name": "value",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
             "line": 8,
             "column": 5,
             "length": 5

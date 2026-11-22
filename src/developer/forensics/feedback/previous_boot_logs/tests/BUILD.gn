@@ -1,0 +1,80 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/components/fuchsia_unittest_component.gni")
+import("//build/testing/cc_test_executable.gni")
+
+###############################################################################
+# EXECUTABLES
+###############################################################################
+cc_test_executable("boot_info_unittest_exe") {
+  testonly = true
+
+  sources = [ "boot_info_unittest.cc" ]
+
+  deps = [
+    "//src/developer/forensics/feedback/previous_boot_logs:boot_info",
+    "//src/lib/fxl/test:gtest_main",
+    "//third_party/googletest:gtest",
+    "//zircon/system/ulib/zx",
+  ]
+}
+
+cc_test_executable("single_previous_boot_logs_unittest_exe") {
+  testonly = true
+
+  sources = [ "single_previous_boot_logs_unittest.cc" ]
+
+  deps = [
+    "//sdk/lib/async:async-cpp",
+    "//src/developer/forensics/feedback/attachments",
+    "//src/developer/forensics/feedback/previous_boot_logs",
+    "//src/developer/forensics/testing:gpretty_printers",
+    "//src/developer/forensics/testing:gtest_with_syslog_main",
+    "//src/developer/forensics/testing:unit_test_fixture",
+    "//src/developer/forensics/utils:errors",
+    "//src/lib/files",
+    "//src/lib/timekeeper:testing",
+    "//third_party/googletest:gtest",
+  ]
+}
+
+###############################################################################
+# COMPONENTS
+###############################################################################
+fuchsia_unittest_component("boot_info_unittest") {
+  deps = [ ":boot_info_unittest_exe" ]
+}
+
+fuchsia_unittest_component("single_previous_boot_logs_unittest") {
+  deps = [
+    ":single_previous_boot_logs_unittest_exe",
+    "//src/sys/test_runners:tmp_storage",
+  ]
+}
+
+###############################################################################
+# PACKAGES
+###############################################################################
+fuchsia_test_package("previous-boot-logs-tests") {
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+  test_components = [
+    ":boot_info_unittest",
+    ":single_previous_boot_logs_unittest",
+  ]
+}
+
+###############################################################################
+# GROUPS
+###############################################################################
+group("tests") {
+  testonly = true
+
+  deps = [ ":previous-boot-logs-tests" ]
+}

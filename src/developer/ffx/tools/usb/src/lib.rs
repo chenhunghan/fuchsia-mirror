@@ -3,8 +3,7 @@
 // found in the LICENSE file.
 
 use fdomain_fuchsia_hardware_usb_policy as fpolicy;
-use fho::subtool_suite::{FfxSubtoolSuite, Subtool, SubtoolBox, SubtoolSuite, ToolSuiteCommand};
-use fho::{FfxTool, FhoEnvironment, Result};
+use fho::subtool_suite::{FfxSubtoolSuite, Subtool, SubtoolBox, SubtoolSuite};
 
 mod args;
 mod diagnostics;
@@ -12,27 +11,15 @@ mod diagnostics;
 pub use args::{DiagnosticsCommand, UsbCommand, UsbSubCommand};
 pub use diagnostics::DiagnosticsTool;
 
-impl ToolSuiteCommand for UsbCommand {
-    type SubCommand = UsbSubCommand;
-    fn into_subcommand(self) -> Self::SubCommand {
-        self.subcommand
-    }
-}
-
 pub struct UsbSuite;
 
 impl SubtoolSuite for UsbSuite {
     type Command = UsbCommand;
 
-    async fn new_subtool(
-        env: FhoEnvironment,
-        subcommand: UsbSubCommand,
-    ) -> Result<Box<dyn SubtoolBox>> {
-        Ok(match subcommand {
-            UsbSubCommand::Diagnostics(cmd) => {
-                Subtool::new(diagnostics::DiagnosticsTool::from_env(env, cmd).await?)
-            }
-        })
+    fn new_subtool(cmd: UsbCommand) -> Box<dyn SubtoolBox> {
+        match cmd.subcommand {
+            UsbSubCommand::Diagnostics(cmd) => Subtool::<diagnostics::DiagnosticsTool>::new(cmd),
+        }
     }
 }
 

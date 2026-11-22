@@ -44,6 +44,7 @@ SENTINEL_RE = re.compile(
     r"^##\s*BAZEL2GN SENTINEL|#LOCAL_BAZEL_BUILD_SENTINEL", re.M
 )
 PKG_URL_RE = re.compile(r"^fuchsia-pkg://([^/]+)/([^#]+)#(.+)$")
+COMPONENT_URL_PREFIXES = ("fuchsia-pkg://", "fuchsia-boot:///")
 
 PRODUCT_TARGET_ROOT = "//bundles/buildbot/core"
 PRODUCT_HOST_ROOT = "//bundles/buildbot/host"
@@ -55,12 +56,14 @@ GN_DIRECT_TEST_TEMPLATES = frozenset(
     {
         "test",
         "cc_test",
+        "cc_test_executable",
         "rustc_test",
         "go_test",
         "python_host_test",
         "host_test",
         "fuchsia_unittest_package",
         "fuchsia_test_package",
+        "fuchsia_fuzzer_package",
     }
 )
 GN_RUST_UNIT_TEST_TEMPLATES = frozenset(
@@ -89,7 +92,8 @@ REMEDIATION = (
     "package `test_suite()` in `BUILD.bazel` (omitting `visibility` until the "
     "aggregation package is known; never guess an aggregation directory) and "
     "report the resulting `cq_reachability/unexported_bazel_test` and "
-    "`tests_json_parity/test_dropped_from_tests_json` findings in "
+    "`tests_json_parity/test_dropped_from_tests_json` (or "
+    "`tests_json_parity/dual_build_bazel_variant_missing` in Case 2) findings in "
     "`CoderReport.disputed_findings` and `summary`, asking the reviewer which "
     "aggregation `test_suite()` the package's `test_suite()`(s) should be "
     "added to. Otherwise, coding agents MUST NEVER waive dropped tests via "
@@ -196,13 +200,33 @@ def format_env_set(envs: Sequence[str]) -> str:
     return "[" + ", ".join(rendered) + "]"
 
 
+# Check whether a test name or `package_url` identifies a Fuchsia component test.
+# Under `use_test_pilot = true` in `fuchsia_test_package.gni`, GN component test
+# specs emit `os = "linux"` (for the host `test-pilot` wrapper) alongside a
+# `fuchsia-pkg://` `package_url` and Fuchsia device environments, whereas Bazel
+# `fx_test` emits `os = "fuchsia"` for the same component URL.
+def _is_fuchsia_component_url(value: str | None) -> bool:
+    """Returns True when `value` is a Fuchsia package or bootfs component URL."""
+    cleaned = (value or "").strip()
+    return cleaned.startswith(COMPONENT_URL_PREFIXES)
+
+
 def normalize_test_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
     """Normalizes a single `<build dir>/tests.json` entry."""
     test_obj = entry.get("test") or {}
     raw_label = (test_obj.get("label") or "").strip()
     is_bazel = raw_label.startswith("@")
-    name = (test_obj.get("name") or test_obj.get("package_url") or "").strip()
-    os_name = (test_obj.get("os") or "").strip()
+    pkg_url = (test_obj.get("package_url") or "").strip()
+    name = (test_obj.get("name") or pkg_url).strip()
+    raw_os = (test_obj.get("os") or "").strip()
+    os_name = (
+        "fuchsia"
+        if (
+            _is_fuchsia_component_url(pkg_url)
+            or _is_fuchsia_component_url(name)
+        )
+        else raw_os
+    )
     cpu = (test_obj.get("cpu") or "").strip()
     norm_label = normalize_label(raw_label)
     norm_source = normalize_label(test_obj.get("source_label")) or norm_label
@@ -484,12 +508,31 @@ def _kept_gn_test_names_above_sentinel(
     any_target_re = re.compile(r'\b([A-Za-z_]\w*)\(\s*"([^"$]+)"\s*\)\s*\{')
     post_names = {m.group(2) for m in any_target_re.finditer(clean_post)}
     bazel_names = set(re.findall(r'\bname\s*=\s*"([^"]+)"', clean_bazel))
+    # Record unmigrated pre-sentinel GN targets and fuzzer `*_package` subtargets.
+    # `fuchsia_fuzzer_package` registers `fuchsia_test` against `${package_name}_package`
+    # (`invoker.package_name` when set, otherwise `target_name`).
+    fuzzer_pkg_templates = ("fuchsia_fuzzer_package", "fuzzer_package")
     for match in any_target_re.finditer(clean_pre):
         tmpl, tname = match.group(1), match.group(2)
         if tmpl in ("group", "bazel_test_suite", "standardized_test_groups"):
             continue
         if tname not in post_names and tname not in bazel_names:
             kept.add(tname)
+            if tmpl in fuzzer_pkg_templates or tmpl.endswith("_fuzzer_package"):
+                body = clean_pre[
+                    match.end() : _closing_brace(clean_pre, match.end() - 1)
+                ]
+                m_pkg = re.search(r'\bpackage_name\s*=\s*"([^"$]+)"', body)
+                pkg_stems = {tname}
+                if m_pkg:
+                    pkg_stems.add(m_pkg.group(1))
+                for stem in pkg_stems:
+                    pkg_subtarget = f"{stem}_package"
+                    if (
+                        pkg_subtarget not in post_names
+                        and pkg_subtarget not in bazel_names
+                    ):
+                        kept.add(pkg_subtarget)
     # Exclude `<pkg>-gn` dual-build wrapper packages from unmigrated GN-only set.
     target_re = re.compile(r'\b([A-Za-z_]\w*)\(\s*"([^"$]+)"\s*\)\s*\{')
     for match in target_re.finditer(clean_pre):
@@ -497,10 +540,13 @@ def _kept_gn_test_names_above_sentinel(
         body = clean_pre[
             match.end() : _closing_brace(clean_pre, match.end() - 1)
         ]
-        if tname.endswith("-gn") or re.search(
-            r'\bpackage_name\s*=\s*"[^"]+-gn"', body
-        ):
+        m_pkg = re.search(r'\bpackage_name\s*=\s*"([^"$]+)"', body)
+        pkg_override = m_pkg.group(1) if m_pkg else ""
+        if tname.endswith("-gn") or pkg_override.endswith("-gn"):
             kept.discard(tname)
+            kept.discard(f"{tname}_package")
+            if pkg_override:
+                kept.discard(f"{pkg_override}_package")
     return kept
 
 
@@ -509,6 +555,7 @@ def detect_package_mode(
     after_gn: str | None,
     after_bazel: str | None,
     is_gn2gone_commit: bool = False,
+    before_bazel: str | None = None,
 ) -> str:
     """Classifies a touched package's migration mode."""
     had_sentinel = bool(before_gn and SENTINEL_RE.search(before_gn))
@@ -521,14 +568,471 @@ def detect_package_mode(
         return "case3_gn2gone"
     if is_gn2gone_commit and has_bazel and not has_sentinel:
         return "case3_gn2gone"
+    # A package that keeps its sentinel-less BUILD.gn and whose
+    # pre-existing BUILD.bazel (e.g. only a license target) is unchanged was
+    # not migrated: it is a GN package touched only to edit GN-side wiring
+    # (such as dropping a migrated child from a test list), not Case 1.
+    if (
+        has_bazel
+        and after_gn
+        and after_gn.strip()
+        and before_gn
+        and (before_bazel or "") == (after_bazel or "")
+    ):
+        return "gn_only"
     if has_bazel:
         return "case1_full_removal"
     return "gn_only"
 
 
-def build_product_args_gn(original_args: str) -> str:
+# Strip synthetic `# planter-managed` label assignments from `<build dir>/args.gn`
+# so baseline/post-change `fx gen` runs against true CQ product and scoped roots.
+PLANTER_MANAGED_COMMENT_RE = re.compile(r"#\s*planter-managed\b", re.I)
+_GN_LABEL_ASSIGN_RE = re.compile(r"^\s*([A-Za-z_]\w*_labels)\s*(\+?=|-=)")
+
+
+def _gn_bracket_delta(clean_line: str) -> int:
+    """Returns net `([{` minus `)]}` count outside GN string literals."""
+    delta = 0
+    in_str = False
+    i = 0
+    while i < len(clean_line):
+        ch = clean_line[i]
+        if in_str:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "([{":
+            delta += 1
+        elif ch in ")]}":
+            delta -= 1
+        i += 1
+    return delta
+
+
+def _consume_gn_statement(raw_lines: Sequence[str], start: int) -> int:
+    """Returns the line index past the GN statement starting at `start`."""
+    n = len(raw_lines)
+    clean_first = _blank_gn_comments(raw_lines[start])
+    depth = _gn_bracket_delta(clean_first)
+    needs_rhs = bool(re.search(r"(?<![=!<>])=\s*$", clean_first))
+    idx = start + 1
+    while idx < n and (depth > 0 or needs_rhs):
+        clean_ln = _blank_gn_comments(raw_lines[idx])
+        depth = max(0, depth + _gn_bracket_delta(clean_ln))
+        needs_rhs = bool(re.search(r"(?<![=!<>])=\s*$", clean_ln))
+        idx += 1
+    return idx
+
+
+def _find_top_gn_bracket_spans(clean_stmt: str) -> list[tuple[int, int]]:
+    """Returns `(open_idx, close_idx)` character spans for top-level `[...]` lists."""
+    spans: list[tuple[int, int]] = []
+    depth = 0
+    in_str = False
+    cur_open = -1
+    ci = 0
+    while ci < len(clean_stmt):
+        ch = clean_stmt[ci]
+        if in_str:
+            if ch == "\\":
+                ci += 2
+                continue
+            if ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == "[":
+            if depth == 0:
+                cur_open = ci
+            depth += 1
+        elif ch == "]" and depth > 0:
+            depth -= 1
+            if depth == 0 and cur_open >= 0:
+                spans.append((cur_open, ci))
+                cur_open = -1
+        ci += 1
+    return spans
+
+
+def _strip_pm_comment_from_tail(tail: str) -> str:
+    nl = "\n" if tail.endswith("\n") else ""
+    body = tail[:-1] if nl else tail
+    if PLANTER_MANAGED_COMMENT_RE.search(body):
+        clean_b = _blank_gn_comments(body)
+        # Keep non-comment GN code before `#`, strip trailing `# ...` and spaces.
+        code_len = len(clean_b.rstrip(" \t"))
+        return body[:code_len].rstrip(" \t") + nl
+    return tail
+
+
+def _filter_planter_managed_list_stmt(
+    var_name: str,
+    op: str,
+    stmt_lines: Sequence[str],
+    whole_stmt_managed: bool = False,
+) -> str:
+    full_stmt = "".join(stmt_lines)
+    clean_full = _blank_gn_comments(full_stmt)
+    spans = _find_top_gn_bracket_spans(clean_full)
+    if not spans:
+        if whole_stmt_managed or PLANTER_MANAGED_COMMENT_RE.search(full_stmt):
+            return "" if op in ("+=", "-=") else f"{var_name} = []\n"
+        return full_stmt
+
+    pure_list_assign = (
+        len(spans) == 1
+        and bool(
+            re.match(
+                r"^\s*[A-Za-z_]\w*\s*(?:\+=|-=|=)\s*$",
+                clean_full[: spans[0][0]],
+            )
+        )
+        and not clean_full[spans[0][1] + 1 :].strip()
+    )
+
+    out_stmt = full_stmt
+    changed_any = False
+    single_kept_elems = 0
+    for idx in range(len(spans) - 1, -1, -1):
+        open_idx, close_idx = spans[idx]
+        open_line_start = full_stmt.rfind("\n", 0, open_idx) + 1
+        open_nl = full_stmt.find("\n", open_idx)
+        open_line_end = len(full_stmt) if open_nl < 0 else open_nl + 1
+        close_line_start = full_stmt.rfind("\n", 0, close_idx) + 1
+        close_nl = full_stmt.find("\n", close_idx)
+        close_line_end = len(full_stmt) if close_nl < 0 else close_nl + 1
+
+        prev_bound = 0
+        if idx > 0:
+            prev_nl = full_stmt.find("\n", spans[idx - 1][1])
+            prev_bound = (
+                min(open_idx, prev_nl + 1)
+                if prev_nl >= 0
+                else spans[idx - 1][1] + 1
+            )
+        next_bound = (
+            spans[idx + 1][0] if idx + 1 < len(spans) else len(full_stmt)
+        )
+        same_line_brackets = open_line_start == close_line_start
+        last_on_close_line = next_bound >= close_line_end
+
+        before_open_pm = bool(
+            PLANTER_MANAGED_COMMENT_RE.search(full_stmt[prev_bound:open_idx])
+        )
+        open_rest_code = clean_full[open_idx + 1 : open_line_end].strip()
+        close_pre_code = clean_full[close_line_start:close_idx].strip()
+        open_hdr_pm = (
+            not same_line_brackets
+            and not open_rest_code
+            and bool(
+                PLANTER_MANAGED_COMMENT_RE.search(
+                    full_stmt[open_idx + 1 : open_line_end]
+                )
+            )
+        )
+        close_ftr_pm = (
+            not same_line_brackets
+            and not close_pre_code
+            and last_on_close_line
+            and bool(
+                PLANTER_MANAGED_COMMENT_RE.search(
+                    full_stmt[close_idx + 1 : close_line_end]
+                )
+            )
+        )
+        after_close_pm = last_on_close_line and bool(
+            PLANTER_MANAGED_COMMENT_RE.search(
+                full_stmt[close_line_end:next_bound]
+            )
+        )
+        same_line_pm = same_line_brackets and (
+            bool(
+                PLANTER_MANAGED_COMMENT_RE.search(
+                    full_stmt[open_idx : close_idx + 1]
+                )
+            )
+            or (
+                last_on_close_line
+                and bool(
+                    PLANTER_MANAGED_COMMENT_RE.search(
+                        full_stmt[close_idx + 1 : close_line_end]
+                    )
+                )
+            )
+        )
+        span_whole_managed = (
+            whole_stmt_managed
+            or before_open_pm
+            or same_line_pm
+            or open_hdr_pm
+            or close_ftr_pm
+            or after_close_pm
+        )
+
+        if span_whole_managed:
+            changed_any = True
+            single_kept_elems = 0
+            rep_end = close_line_end if last_on_close_line else close_idx + 1
+            tail = (
+                _strip_pm_comment_from_tail(
+                    out_stmt[close_idx + 1 : close_line_end]
+                )
+                if last_on_close_line
+                else ""
+            )
+            out_stmt = out_stmt[:open_idx] + "[]" + tail + out_stmt[rep_end:]
+            continue
+
+        if same_line_brackets:
+            single_kept_elems = 1
+            continue
+
+        segments: list[tuple[str, str]] = []
+        if open_rest_code:
+            seg = full_stmt[open_idx + 1 : open_line_end]
+            if not seg.endswith("\n"):
+                seg += "\n"
+            segments.append(
+                (
+                    "  " + seg.lstrip(" "),
+                    full_stmt[open_line_start:open_line_end],
+                )
+            )
+        for mid_ln in full_stmt[open_line_end:close_line_start].splitlines(
+            keepends=True
+        ):
+            segments.append((mid_ln, mid_ln))
+        if close_pre_code:
+            seg = full_stmt[close_line_start:close_idx].rstrip() + "\n"
+            segments.append((seg, full_stmt[close_line_start:close_line_end]))
+
+        kept_segs: list[str] = []
+        kept_elems = 0
+        dropped_in_span = False
+        pending_comments: list[str] = []
+        drop_next = False
+        si = 0
+        while si < len(segments):
+            seg_txt, chk_ln = segments[si]
+            stripped = seg_txt.strip()
+            if not stripped:
+                if not drop_next:
+                    pending_comments.append(seg_txt)
+                si += 1
+                continue
+            if stripped.startswith("#"):
+                if PLANTER_MANAGED_COMMENT_RE.search(chk_ln):
+                    drop_next = True
+                else:
+                    pending_comments.append(seg_txt)
+                si += 1
+                continue
+            elem_segs = [(seg_txt, chk_ln)]
+            edepth = _gn_bracket_delta(_blank_gn_comments(seg_txt))
+            si += 1
+            while si < len(segments) and edepth > 0:
+                n_txt, n_chk = segments[si]
+                elem_segs.append((n_txt, n_chk))
+                edepth = max(
+                    0, edepth + _gn_bracket_delta(_blank_gn_comments(n_txt))
+                )
+                si += 1
+            elem_pm = drop_next or any(
+                PLANTER_MANAGED_COMMENT_RE.search(c) for _, c in elem_segs
+            )
+            if not elem_pm:
+                kept_segs.extend(pending_comments)
+                kept_segs.extend(t for t, _ in elem_segs)
+                kept_elems += 1
+            else:
+                dropped_in_span = True
+            pending_comments = []
+            drop_next = False
+
+        single_kept_elems = kept_elems
+        if not dropped_in_span:
+            continue
+        changed_any = True
+        rep_end = close_line_end if last_on_close_line else close_idx + 1
+        tail = out_stmt[close_idx + 1 : rep_end]
+        if last_on_close_line and (close_pre_code or kept_elems == 0):
+            tail = _strip_pm_comment_from_tail(tail)
+        if kept_elems == 0:
+            out_stmt = out_stmt[:open_idx] + "[]" + tail + out_stmt[rep_end:]
+        else:
+            kept_segs.extend(pending_comments)
+            open_hdr_tail = (
+                "\n"
+                if open_rest_code
+                else full_stmt[open_idx + 1 : open_line_end]
+            )
+            close_indent = (
+                "" if close_pre_code else full_stmt[close_line_start:close_idx]
+            )
+            rebuilt_span = (
+                "[" + open_hdr_tail + "".join(kept_segs) + close_indent + "]"
+            )
+            out_stmt = (
+                out_stmt[:open_idx] + rebuilt_span + tail + out_stmt[rep_end:]
+            )
+
+    if not changed_any:
+        return full_stmt
+    if pure_list_assign and single_kept_elems == 0:
+        return "" if op in ("+=", "-=") else f"{var_name} = []\n"
+    if not out_stmt.endswith("\n"):
+        out_stmt += "\n"
+    return out_stmt
+
+
+def strip_planter_managed_args_gn(original_args: str) -> str:
+    """Strips `# planter-managed` label entries from `args.gn` content."""
+    if not PLANTER_MANAGED_COMMENT_RE.search(original_args):
+        return original_args
+
+    raw_lines = original_args.splitlines(keepends=True)
+    kept_lines: list[str] = []
+    i = 0
+    n = len(raw_lines)
+    while i < n:
+        line = raw_lines[i]
+        if line.lstrip().startswith("#") and PLANTER_MANAGED_COMMENT_RE.search(
+            line
+        ):
+            while (
+                i < n
+                and raw_lines[i].lstrip().startswith("#")
+                and PLANTER_MANAGED_COMMENT_RE.search(raw_lines[i])
+            ):
+                i += 1
+            if i < n:
+                m_next = _GN_LABEL_ASSIGN_RE.match(
+                    _blank_gn_comments(raw_lines[i])
+                )
+                if m_next:
+                    var_name, op = m_next.group(1), m_next.group(2)
+                    end = _consume_gn_statement(raw_lines, i)
+                    rewritten = _filter_planter_managed_list_stmt(
+                        var_name, op, raw_lines[i:end], whole_stmt_managed=True
+                    )
+                    if rewritten:
+                        kept_lines.append(rewritten)
+                    i = end
+            continue
+
+        m_stmt = _GN_LABEL_ASSIGN_RE.match(_blank_gn_comments(line))
+        if m_stmt:
+            var_name, op = m_stmt.group(1), m_stmt.group(2)
+            end = _consume_gn_statement(raw_lines, i)
+            stmt_lines = raw_lines[i:end]
+            i = end
+            if any(PLANTER_MANAGED_COMMENT_RE.search(ln) for ln in stmt_lines):
+                rewritten = _filter_planter_managed_list_stmt(
+                    var_name, op, stmt_lines
+                )
+                if rewritten:
+                    kept_lines.append(rewritten)
+                continue
+            kept_lines.extend(stmt_lines)
+            continue
+
+        kept_lines.append(line)
+        i += 1
+
+    return "".join(kept_lines)
+
+
+def _gn_label_resolvable_in_touched_dirs(
+    lbl: str,
+    gn_by_dir: Mapping[str, str | None] | None,
+) -> bool:
+    """Returns False when `lbl` targets a touched directory lacking that GN target."""
+    if gn_by_dir is None:
+        return True
+    clean_lbl = (lbl or "").strip().split("(", 1)[0].strip()
+    if not clean_lbl.startswith("//"):
+        return True
+    pkg_part, sep, tgt_part = clean_lbl[2:].partition(":")
+    pkg_dir = pkg_part.strip("/")
+    if pkg_dir not in gn_by_dir:
+        return True
+    gn_txt = gn_by_dir.get(pkg_dir)
+    if not gn_txt:
+        return False
+    tgt_name = tgt_part.strip() if sep else pkg_dir.rsplit("/", 1)[-1]
+    if not tgt_name:
+        return True
+    clean_gn = _blank_gn_comments(gn_txt)
+    if re.search(rf'"{re.escape(tgt_name)}"', clean_gn):
+        return True
+    return tgt_name == "tests" and "standardized_test_groups" in clean_gn
+
+
+def sanitize_args_gn(
+    original_args: str,
+    gn_by_dir: Mapping[str, str | None] | None = None,
+) -> str:
+    """Strips `# planter-managed` entries and unresolvable touched-dir GN labels."""
+    stripped = strip_planter_managed_args_gn(original_args)
+    if not gn_by_dir:
+        return stripped
+    raw_lines = stripped.splitlines(keepends=True)
+    kept_lines: list[str] = []
+    i = 0
+    n = len(raw_lines)
+    while i < n:
+        line = raw_lines[i]
+        m_stmt = _GN_LABEL_ASSIGN_RE.match(_blank_gn_comments(line))
+        if not m_stmt:
+            kept_lines.append(line)
+            i += 1
+            continue
+        var_name, op = m_stmt.group(1), m_stmt.group(2)
+        end = _consume_gn_statement(raw_lines, i)
+        stmt_lines = raw_lines[i:end]
+        i = end
+        stmt_clean = "".join(_blank_gn_comments(ln) for ln in stmt_lines)
+        stmt_lbls = re.findall(r'"(//[^"\n]+)"', stmt_clean)
+        bad_lbls = [
+            lbl
+            for lbl in stmt_lbls
+            if not _gn_label_resolvable_in_touched_dirs(lbl, gn_by_dir)
+        ]
+        if not bad_lbls:
+            kept_lines.extend(stmt_lines)
+            continue
+        if len(bad_lbls) == len(stmt_lbls):
+            if op not in ("+=", "-="):
+                kept_lines.append(f"{var_name} = []\n")
+            continue
+        filtered_stmt: list[str] = []
+        for sln in stmt_lines:
+            sclean = _blank_gn_comments(sln)
+            line_lbls = re.findall(r'"(//[^"\n]+)"', sclean)
+            if line_lbls and all(
+                not _gn_label_resolvable_in_touched_dirs(lbl, gn_by_dir)
+                for lbl in line_lbls
+            ):
+                continue
+            for bl in bad_lbls:
+                sln = re.sub(rf'\s*"{re.escape(bl)}"\s*,?', "", sln)
+            filtered_stmt.append(sln)
+        kept_lines.extend(filtered_stmt)
+    return "".join(kept_lines)
+
+
+def build_product_args_gn(
+    original_args: str,
+    gn_by_dir: Mapping[str, str | None] | None = None,
+) -> str:
     """Appends true CQ product roots without per-directory `:tests` injection."""
-    clean = _blank_gn_comments(original_args)
+    base_args = sanitize_args_gn(original_args, gn_by_dir=gn_by_dir)
+    clean = _blank_gn_comments(base_args)
     lines: list[str] = []
     for var, root_lbl in (
         ("target_labels", PRODUCT_TARGET_ROOT),
@@ -539,22 +1043,36 @@ def build_product_args_gn(original_args: str) -> str:
         op = "+=" if re.search(rf"^\s*{var}\s*\+?=", clean, re.M) else "="
         lines.append(f"{var} {op} {json.dumps([root_lbl])}")
     if not lines:
-        return original_args
-    return original_args + "\n".join([f"\n{ROOTS_MARKER}"] + lines) + "\n"
+        return base_args
+    return base_args + "\n".join([f"\n{ROOTS_MARKER}"] + lines) + "\n"
 
 
 def build_scoped_args_gn(
     original_args: str,
     host_roots: Sequence[str],
     device_roots: Sequence[str],
+    gn_by_dir: Mapping[str, str | None] | None = None,
 ) -> str:
     """Appends enclosing group roots for off-CQ developer tests."""
-    clean = _blank_gn_comments(original_args)
+    base_args = sanitize_args_gn(original_args, gn_by_dir=gn_by_dir)
+    clean = _blank_gn_comments(base_args)
     host_filtered = sorted(
-        {lbl for lbl in host_roots if lbl and f'"{lbl}"' not in clean}
+        {
+            lbl
+            for lbl in host_roots
+            if lbl
+            and f'"{lbl}"' not in clean
+            and _gn_label_resolvable_in_touched_dirs(lbl, gn_by_dir)
+        }
     )
     dev_filtered = sorted(
-        {lbl for lbl in device_roots if lbl and f'"{lbl}"' not in clean}
+        {
+            lbl
+            for lbl in device_roots
+            if lbl
+            and f'"{lbl}"' not in clean
+            and _gn_label_resolvable_in_touched_dirs(lbl, gn_by_dir)
+        }
     )
     lines: list[str] = []
     for var, labels in (
@@ -565,8 +1083,8 @@ def build_scoped_args_gn(
             op = "+=" if re.search(rf"^\s*{var}\s*\+?=", clean, re.M) else "="
             lines.append(f"{var} {op} {json.dumps(labels)}")
     if not lines:
-        return original_args
-    return original_args + "\n".join([f"\n{ROOTS_MARKER}"] + lines) + "\n"
+        return base_args
+    return base_args + "\n".join([f"\n{ROOTS_MARKER}"] + lines) + "\n"
 
 
 def find_uncovered_gn_test_targets(
@@ -577,11 +1095,16 @@ def find_uncovered_gn_test_targets(
     covered_labels: set[str] = set()
     covered_pkgs_with_device_tests: set[str] = set()
     for rec in baseline_tests:
+        is_device_rec = (
+            rec.get("os") == "fuchsia"
+            or _is_fuchsia_component_url(rec.get("name"))
+            or _is_fuchsia_component_url(rec.get("canonical_id"))
+        )
         for field in ("label", "source_label"):
             val = rec.get(field) or ""
             if val:
                 covered_labels.add(val)
-                if rec.get("os") == "fuchsia":
+                if is_device_rec:
                     covered_pkgs_with_device_tests.add(package_of(val))
 
     uncovered: list[dict[str, Any]] = []
@@ -590,11 +1113,22 @@ def find_uncovered_gn_test_targets(
         pkg = package_of(lbl)
         if lbl in covered_labels:
             continue
-        # Inner binary (`rustc_test` / `test`) packaged into a covered device
-        # test package in the same directory is already covered.
+        # Inner test binary (including `rustc_*` `with_unit_tests = true`
+        # `<name>_test` targets and `cc_test_executable`) packaged into a
+        # covered device test package in the same directory is already covered.
         if (
             not tgt.get("is_host")
-            and tgt["template"] in ("test", "cc_test", "rustc_test", "go_test")
+            and (
+                tgt["template"]
+                in (
+                    "test",
+                    "cc_test",
+                    "cc_test_executable",
+                    "rustc_test",
+                    "go_test",
+                )
+                or tgt["template"] in GN_RUST_UNIT_TEST_TEMPLATES
+            )
             and pkg in covered_pkgs_with_device_tests
         ):
             continue
@@ -650,7 +1184,30 @@ def _extract_gn_groups(
                 refs.add(norm_dep)
                 if is_host_dep:
                     host_edges.add((norm_dep, glabel))
+        # Also resolve bare relative subdir deps (e.g. `deps = [ "tests" ]`) inside
+        # deps/public_deps/data_deps lists to `//<pkg>/<subdir>:<subdir>`.
+        for dep_block in re.findall(
+            r"\b(?:public_|data_)?deps\s*\+?=\s*\[(.*?)\]", body, re.S
+        ):
+            for raw_dep in re.findall(
+                r'"([^"$\n]+(?:\(\$host_toolchain\))?)"', dep_block
+            ):
+                is_host_dep = "($host_toolchain)" in raw_dep or (
+                    "(" in raw_dep and "host" in raw_dep.split("(", 1)[1]
+                )
+                dep_no_tc = raw_dep.split("(", 1)[0].strip()
+                if re.fullmatch(r"[A-Za-z0-9_.\-]+", dep_no_tc):
+                    joined = f"{pkg_clean}/{dep_no_tc}".strip("/")
+                    norm_dep = normalize_label(f"//{joined}")
+                    if norm_dep:
+                        refs.add(norm_dep)
+                        if is_host_dep:
+                            host_edges.add((norm_dep, glabel))
     return out, host_edges, host_guarded_groups
+
+
+_STOP_CLIMB_PREFIXES = ("//:", "//bundles/", "//build/")
+MAX_GN_REFS_CALLS = 16
 
 
 def resolve_highest_enclosing_groups(
@@ -658,6 +1215,7 @@ def resolve_highest_enclosing_groups(
     gn_refs_fn: Callable[[str], Sequence[str]] | None,
     gn_files_by_pkg: Mapping[str, str],
     read_gn_fn: Callable[[str], str | None] | None = None,
+    max_gn_refs_calls: int = MAX_GN_REFS_CALLS,
 ) -> tuple[list[str], list[str]]:
     """Walks `fx gn refs` (with static BUILD.gn fallback) to top `group(...)`."""
     reverse_groups: dict[str, set[str]] = {}
@@ -666,6 +1224,9 @@ def resolve_highest_enclosing_groups(
     host_only_pkgs: set[str] = set()
     host_guarded_groups: set[str] = set()
     indexed_pkgs: set[str] = set()
+    pkg_gn_texts: dict[str, str] = {}
+    refs_cache: dict[str, list[str]] = {}
+    gn_refs_calls = 0
 
     def _index_pkg(pkg_dir: str, gn_text: str | None) -> None:
         clean_dir = pkg_dir.strip("/")
@@ -674,7 +1235,9 @@ def resolve_highest_enclosing_groups(
         indexed_pkgs.add(clean_dir)
         if not gn_text:
             return
-        if re.search(r"\bassert\(\s*is_host\b", _blank_gn_comments(gn_text)):
+        clean_gn = _blank_gn_comments(gn_text)
+        pkg_gn_texts[clean_dir] = clean_gn
+        if re.search(r"\bassert\(\s*is_host\b", clean_gn):
             host_only_pkgs.add(f"//{clean_dir}" if clean_dir else "//")
         groups_map, pkg_host_edges, pkg_host_groups = _extract_gn_groups(
             gn_text, clean_dir
@@ -689,42 +1252,128 @@ def resolve_highest_enclosing_groups(
     for pkg_dir, gn_text in gn_files_by_pkg.items():
         _index_pkg(pkg_dir, gn_text)
 
-    def _ensure_pkg_indexed(lbl: str) -> None:
+    def _ensure_pkg_and_ancestors_indexed(lbl: str) -> None:
         if read_gn_fn is None:
             return
         pkg = package_of(lbl)
         if not pkg:
             return
-        rel_dir = pkg[2:]
-        if rel_dir not in indexed_pkgs:
-            _index_pkg(rel_dir, read_gn_fn(rel_dir))
+        cur_dir = pkg[2:].strip("/")
+        while True:
+            if cur_dir not in indexed_pkgs:
+                _index_pkg(cur_dir, read_gn_fn(cur_dir))
+            if not cur_dir:
+                break
+            cur_dir = os.path.dirname(cur_dir)
+
+    if read_gn_fn is not None:
+        for prod_dir in ("bundles/buildbot/core", "bundles/buildbot/host"):
+            if prod_dir not in indexed_pkgs:
+                _index_pkg(prod_dir, read_gn_fn(prod_dir))
+
+    def _cached_gn_refs(lbl: str) -> list[str]:
+        nonlocal gn_refs_calls
+        if gn_refs_fn is None:
+            return []
+        if lbl in refs_cache:
+            return refs_cache[lbl]
+        if gn_refs_calls >= max_gn_refs_calls:
+            return []
+        gn_refs_calls += 1
+        res = list(gn_refs_fn(lbl))
+        refs_cache[lbl] = res
+        return res
 
     host_roots: set[str] = set()
     device_roots: set[str] = set()
+    product_root_pkgs = {
+        PRODUCT_TARGET_ROOT,
+        PRODUCT_HOST_ROOT,
+    }
+    product_root_labels = {
+        normalize_label(PRODUCT_TARGET_ROOT),
+        normalize_label(PRODUCT_HOST_ROOT),
+    }
 
-    for tgt in uncovered_targets:
-        start_lbl = normalize_label(tgt["label"])
-        _ensure_pkg_indexed(start_lbl)
-        start_is_host = bool(tgt.get("is_host"))
+    def _find_dynamic_parent_groups(start_lbl: str) -> list[str]:
+        pkg = package_of(start_lbl)
+        if not pkg:
+            return []
+        pkg_dir = pkg[2:].strip("/")
+        if not pkg_dir:
+            return []
+        tgt_name = start_lbl.split(":", 1)[-1]
+        cur_anc = os.path.dirname(pkg_dir)
+        while cur_anc:
+            anc_prefix = f"//{cur_anc}"
+            if anc_prefix.startswith(_STOP_CLIMB_PREFIXES):
+                break
+            if cur_anc not in indexed_pkgs and read_gn_fn is not None:
+                _index_pkg(cur_anc, read_gn_fn(cur_anc))
+            anc_clean = pkg_gn_texts.get(cur_anc, "")
+            if anc_clean:
+                anc_groups = sorted(
+                    g for g in known_groups if package_of(g) == anc_prefix
+                )
+                if anc_groups:
+                    rel_sub = os.path.relpath(pkg_dir, cur_anc)
+                    leaf = os.path.basename(pkg_dir)
+                    tokens = {rel_sub, leaf, tgt_name, f"//{pkg_dir}"}
+                    if any(
+                        f'"{tok}"' in anc_clean or f'"{tok}:' in anc_clean
+                        for tok in tokens
+                        if tok
+                    ):
+                        tests_grp = f"{anc_prefix}:tests"
+                        return (
+                            [tests_grp]
+                            if tests_grp in anc_groups
+                            else anc_groups
+                        )
+            cur_anc = os.path.dirname(cur_anc)
+        return []
+
+    def _climb_groups(
+        start_lbl: str,
+        initial_nodes: Sequence[tuple[str, bool]],
+    ) -> tuple[set[tuple[str, bool]], bool]:
         visited: set[tuple[str, bool]] = set()
-        frontier: list[tuple[str, bool]] = [(start_lbl, start_is_host)]
-        top_groups: set[tuple[str, bool]] = set()
-
-        while frontier and len(visited) < 500:
+        frontier = list(initial_nodes)
+        found_top: set[tuple[str, bool]] = set()
+        found_product = False
+        while frontier and len(visited) < 200:
             cur, cur_is_host = frontier.pop(0)
             if (cur, cur_is_host) in visited:
                 continue
             visited.add((cur, cur_is_host))
 
+            if cur != start_lbl and (
+                cur in product_root_labels
+                or package_of(cur) in product_root_pkgs
+            ):
+                found_product = True
+                continue
+
+            if cur != start_lbl and cur.startswith(_STOP_CLIMB_PREFIXES):
+                continue
+
             parents_with_host: dict[str, bool] = {}
-            if gn_refs_fn is not None:
-                for raw_ref in gn_refs_fn(cur):
+            for grp_parent in reverse_groups.get(cur, set()):
+                _ensure_pkg_and_ancestors_indexed(grp_parent)
+                edge_host = cur_is_host or (cur, grp_parent) in host_edges
+                parents_with_host[grp_parent] = (
+                    parents_with_host.get(grp_parent, False) or edge_host
+                )
+            if gn_refs_fn is not None and (
+                cur not in known_groups or not parents_with_host
+            ):
+                for raw_ref in _cached_gn_refs(cur):
                     ref_has_host_tc = (
                         "(" in raw_ref and "host" in raw_ref.split("(", 1)[1]
                     )
                     norm_ref = normalize_label(raw_ref)
                     if norm_ref and norm_ref != cur:
-                        _ensure_pkg_indexed(norm_ref)
+                        _ensure_pkg_and_ancestors_indexed(norm_ref)
                         edge_host = (
                             cur_is_host
                             or ref_has_host_tc
@@ -733,37 +1382,64 @@ def resolve_highest_enclosing_groups(
                         parents_with_host[norm_ref] = (
                             parents_with_host.get(norm_ref, False) or edge_host
                         )
-            for grp_parent in reverse_groups.get(cur, set()):
-                edge_host = cur_is_host or (cur, grp_parent) in host_edges
-                parents_with_host[grp_parent] = (
-                    parents_with_host.get(grp_parent, False) or edge_host
-                )
 
-            next_steps = [
-                (p, p_host)
-                for p, p_host in sorted(parents_with_host.items())
-                if (
-                    p in known_groups
-                    or (gn_refs_fn is not None and (p, p_host) not in visited)
-                )
-            ]
+            next_steps: list[tuple[str, bool]] = []
+            for p, p_host in sorted(parents_with_host.items()):
+                if p.startswith("//bundles/buildbot/"):
+                    found_product = True
+                    continue
+                if p.startswith(_STOP_CLIMB_PREFIXES):
+                    continue
+                if cur in known_groups:
+                    p_pkg = package_of(p)[2:].strip("/")
+                    if p not in known_groups and (
+                        read_gn_fn is not None or p_pkg in indexed_pkgs
+                    ):
+                        continue
+                if p in known_groups or (
+                    gn_refs_fn is not None and (p, p_host) not in visited
+                ):
+                    next_steps.append((p, p_host))
+
             if not next_steps:
-                if cur in known_groups and cur != start_lbl:
-                    top_groups.add((cur, cur_is_host))
+                if (
+                    cur in known_groups
+                    and cur != start_lbl
+                    and not found_product
+                ):
+                    found_top.add((cur, cur_is_host))
                 continue
             for parent, p_host in next_steps:
                 if (parent, p_host) not in visited:
                     frontier.append((parent, p_host))
                 elif parent in known_groups:
-                    top_groups.add((parent, p_host))
+                    found_top.add((parent, p_host))
+        return found_top, found_product
 
-        if not top_groups:
-            # If the leaf has no enclosing group anywhere, root at the leaf's
-            # own `:tests` group if defined, otherwise at the target itself.
+    for tgt in uncovered_targets:
+        start_lbl = normalize_label(tgt["label"])
+        _ensure_pkg_and_ancestors_indexed(start_lbl)
+        start_is_host = bool(tgt.get("is_host"))
+        top_groups, reached_product_root = _climb_groups(
+            start_lbl, [(start_lbl, start_is_host)]
+        )
+
+        if not top_groups and not reached_product_root:
+            # If the leaf has no enclosing group anywhere, first look for an
+            # ancestor BUILD.gn test group packaging this leaf via `foreach`
+            # or a local `:tests` group before falling back to the target itself.
             pkg = package_of(start_lbl)
             local_tests = f"{pkg}:tests" if pkg else "//:tests"
-            chosen = local_tests if local_tests in known_groups else start_lbl
-            top_groups.add((chosen, start_is_host))
+            if local_tests in known_groups:
+                top_groups.add((local_tests, start_is_host))
+            else:
+                anc_groups = _find_dynamic_parent_groups(start_lbl)
+                if anc_groups:
+                    top_groups, reached_product_root = _climb_groups(
+                        start_lbl, [(g, start_is_host) for g in anc_groups]
+                    )
+                if not top_groups and not reached_product_root:
+                    top_groups.add((start_lbl, start_is_host))
 
         for root_lbl, root_is_host in top_groups:
             root_pkg = package_of(root_lbl)
@@ -818,6 +1494,7 @@ def host_pkg_stems(rec: Mapping[str, Any]) -> set[tuple[str, str, str, str]]:
         "_unittests",
         "_tests",
         "_test",
+        "_bin",
     )
     generic = {
         "lib",
@@ -829,22 +1506,45 @@ def host_pkg_stems(rec: Mapping[str, Any]) -> set[tuple[str, str, str, str]]:
         "unittest",
         "unittests",
     }
+
+    # Peel stacked test wrapper suffixes (e.g. `<stem>_test_host_test` ->
+    # `<stem>_test` -> `<stem>`) so Bazel `host_test()` wrappers around shared
+    # `*_test` binaries match their baseline GN host test entries 1:1.
+    def _peel_host_stems(norm_tok: str) -> list[str]:
+        peeled: list[str] = []
+        cur = norm_tok
+        while True:
+            matched_sfx = next(
+                (s for s in suffixes if cur.endswith(s) and len(cur) > len(s)),
+                None,
+            )
+            if matched_sfx is None:
+                break
+            cur = cur[: -len(matched_sfx)]
+            peeled.append(cur)
+            if cur in generic:
+                break
+        return peeled or [norm_tok]
+
     pkg_stem = os.path.basename(pkg).replace("-", "_")
     for tok in raw_tokens:
         norm = tok.replace("-", "_")
-        stem = norm
-        for sfx in suffixes:
-            if norm.endswith(sfx) and len(norm) > len(sfx):
-                stem = norm[: -len(sfx)]
-                break
-        if stem in generic:
-            if pkg_stem:
-                stems.add((rec["os"], rec["cpu"], pkg, pkg_stem))
-        elif stem:
-            stems.add((rec["os"], rec["cpu"], pkg, stem))
-            for mid in ("_lib", "_bin", "_host"):
-                if stem.endswith(mid) and len(stem) > len(mid):
-                    stems.add((rec["os"], rec["cpu"], pkg, stem[: -len(mid)]))
+        for stem in _peel_host_stems(norm):
+            if stem in generic:
+                if pkg_stem:
+                    stems.add((rec["os"], rec["cpu"], pkg, pkg_stem))
+            elif stem:
+                stems.add((rec["os"], rec["cpu"], pkg, stem))
+                for mid in ("_lib", "_bin", "_host"):
+                    if stem.endswith(mid) and len(stem) > len(mid):
+                        trimmed = stem[: -len(mid)]
+                        if trimmed in generic:
+                            if pkg_stem:
+                                stems.add(
+                                    (rec["os"], rec["cpu"], pkg, pkg_stem)
+                                )
+                        else:
+                            stems.add((rec["os"], rec["cpu"], pkg, trimmed))
     return stems
 
 
@@ -993,6 +1693,24 @@ def _check_attribute_parity(
     return errs
 
 
+# Canonicalize pre-normalized test dicts (e.g. from cached baselines or unit
+# tests) so Fuchsia component URL records always carry `os = "fuchsia"`.
+def _ensure_normalized_record(
+    rec_or_entry: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Normalizes a raw `tests.json` entry or canonicalizes a normalized dict."""
+    if "canonical_id" not in rec_or_entry:
+        return normalize_test_entry(rec_or_entry)
+    rec = dict(rec_or_entry)
+    if _is_fuchsia_component_url(rec.get("name")) or _is_fuchsia_component_url(
+        rec.get("canonical_id")
+    ):
+        rec["os"] = "fuchsia"
+        if not rec.get("max_severity"):
+            rec["max_severity"] = "WARN"
+    return rec
+
+
 def verify_parity(
     before_tests: Sequence[Mapping[str, Any]],
     after_tests: Sequence[Mapping[str, Any]],
@@ -1002,14 +1720,8 @@ def verify_parity(
     workdir: str = "",
 ) -> list[dict[str, Any]]:
     """Compares normalized baseline and post-change `tests.json` records."""
-    before = [
-        normalize_test_entry(t) if "canonical_id" not in t else dict(t)
-        for t in before_tests
-    ]
-    after = [
-        normalize_test_entry(t) if "canonical_id" not in t else dict(t)
-        for t in after_tests
-    ]
+    before = [_ensure_normalized_record(t) for t in before_tests]
+    after = [_ensure_normalized_record(t) for t in after_tests]
     pkg_states = dict(package_states or {})
     footers = parse_commit_footers(commit_msg)
 
@@ -1036,6 +1748,7 @@ def verify_parity(
             pstate.after_gn,
             pstate.after_bazel,
             is_gn2gone_commit=footers.is_gn2gone,
+            before_bazel=pstate.before_bazel,
         )
         kept_gn_by_pkg[norm_pkg] = _kept_gn_test_names_above_sentinel(
             pstate.after_gn, pstate.after_bazel

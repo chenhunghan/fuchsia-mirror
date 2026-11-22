@@ -4,7 +4,7 @@
 
 #include "nand_driver.h"
 
-#include <fuchsia/hardware/badblock/cpp/banjo.h>
+#include <fidl/fuchsia.hardware.badblock/cpp/wire.h>
 #include <fuchsia/hardware/nand/c/banjo.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <zircon/assert.h>
@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 
+#include <fbl/alloc_checker.h>
 #include <fbl/array.h>
 
 #include "nand_operation.h"
@@ -58,7 +59,8 @@ __PRINTFLIKE(3, 4) void LogError(const char* file, int line, const char* format,
 
 class NandDriverImpl final : public ftl::NandDriver {
  public:
-  NandDriverImpl(const nand_protocol_t* parent, const bad_block_protocol_t* bad_block,
+  NandDriverImpl(const nand_protocol_t* parent,
+                 fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock> bad_block,
                  ftl::OperationCounters* counters, uint32_t ftl_original_size)
       : NandDriver(FtlLogger{
             .trace = &LogTrace,
@@ -68,7 +70,7 @@ class NandDriverImpl final : public ftl::NandDriver {
             .error = &LogError,
         }),
         parent_(parent),
-        bad_block_protocol_(bad_block),
+        bad_block_(bad_block),
         counters_(counters),
         ftl_original_size_(ftl_original_size) {}
   ~NandDriverImpl() final {}
@@ -98,7 +100,7 @@ class NandDriverImpl final : public ftl::NandDriver {
   ftl::OobDoubler parent_;
   size_t op_size_ = 0;
   nand_info_t info_ = {};
-  const bad_block_protocol_t* bad_block_protocol_;
+  fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock> bad_block_;
   fbl::Array<uint32_t> bad_blocks_;
   ftl::OperationCounters* counters_ = nullptr;
   uint32_t ftl_original_size_;
@@ -109,6 +111,14 @@ const char* NandDriverImpl::Init() {
   FDF_LOG(INFO, "FTL: Nand: page_size %u, block size %u, %u blocks, %u ecc, %u oob, op size %lu",
           info_.page_size, info_.pages_per_block, info_.num_blocks, info_.ecc_bits, info_.oob_size,
           op_size_);
+
+  if (parent_.active()) {
+    // Every page read by the FTL is two page reads on the underlying nand, and the FTL only counts
+    // the former when deciding if a block has been read enough to be at risk of read-disturb
+    // errors. Halve the limit to compensate.
+    set_read_wear_limit(ftl::kDefaultReadWearLimit / 2);
+    FDF_LOG(INFO, "FTL: Nand: pages are doubled, read wear limit set to %u", read_wear_limit());
+  }
 
   if (!GetBadBlocks()) {
     return "Failed to query bad blocks";
@@ -406,29 +416,36 @@ bool NandDriverImpl::HandleAlternateConfig(const ftl::Volume* ftl_volume,
 }
 
 bool NandDriverImpl::GetBadBlocks() {
-  if (!bad_block_protocol_->ops) {
+  if (!bad_block_.is_valid()) {
     return true;
   }
-  ddk::BadBlockProtocolClient client(const_cast<bad_block_protocol_t*>(bad_block_protocol_));
-
-  size_t num_bad_blocks;
-  zx_status_t status = client.GetBadBlockList(nullptr, 0, &num_bad_blocks);
-  if (status != ZX_OK) {
+  fidl::WireResult result = fidl::WireCall(bad_block_)->GetBadBlockList();
+  if (result.is_peer_closed() || result.status() == ZX_ERR_NOT_FOUND) {
+    FDF_LOG(INFO, "Bad block protocol absent or peer closed: %s", result.status_string());
+    bad_block_ = fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock>(ZX_HANDLE_INVALID);
+    return true;
+  }
+  if (!result.ok()) {
+    FDF_LOG(ERROR, "Failed to get bad block list: %s", result.status_string());
     return false;
   }
-  if (!num_bad_blocks) {
+  if (result->is_error()) {
+    FDF_LOG(ERROR, "GetBadBlockList returned error: %s",
+            zx_status_get_string(result->error_value()));
+    return false;
+  }
+  const auto& list = result->value()->bad_block_list;
+  if (list.empty()) {
     return true;
   }
 
-  std::unique_ptr<uint32_t[]> bad_block_list(new uint32_t[num_bad_blocks]);
-  size_t new_count;
-  status = client.GetBadBlockList(bad_block_list.get(), num_bad_blocks, &new_count);
-  if (status != ZX_OK) {
+  fbl::AllocChecker ac;
+  bad_blocks_ = fbl::MakeArray<uint32_t>(&ac, list.size());
+  if (!ac.check()) {
+    FDF_LOG(ERROR, "Failed to allocate memory for bad blocks");
     return false;
   }
-  ZX_ASSERT(new_count == num_bad_blocks);
-
-  bad_blocks_ = fbl::Array<uint32_t>(bad_block_list.release(), num_bad_blocks);
+  memcpy(bad_blocks_.data(), list.data(), list.size() * sizeof(uint32_t));
 
   for (uint32_t bad_block : bad_blocks_) {
     FDF_LOG(DEBUG, "Bad block: %x", bad_block);
@@ -441,17 +458,18 @@ bool NandDriverImpl::GetBadBlocks() {
 namespace ftl {
 
 // Static.
-std::unique_ptr<NandDriver> NandDriver::Create(const nand_protocol_t* parent,
-                                               const bad_block_protocol_t* bad_block,
-                                               uint32_t ftl_original_size) {
+std::unique_ptr<NandDriver> NandDriver::Create(
+    const nand_protocol_t* parent,
+    fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock> bad_block,
+    uint32_t ftl_original_size) {
   return std::unique_ptr<NandDriver>(
       new NandDriverImpl(parent, bad_block, nullptr, ftl_original_size));
 }
 
-std::unique_ptr<NandDriver> NandDriver::CreateWithCounters(const nand_protocol_t* parent,
-                                                           const bad_block_protocol_t* bad_block,
-                                                           OperationCounters* counters,
-                                                           uint32_t ftl_original_size) {
+std::unique_ptr<NandDriver> NandDriver::CreateWithCounters(
+    const nand_protocol_t* parent,
+    fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock> bad_block,
+    OperationCounters* counters, uint32_t ftl_original_size) {
   return std::unique_ptr<NandDriver>(
       new NandDriverImpl(parent, bad_block, counters, ftl_original_size));
 }

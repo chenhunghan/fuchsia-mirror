@@ -17,7 +17,7 @@ are rebased periodically to make them easy to send as GitHub pull requests
 to the upstream project, as described in the
 [Strategy section of the RFC][rfc-strategy].
 
-## Feature: Status of running commands
+## Feature: Status of running commands {:#feature-status-of-running-commands}
 
 Set `NINJA_STATUS_MAX_COMMANDS` in your environment to a strictly positive
 integer to let Ninja print, when run in a smart terminal, a table of the
@@ -69,7 +69,7 @@ shared by participating clients (e.g. compiler, linkers, or even build tools).
 The Fuchsia-specific Ninja binary can act both as a client or a server for the
 protocol.
 
-You can enable server mode through the `--jobserver` command-line flag, or
+You can enable server mode through the `--jobserver-pool` command-line flag, or
 setting `NINJA_JOBSERVER=1` in the environment, when starting Ninja.
 
 When Ninja starts, client mode is enabled automatically by looking at the

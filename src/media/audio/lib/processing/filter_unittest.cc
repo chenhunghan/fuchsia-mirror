@@ -6,7 +6,9 @@
 
 #include <lib/syslog/cpp/macros.h>
 
+#include <cmath>
 #include <limits>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -283,6 +285,104 @@ TEST(SincFilterTest, ComputeSample) {
   // edge of the data populated in ValidateSincComputeSample (downsampling of about 4.125:1).
   side_length = 132;
   ValidateSincComputeSample(source_rate, dest_rate, side_length, num_frac_bits);
+}
+
+double MeasureFilterMagnitude(SincFilter& filter, int64_t frac_offset, double freq_hz,
+                              double sample_rate = 96000.0) {
+  constexpr int32_t kCenter = 50;
+  constexpr int32_t kSize = 101;
+  float cos_buf[kSize];
+  float sin_buf[kSize];
+  double omega = 2.0 * M_PI * freq_hz / sample_rate;
+  for (int32_t i = 0; i < kSize; ++i) {
+    int32_t n = i - kCenter;
+    cos_buf[i] = static_cast<float>(std::cos(omega * static_cast<double>(n)));
+    sin_buf[i] = static_cast<float>(std::sin(omega * static_cast<double>(n)));
+  }
+  double y_cos = filter.ComputeSample(frac_offset, &cos_buf[kCenter]);
+  double y_sin = filter.ComputeSample(frac_offset, &sin_buf[kCenter]);
+  return std::sqrt(y_cos * y_cos + y_sin * y_sin);
+}
+
+// Verifies HighPass SincFilter length, >43.9 dB stopband attenuation, and 26-31 kHz passband.
+TEST(SincFilterTest, HighPassFrequencyResponse) {
+  EXPECT_EQ(SincFilter::Length(96000, 96000, /*high_pass=*/true),
+            Fixed::FromRaw(SincFilter::kFracHighPassSideLength));
+
+  SincFilter filter(96000, 96000, SincFilter::kFracHighPassSideLength,
+                    Fixed::Format::FractionalBits, /*high_pass=*/true);
+  EXPECT_TRUE(filter.high_pass());
+  EXPECT_EQ(filter.side_length(), SincFilter::kFracHighPassSideLength);
+
+  const std::vector<int64_t> test_alphas = {0, 1, 2048, 4096, 8191};
+  for (auto alpha : test_alphas) {
+    SCOPED_TRACE(testing::Message() << "alpha = " << alpha);
+
+    // DC (0 Hz)
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 0.0), 2e-5);
+
+    // Deep & mid audible stopband
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 1000.0), 2e-5);
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 10000.0), 5e-5);
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 18000.0), 0.002);
+
+    // Upper audible stopband
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 19500.0), 0.0065);
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 20000.0), 0.0035);
+
+    // Cutoff (23 kHz)
+    auto mag_23k = MeasureFilterMagnitude(filter, alpha, 23000.0);
+    EXPECT_GE(mag_23k, 0.499);
+    EXPECT_LE(mag_23k, 0.501);
+
+    // Ultrasonic passband
+    for (double freq : {26000.0, 31000.0, 36000.0, 40000.0}) {
+      auto mag = MeasureFilterMagnitude(filter, alpha, freq);
+      EXPECT_GE(mag, 0.992) << "freq = " << freq;
+      EXPECT_LE(mag, 0.008 + 1.0) << "freq = " << freq;
+    }
+  }
+}
+
+// Verifies LowPass SincFilter length, audible passband ripple, and >43.9 dB ultrasonic stopband.
+TEST(SincFilterTest, LowPassFrequencyResponse) {
+  EXPECT_EQ(SincFilter::Length(96000, 96000, /*high_pass=*/false, /*low_pass=*/true),
+            Fixed::FromRaw(SincFilter::kFracHighPassSideLength));
+  EXPECT_EQ(SincFilter::Length(96000, 48000, /*high_pass=*/false, /*low_pass=*/true),
+            Fixed::FromRaw(SincFilter::kFracHighPassSideLength));
+  EXPECT_EQ(SincFilter::Length(96000, 16000, /*high_pass=*/false, /*low_pass=*/true),
+            SincFilter::Length(96000, 16000));
+
+  SincFilter filter(96000, 96000, SincFilter::kFracHighPassSideLength,
+                    Fixed::Format::FractionalBits, /*high_pass=*/false, /*low_pass=*/true);
+  EXPECT_FALSE(filter.high_pass());
+  EXPECT_TRUE(filter.low_pass());
+  EXPECT_EQ(filter.side_length(), SincFilter::kFracHighPassSideLength);
+
+  const std::vector<int64_t> test_alphas = {0, 1, 2048, 4096, 8191};
+  for (auto alpha : test_alphas) {
+    SCOPED_TRACE(testing::Message() << "alpha = " << alpha);
+
+    // Audible passband (DC through 20 kHz)
+    for (double freq : {0.0, 1000.0, 10000.0, 18000.0, 19500.0, 20000.0}) {
+      auto mag = MeasureFilterMagnitude(filter, alpha, freq);
+      EXPECT_GE(mag, 0.992) << "freq = " << freq;
+      EXPECT_LE(mag, 1.008) << "freq = " << freq;
+    }
+
+    // Cutoff (23 kHz)
+    auto mag_23k = MeasureFilterMagnitude(filter, alpha, 23000.0);
+    EXPECT_GE(mag_23k, 0.499);
+    EXPECT_LE(mag_23k, 0.501);
+
+    // Ultrasonic stopband (>= 26 kHz)
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 26000.0), 0.0035);
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 26500.0), 0.0065);
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 28000.0), 0.002);
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 36000.0), 5e-5);
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 40000.0), 1e-4);
+    EXPECT_LT(MeasureFilterMagnitude(filter, alpha, 45000.0), 5e-5);
+  }
 }
 
 }  // namespace

@@ -7,9 +7,11 @@ mod feature;
 mod intrin;
 mod paging;
 mod system;
+mod ticks;
 
 pub use feature::*;
 #[cfg(target_arch = "riscv64")]
 pub use intrin::*;
 pub use paging::*;
 pub use system::*;
+pub use ticks::*;

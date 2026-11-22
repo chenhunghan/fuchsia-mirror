@@ -10,6 +10,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Mapping, Sequence
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 
 # Ensure repository root is on sys.path when running standalone.
@@ -18,6 +21,139 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from build.bazel.scripts import generate_fx_host_tool
+
+_FAKE_PYTHON_REPO_NAME = "compact_prebuilt_python"
+_FAKE_PYTHON_VERSION = "3.14"
+
+_FAKE_COMPACT_PYTHON_REAL = (
+    "#!/bin/bash\n"
+    "set -euo pipefail\n"
+    'flags=""\n'
+    'while [[ $# -gt 0 && "$1" == -* ]]; do\n'
+    '  flags="${flags}${flags:+ }$1"\n'
+    "  shift\n"
+    "done\n"
+    'script="$1"\n'
+    "shift\n"
+    'if [[ "${script}" == */my_py_bin ]]; then\n'
+    '  if [[ -n "${PYTHONHOME+x}" ]]; then\n'
+    '    echo "ERROR: stage1 saw PYTHONHOME=${PYTHONHOME}" >&2\n'
+    "    exit 11\n"
+    "  fi\n"
+    '  venv_dir="$(mktemp -d)"\n'
+    '  mkdir -p "${venv_dir}/bin"\n'
+    '  ln -s "${RUNFILES_DIR}/compact_prebuilt_python/python3" "${venv_dir}/bin/python3"\n'
+    "  export PYTHONSAFEPATH=1\n"
+    '  exec "${venv_dir}/bin/python3" "${RUNFILES_DIR}/_main/pkg/stage2.py" "$@"\n'
+    "fi\n"
+    'echo "flags=${flags}"\n'
+    'echo "script=$(basename "${script}")"\n'
+    'echo "PYTHONHOME=${PYTHONHOME-<UNSET>}"\n'
+    'echo "PYTHONPATH=${PYTHONPATH-<UNSET>}"\n'
+    'echo "PYTHONSAFEPATH=${PYTHONSAFEPATH-<UNSET>}"\n'
+    'echo "_FX_UNSET_PYTHONSAFEPATH=${_FX_UNSET_PYTHONSAFEPATH-<UNSET>}"\n'
+    'echo "args=$*"\n'
+)
+
+
+def _stage_fake_compact_python_repo(
+    execroot: Path,
+) -> tuple[Path, Sequence[tuple[str, Path]]]:
+    external_repo = execroot / "external" / _FAKE_PYTHON_REPO_NAME
+    external_repo.mkdir(parents=True, exist_ok=True)
+
+    prebuilt_real = (
+        execroot
+        / "prebuilt"
+        / "third_party"
+        / "python3"
+        / "linux-x64"
+        / "bin"
+        / f"python{_FAKE_PYTHON_VERSION}"
+    )
+    prebuilt_real.parent.mkdir(parents=True, exist_ok=True)
+    prebuilt_real.write_text(_FAKE_COMPACT_PYTHON_REAL, encoding="utf-8")
+    prebuilt_real.chmod(0o755)
+
+    py_real_link = external_repo / f"python{_FAKE_PYTHON_VERSION}-real"
+    py_real_link.symlink_to(prebuilt_real)
+
+    lib_zip = external_repo / f"lib_python{_FAKE_PYTHON_VERSION}.zip"
+    lib_zip.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+
+    dynload_so = (
+        external_repo
+        / "lib"
+        / f"python{_FAKE_PYTHON_VERSION}"
+        / "lib-dynload"
+        / "_m.so"
+    )
+    dynload_so.parent.mkdir(parents=True, exist_ok=True)
+    dynload_so.write_bytes(b"\x7fELF")
+
+    orig_wrapper = external_repo / "python3"
+    orig_wrapper.write_text(
+        "#!/bin/bash\n"
+        "# ORIGINAL WRAPPER\n"
+        'PYTHONHOME="/broken" PYTHONPATH="/broken/lib.zip" exec true "$@"\n',
+        encoding="utf-8",
+    )
+    orig_wrapper.chmod(0o755)
+
+    manifest_entries = (
+        (f"{_FAKE_PYTHON_REPO_NAME}/python3", orig_wrapper),
+        (
+            f"{_FAKE_PYTHON_REPO_NAME}/python{_FAKE_PYTHON_VERSION}-real",
+            py_real_link,
+        ),
+        (
+            f"{_FAKE_PYTHON_REPO_NAME}/lib_python{_FAKE_PYTHON_VERSION}.zip",
+            lib_zip,
+        ),
+        (
+            f"{_FAKE_PYTHON_REPO_NAME}/lib/python{_FAKE_PYTHON_VERSION}/lib-dynload/_m.so",
+            dynload_so,
+        ),
+    )
+    return external_repo, manifest_entries
+
+
+def _generate_compact_python_tool(
+    execroot: Path,
+    *,
+    entry_body: str,
+    entry_name: str = "my_py_bin",
+    extra_manifest_entries: Sequence[tuple[str, Path]] = (),
+    runtime_tools: Mapping[str, Path] | None = None,
+) -> tuple[int, Path, Path, Path]:
+    bin_dir = execroot / "bazel-out" / "k8-opt" / "bin" / "pkg"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    external_repo, py_entries = _stage_fake_compact_python_repo(execroot)
+
+    entry_point = bin_dir / entry_name
+    entry_point.write_text(entry_body, encoding="utf-8")
+    entry_point.chmod(0o755)
+
+    manifest_file = bin_dir / f"{entry_name}.runfiles_manifest"
+    all_entries = (*py_entries, *extra_manifest_entries)
+    manifest_file.write_text(
+        "\n".join(f"{rloc} {target}" for rloc, target in all_entries) + "\n",
+        encoding="utf-8",
+    )
+
+    out_launcher = bin_dir / "my-py-tool"
+    out_runtime = bin_dir / "my-py-tool.runtime_dir"
+    rc = generate_fx_host_tool.generate_fx_host_tool(
+        entry_point=entry_point.relative_to(execroot),
+        entry_runfiles_manifest=manifest_file.relative_to(execroot),
+        output_launcher=out_launcher,
+        output_runtime_dir=out_runtime,
+        bazel_execroot=execroot,
+        data_runfiles=(),
+        runtime_tools=runtime_tools if runtime_tools is not None else {},
+    )
+    return rc, external_repo, out_launcher, out_runtime
 
 
 class GenerateFxHostToolTest(unittest.TestCase):
@@ -634,6 +770,7 @@ class GenerateFxHostToolTest(unittest.TestCase):
                 "#!/bin/bash\n"
                 "set -euo pipefail\n"
                 'echo "manifest_env=${RUNFILES_MANIFEST_FILE:-UNSET}"\n'
+                'echo "manifest_file_exists=$([[ -e "${RUNFILES_DIR}/MANIFEST" ]] && echo yes || echo no)"\n'
                 'echo "ld_env=${LD_LIBRARY_PATH:-UNSET}"\n'
                 'echo "repo_map=$(head -n 1 "${RUNFILES_DIR}/_repo_mapping")"\n'
                 'echo "in_tree=$(cat "${RUNFILES_DIR}/_main/pkg/in_tree.txt")"\n'
@@ -694,14 +831,19 @@ class GenerateFxHostToolTest(unittest.TestCase):
             # Deleting or mutating the original source file leaves the staged copy self-contained.
             real_src_data.unlink()
 
-            # Manifest entries inside relocated runtime_dir must be relative, not pointing to deleted output_base.
-            relocated_manifest = (
-                host_tools_dir
-                / "clean-safe-tool.runtime_dir"
-                / "tool_bin.runfiles"
-                / "MANIFEST"
-            ).read_text()
-            self.assertNotIn(str(output_base), relocated_manifest)
+            # Materialized POSIX runfiles directories must omit MANIFEST and
+            # .runfiles_manifest so C++/Rust/Python runfiles libraries use
+            # CWD-independent directory lookup under ${RUNFILES_DIR}.
+            relocated_runtime = host_tools_dir / "clean-safe-tool.runtime_dir"
+            relocated_runfiles = relocated_runtime / "tool_bin.runfiles"
+            self.assertFalse((relocated_runfiles / "MANIFEST").exists())
+            self.assertFalse((relocated_runfiles / "MANIFEST").is_symlink())
+            self.assertFalse(
+                (relocated_runtime / "tool_bin.runfiles_manifest").exists()
+            )
+            self.assertFalse(
+                (relocated_runtime / "tool_bin.runfiles_manifest").is_symlink()
+            )
 
             # Even if caller environment has a stale RUNFILES_MANIFEST_FILE, launcher unsets it.
             caller_cwd = tmp_path / "arbitrary_cwd"
@@ -722,6 +864,7 @@ class GenerateFxHostToolTest(unittest.TestCase):
                 proc.stdout.strip().splitlines(),
                 [
                     "manifest_env=UNSET",
+                    "manifest_file_exists=no",
                     "ld_env=UNSET",
                     "repo_map=,fuchsia,_main",
                     "in_tree=in-tree-v1",
@@ -882,6 +1025,517 @@ class GenerateFxHostToolTest(unittest.TestCase):
             self.assertTrue((staged_bundle / "bin" / "sub2").is_symlink())
             self.assertEqual(
                 os.readlink(staged_bundle / "bin" / "sub2"), "sub1"
+            )
+
+    def test_in_tree_non_prebuilt_directory_materialized_for_swarming_relocation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            build_bot_fuchsia_dir = tmp_path / "cache" / "incremental"
+            build_bot_out = build_bot_fuchsia_dir / "out" / "not-default"
+            execroot = (
+                build_bot_out
+                / "gen"
+                / "build"
+                / "bazel"
+                / "output_base"
+                / "execroot"
+                / "_main"
+            )
+            bin_dir = execroot / "bazel-out" / "k8-fastbuild" / "bin" / "pkg"
+            bin_dir.mkdir(parents=True)
+
+            # Non-prebuilt in-tree directory with internal relative symlink and
+            # relative cross-directory symlinks (both directory and file) to
+            # another in-tree non-prebuilt directory.
+            in_tree_data_dir = build_bot_fuchsia_dir / "tools" / "data_dir"
+            (in_tree_data_dir / "sub").mkdir(parents=True)
+            (in_tree_data_dir / "sub" / "config.json").write_text(
+                '{"mode":"hermetic"}\n'
+            )
+            (in_tree_data_dir / "sub" / "alias.json").symlink_to("config.json")
+
+            other_in_tree_dir = build_bot_fuchsia_dir / "src" / "shared_assets"
+            other_in_tree_dir.mkdir(parents=True)
+            (other_in_tree_dir / "asset.txt").write_text("asset-ok\n")
+            (other_in_tree_dir / "doc.txt").write_text("doc-ok\n")
+            (in_tree_data_dir / "linked_assets").symlink_to(
+                os.path.relpath(other_in_tree_dir, in_tree_data_dir)
+            )
+            (in_tree_data_dir / "sub" / "linked_doc.txt").symlink_to(
+                os.path.relpath(
+                    other_in_tree_dir / "doc.txt", in_tree_data_dir / "sub"
+                )
+            )
+
+            # Prebuilt directory under fuchsia_dir / "prebuilt" must remain a symlink.
+            prebuilt_rel = Path(
+                "prebuilt", "third_party", "jq_pkg", "linux-x64"
+            )
+            prebuilt_dir = build_bot_fuchsia_dir / prebuilt_rel
+            (prebuilt_dir / "bin").mkdir(parents=True)
+            (prebuilt_dir / "bin" / "jq").write_text("#!/bin/bash\nexit 0\n")
+            (prebuilt_dir / "bin" / "jq").chmod(0o755)
+
+            in_tree_entry = (
+                build_bot_fuchsia_dir / "tools" / "runner" / "run_tool.sh"
+            )
+            in_tree_entry.parent.mkdir(parents=True)
+            in_tree_entry.write_text(
+                "#!/bin/bash\n"
+                "set -euo pipefail\n"
+                'cat "${RUNFILES_DIR}/_main/tools/data_dir/sub/alias.json"\n'
+                'cat "${RUNFILES_DIR}/_main/tools/data_dir/linked_assets/asset.txt"\n'
+                'cat "${RUNFILES_DIR}/_main/tools/data_dir/sub/linked_doc.txt"\n'
+            )
+            in_tree_entry.chmod(0o755)
+
+            (execroot / "tools" / "runner").mkdir(parents=True)
+            (execroot / "tools" / "runner" / "run_tool.sh").symlink_to(
+                in_tree_entry
+            )
+            (execroot / "tools" / "data_dir").symlink_to(in_tree_data_dir)
+            (execroot / prebuilt_rel.parent).mkdir(parents=True)
+            (execroot / prebuilt_rel).symlink_to(prebuilt_dir)
+
+            out_launcher = bin_dir / "dir-tool"
+            out_runtime = bin_dir / "dir-tool.runtime_dir"
+            rc = generate_fx_host_tool.generate_fx_host_tool(
+                entry_point=Path("tools/runner/run_tool.sh"),
+                entry_runfiles_manifest=None,
+                output_launcher=out_launcher,
+                output_runtime_dir=out_runtime,
+                bazel_execroot=execroot,
+                data_runfiles=[
+                    "tools/data_dir",
+                    str(prebuilt_rel),
+                ],
+                runtime_tools={},
+                fuchsia_dir=build_bot_fuchsia_dir,
+            )
+            self.assertEqual(rc, 0)
+
+            staged_data_dir = (
+                out_runtime
+                / "run_tool.sh.runfiles"
+                / "_main"
+                / "tools"
+                / "data_dir"
+            )
+            self.assertTrue(staged_data_dir.is_dir())
+            self.assertFalse(staged_data_dir.is_symlink())
+            self.assertTrue(
+                (staged_data_dir / "sub" / "alias.json").is_symlink()
+            )
+            self.assertEqual(
+                os.readlink(staged_data_dir / "sub" / "alias.json"),
+                "config.json",
+            )
+            self.assertTrue((staged_data_dir / "linked_assets").is_dir())
+            self.assertFalse((staged_data_dir / "linked_assets").is_symlink())
+            self.assertTrue(
+                (staged_data_dir / "sub" / "linked_doc.txt").is_file()
+            )
+            self.assertFalse(
+                (staged_data_dir / "sub" / "linked_doc.txt").is_symlink()
+            )
+
+            staged_prebuilt_dir = (
+                out_runtime / "run_tool.sh.runfiles" / "_main" / prebuilt_rel
+            )
+            self.assertTrue(staged_prebuilt_dir.is_symlink())
+            self.assertEqual(
+                staged_prebuilt_dir.resolve(), prebuilt_dir.resolve()
+            )
+
+            local_caller = tmp_path / "local_caller"
+            local_caller.mkdir()
+            local_proc = subprocess.run(
+                [str(out_launcher)],
+                cwd=local_caller,
+                env={"PATH": "/usr/bin:/bin"},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(
+                local_proc.stdout.strip().splitlines(),
+                ['{"mode":"hermetic"}', "asset-ok", "doc-ok"],
+            )
+
+            # Relocate out/not-default to an isolated Swarming directory and remove the checkout.
+            swarming_out = tmp_path / "swarming_ir" / "out" / "not-default"
+            swarming_out.parent.mkdir(parents=True)
+            shutil.move(str(build_bot_out), str(swarming_out))
+            shutil.rmtree(build_bot_fuchsia_dir)
+
+            swarming_launcher = (
+                swarming_out
+                / "gen"
+                / "build"
+                / "bazel"
+                / "output_base"
+                / "execroot"
+                / "_main"
+                / "bazel-out"
+                / "k8-fastbuild"
+                / "bin"
+                / "pkg"
+                / "dir-tool"
+            )
+            caller_cwd = tmp_path / "swarming_caller"
+            caller_cwd.mkdir()
+            proc = subprocess.run(
+                [str(swarming_launcher)],
+                cwd=caller_cwd,
+                env={"PATH": "/usr/bin:/bin"},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(
+                proc.stdout.strip().splitlines(),
+                ['{"mode":"hermetic"}', "asset-ok", "doc-ok"],
+            )
+
+    def test_duplicate_runtime_tool_command_names_fail_at_build_time(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            execroot = tmp_path / "execroot"
+            bin_dir = execroot / "bazel-out" / "k8-fastbuild" / "bin" / "pkg"
+            bin_dir.mkdir(parents=True)
+
+            entry_point = bin_dir / "entry.sh"
+            entry_point.write_text("#!/bin/bash\nexit 0\n")
+            entry_point.chmod(0o755)
+
+            tool_a = execroot / "pkg_a" / "dup-cmd"
+            tool_a.parent.mkdir(parents=True)
+            tool_a.write_text("#!/bin/bash\necho a\n")
+            tool_a.chmod(0o755)
+
+            tool_b = execroot / "pkg_b" / "dup-cmd"
+            tool_b.parent.mkdir(parents=True)
+            tool_b.write_text("#!/bin/bash\necho b\n")
+            tool_b.chmod(0o755)
+
+            # 1. Duplicate --runtime-tool command names on CLI.
+            err_dup_rt = StringIO()
+            with redirect_stderr(err_dup_rt):
+                rc_dup_rt = generate_fx_host_tool.main(
+                    [
+                        f"--entry-point={entry_point.relative_to(execroot)}",
+                        f"--output-launcher={bin_dir / 'out1'}",
+                        f"--output-runtime-dir={bin_dir / 'out1.runtime_dir'}",
+                        f"--bazel-execroot={execroot}",
+                        f"--runtime-tool=dup-cmd={tool_a.relative_to(execroot)}",
+                        f"--runtime-tool=dup-cmd={tool_b.relative_to(execroot)}",
+                    ]
+                )
+            self.assertEqual(rc_dup_rt, 1)
+            self.assertIn("ERROR:", err_dup_rt.getvalue())
+            self.assertIn("dup-cmd", err_dup_rt.getvalue())
+
+            # 2. Collision between --runtime-cipd-dir executable and --runtime-tool.
+            cipd_dir_a = execroot / "cipd_a"
+            (cipd_dir_a / "bin").mkdir(parents=True)
+            (cipd_dir_a / "bin" / "dup-cmd").write_text("#!/bin/bash\nexit 0\n")
+            (cipd_dir_a / "bin" / "dup-cmd").chmod(0o755)
+
+            err_cipd_rt = StringIO()
+            with redirect_stderr(err_cipd_rt):
+                rc_cipd_rt = generate_fx_host_tool.main(
+                    [
+                        f"--entry-point={entry_point.relative_to(execroot)}",
+                        f"--output-launcher={bin_dir / 'out2'}",
+                        f"--output-runtime-dir={bin_dir / 'out2.runtime_dir'}",
+                        f"--bazel-execroot={execroot}",
+                        (
+                            "--runtime-cipd-dir=cipd_a="
+                            f"{cipd_dir_a.relative_to(execroot)}:"
+                            f"{Path('prebuilt', 'cipd_a')}"
+                        ),
+                        f"--runtime-tool=dup-cmd={tool_a.relative_to(execroot)}",
+                    ]
+                )
+            self.assertEqual(rc_cipd_rt, 1)
+            self.assertIn("ERROR:", err_cipd_rt.getvalue())
+            self.assertIn("dup-cmd", err_cipd_rt.getvalue())
+
+            # 3. Collision between --runtime-tool and --runtime-fx-tool.
+            fx_launcher = bin_dir / "fx_child"
+            fx_launcher.write_text("#!/bin/bash\nexit 0\n")
+            fx_launcher.chmod(0o755)
+            fx_runtime = bin_dir / "fx_child.runtime_dir"
+            fx_runtime.mkdir()
+
+            err_fx_rt = StringIO()
+            with redirect_stderr(err_fx_rt):
+                rc_fx_rt = generate_fx_host_tool.main(
+                    [
+                        f"--entry-point={entry_point.relative_to(execroot)}",
+                        f"--output-launcher={bin_dir / 'out3'}",
+                        f"--output-runtime-dir={bin_dir / 'out3.runtime_dir'}",
+                        f"--bazel-execroot={execroot}",
+                        f"--runtime-tool=dup-cmd={tool_a.relative_to(execroot)}",
+                        (
+                            "--runtime-fx-tool=dup-cmd="
+                            f"{fx_launcher.relative_to(execroot)}:"
+                            f"{fx_runtime.relative_to(execroot)}"
+                        ),
+                    ]
+                )
+            self.assertEqual(rc_fx_rt, 1)
+            self.assertIn("ERROR:", err_fx_rt.getvalue())
+            self.assertIn("dup-cmd", err_fx_rt.getvalue())
+
+            # 4. Collision across two --runtime-cipd-dir packages exposing the same executable.
+            cipd_dir_b = execroot / "cipd_b"
+            (cipd_dir_b / "bin").mkdir(parents=True)
+            (cipd_dir_b / "bin" / "dup-cmd").write_text("#!/bin/bash\nexit 0\n")
+            (cipd_dir_b / "bin" / "dup-cmd").chmod(0o755)
+
+            err_cipd_dup = StringIO()
+            with redirect_stderr(err_cipd_dup):
+                rc_cipd_dup = generate_fx_host_tool.main(
+                    [
+                        f"--entry-point={entry_point.relative_to(execroot)}",
+                        f"--output-launcher={bin_dir / 'out4'}",
+                        f"--output-runtime-dir={bin_dir / 'out4.runtime_dir'}",
+                        f"--bazel-execroot={execroot}",
+                        (
+                            "--runtime-cipd-dir=cipd_a="
+                            f"{cipd_dir_a.relative_to(execroot)}:"
+                            f"{Path('prebuilt', 'cipd_a')}"
+                        ),
+                        (
+                            "--runtime-cipd-dir=cipd_b="
+                            f"{cipd_dir_b.relative_to(execroot)}:"
+                            f"{Path('prebuilt', 'cipd_b')}"
+                        ),
+                    ]
+                )
+            self.assertEqual(rc_cipd_dup, 1)
+            self.assertIn("ERROR:", err_cipd_dup.getvalue())
+            self.assertIn("dup-cmd", err_cipd_dup.getvalue())
+
+    def test_runtime_tool_runfiles_manifest_and_repo_mapping_merged(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            execroot = tmp_path / "execroot"
+            bin_dir = execroot / "bazel-out" / "k8-fastbuild" / "bin" / "pkg"
+            bin_dir.mkdir(parents=True)
+
+            # Plain shell entry without its own runfiles manifest invoking a
+            # Bazel executable runtime_tool that relies on its runfiles_manifest
+            # (empty __init__.py, external repo file, and _repo_mapping).
+            ext_data = execroot / "external" / "helper_repo+" / "data.txt"
+            ext_data.parent.mkdir(parents=True)
+            ext_data.write_text("from-helper-manifest\n")
+
+            helper_repo_map = bin_dir / "py_helper.repo_mapping"
+            helper_repo_map.write_text(",helper_repo,helper_repo+\n")
+
+            helper_bin = bin_dir / "py_helper"
+            helper_bin.write_text(
+                "#!/bin/bash\n"
+                "set -euo pipefail\n"
+                '_self_rf="${BASH_SOURCE[0]}.runfiles"\n'
+                'echo "has_init=$([[ -f "${_self_rf}/_main/helper_pkg/__init__.py" ]] && echo yes || echo no)"\n'
+                'echo "ext_data=$(cat "${RUNFILES_DIR}/helper_repo+/data.txt")"\n'
+                'echo "repo_map=$(cat "${RUNFILES_DIR}/_repo_mapping")"\n'
+            )
+            helper_bin.chmod(0o755)
+
+            helper_manifest = bin_dir / "py_helper.runfiles_manifest"
+            helper_manifest.write_text(
+                f"_main/helper_pkg/__init__.py \n"
+                f"helper_repo+/data.txt {ext_data}\n"
+                f"_repo_mapping {helper_repo_map}\n"
+            )
+
+            sh_entry = execroot / "pkg" / "driver.sh"
+            sh_entry.parent.mkdir(parents=True)
+            sh_entry.write_text(
+                '#!/bin/bash\nset -euo pipefail\npy_helper "$@"\n'
+            )
+            sh_entry.chmod(0o755)
+
+            out_launcher = bin_dir / "sh-with-py-helper"
+            out_runtime = bin_dir / "sh-with-py-helper.runtime_dir"
+            rc = generate_fx_host_tool.main(
+                [
+                    f"--entry-point={sh_entry.relative_to(execroot)}",
+                    f"--output-launcher={out_launcher}",
+                    f"--output-runtime-dir={out_runtime}",
+                    f"--bazel-execroot={execroot}",
+                    f"--runtime-tool=py_helper={helper_bin.relative_to(execroot)}",
+                    f"--runtime-tool-manifest=py_helper={helper_manifest.relative_to(execroot)}",
+                ]
+            )
+            self.assertEqual(rc, 0)
+
+            # Also verify merging when entry has its own _repo_mapping alongside runtime_tool's.
+            entry_repo_map = bin_dir / "entry_bin.repo_mapping"
+            entry_repo_map.write_text(",fuchsia,_main\n")
+            entry_manifest = bin_dir / "entry_bin.runfiles_manifest"
+            entry_manifest.write_text(f"_repo_mapping {entry_repo_map}\n")
+
+            merged_launcher = bin_dir / "merged-tool"
+            merged_runtime = bin_dir / "merged-tool.runtime_dir"
+            rc_merged = generate_fx_host_tool.main(
+                [
+                    f"--entry-point={sh_entry.relative_to(execroot)}",
+                    f"--entry-runfiles-manifest={entry_manifest.relative_to(execroot)}",
+                    f"--output-launcher={merged_launcher}",
+                    f"--output-runtime-dir={merged_runtime}",
+                    f"--bazel-execroot={execroot}",
+                    f"--runtime-tool=py_helper={helper_bin.relative_to(execroot)}",
+                    f"--runtime-tool-manifest=py_helper={helper_manifest.relative_to(execroot)}",
+                ]
+            )
+            self.assertEqual(rc_merged, 0)
+
+            host_tools_dir = tmp_path / "host-tools"
+            host_tools_dir.mkdir()
+            for name, launcher, runtime in (
+                ("sh-with-py-helper", out_launcher, out_runtime),
+                ("merged-tool", merged_launcher, merged_runtime),
+            ):
+                shutil.copy2(launcher, host_tools_dir / name)
+                shutil.copytree(
+                    runtime,
+                    host_tools_dir / f"{name}.runtime_dir",
+                    symlinks=True,
+                )
+            shutil.rmtree(execroot)
+
+            caller_cwd = tmp_path / "ext_cwd"
+            caller_cwd.mkdir()
+            proc1 = subprocess.run(
+                [str(host_tools_dir / "sh-with-py-helper")],
+                cwd=caller_cwd,
+                env={"PATH": "/usr/bin:/bin"},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(
+                proc1.stdout.strip().splitlines(),
+                [
+                    "has_init=yes",
+                    "ext_data=from-helper-manifest",
+                    "repo_map=,helper_repo,helper_repo+",
+                ],
+            )
+
+            proc2 = subprocess.run(
+                [str(host_tools_dir / "merged-tool")],
+                cwd=caller_cwd,
+                env={"PATH": "/usr/bin:/bin"},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(
+                proc2.stdout.strip().splitlines(),
+                [
+                    "has_init=yes",
+                    "ext_data=from-helper-manifest",
+                    "repo_map=,fuchsia,_main",
+                    ",helper_repo,helper_repo+",
+                ],
+            )
+
+    def test_runtime_tool_manifest_and_repo_mapping_validation_errors(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            execroot = tmp_path / "execroot"
+            bin_dir = execroot / "bazel-out" / "k8-fastbuild" / "bin" / "pkg"
+            bin_dir.mkdir(parents=True)
+
+            entry_point = bin_dir / "entry.sh"
+            entry_point.write_text("#!/bin/bash\nexit 0\n")
+            entry_point.chmod(0o755)
+
+            helper_bin = bin_dir / "py_helper"
+            helper_bin.write_text("#!/bin/bash\nexit 0\n")
+            helper_bin.chmod(0o755)
+
+            entry_repo_map = bin_dir / "entry.repo_mapping"
+            entry_repo_map.write_text(",shared_repo,shared_repo+v1\n")
+            entry_manifest = bin_dir / "entry.runfiles_manifest"
+            entry_manifest.write_text(f"_repo_mapping {entry_repo_map}\n")
+
+            helper_repo_map = bin_dir / "helper.repo_mapping"
+            helper_repo_map.write_text(",shared_repo,shared_repo+v2\n")
+            helper_manifest = bin_dir / "helper.runfiles_manifest"
+            helper_manifest.write_text(f"_repo_mapping {helper_repo_map}\n")
+
+            # 1. Conflicting _repo_mapping entries across entry and runtime_tool manifests.
+            err_conflict = StringIO()
+            with redirect_stderr(err_conflict):
+                rc_conflict = generate_fx_host_tool.main(
+                    [
+                        f"--entry-point={entry_point.relative_to(execroot)}",
+                        f"--entry-runfiles-manifest={entry_manifest.relative_to(execroot)}",
+                        f"--output-launcher={bin_dir / 'conflict-out'}",
+                        f"--output-runtime-dir={bin_dir / 'conflict-out.runtime_dir'}",
+                        f"--bazel-execroot={execroot}",
+                        f"--runtime-tool=py_helper={helper_bin.relative_to(execroot)}",
+                        f"--runtime-tool-manifest=py_helper={helper_manifest.relative_to(execroot)}",
+                    ]
+                )
+            self.assertEqual(rc_conflict, 1)
+            self.assertIn("Conflicting _repo_mapping", err_conflict.getvalue())
+            self.assertIn("shared_repo+v1", err_conflict.getvalue())
+            self.assertIn("shared_repo+v2", err_conflict.getvalue())
+
+            # 2. runtime_tool_manifests key without a matching runtime_tools entry.
+            err_orphan = StringIO()
+            with redirect_stderr(err_orphan):
+                rc_orphan = generate_fx_host_tool.main(
+                    [
+                        f"--entry-point={entry_point.relative_to(execroot)}",
+                        f"--output-launcher={bin_dir / 'orphan-out'}",
+                        f"--output-runtime-dir={bin_dir / 'orphan-out.runtime_dir'}",
+                        f"--bazel-execroot={execroot}",
+                        f"--runtime-tool-manifest=orphan_helper={helper_manifest.relative_to(execroot)}",
+                    ]
+                )
+            self.assertEqual(rc_orphan, 1)
+            self.assertIn(
+                "runtime_tool_manifest 'orphan_helper' has no matching runtime_tool",
+                err_orphan.getvalue(),
+            )
+
+            # 3. Duplicate --runtime-tool-manifest for the same tool name in main().
+            alt_manifest = bin_dir / "helper_alt.runfiles_manifest"
+            alt_manifest.write_text("_main/__init__.py \n")
+            err_dup = StringIO()
+            with redirect_stderr(err_dup):
+                rc_dup = generate_fx_host_tool.main(
+                    [
+                        f"--entry-point={entry_point.relative_to(execroot)}",
+                        f"--output-launcher={bin_dir / 'dup-manifest-out'}",
+                        f"--output-runtime-dir={bin_dir / 'dup-manifest-out.runtime_dir'}",
+                        f"--bazel-execroot={execroot}",
+                        f"--runtime-tool=py_helper={helper_bin.relative_to(execroot)}",
+                        f"--runtime-tool-manifest=py_helper={helper_manifest.relative_to(execroot)}",
+                        f"--runtime-tool-manifest=py_helper={alt_manifest.relative_to(execroot)}",
+                    ]
+                )
+            self.assertEqual(rc_dup, 1)
+            self.assertIn(
+                "Duplicate --runtime-tool-manifest for 'py_helper'",
+                err_dup.getvalue(),
             )
 
     def test_sources_manifest_and_build_working_directory(self) -> None:
@@ -1059,6 +1713,318 @@ class GenerateFxHostToolTest(unittest.TestCase):
             self.assertEqual(
                 content,
                 "BUILD.bazel\ntools/cmc/BUILD.bazel\ntools/lib/cml/BUILD.bazel\n",
+            )
+
+    def test_normalizes_compact_python_runtime_layout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            execroot = Path(tmp) / "execroot"
+            rc, external_repo, _, out_runtime = _generate_compact_python_tool(
+                execroot,
+                entry_body="#!/bin/bash\nexit 0\n",
+            )
+            self.assertEqual(rc, 0)
+
+            staged_repo = (
+                out_runtime / "my_py_bin.runfiles" / "compact_prebuilt_python"
+            )
+            staged_bin = staged_repo / "bin" / "python3.14"
+            staged_zip = staged_repo / "lib" / "python314.zip"
+            staged_so = (
+                staged_repo / "lib" / "python3.14" / "lib-dynload" / "_m.so"
+            )
+
+            self.assertTrue(staged_bin.is_file())
+            self.assertFalse(staged_bin.is_symlink())
+            self.assertTrue(os.access(staged_bin, os.X_OK))
+            self.assertTrue(staged_zip.is_file())
+            self.assertEqual(
+                staged_zip.read_bytes(), b"PK\x05\x06" + b"\x00" * 18
+            )
+            self.assertTrue(staged_so.is_file())
+            self.assertFalse((staged_repo / "python3.14-real").exists())
+            self.assertFalse((staged_repo / "lib_python3.14.zip").exists())
+
+            # Rewriting staged python3 must not mutate the external hardlink source.
+            self.assertIn(
+                "ORIGINAL WRAPPER",
+                (external_repo / "python3").read_text(encoding="utf-8"),
+            )
+            staged_wrapper_text = (staged_repo / "python3").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("ORIGINAL WRAPPER", staged_wrapper_text)
+            self.assertIn("unset PYTHONHOME", staged_wrapper_text)
+            self.assertIn("bin/python3.14", staged_wrapper_text)
+
+            self.assertFalse(
+                (out_runtime / "my_py_bin.runfiles" / "MANIFEST").exists()
+            )
+            self.assertFalse(
+                (out_runtime / "my_py_bin.runfiles" / "MANIFEST").is_symlink()
+            )
+            self.assertFalse(
+                (out_runtime / "my_py_bin.runfiles_manifest").exists()
+            )
+            self.assertFalse(
+                (out_runtime / "my_py_bin.runfiles_manifest").is_symlink()
+            )
+
+    def test_normalized_compact_python_runtime_two_stage_bootstrap_env(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            execroot = tmp_path / "execroot"
+            stage2_py = execroot / "pkg" / "stage2.py"
+            stage2_py.parent.mkdir(parents=True, exist_ok=True)
+            stage2_py.write_text("# stage2\n", encoding="utf-8")
+
+            rc, _, out_launcher, out_runtime = _generate_compact_python_tool(
+                execroot,
+                entry_body=(
+                    "#!/bin/bash\n"
+                    '"exec" "${RUNFILES_DIR:-$(readlink "$0" || echo "$0").runfiles}/compact_prebuilt_python/python3" "$0" "$@"\n'
+                ),
+                extra_manifest_entries=(("_main/pkg/stage2.py", stage2_py),),
+            )
+            self.assertEqual(rc, 0)
+
+            # Relocate bundle and delete execroot to verify full relocatability.
+            relocated = tmp_path / "relocated"
+            relocated.mkdir()
+            shutil.copy2(out_launcher, relocated / "my-py-tool")
+            shutil.copytree(
+                out_runtime, relocated / "my-py-tool.runtime_dir", symlinks=True
+            )
+            shutil.rmtree(execroot)
+
+            # 1. Default caller env (no PYTHONSAFEPATH) with ambient PYTHONHOME
+            #    and caller PYTHONPATH: PYTHONHOME is cleared, caller PYTHONPATH
+            #    is preserved without lib_python zip pollution, -P is passed, and
+            #    PYTHONSAFEPATH + internal _FX_UNSET_PYTHONSAFEPATH are unset.
+            proc_default = subprocess.run(
+                (str(relocated / "my-py-tool"), "arg1", "arg2"),
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "TMPDIR": str(tmp_path),
+                    "PYTHONHOME": "/polluted/pythonhome",
+                    "PYTHONPATH": "/caller/site",
+                },
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertSequenceEqual(
+                proc_default.stdout.strip().splitlines(),
+                (
+                    "flags=-P -S -s",
+                    "script=stage2.py",
+                    "PYTHONHOME=<UNSET>",
+                    "PYTHONPATH=/caller/site",
+                    "PYTHONSAFEPATH=<UNSET>",
+                    "_FX_UNSET_PYTHONSAFEPATH=<UNSET>",
+                    "args=arg1 arg2",
+                ),
+            )
+
+            # 2. Caller explicitly sets PYTHONSAFEPATH=1: preserved without -P.
+            proc_explicit = subprocess.run(
+                (str(relocated / "my-py-tool"), "keep"),
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "TMPDIR": str(tmp_path),
+                    "PYTHONSAFEPATH": "1",
+                },
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertSequenceEqual(
+                proc_explicit.stdout.strip().splitlines(),
+                (
+                    "flags=-S -s",
+                    "script=stage2.py",
+                    "PYTHONHOME=<UNSET>",
+                    "PYTHONPATH=<UNSET>",
+                    "PYTHONSAFEPATH=1",
+                    "_FX_UNSET_PYTHONSAFEPATH=<UNSET>",
+                    "args=keep",
+                ),
+            )
+
+    def test_normalized_compact_python_runtime_single_stage_shell_bootstrap_env(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            execroot = Path(tmp) / "execroot"
+            stage2_py = execroot / "pkg" / "stage2.py"
+            stage2_py.parent.mkdir(parents=True, exist_ok=True)
+            stage2_py.write_text("# stage2\n", encoding="utf-8")
+
+            # Simulate rules_python's 1-stage shell bootstrap: sets
+            # PYTHONSAFEPATH=1 (unless already set) and invokes python3 once
+            # directly on stage2.py.
+            rc, _, out_launcher, _ = _generate_compact_python_tool(
+                execroot,
+                entry_body=(
+                    "#!/bin/bash\n"
+                    "set -euo pipefail\n"
+                    'if [[ -z "${PYTHONSAFEPATH+x}" ]]; then\n'
+                    "  export PYTHONSAFEPATH=1\n"
+                    "fi\n"
+                    'exec "${RUNFILES_DIR}/compact_prebuilt_python/python3" "${RUNFILES_DIR}/_main/pkg/stage2.py" "$@"\n'
+                ),
+                extra_manifest_entries=(("_main/pkg/stage2.py", stage2_py),),
+            )
+            self.assertEqual(rc, 0)
+
+            proc_default = subprocess.run(
+                (str(out_launcher), "hello"),
+                env={"PATH": "/usr/bin:/bin", "PYTHONHOME": "/polluted"},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertSequenceEqual(
+                proc_default.stdout.strip().splitlines(),
+                (
+                    "flags=-P -S -s",
+                    "script=stage2.py",
+                    "PYTHONHOME=<UNSET>",
+                    "PYTHONPATH=<UNSET>",
+                    "PYTHONSAFEPATH=<UNSET>",
+                    "_FX_UNSET_PYTHONSAFEPATH=<UNSET>",
+                    "args=hello",
+                ),
+            )
+
+            proc_empty_safepath = subprocess.run(
+                (str(out_launcher), "empty"),
+                env={"PATH": "/usr/bin:/bin", "PYTHONSAFEPATH": ""},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertSequenceEqual(
+                proc_empty_safepath.stdout.strip().splitlines(),
+                (
+                    "flags=-S -s",
+                    "script=stage2.py",
+                    "PYTHONHOME=<UNSET>",
+                    "PYTHONPATH=<UNSET>",
+                    "PYTHONSAFEPATH=",
+                    "_FX_UNSET_PYTHONSAFEPATH=<UNSET>",
+                    "args=empty",
+                ),
+            )
+
+    def test_non_python_entry_with_compact_python_in_runfiles_skips_safepath_handshake(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            execroot = Path(tmp) / "execroot"
+            helper_script = execroot / "pkg" / "helper.py"
+            helper_script.parent.mkdir(parents=True, exist_ok=True)
+            helper_script.write_text("# helper\n", encoding="utf-8")
+
+            py_helper_bin = execroot / "pkg" / "py_helper"
+            py_helper_bin.write_text(
+                "#!/bin/bash\n"
+                "set -euo pipefail\n"
+                'exec "${RUNFILES_DIR}/compact_prebuilt_python/python3" "${RUNFILES_DIR}/_main/pkg/helper.py" "$@"\n',
+                encoding="utf-8",
+            )
+            py_helper_bin.chmod(0o755)
+
+            # Shell entry point does not invoke compact_prebuilt_python/python3
+            # directly; instead it calls a helper staged in .bin/ via PATH.
+            rc, _, out_launcher, out_runtime = _generate_compact_python_tool(
+                execroot,
+                entry_name="my_shell_tool",
+                entry_body=(
+                    "#!/bin/bash\n"
+                    "set -euo pipefail\n"
+                    'echo "entry_handshake=${_FX_UNSET_PYTHONSAFEPATH-<UNSET>}"\n'
+                    'py-helper "$@"\n'
+                ),
+                extra_manifest_entries=(
+                    ("_main/pkg/helper.py", helper_script),
+                ),
+                runtime_tools={
+                    "py-helper": py_helper_bin.relative_to(execroot),
+                },
+            )
+            self.assertEqual(rc, 0)
+
+            self.assertNotIn(
+                "_FX_UNSET_PYTHONSAFEPATH",
+                out_launcher.read_text(encoding="utf-8"),
+            )
+            staged_repo = (
+                out_runtime
+                / "my_shell_tool.runfiles"
+                / "compact_prebuilt_python"
+            )
+            self.assertTrue((staged_repo / "bin" / "python3.14").is_file())
+            self.assertTrue((staged_repo / "lib" / "python314.zip").is_file())
+
+            proc = subprocess.run(
+                (str(out_launcher), "hi"),
+                env={"PATH": "/usr/bin:/bin", "PYTHONHOME": "/polluted"},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertSequenceEqual(
+                proc.stdout.strip().splitlines(),
+                (
+                    "entry_handshake=<UNSET>",
+                    "flags=-S -s",
+                    "script=helper.py",
+                    "PYTHONHOME=<UNSET>",
+                    "PYTHONPATH=<UNSET>",
+                    "PYTHONSAFEPATH=<UNSET>",
+                    "_FX_UNSET_PYTHONSAFEPATH=<UNSET>",
+                    "args=hi",
+                ),
+            )
+
+            # Even if _FX_UNSET_PYTHONSAFEPATH=1 is present in the environment,
+            # invoking the wrapper with PYTHONSAFEPATH unset must not inject -P.
+            direct_wrapper = subprocess.run(
+                (
+                    str(staged_repo / "python3"),
+                    str(
+                        out_runtime
+                        / "my_shell_tool.runfiles"
+                        / "_main"
+                        / "pkg"
+                        / "helper.py"
+                    ),
+                    "direct",
+                ),
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "PYTHONHOME": "/polluted",
+                    "_FX_UNSET_PYTHONSAFEPATH": "1",
+                },
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertSequenceEqual(
+                direct_wrapper.stdout.strip().splitlines(),
+                (
+                    "flags=-S -s",
+                    "script=helper.py",
+                    "PYTHONHOME=<UNSET>",
+                    "PYTHONPATH=<UNSET>",
+                    "PYTHONSAFEPATH=<UNSET>",
+                    "_FX_UNSET_PYTHONSAFEPATH=1",
+                    "args=direct",
+                ),
             )
 
 

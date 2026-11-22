@@ -50,6 +50,7 @@ ATTR_RE = re.compile(
 def parse(smaps_path: Path) -> List[SmapEntry]:
     """Reads /proc/*/smaps file into dataclasses."""
     entries = []
+    entry: Optional[SmapEntry] = None
     with open(smaps_path, "rt") as f:
         for line_no, line in enumerate(f, start=1):
             line = line.strip()
@@ -57,11 +58,24 @@ def parse(smaps_path: Path) -> List[SmapEntry]:
                 continue
             hm = HEADER_RE.match(line)
             if hm:
-                entry = SmapEntry(**hm.groupdict())
+                entry = SmapEntry(
+                    addr_start=hm["addr_start"],
+                    addr_end=hm["addr_end"],
+                    perms=hm["perms"],
+                    offset=hm["offset"],
+                    dev=hm["dev"],
+                    inode=hm["inode"],
+                    pathname=hm["pathname"],
+                )
                 entries.append(entry)
                 continue
             am = ATTR_RE.match(line)
             if am:
+                if entry is None:
+                    raise ValueError(
+                        f"{smaps_path}:{line_no} attribute before any mapping"
+                        f" header\n{line!r}"
+                    )
                 if am.group("value_kb") is not None:
                     value = int(am.group("value_kb"))
                 elif am.group("value") is not None:
@@ -70,5 +84,5 @@ def parse(smaps_path: Path) -> List[SmapEntry]:
                     value = am.group("flags")
                 setattr(entry, am.group("name"), value)
                 continue
-            raise Exception(f"{smaps_path}:{line_no} does not match\n{line!r}")
+            raise ValueError(f"{smaps_path}:{line_no} does not match\n{line!r}")
         return entries

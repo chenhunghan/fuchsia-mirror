@@ -39,10 +39,10 @@ bool IsAcceptableBitsPerUncompAudioSample(const uint32_t bits_per_sample) {
 }
 
 std::optional<std::pair<lc3_pcm_format, size_t>> ResolveLc3PcmFormat(
-    const fuchsia::media::PcmFormat2& input_format) {
-  const uint32_t bits_per_sample = input_format.bits_per_sample();
-  const uint32_t effective_bytes_per_sample = input_format.has_bytes_per_sample()
-                                                  ? input_format.bytes_per_sample()
+    const fuchsia_media::PcmFormat2& input_format) {
+  const uint32_t bits_per_sample = *input_format.bits_per_sample();
+  const uint32_t effective_bytes_per_sample = input_format.bytes_per_sample().has_value()
+                                                  ? *input_format.bytes_per_sample()
                                                   : (bits_per_sample + 7) / 8;
   if (bits_per_sample == 16 && effective_bytes_per_sample == 2) {
     return std::make_pair(LC3_PCM_FORMAT_S16, size_t{2});
@@ -56,22 +56,22 @@ std::optional<std::pair<lc3_pcm_format, size_t>> ResolveLc3PcmFormat(
   return std::nullopt;
 }
 
-Lc3EncoderParams CreateEncoderParams(const fuchsia::media::FormatDetails& format_details,
+Lc3EncoderParams CreateEncoderParams(const fuchsia_media::FormatDetails& format_details,
                                      lc3_pcm_format fmt, size_t bytes_per_sample) {
-  const auto& input_format = format_details.pcm_format();
-  const auto& settings = format_details.encoder_settings().lc3();
+  const auto& input_format = *format_details.pcm_format();
+  const auto& settings = format_details.encoder_settings()->lc3().value();
 
-  auto num_channels = static_cast<int>(input_format.channel_map().size());
+  auto num_channels = static_cast<int>(input_format.channel_map()->size());
   std::vector<Lc3CodecContainer<lc3_encoder_t>> encoders;
 
   int frame_us =
-      (settings.frame_duration() == fuchsia::media::Lc3FrameDuration::D10_MS) ? 10000 : 7500;
+      (*settings.frame_duration() == fuchsia_media::Lc3FrameDuration::kD10Ms) ? 10000 : 7500;
 
   // According to LC3 Specification v1.0 section 2.1, when the sampling frequency of the
   // input signal is 44.1 kHz, the same frame length is used as for 48 kHz.
-  int sampling_freq = (input_format.frames_per_second() == 44100)
+  int sampling_freq = (*input_format.frames_per_second() == 44100)
                           ? 48000
-                          : static_cast<int>(input_format.frames_per_second());
+                          : static_cast<int>(*input_format.frames_per_second());
   encoders.reserve(num_channels);
   auto encoder_size = lc3_encoder_size(frame_us, sampling_freq);
 
@@ -91,7 +91,7 @@ Lc3EncoderParams CreateEncoderParams(const fuchsia::media::FormatDetails& format
       .num_channels = num_channels,
       .dt_us = frame_us,
       .sr_hz = sampling_freq,
-      .nbytes = static_cast<int>(settings.nbytes()),
+      .nbytes = static_cast<int>(*settings.nbytes()),
       .bytes_per_sample = bytes_per_sample,
       .fmt = fmt,
   };
@@ -103,7 +103,7 @@ CodecAdapterLc3Encoder::CodecAdapterLc3Encoder(std::mutex& lock,
                                                CodecAdapterEvents* codec_adapter_events)
     : CodecAdapterSWImpl(lock, codec_adapter_events) {}
 
-std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterLc3Encoder::OutputFormatDetails() {
+std::pair<fuchsia_media::FormatDetails, size_t> CodecAdapterLc3Encoder::OutputFormatDetails() {
   size_t min_output_buffer_size = 0;
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -111,71 +111,76 @@ std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterLc3Encoder::OutputF
     min_output_buffer_size = MinOutputBufferSize();
   }
 
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_mime_type(kLc3MimeType);
+  fuchsia_media::FormatDetails format_details;
+  format_details.mime_type() = kLc3MimeType;
 
   return {std::move(format_details), min_output_buffer_size};
 }
 
 CodecAdapterLc3Encoder::InputLoopStatus CodecAdapterLc3Encoder::ProcessFormatDetails(
-    const fuchsia::media::FormatDetails& format_details) {
+    const fuchsia_media::FormatDetails& format_details) {
   if (codec_params_.has_value()) {
     events_->onCoreCodecFailCodec("LC3 Encoder: Midstream input format change is not supported.");
     return kShouldTerminate;
   }
-  if (!format_details.has_pcm_format()) {
+  if (!format_details.pcm_format().has_value()) {
     events_->onCoreCodecFailCodec(
         "LC3 Encoder received input that was not uncompressed pcm audio.");
     return kShouldTerminate;
   }
-  if (!format_details.has_encoder_settings() || !format_details.encoder_settings().is_lc3()) {
+  if (!format_details.encoder_settings().has_value() ||
+      format_details.encoder_settings()->Which() != fuchsia_media::EncoderSettings::Tag::kLc3) {
     events_->onCoreCodecFailCodec("LC3 Encoder did not receive encoder settings.");
     return kShouldTerminate;
   }
-  const auto& input_format = format_details.pcm_format();
-  const auto& settings = format_details.encoder_settings().lc3();
+  const auto& input_format = *format_details.pcm_format();
+  const auto& settings = format_details.encoder_settings()->lc3().value();
 
-  if (!input_format.has_channel_map() || input_format.channel_map().empty() ||
-      input_format.channel_map().size() > kMaxChannelCount) {
+  if (!input_format.channel_map().has_value() || input_format.channel_map()->empty() ||
+      input_format.channel_map()->size() > kMaxChannelCount) {
     events_->onCoreCodecFailCodec(
         "Unsupported channel count for LC3 Encoder: %zu",
-        input_format.has_channel_map() ? input_format.channel_map().size() : 0);
+        input_format.channel_map().has_value() ? input_format.channel_map()->size() : 0);
     return kShouldTerminate;
   }
 
-  if (!input_format.has_pcm_mode() ||
-      input_format.pcm_mode() != fuchsia::media::AudioPcmMode2::LINEAR ||
-      !input_format.has_bits_per_sample() ||
-      !IsAcceptableBitsPerUncompAudioSample(input_format.bits_per_sample())) {
+  if (!input_format.pcm_mode().has_value() ||
+      *input_format.pcm_mode() != fuchsia_media::AudioPcmMode2::kLinear) {
+    events_->onCoreCodecFailCodec("Unsupported PCM mode for LC3 Encoder.");
+    return kShouldTerminate;
+  }
+
+  if (!input_format.bits_per_sample().has_value() ||
+      !IsAcceptableBitsPerUncompAudioSample(*input_format.bits_per_sample())) {
     events_->onCoreCodecFailCodec("Unsupported bits per sample LC3 Encoder.");
     return kShouldTerminate;
   }
 
   auto resolved_pcm_format = ResolveLc3PcmFormat(input_format);
   if (!resolved_pcm_format.has_value()) {
-    const uint32_t effective_bytes_per_sample = input_format.has_bytes_per_sample()
-                                                    ? input_format.bytes_per_sample()
-                                                    : (input_format.bits_per_sample() + 7) / 8;
+    const uint32_t effective_bytes_per_sample = input_format.bytes_per_sample().has_value()
+                                                    ? *input_format.bytes_per_sample()
+                                                    : (*input_format.bits_per_sample() + 7) / 8;
     events_->onCoreCodecFailCodec("Unsupported bytes_per_sample %u for %u-bit LC3 Encoder.",
-                                  effective_bytes_per_sample, input_format.bits_per_sample());
+                                  effective_bytes_per_sample, *input_format.bits_per_sample());
     return kShouldTerminate;
   }
 
-  if (!input_format.has_frames_per_second() ||
-      !IsAcceptableSamplingFrequency(input_format.frames_per_second())) {
+  if (!input_format.frames_per_second().has_value() ||
+      !IsAcceptableSamplingFrequency(*input_format.frames_per_second())) {
     events_->onCoreCodecFailCodec("Unsupported sampling frequency for LC3 Encoder.");
     return kShouldTerminate;
   }
 
-  if (!settings.has_nbytes() || settings.nbytes() < kMinExternalByteCount ||
-      settings.nbytes() > kMaxExternalByteCount) {
+  if (!settings.nbytes().has_value() || *settings.nbytes() < kMinExternalByteCount ||
+      *settings.nbytes() > kMaxExternalByteCount) {
     events_->onCoreCodecFailCodec("Byte count should be between [20 ... 400] bytes per channel.");
     return kShouldTerminate;
   }
 
-  if (!settings.has_frame_duration() ||
-      (settings.frame_duration() != fuchsia::media::Lc3FrameDuration::D10_MS &&
-       settings.frame_duration() != fuchsia::media::Lc3FrameDuration::D7P5_MS)) {
+  if (!settings.frame_duration().has_value() ||
+      (*settings.frame_duration() != fuchsia_media::Lc3FrameDuration::kD10Ms &&
+       *settings.frame_duration() != fuchsia_media::Lc3FrameDuration::kD7P5Ms)) {
     events_->onCoreCodecFailCodec("Invalid or missing frame duration for LC3 Encoder.");
     return kShouldTerminate;
   }
@@ -268,20 +273,21 @@ int CodecAdapterLc3Encoder::ProcessInputChunkData(const uint8_t* input_data, siz
   return bytes_produced;
 }
 
-fuchsia::sysmem::BufferCollectionConstraints CodecAdapterLc3Encoder::BufferCollectionConstraints(
+fuchsia_sysmem2::BufferCollectionConstraints CodecAdapterLc3Encoder::BufferCollectionConstraints(
     CodecPort port) {
-  fuchsia::sysmem::BufferCollectionConstraints c;
+  fuchsia_sysmem2::BufferCollectionConstraints c;
+  auto& bmc = c.buffer_memory_constraints().emplace();
   if (port == kInputPort) {
-    c.min_buffer_count_for_camping = kMinInputBufferCountForCamping;
+    c.min_buffer_count_for_camping() = kMinInputBufferCountForCamping;
 
-    c.buffer_memory_constraints.min_size_bytes = zx_system_get_page_size();
-    c.buffer_memory_constraints.max_size_bytes = kInputPerPacketBufferBytesMax;
+    bmc.min_size_bytes() = zx_system_get_page_size();
+    bmc.max_size_bytes() = kInputPerPacketBufferBytesMax;
   } else {
-    c.min_buffer_count_for_camping = kMinOutputBufferCountForCamping;
+    c.min_buffer_count_for_camping() = kMinOutputBufferCountForCamping;
 
     ZX_ASSERT(min_output_buffer_size_.has_value());
-    c.buffer_memory_constraints.min_size_bytes = *min_output_buffer_size_;
-    c.buffer_memory_constraints.max_size_bytes = 0xFFFFFFFF;  // arbitrary value.
+    bmc.min_size_bytes() = *min_output_buffer_size_;
+    bmc.max_size_bytes() = 0xFFFFFFFF;  // arbitrary value.
   }
 
   return c;
@@ -310,11 +316,11 @@ size_t CodecAdapterLc3Encoder::MinOutputBufferSize() {
 }
 
 TimestampExtrapolator CodecAdapterLc3Encoder::CreateTimestampExtrapolator(
-    const fuchsia::media::FormatDetails& format_details) {
+    const fuchsia_media::FormatDetails& format_details) {
   ZX_DEBUG_ASSERT(codec_params_);
 
-  if (format_details.has_timebase()) {
-    const auto& input_format = format_details.pcm_format();
+  if (format_details.timebase().has_value()) {
+    const auto& input_format = *format_details.pcm_format();
     // Use `codec_params_->bytes_per_sample` (2 for S16, 3 for packed S24_3LE, or 4 for 24-in-32
     // S24) rather than `bits_per_sample / 8`.
     // Bytes per second is input PCM sampling frequency * number_of_channels * bytes_per_sample.
@@ -324,9 +330,9 @@ TimestampExtrapolator CodecAdapterLc3Encoder::CreateTimestampExtrapolator(
     // input_format.frames_per_second() (44.1 kHz) yields the actual frame duration of 10.884 ms
     // (or 8.16 ms for 7.5 ms interval) per LC3 specification v1.0 section 2.1.
     const size_t bytes_per_second = static_cast<size_t>(codec_params_->num_channels) *
-                                    static_cast<size_t>(input_format.frames_per_second()) *
+                                    static_cast<size_t>(*input_format.frames_per_second()) *
                                     codec_params_->bytes_per_sample;
-    return TimestampExtrapolator(format_details.timebase(), bytes_per_second);
+    return TimestampExtrapolator(*format_details.timebase(), bytes_per_second);
   }
   return TimestampExtrapolator();
 }

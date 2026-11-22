@@ -11,6 +11,8 @@
 #include <lib/fidl/cpp/binding.h>
 #include <lib/sys/cpp/component_context.h>
 
+#include <mutex>
+
 namespace nl {
 namespace Weave {
 namespace DeviceLayer {
@@ -62,7 +64,7 @@ class BLEManagerImpl final : public BLEManager,
   bool _IsAdvertising();
   WEAVE_ERROR _GetDeviceName(char *device_name, size_t device_name_size);
   WEAVE_ERROR _SetDeviceName(const char *device_name);
-  uint16_t _NumConnections() { return 0; }
+  uint16_t _NumConnections();
   void _OnPlatformEvent(const WeaveDeviceEvent *event);
   ::nl::Ble::BleLayer *_GetBleLayer() const;
 
@@ -76,7 +78,7 @@ class BLEManagerImpl final : public BLEManager,
                                  const WeaveBleUUID *charId) override {
     return false;
   }
-  bool CloseConnection(BLE_CONNECTION_OBJECT conId) override { return false; }
+  bool CloseConnection(BLE_CONNECTION_OBJECT conId) override;
   uint16_t GetMTU(BLE_CONNECTION_OBJECT conId) const override { return 0; }
   bool SendIndication(BLE_CONNECTION_OBJECT conId, const WeaveBleUUID *svcId,
                       const WeaveBleUUID *charId, PacketBuffer *data) override;
@@ -95,7 +97,7 @@ class BLEManagerImpl final : public BLEManager,
 
   // ===== Members that implement virtual methods on BleApplicationDelegate.
 
-  void NotifyWeaveConnectionClosed(BLE_CONNECTION_OBJECT conId) override {}
+  void NotifyWeaveConnectionClosed(BLE_CONNECTION_OBJECT conId) override;
 
   // ===== Members that implement virtual methods on LocalService
   void CharacteristicConfiguration(::fuchsia::bluetooth::PeerId peer_id,
@@ -128,14 +130,23 @@ class BLEManagerImpl final : public BLEManager,
 
   // ===== Private members reserved for use by this class only.
 
+  static constexpr size_t kMaxConnections = BLE_LAYER_NUM_BLE_ENDPOINTS;
+
   struct WoBLEConState {
-    WoBLEConState(BLEManagerImpl *connection_instance) : instance(connection_instance) {}
-    BLEManagerImpl *instance;
-    PacketBuffer *pending_ind_buf;
-    fuchsia::bluetooth::PeerId peer_id;
+    BLEManagerImpl *instance = nullptr;
+    PacketBuffer *pending_ind_buf = nullptr;
+    fuchsia::bluetooth::PeerId peer_id{};
+    bool allocated = false;
   };
 
-  WoBLEConState woble_connection_;
+  WoBLEConState *GetConnectionState(fuchsia::bluetooth::PeerId peer_id, bool allocate = false);
+  bool IsConnectionAllocated(BLE_CONNECTION_OBJECT con_id,
+                             fuchsia::bluetooth::PeerId *out_peer_id = nullptr) const;
+  bool ReleaseConnectionState(BLE_CONNECTION_OBJECT con_id);
+  void ReleaseAllConnections();
+
+  mutable std::mutex connections_mutex_;
+  WoBLEConState woble_connections_[kMaxConnections];
 
   char device_name_[kMaxDeviceNameLength + 1];
   uint16_t flags_;

@@ -79,7 +79,6 @@ once_cell_visibility = [
   "//src/starnix/modules/overlayfs:*",
   "//src/storage/ext4:*",
   "//src/testing/sl4f:*",
-  "//tools/shush:*",
 
   # At this time we are not enforcing restrictions on the below.
   "//third_party/*",
@@ -209,18 +208,6 @@ regex_visibility = [
   #
   # To regenerate, run:
   # (cd $FUCHSIA_DIR && git grep  --files-with-matches '//third_party/rust_crates:regex\"' -- '*BUILD.gn' | sed 's|\(.*\)/BUILD.gn|"//\1:*",|')
-  "//examples/fidl/new/key_value_store/add_iterator/rust/server:*",
-  "//examples/fidl/new/key_value_store/add_iterator/rust_next/server:*",
-  "//examples/fidl/new/key_value_store/add_read_item/rust/server:*",
-  "//examples/fidl/new/key_value_store/add_read_item/rust_next/server:*",
-  "//examples/fidl/new/key_value_store/baseline/rust/server:*",
-  "//examples/fidl/new/key_value_store/baseline/rust_next/server:*",
-  "//examples/fidl/new/key_value_store/support_exports/rust/server:*",
-  "//examples/fidl/new/key_value_store/support_exports/rust_next/server:*",
-  "//examples/fidl/new/key_value_store/support_trees/rust/server:*",
-  "//examples/fidl/new/key_value_store/support_trees/rust_next/server:*",
-  "//examples/fidl/new/key_value_store/use_generic_values/rust/server:*",
-  "//examples/fidl/new/key_value_store/use_generic_values/rust_next/server:*",
   "//examples/intl/wisdom/rust/server:*",
   "//examples/intl/wisdom/tests:*",
   "//src/connectivity/bluetooth/tools/bt-cli:*",
@@ -244,9 +231,7 @@ regex_visibility = [
   "//src/developer/ffx/plugins/profile/memory:*",
   "//src/developer/ffx/plugins/profile/network/activity:*",
   "//src/developer/ffx/plugins/profile/temperature/logger:*",
-  "//src/developer/ffx/plugins/setui/keyboard:*",
   "//src/developer/ffx/plugins/target/list:*",
-  "//src/developer/ffx/plugins/trace:*",
   "//src/developer/ffx/tools/bluetooth/common:*",
   "//src/developer/ffx/tools/bluetooth/src/peer:*",
   "//src/developer/ffx/tools/starnix:*",
@@ -264,7 +249,7 @@ regex_visibility = [
   "//src/lib/testing/sharding:*",
   "//src/lib/testing/sharding/tests/integration:*",
   "//src/lib/utf8_path:*",
-  "//src/performance/memory/attribution/monitor:*",
+  "//src/memory/attribution/monitor:*",
   "//src/starnix/tests/memory_attribution:*",
   "//src/storage/benchmarks:*",
   "//src/storage/benchmarks/fuchsia:*",
@@ -278,10 +263,8 @@ regex_visibility = [
   "//src/sys/test_runners/rust:*",
   "//src/ui/lib/input_pipeline:*",
   "//third_party/tcpdump/tests:*",
-  "//tools/fidl/example-tester:*",
   "//tools/fidl/fidldoc:*",
   "//tools/pretty_serial:*",
-  "//tools/shush:*",
 
   # Allow generic usage within vendor directories without exposing internal
   # paths

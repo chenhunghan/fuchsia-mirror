@@ -11,7 +11,7 @@
     ],
     offer: [
         {
-            name: "khadas-mcu-18",
+            name: "i2c",
             service: "fuchsia.hardware.i2c.Service",
             from: "#i2c-5000",
             to: "#khadas-mcu-18",

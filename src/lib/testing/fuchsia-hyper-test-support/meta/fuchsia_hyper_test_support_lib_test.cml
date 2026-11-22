@@ -13,7 +13,7 @@
     children: [
         {
             name: "dns_resolver",
-            url: "#meta/dns_resolver.cm",
+            url: "dns-resolver#meta/dns_resolver.cm",
         },
         {
             name: "netstack",

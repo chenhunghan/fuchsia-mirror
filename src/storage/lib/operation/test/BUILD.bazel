@@ -1,0 +1,74 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":storage-operation-tests"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "storage_operation",
+    srcs = ["unbuffered_operations_builder_test.cc"],
+    disable_build_flags = ["//build/config/fuchsia:fdio_config"],
+    deps = [
+        "//sdk/lib/fdio",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/storage/lib/operation",
+        # @com_google_googletest//:gtest bundles GoogleMock.
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "storage_operation_packaged",
+    testonly = True,
+    binary = ":storage_operation",
+    binary_name = "storage_operation",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "storage-operation-tests-manifest",
+    testonly = True,
+    component_name = "storage-operation-tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/storage-operation-tests.cml",
+)
+
+fx_test_component(
+    name = "storage-operation-tests-component",
+    compiled_manifest = ":storage-operation-tests-manifest",
+    deps = [":storage_operation_packaged"],
+)
+
+fx_package(
+    name = "storage-operation-tests-pkg",
+    package_name = "storage-operation-tests",
+    testonly = True,
+    test_components = [":storage-operation-tests-component"],
+)
+
+fx_test(
+    name = "storage-operation-tests",
+    package = ":storage-operation-tests-pkg",
+)

@@ -127,7 +127,7 @@ the possibility of these spurious wakeups.
 This design can be implemented in one small CL. The CL defines the new signal
 and modifies UpdateState to include a new `strobe_mask` input.
 
-## Performance
+## Performance {:#performance}
 
 This new signal will be used by Starnix kernel to reduce the potential error of
 the UTC clock of Linux programs running on Starnix.
@@ -177,7 +177,7 @@ method clock users should follow to not miss an update when using this signal.
 ### Drawbacks
 
 The issue of performance decreasing as the number of observers of the signal
-increases is described in the [Performance](#Performance) section of this
+increases is described in the [Performance](#performance) section of this
 document. If the number of observers of the clock signal increases to a large
 number, further work may need to be done to mitigate these performance issues.
 

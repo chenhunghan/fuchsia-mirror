@@ -412,7 +412,7 @@ syscall_maybe_mds_buff_overwrite:
     JMP_AND_SPECULATION_POSTFENCE(.Lreturn_from_syscall)
 END_FUNCTION(x86_syscall_cleanup_and_return)
 
-// One of these macros is invoked by kernel.inc for each syscall.
+// One of these macros is invoked by syscalls.inc for each syscall.
 
 // These don't have kernel entry points.
 #define VDSO_SYSCALL(...)
@@ -425,7 +425,7 @@ END_FUNCTION(x86_syscall_cleanup_and_return)
 
 start_syscall_dispatch
 
-#include <lib/syscalls/kernel.inc>
+#include <lib/syscalls/syscalls.inc>
 
 #undef VDSO_SYSCALL
 #undef KERNEL_SYSCALL

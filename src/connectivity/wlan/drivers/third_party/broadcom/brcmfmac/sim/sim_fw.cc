@@ -1027,6 +1027,17 @@ void SimFirmware::TriggerFirmwareLinkDownEvent() {
                     BRCMF_E_REASON_LINK_DISASSOC);
 }
 
+void SimFirmware::TriggerFirmwareMicError(uint16_t flags, const MacAddr& addr) {
+  SendEventToDriver(0, nullptr, BRCMF_E_MIC_ERROR, BRCMF_E_STATUS_SUCCESS, kClientIfidx, nullptr,
+                    flags, 0, addr);
+}
+
+void SimFirmware::TriggerFirmwareSoftApMicError(uint16_t flags, const MacAddr& addr) {
+  ZX_ASSERT(softap_ifidx_.has_value());
+  SendEventToDriver(0, nullptr, BRCMF_E_MIC_ERROR, BRCMF_E_STATUS_SUCCESS, softap_ifidx_.value(),
+                    nullptr, flags, 0, addr);
+}
+
 // Process an RX CTL message. We simply pass back the results of the previous TX CTL
 // operation, which has been stored in bcdc_response_. In real hardware, we may have to
 // indicate that the TX CTL operation has not completed. In simulated hardware, we perform

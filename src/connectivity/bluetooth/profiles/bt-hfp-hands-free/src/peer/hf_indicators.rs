@@ -81,7 +81,7 @@ impl HfIndicators {
                 self.battery_level.0.enabled = *state;
             }
             at::Success::BindStatus { anum: BluetoothHFIndicator::EnhancedSafety, state }
-                if self.battery_level.1 =>
+                if self.enhanced_safety.1 =>
             {
                 self.enhanced_safety.0.enabled = *state;
             }
@@ -138,6 +138,27 @@ mod tests {
         assert_matches!(hf_indicators.change_indicator_state(&response2), Ok(_));
         // Indicator should remain disabled
         assert!(!hf_indicators.battery_level.0.enabled);
+        assert!(!hf_indicators.enhanced_safety.0.enabled);
+    }
+
+    #[fuchsia::test]
+    fn supported_indicators_change_state() {
+        let mut hf_indicators = HfIndicators::default();
+        hf_indicators.set_supported_indicators(&vec![at::BluetoothHFIndicator::EnhancedSafety]);
+        assert!(!hf_indicators.battery_level.1);
+        assert!(hf_indicators.enhanced_safety.1);
+
+        let enable_safety =
+            at::Success::BindStatus { anum: at::BluetoothHFIndicator::EnhancedSafety, state: true };
+        assert_matches!(hf_indicators.change_indicator_state(&enable_safety), Ok(_));
+        assert!(hf_indicators.enhanced_safety.0.enabled);
+        assert!(!hf_indicators.battery_level.0.enabled);
+
+        let disable_safety = at::Success::BindStatus {
+            anum: at::BluetoothHFIndicator::EnhancedSafety,
+            state: false,
+        };
+        assert_matches!(hf_indicators.change_indicator_state(&disable_safety), Ok(_));
         assert!(!hf_indicators.enhanced_safety.0.enabled);
     }
 

@@ -8,9 +8,7 @@
 use crate::device::kobject::Device;
 use crate::task::{CurrentTask, Kernel};
 use anyhow::Context as _;
-use fidl::endpoints::{
-    MemberOpener, Proxy as _, ServiceMarker, ServiceProxy as _, SynchronousProxy,
-};
+use fidl::endpoints::{MemberOpener, Proxy, ServiceMarker, ServiceProxy as _, SynchronousProxy};
 use fidl_fuchsia_io as fio;
 use fuchsia_async as fasync;
 use fuchsia_component::client as fclient;
@@ -23,6 +21,8 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
+#[cfg(test)]
+use vfs::directory::immutable::Simple;
 use zx::Peered as _;
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -37,6 +37,29 @@ impl<P: SynchronousProxy + Send + Sync + 'static> MonitoredChannel for P {
     }
 }
 
+struct AsyncProxyChannel<P>(P);
+
+impl<P: Proxy + Send + Sync + 'static> MonitoredChannel for AsyncProxyChannel<P> {
+    fn as_channel(&self) -> &zx::Channel {
+        self.0.as_channel().as_ref()
+    }
+}
+
+#[derive(Default)]
+struct ServiceBinding {
+    monitored_channel: Option<Arc<dyn MonitoredChannel>>,
+    teardown_hooks: Vec<Box<dyn FnOnce(&CurrentTask) + Send>>,
+}
+
+impl ServiceBinding {
+    fn teardown(&mut self, current_task: &CurrentTask) {
+        self.monitored_channel = None;
+        for hook in self.teardown_hooks.drain(..).rev() {
+            hook(current_task);
+        }
+    }
+}
+
 /// Registration scope passed to a driver's `bind` callback for a discovered FIDL service instance.
 ///
 /// Devices registered through [`Self::add_scoped_device`] and cleanup callbacks registered via
@@ -48,8 +71,8 @@ impl<P: SynchronousProxy + Send + Sync + 'static> MonitoredChannel for P {
 /// main async executor.
 #[derive(Default)]
 pub struct ServiceBindingScope {
-    monitored_channel: Option<Arc<dyn MonitoredChannel>>,
-    teardown_hooks: Vec<Box<dyn FnOnce(&CurrentTask) + Send>>,
+    binding: ServiceBinding,
+    torn_down: bool,
 }
 
 impl ServiceBindingScope {
@@ -57,7 +80,18 @@ impl ServiceBindingScope {
     /// channel for `ZX_CHANNEL_PEER_CLOSED`, running all registered teardown hooks when the
     /// remote peer closes its endpoint.
     pub fn monitor_channel<P: SynchronousProxy + Send + Sync + 'static>(&mut self, proxy: Arc<P>) {
-        self.monitored_channel = Some(proxy);
+        if !self.torn_down {
+            self.binding.monitored_channel = Some(proxy);
+        }
+    }
+
+    /// Retains an async FIDL `proxy` for the duration of the binding and monitors its underlying
+    /// Zircon channel for `ZX_CHANNEL_PEER_CLOSED`, running all registered teardown hooks when the
+    /// remote peer closes its endpoint.
+    pub fn monitor_async_channel<P: Proxy + Send + Sync + 'static>(&mut self, proxy: P) {
+        if !self.torn_down {
+            self.binding.monitored_channel = Some(Arc::new(AsyncProxyChannel(proxy)));
+        }
     }
 
     /// Registers `hook` to be invoked on the kernel's main async executor with
@@ -65,7 +99,9 @@ impl ServiceBindingScope {
     /// disconnects, executing in reverse registration order relative to other hooks and scoped
     /// devices.
     pub fn on_disconnect(&mut self, hook: impl FnOnce(&CurrentTask) + Send + 'static) {
-        self.teardown_hooks.push(Box::new(hook));
+        if !self.torn_down {
+            self.binding.teardown_hooks.push(Box::new(hook));
+        }
     }
 
     /// Registers a disconnect hook that removes `device` via
@@ -78,13 +114,47 @@ impl ServiceBindingScope {
         });
         device
     }
+
+    /// Runs all registered disconnect hooks and device removals immediately in reverse
+    /// registration order, clears any monitored channel, and marks the scope as torn down so no
+    /// active binding is recorded.
+    pub fn teardown(&mut self, current_task: &CurrentTask) {
+        self.torn_down = true;
+        self.binding.teardown(current_task);
+    }
+
+    fn into_active_binding(
+        mut self,
+        instance_active: Arc<AtomicBool>,
+    ) -> Option<(
+        ActiveBinding,
+        Option<(Arc<dyn MonitoredChannel>, futures::channel::oneshot::Receiver<()>)>,
+    )> {
+        if self.torn_down {
+            return None;
+        }
+        let (cancel_tx, monitored) = match self.binding.monitored_channel.clone() {
+            Some(channel) => {
+                let (tx, rx) = futures::channel::oneshot::channel();
+                (Some(tx), Some((channel, rx)))
+            }
+            None => (None, None),
+        };
+        let active = ActiveBinding {
+            instance_active,
+            binding: std::mem::take(&mut self.binding),
+            _cancel_monitor: cancel_tx,
+        };
+        Some((active, monitored))
+    }
 }
 
 impl std::fmt::Debug for ServiceBindingScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceBindingScope")
-            .field("has_monitored_channel", &self.monitored_channel.is_some())
-            .field("teardown_hooks_len", &self.teardown_hooks.len())
+            .field("has_monitored_channel", &self.binding.monitored_channel.is_some())
+            .field("teardown_hooks_len", &self.binding.teardown_hooks.len())
+            .field("torn_down", &self.torn_down)
             .finish()
     }
 }
@@ -103,30 +173,38 @@ impl<P> Clone for InstanceEntry<P> {
 
 struct ActiveBinding {
     instance_active: Arc<AtomicBool>,
-    monitored_channel: Option<Arc<dyn MonitoredChannel>>,
+    binding: ServiceBinding,
     _cancel_monitor: Option<futures::channel::oneshot::Sender<()>>,
-    teardown_hooks: Vec<Box<dyn FnOnce(&CurrentTask) + Send>>,
 }
 
 impl ActiveBinding {
     fn is_stale(&self) -> bool {
         !self.instance_active.load(Ordering::Acquire)
             || self
+                .binding
                 .monitored_channel
                 .as_ref()
                 .is_some_and(|ch| ch.as_channel().is_closed().unwrap_or(true))
     }
 
-    fn teardown(self, current_task: &CurrentTask) {
-        for hook in self.teardown_hooks.into_iter().rev() {
-            hook(current_task);
-        }
+    fn teardown(mut self, current_task: &CurrentTask) {
+        self.binding.teardown(current_task);
     }
 }
 
 struct DriverState<Bind> {
     bind: Bind,
     active_bindings: Vec<ActiveBinding>,
+    rejected_instances: Vec<Weak<AtomicBool>>,
+}
+
+impl<Bind> DriverState<Bind> {
+    fn is_rejected(&mut self, instance_active: &Arc<AtomicBool>) -> bool {
+        self.rejected_instances.retain(|weak| weak.strong_count() > 0);
+        self.rejected_instances
+            .iter()
+            .any(|weak| weak.upgrade().is_some_and(|active| Arc::ptr_eq(&active, instance_active)))
+    }
 }
 
 trait ServiceDriver<S: ServiceMarker>: Send + Sync {
@@ -170,7 +248,11 @@ where
         Arc::new(Self {
             singleton,
             probe,
-            state: LockDepMutex::new(DriverState { bind, active_bindings: Vec::new() }),
+            state: LockDepMutex::new(DriverState {
+                bind,
+                active_bindings: Vec::new(),
+                rejected_instances: Vec::new(),
+            }),
             _marker: PhantomData,
         })
     }
@@ -179,6 +261,7 @@ where
         state: &mut DriverState<Bind>,
         current_task: &CurrentTask,
     ) -> bool {
+        state.rejected_instances.retain(|weak| weak.strong_count() > 0);
         let mut removed_any = false;
         let mut i = 0;
         while i < state.active_bindings.len() {
@@ -210,7 +293,7 @@ where
         };
         watcher_state.prune_inactive_instances();
         if should_promote {
-            self.promote_singleton_instance(watcher_state, weak_kernel).await;
+            self.promote_singleton_instance(watcher_state, weak_kernel, None).await;
         }
     }
 
@@ -218,10 +301,20 @@ where
         &self,
         watcher_state: &Arc<ServiceWatcherState<S>>,
         weak_kernel: &Weak<Kernel>,
+        skip_instance: Option<&Arc<AtomicBool>>,
     ) {
         for candidate in watcher_state.active_instances() {
-            if !self.state.lock().active_bindings.is_empty() {
-                break;
+            if skip_instance.is_some_and(|skip| Arc::ptr_eq(&candidate.active, skip)) {
+                continue;
+            }
+            {
+                let mut state = self.state.lock();
+                if !state.active_bindings.is_empty() {
+                    break;
+                }
+                if state.is_rejected(&candidate.active) {
+                    continue;
+                }
             }
             self.probe_and_bind_instance(watcher_state, weak_kernel, candidate).await;
         }
@@ -236,10 +329,20 @@ where
         let Some(probed) = (self.probe)(instance.proxy.clone()).await else {
             return;
         };
-        if let Some(kernel) = weak_kernel.upgrade()
+        let should_promote = if let Some(kernel) = weak_kernel.upgrade()
             && instance.active.load(Ordering::Acquire)
         {
-            self.bind_probed(kernel.kthreads.system_task(), watcher_state, &instance, probed);
+            self.bind_probed(kernel.kthreads.system_task(), watcher_state, &instance, probed)
+        } else {
+            false
+        };
+        if should_promote {
+            Box::pin(self.promote_singleton_instance(
+                watcher_state,
+                weak_kernel,
+                Some(&instance.active),
+            ))
+            .await;
         }
     }
 
@@ -249,21 +352,21 @@ where
         watcher_state: &Arc<ServiceWatcherState<S>>,
         instance: &InstanceEntry<S::Proxy>,
         probed: P,
-    ) {
-        let monitored_channel = {
+    ) -> bool {
+        let (monitored_channel, should_promote) = {
             let mut state = self.state.lock();
 
             // Synchronously tear down any bindings whose channels have already closed or whose
             // service directory entries have been removed or replaced so a restarted provider
             // instance never races against a pending `OnSignals` or `REMOVE_FILE` wakeup.
-            Self::cleanup_stale_bindings_locked(&mut state, system_task);
+            let removed_stale = Self::cleanup_stale_bindings_locked(&mut state, system_task);
 
-            if !instance.active.load(Ordering::Acquire) {
-                None
-            } else if state
-                .active_bindings
-                .iter()
-                .any(|binding| Arc::ptr_eq(&binding.instance_active, &instance.active))
+            let monitored = if !instance.active.load(Ordering::Acquire)
+                || state
+                    .active_bindings
+                    .iter()
+                    .any(|binding| Arc::ptr_eq(&binding.instance_active, &instance.active))
+                || state.is_rejected(&instance.active)
             {
                 None
             } else if self.singleton && !state.active_bindings.is_empty() {
@@ -275,22 +378,17 @@ where
             } else {
                 let mut scope = ServiceBindingScope::default();
                 (state.bind)(system_task, probed, &mut scope);
-
-                let (cancel_tx, monitored) = match scope.monitored_channel.clone() {
-                    Some(channel) => {
-                        let (tx, rx) = futures::channel::oneshot::channel();
-                        (Some(tx), Some((channel, rx)))
-                    }
-                    None => (None, None),
-                };
-                state.active_bindings.push(ActiveBinding {
-                    instance_active: instance.active.clone(),
-                    monitored_channel: scope.monitored_channel,
-                    _cancel_monitor: cancel_tx,
-                    teardown_hooks: scope.teardown_hooks,
-                });
-                monitored
-            }
+                if let Some((active, monitored)) =
+                    scope.into_active_binding(instance.active.clone())
+                {
+                    state.active_bindings.push(active);
+                    monitored
+                } else {
+                    state.rejected_instances.push(Arc::downgrade(&instance.active));
+                    None
+                }
+            };
+            (monitored, self.singleton && removed_stale && state.active_bindings.is_empty())
         };
 
         watcher_state.prune_inactive_instances();
@@ -328,6 +426,7 @@ where
                 "service_watcher_disconnect_monitor",
             );
         }
+        should_promote
     }
 }
 
@@ -663,10 +762,10 @@ impl MemberOpener for SyncServiceInstanceOpener {
     }
 }
 
-/// Connects `service_dir` to the per-[`Kernel`] [`ServiceWatcher`] for `S` on the kernel's main
-/// async executor while suppressing the default `/svc/<S::SERVICE_NAME>` lookup.
+/// Serves `service_dir` and connects it to the per-[`Kernel`] [`ServiceWatcher`] for `S` on the
+/// kernel's main async executor while suppressing the default `/svc/<S::SERVICE_NAME>` lookup.
 #[cfg(test)]
-pub(crate) fn watch_service_dir_for_testing<S>(kernel: &Kernel, service_dir: fio::DirectoryProxy)
+pub(crate) fn watch_service_dir_for_testing<S>(kernel: &Kernel, service_dir: Arc<Simple>)
 where
     S: ServiceMarker<Proxy: Send + Sync + 'static>,
 {
@@ -675,7 +774,13 @@ where
     let weak_kernel = kernel.weak_self.clone();
     kernel.kthreads.spawn_future(
         move || async move {
-            let _ = state.watch_service_dir(&weak_kernel, service_dir).await;
+            // Serve the test directory inside the future so its `ExecutionScope` and proxy
+            // receiver bind to the `kthreads` executor rather than the caller's thread-local
+            // executor.
+            let proxy = vfs::directory::serve_read_only(service_dir, vfs::ExecutionScope::new());
+            if let Err(e) = state.watch_service_dir(&weak_kernel, proxy).await {
+                log_warn!("{}: test service watcher failed: {e:#}", S::SERVICE_NAME);
+            }
         },
         "service_watcher_test_dir",
     );
@@ -693,12 +798,10 @@ mod tests {
     use starnix_uapi::error;
     use std::collections::HashSet;
     use vfs::directory::helper::DirectlyMutable as _;
-    use vfs::directory::immutable::Simple;
 
     fn start_test_service_dir(kernel: &Kernel) -> Arc<Simple> {
         let dir = vfs::directory::immutable::simple();
-        let proxy = vfs::directory::serve_read_only(dir.clone(), vfs::ExecutionScope::new());
-        watch_service_dir_for_testing::<fpowerstats::ServiceMarker>(kernel, proxy);
+        watch_service_dir_for_testing::<fpowerstats::ServiceMarker>(kernel, dir.clone());
         dir
     }
 
@@ -763,8 +866,7 @@ mod tests {
                 },
             );
 
-            let proxy = vfs::directory::serve_read_only(dir, vfs::ExecutionScope::new());
-            watch_service_dir_for_testing::<fpowerstats::ServiceMarker>(kernel, proxy);
+            watch_service_dir_for_testing::<fpowerstats::ServiceMarker>(kernel, dir);
 
             let seen = done_rx.await.expect("both instances discovered concurrently");
             assert_eq!(seen, HashSet::from(["first".to_string(), "second".to_string()]));
@@ -809,51 +911,62 @@ mod tests {
         .await;
     }
 
+    fn register_recording_singleton(
+        kernel: &Arc<Kernel>,
+        device_name: &'static str,
+        teardown_instance: Option<&'static str>,
+    ) -> (mpsc::UnboundedReceiver<String>, Arc<Mutex<Vec<starnix_uapi::device_id::DeviceId>>>) {
+        let (event_tx, event_rx) = mpsc::unbounded();
+        let devts = Arc::new(Mutex::new(Vec::new()));
+        let devts_for_bind = devts.clone();
+        ServiceWatcher::register_singleton(
+            kernel,
+            fpowerstats::ServiceMarker,
+            move |current_task, instance, scope| {
+                let name = instance.instance_name().to_string();
+                let proxy = Arc::new(instance.connect_to_device_sync().expect("connect to device"));
+                scope.monitor_channel(proxy);
+
+                for hook in ["hook1", "hook2"] {
+                    let tx = event_tx.clone();
+                    let label = format!("{hook}:{name}");
+                    scope.on_disconnect(move |_| {
+                        let _ = tx.unbounded_send(label);
+                    });
+                }
+
+                let kernel = current_task.kernel();
+                let misc_dev = scope.add_scoped_device(
+                    kernel
+                        .device_registry
+                        .add_misc_device(kernel, device_name.into(), simple_device_ops::<DevNull>)
+                        .expect("add misc device"),
+                );
+                devts_for_bind.lock().push(misc_dev.metadata().expect("metadata").devt);
+
+                if teardown_instance == Some(name.as_str()) {
+                    scope.teardown(current_task);
+                    let _ = event_tx.unbounded_send(format!("teardown:{name}"));
+                } else {
+                    let _ = event_tx.unbounded_send(format!("bind:{name}"));
+                }
+            },
+        );
+        (event_rx, devts)
+    }
+
     #[::fuchsia::test]
     async fn tears_down_scoped_devices_and_hooks_on_peer_close() {
         spawn_kernel_and_run(async |current_task| {
             let kernel = current_task.kernel();
             let dir = start_test_service_dir(kernel);
-            let (event_tx, mut event_rx) = mpsc::unbounded();
-            let (all_seen_tx, mut all_seen_rx) = mpsc::unbounded();
-            let devts = Arc::new(Mutex::new(Vec::new()));
-            let devts_for_bind = devts.clone();
-
-            ServiceWatcher::register_singleton(
+            let (mut event_rx, devts) = register_recording_singleton(
                 kernel,
-                fpowerstats::ServiceMarker,
-                move |current_task, instance, scope| {
-                    let name = instance.instance_name().to_string();
-                    let proxy =
-                        Arc::new(instance.connect_to_device_sync().expect("connect to device"));
-                    scope.monitor_channel(proxy);
-
-                    let tx1 = event_tx.clone();
-                    let name1 = name.clone();
-                    scope.on_disconnect(move |_| {
-                        let _ = tx1.unbounded_send(format!("hook1:{name1}"));
-                    });
-                    let tx2 = event_tx.clone();
-                    let name2 = name.clone();
-                    scope.on_disconnect(move |_| {
-                        let _ = tx2.unbounded_send(format!("hook2:{name2}"));
-                    });
-
-                    let kernel = current_task.kernel();
-                    let misc_dev = scope.add_scoped_device(
-                        kernel
-                            .device_registry
-                            .add_misc_device(
-                                kernel,
-                                "watcher_misc".into(),
-                                simple_device_ops::<DevNull>,
-                            )
-                            .expect("add misc device"),
-                    );
-                    devts_for_bind.lock().push(misc_dev.metadata().expect("metadata").devt);
-                    let _ = event_tx.unbounded_send(format!("bind:{name}"));
-                },
+                "watcher_misc",
+                /* teardown_instance = */ None,
             );
+            let (all_seen_tx, mut all_seen_rx) = mpsc::unbounded();
+
             ServiceWatcher::register(
                 kernel,
                 fpowerstats::ServiceMarker,
@@ -959,6 +1072,55 @@ mod tests {
                 .expect("remove service instance");
             assert_eq!(event_rx.next().await.as_deref(), Some("disconnect:2"));
             assert!(root.lookup("devices/virtual/misc/watcher_replace_misc".into()).is_none());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn singleton_teardown_during_bind_allows_subsequent_instance() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let dir = start_test_service_dir(kernel);
+            let (mut event_rx, devts) = register_recording_singleton(
+                kernel,
+                "teardown_misc",
+                /* teardown_instance = */ Some("failing"),
+            );
+
+            let (_failing_srv_tx, _failing_srv_rx) = mpsc::unbounded();
+            add_instance(&dir, "failing", move |ch| {
+                let _ = _failing_srv_tx.unbounded_send(ch);
+            });
+            assert_eq!(event_rx.next().await.as_deref(), Some("hook2:failing"));
+            assert_eq!(event_rx.next().await.as_deref(), Some("hook1:failing"));
+            assert_eq!(event_rx.next().await.as_deref(), Some("teardown:failing"));
+
+            let registry = &kernel.device_registry;
+            assert!(
+                registry.objects.root.lookup("devices/virtual/misc/teardown_misc".into()).is_none()
+            );
+
+            // Adding `"healthy"` while `"failing"` is still in `/svc` must bind immediately and
+            // reuse the freed misc minor number.
+            let (healthy_srv_tx, mut healthy_srv_rx) = mpsc::unbounded();
+            add_instance(&dir, "healthy", move |ch| {
+                let _ = healthy_srv_tx.unbounded_send(ch);
+            });
+            assert_eq!(event_rx.next().await.as_deref(), Some("bind:healthy"));
+            let healthy_server = healthy_srv_rx.next().await.expect("healthy server channel");
+            let recorded_devts = devts.lock().clone();
+            assert_eq!(recorded_devts[1], recorded_devts[0]);
+            assert!(
+                registry.objects.root.lookup("devices/virtual/misc/teardown_misc".into()).is_some()
+            );
+
+            drop(healthy_server);
+            assert_eq!(event_rx.next().await.as_deref(), Some("hook2:healthy"));
+            assert_eq!(event_rx.next().await.as_deref(), Some("hook1:healthy"));
+            assert!(
+                registry.objects.root.lookup("devices/virtual/misc/teardown_misc".into()).is_none()
+            );
+            assert!(event_rx.try_recv().is_err());
         })
         .await;
     }

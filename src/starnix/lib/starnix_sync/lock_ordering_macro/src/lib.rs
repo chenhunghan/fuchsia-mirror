@@ -118,24 +118,28 @@ pub fn lock_ordering(input: TokenStream) -> TokenStream {
     let mut lock_ids: BTreeMap<Ident, usize> = BTreeMap::new();
     let max_id = usize::MAX & !0xF; // Max value with subclass bits cleared
 
-    while let Some(node) = queue.pop_first() {
-        if terminals.contains(&node) {
-            lock_ids.insert(node.clone(), max_id);
-        } else {
-            lock_ids.insert(node.clone(), next_id);
-            // Space out IDs by 16 (4 bits) for subclassing
-            next_id += 16;
-        }
-        if let Some(neighbors) = adj_list.get(&node) {
-            for neighbor in neighbors {
-                let deg = in_degree.get_mut(neighbor).unwrap();
-                assert!(*deg > 0);
-                *deg -= 1;
-                if *deg == 0 {
-                    queue.insert(neighbor.clone());
+    while !queue.is_empty() {
+        let mut next_queue = BTreeSet::new();
+        for node in queue {
+            if terminals.contains(&node) {
+                lock_ids.insert(node.clone(), max_id);
+            } else {
+                lock_ids.insert(node.clone(), next_id);
+            }
+            if let Some(neighbors) = adj_list.get(&node) {
+                for neighbor in neighbors {
+                    let deg = in_degree.get_mut(neighbor).unwrap();
+                    assert!(*deg > 0);
+                    *deg -= 1;
+                    if *deg == 0 {
+                        next_queue.insert(neighbor.clone());
+                    }
                 }
             }
         }
+        queue = next_queue;
+        // Space out IDs by 16 (4 bits) for subclassing
+        next_id += 16;
     }
 
     if lock_ids.len() != levels.len() {

@@ -4,6 +4,7 @@
 
 #include "src/graphics/display/drivers/coordinator/client.h"
 
+#include <fidl/fuchsia.hardware.display.types/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.display.types/cpp/wire.h>
 #include <fidl/fuchsia.hardware.display/cpp/wire.h>
 #include <fidl/fuchsia.images2/cpp/wire.h>
@@ -1031,6 +1032,25 @@ void Client::SetDisplayPowerMode(SetDisplayPowerModeRequestView request,
   completer.ReplySuccess();
 }
 
+void Client::NotifyExpectedPresent(NotifyExpectedPresentRequestView request,
+                                   NotifyExpectedPresentCompleter::Sync& completer) {
+  TRACE_DURATION("gfx", "Display::Client::NotifyExpectedPresent");
+
+  if (!is_owner_) {
+    return;
+  }
+
+  const display::DisplayId display_id(request->display_id);
+  if (!display_configs_.find(display_id).IsValid()) {
+    fdf::warn("NotifyExpectedPresent called with unknown display ID: {}", display_id.value());
+    return;
+  }
+
+  controller_.engine_driver_client()->NotifyExpectedPresent(
+      display_id, zx::time_monotonic(request->expected_present_time),
+      zx::duration(request->frame_interval));
+}
+
 display::ConfigCheckResult Client::CheckConfigImpl() {
   TRACE_DURATION("gfx", "Display::Client::CheckConfig");
 
@@ -1393,6 +1413,13 @@ void Client::OnDisplaysChanged(std::span<const display::DisplayId> added_display
 
     const bool found_display_info =
         controller_.FindDisplayInfo(added_display_id, [&](const DisplayInfo& display_info) {
+          fidl_display_info.mode_vrr_configs =
+              fidl::VectorView<fuchsia_hardware_display_types::wire::VrrConfig>(
+                  arena, display_info.mode_vrr_configs.size());
+          for (size_t i = 0; i < display_info.mode_vrr_configs.size(); ++i) {
+            fidl_display_info.mode_vrr_configs[i] =
+                fidl::ToWire(arena, display_info.mode_vrr_configs[i]);
+          }
           fidl_display_info.manufacturer_name =
               fidl::StringView::FromExternal(display_info.GetManufacturerName());
           fidl_display_info.monitor_name = fidl::StringView(arena, display_info.GetMonitorName());

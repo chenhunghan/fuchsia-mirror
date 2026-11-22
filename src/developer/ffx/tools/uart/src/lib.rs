@@ -24,8 +24,8 @@ pub mod sys;
 
 use ffx_config::EnvironmentContext;
 use ffx_writer::ToolIO;
-use fho::subtool_suite::{FfxSubtoolSuite, Subtool, SubtoolBox, SubtoolSuite, ToolSuiteCommand};
-use fho::{FfxTool, FhoEnvironment, Result, user_error};
+use fho::subtool_suite::{FfxSubtoolSuite, Subtool, SubtoolBox, SubtoolSuite};
+use fho::{Result, user_error};
 use sha2 as _;
 
 pub use args::*;
@@ -36,42 +36,20 @@ pub use stream::*;
 pub use subtools::*;
 pub use sys::*;
 
-impl ToolSuiteCommand for UartCommand {
-    type SubCommand = UartSubCommand;
-    fn into_subcommand(self) -> Self::SubCommand {
-        self.sub_cmd
-    }
-}
-
 pub struct UartSuite;
 
 impl SubtoolSuite for UartSuite {
     type Command = UartCommand;
 
-    async fn new_subtool(
-        env: FhoEnvironment,
-        subcommand: UartSubCommand,
-    ) -> Result<Box<dyn SubtoolBox>> {
-        Ok(match subcommand {
-            UartSubCommand::Connect(cmd) => {
-                Subtool::new(subtools::ConnectTool::from_env(env, cmd).await?)
-            }
-            UartSubCommand::Disconnect(cmd) => {
-                Subtool::new(subtools::DisconnectTool::from_env(env, cmd).await?)
-            }
-            UartSubCommand::List(cmd) => {
-                Subtool::new(subtools::ListTool::from_env(env, cmd).await?)
-            }
-            UartSubCommand::Probe(cmd) => {
-                Subtool::new(subtools::ProbeTool::from_env(env, cmd).await?)
-            }
-            UartSubCommand::Status(cmd) => {
-                Subtool::new(subtools::StatusTool::from_env(env, cmd).await?)
-            }
-            UartSubCommand::Doctor(cmd) => {
-                Subtool::new(subtools::DoctorTool::from_env(env, cmd).await?)
-            }
-        })
+    fn new_subtool(cmd: UartCommand) -> Box<dyn SubtoolBox> {
+        match cmd.sub_cmd {
+            UartSubCommand::Connect(cmd) => Subtool::<subtools::ConnectTool>::new(cmd),
+            UartSubCommand::Disconnect(cmd) => Subtool::<subtools::DisconnectTool>::new(cmd),
+            UartSubCommand::List(cmd) => Subtool::<subtools::ListTool>::new(cmd),
+            UartSubCommand::Probe(cmd) => Subtool::<subtools::ProbeTool>::new(cmd),
+            UartSubCommand::Status(cmd) => Subtool::<subtools::StatusTool>::new(cmd),
+            UartSubCommand::Doctor(cmd) => Subtool::<subtools::DoctorTool>::new(cmd),
+        }
     }
 }
 

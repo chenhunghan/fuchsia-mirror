@@ -60,7 +60,7 @@ cc_test_executable("time-zone-info-service-lib-test-bin") {
     ":time-zone-info-service-lib",
     "//sdk/fidl/fuchsia.intl:fuchsia.intl_hlcpp",
     "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//sdk/lib/sys/service/cpp",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fostr/fidl/fuchsia.intl",

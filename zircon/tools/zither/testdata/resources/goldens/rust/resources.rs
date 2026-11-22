@@ -5,30 +5,48 @@
 // DO NOT EDIT.
 // Generated from FIDL library `zither.resources` by zither, a Fuchsia platform tool.
 
-use zerocopy::{FromBytes, Immutable, IntoBytes, TryFromBytes};
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, Eq, Hash, Immutable, IntoBytes, PartialEq, TryFromBytes)]
-pub enum Subtype {
-    A = 0,
-    B = 1,
-}
+#[repr(transparent)]
+#[derive(Clone, Copy, Eq, FromBytes, Hash, Immutable, IntoBytes, PartialEq)]
+pub struct Subtype(u32);
 
 impl Subtype {
-    pub fn from_raw(raw: u32) -> Option<Self> {
-        match raw {
-            0 => Some(Self::A),
+    pub const A: Self = Self(0);
+    pub const B: Self = Self(1);
 
-            1 => Some(Self::B),
+    /// Constructs a value from its underlying integer.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
 
-            _ => None,
-        }
+    /// Returns the underlying integer.
+    pub const fn as_raw(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for Subtype {
+    fn from(raw: u32) -> Self {
+        Self(raw)
     }
 }
 
 impl From<Subtype> for u32 {
     fn from(val: Subtype) -> Self {
-        val as Self
+        val.0
+    }
+}
+
+impl core::fmt::Debug for Subtype {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::A => f.write_str("Subtype::A"),
+
+            Self::B => f.write_str("Subtype::B"),
+
+            Self(raw) => f.debug_tuple("Subtype").field(&raw).finish(),
+        }
     }
 }
 

@@ -7,27 +7,28 @@
 #ifndef ZIRCON_KERNEL_LIB_PAGE_MAP_INCLUDE_LIB_PAGE_MAP_ACCESSOR_H_
 #define ZIRCON_KERNEL_LIB_PAGE_MAP_INCLUDE_LIB_PAGE_MAP_ACCESSOR_H_
 
-#include <lib/fit/defer.h>
 #include <lib/user_copy/internal.h>
-#include <lib/zx/result.h>
-#include <zircon/errors.h>
+#include <stddef.h>
 
-#include <fbl/ref_ptr.h>
 #include <ktl/utility.h>
 
 namespace page_map::internal {
+// The Rust `page_map::Entry`.  Opaque to C++.
 class Entry;
-// Release an Entry from an Accessor.  See definition for why this is not an Accessor method.
-void ReleaseEntry(Entry* entry);
 }  // namespace page_map::internal
+
+extern "C" {
+// Release an Entry from an Accessor.  Implemented in Rust.
+void rust_page_map_release_entry(page_map::internal::Entry* entry);
+}
 
 namespace page_map {
 
-class PageMap;
-
 // Provides access to a single object of type |Object|.
 //
-// Use |PageMap::MakeAccessor| to create an Accessor.
+// Use the Rust |PageMap::make_accessor| to create an Accessor.  This type has the same layout as
+// the Rust |page_map::Accessor|, allowing C++ types that embed an Accessor field to destroy it via
+// |rust_page_map_release_entry|.
 //
 // Accessors can be used in two ways Read/Write and raw.
 //
@@ -45,7 +46,7 @@ class Accessor {
  public:
   static_assert(::internal::is_copy_allowed<Object>::value, "Type must be ABI-safe.");
 
-  // Construct a invalid Accessor.  See |PageMap::MakeAccessor|
+  // Construct a invalid Accessor.  See |PageMap::make_accessor|
   Accessor() = default;
 
   // Because a mapping may be destroyed upon the destruction of the last Accessor that references
@@ -128,9 +129,6 @@ class Accessor {
   Object& raw() const { return *object_; }
 
  private:
-  // So |PageMap::MakeAccessor| can call the private constructor.
-  friend class PageMap;
-
   // See below.
   template <auto field>
   struct FieldRef;
@@ -147,17 +145,12 @@ class Accessor {
     static constexpr const Field& Of(const Struct& instance) { return (instance.*field); }
   };
 
-  // Construct an Accessor for the existing |entry|.
-  //
-  // |page_map| and |entry| must outlive this Accessor.
-  Accessor(internal::Entry* entry, Object* object) : entry_{entry}, object_{object} {}
-
   // Invalidate this accessor and release any mapping it may retain.
   //
   // After |Invalidate|, |IsValid| will return false;
   void Invalidate() {
     if (entry_) {
-      ReleaseEntry(entry_);
+      rust_page_map_release_entry(entry_);
       entry_ = nullptr;
       object_ = nullptr;
     }
@@ -173,6 +166,12 @@ class Accessor {
 
 template <typename Object>
 inline Accessor<Object>::~Accessor() {
+  // Keep layout and field order in sync with Rust `page_map::Accessor` in
+  // `//zircon/kernel/lib/page-map/src/accessor.rs`.
+  static_assert(sizeof(Accessor) == 2 * sizeof(void*));
+  static_assert(alignof(Accessor) == alignof(void*));
+  static_assert(offsetof(Accessor, entry_) == 0);
+  static_assert(offsetof(Accessor, object_) == sizeof(void*));
   Invalidate();
 }
 

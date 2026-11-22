@@ -4267,6 +4267,169 @@ pub mod natural {
     }
 
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum OnlyCpp {
+        X(u32),
+    }
+
+    unsafe impl<___E> ::fidl_next::Encode<crate::wire::OnlyCpp, ___E> for OnlyCpp
+    where
+        ___E: ::fidl_next::encoder::InternalHandleEncoder + ?Sized,
+    {
+        #[inline]
+        fn encode(
+            self,
+            encoder: &mut ___E,
+            out: &mut ::core::mem::MaybeUninit<crate::wire::OnlyCpp>,
+            _: (),
+        ) -> ::core::result::Result<(), ::fidl_next::EncodeError> {
+            ::fidl_next::munge!(let crate::wire::OnlyCpp { raw, _phantom: _ } = out);
+
+            match self {
+                Self::X(value) => ::fidl_next::wire::Union::encode_as_static::<
+                    ___E,
+                    ::fidl_next::wire::Uint32,
+                >(value, 1, encoder, raw, ())?,
+            }
+
+            Ok(())
+        }
+    }
+
+    unsafe impl<'a, ___E> ::fidl_next::Encode<crate::wire::OnlyCpp, ___E> for &'a OnlyCpp
+    where
+        ___E: ::fidl_next::encoder::InternalHandleEncoder + ?Sized,
+    {
+        #[inline]
+        fn encode(
+            self,
+            encoder: &mut ___E,
+            out: &mut ::core::mem::MaybeUninit<crate::wire::OnlyCpp>,
+            _: (),
+        ) -> ::core::result::Result<(), ::fidl_next::EncodeError> {
+            ::fidl_next::munge!(let crate::wire::OnlyCpp { raw, _phantom: _ } = out);
+
+            match self {
+                OnlyCpp::X(value) => ::fidl_next::wire::Union::encode_as_static::<
+                    ___E,
+                    ::fidl_next::wire::Uint32,
+                >(value, 1, encoder, raw, ())?,
+            }
+
+            Ok(())
+        }
+    }
+
+    unsafe impl<___E> ::fidl_next::EncodeOption<crate::wire_optional::OnlyCpp, ___E> for OnlyCpp
+    where
+        ___E: ?Sized,
+        OnlyCpp: ::fidl_next::Encode<crate::wire::OnlyCpp, ___E>,
+    {
+        #[inline]
+        fn encode_option(
+            this: ::core::option::Option<Self>,
+            encoder: &mut ___E,
+            out: &mut ::core::mem::MaybeUninit<crate::wire_optional::OnlyCpp>,
+            _: (),
+        ) -> ::core::result::Result<(), ::fidl_next::EncodeError> {
+            ::fidl_next::munge!(let crate::wire_optional::OnlyCpp { raw, _phantom: _ } = &mut *out);
+
+            if let Some(inner) = this {
+                let value_out = unsafe { &mut *out.as_mut_ptr().cast() };
+                ::fidl_next::Encode::encode(inner, encoder, value_out, ())?;
+            } else {
+                ::fidl_next::wire::Union::encode_absent(raw);
+            }
+
+            Ok(())
+        }
+    }
+
+    unsafe impl<'a, ___E> ::fidl_next::EncodeOption<crate::wire_optional::OnlyCpp, ___E> for &'a OnlyCpp
+    where
+        ___E: ?Sized,
+        &'a OnlyCpp: ::fidl_next::Encode<crate::wire::OnlyCpp, ___E>,
+    {
+        #[inline]
+        fn encode_option(
+            this: ::core::option::Option<Self>,
+            encoder: &mut ___E,
+            out: &mut ::core::mem::MaybeUninit<crate::wire_optional::OnlyCpp>,
+            _: (),
+        ) -> ::core::result::Result<(), ::fidl_next::EncodeError> {
+            ::fidl_next::munge!(let crate::wire_optional::OnlyCpp { raw, _phantom: _ } = &mut *out);
+
+            if let Some(inner) = this {
+                let value_out = unsafe { &mut *out.as_mut_ptr().cast() };
+                ::fidl_next::Encode::encode(inner, encoder, value_out, ())?;
+            } else {
+                ::fidl_next::wire::Union::encode_absent(raw);
+            }
+
+            Ok(())
+        }
+    }
+
+    impl ::fidl_next::FromWire<crate::wire::OnlyCpp> for OnlyCpp {
+        #[inline]
+        fn from_wire(wire: crate::wire::OnlyCpp) -> Self {
+            let wire = ::core::mem::ManuallyDrop::new(wire);
+            match wire.raw.ordinal() {
+                1 => Self::X(::fidl_next::FromWire::from_wire(unsafe {
+                    wire.raw.get().read_unchecked::<::fidl_next::wire::Uint32>()
+                })),
+
+                _ => unsafe { ::core::hint::unreachable_unchecked() },
+            }
+        }
+    }
+
+    impl<'a> ::fidl_next::FromWire<&'a crate::wire::OnlyCpp> for OnlyCpp {
+        #[inline]
+        fn from_wire(wire: &'a crate::wire::OnlyCpp) -> Self {
+            match wire.raw.ordinal() {
+                1 => Self::X(::fidl_next::FromWire::from_wire(unsafe {
+                    wire.raw.get().deref_unchecked::<::fidl_next::wire::Uint32>()
+                })),
+
+                _ => unsafe { ::core::hint::unreachable_unchecked() },
+            }
+        }
+    }
+
+    impl ::fidl_next::FromWireOption<crate::wire_optional::OnlyCpp> for OnlyCpp {
+        #[inline]
+        fn from_wire_option(wire: crate::wire_optional::OnlyCpp) -> ::core::option::Option<Self> {
+            if let Some(inner) = wire.into_option() {
+                Some(::fidl_next::FromWire::from_wire(inner))
+            } else {
+                None
+            }
+        }
+    }
+
+    impl ::fidl_next::FromWireOption<crate::wire_optional::OnlyCpp> for Box<OnlyCpp> {
+        #[inline]
+        fn from_wire_option(wire: crate::wire_optional::OnlyCpp) -> ::core::option::Option<Self> {
+            <
+            OnlyCpp as ::fidl_next::FromWireOption<crate::wire_optional::OnlyCpp>
+        >::from_wire_option(wire).map(Box::new)
+        }
+    }
+
+    impl<'a> ::fidl_next::FromWireOption<&'a crate::wire_optional::OnlyCpp> for Box<OnlyCpp> {
+        #[inline]
+        fn from_wire_option(
+            wire: &'a crate::wire_optional::OnlyCpp,
+        ) -> ::core::option::Option<Self> {
+            if let Some(inner) = wire.as_ref() {
+                Some(Box::new(::fidl_next::FromWire::from_wire(inner)))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     #[repr(u32)]
     pub enum OnlyDart {
         A = 1,
@@ -4348,170 +4511,6 @@ pub mod natural {
         #[inline]
         fn from_wire(wire: &'a crate::wire::OnlyDart) -> Self {
             Self::from(*wire)
-        }
-    }
-
-    #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub enum OnlyLlcpp {
-        X(u32),
-    }
-
-    unsafe impl<___E> ::fidl_next::Encode<crate::wire::OnlyLlcpp, ___E> for OnlyLlcpp
-    where
-        ___E: ::fidl_next::encoder::InternalHandleEncoder + ?Sized,
-    {
-        #[inline]
-        fn encode(
-            self,
-            encoder: &mut ___E,
-            out: &mut ::core::mem::MaybeUninit<crate::wire::OnlyLlcpp>,
-            _: (),
-        ) -> ::core::result::Result<(), ::fidl_next::EncodeError> {
-            ::fidl_next::munge!(let crate::wire::OnlyLlcpp { raw, _phantom: _ } = out);
-
-            match self {
-                Self::X(value) => ::fidl_next::wire::Union::encode_as_static::<
-                    ___E,
-                    ::fidl_next::wire::Uint32,
-                >(value, 1, encoder, raw, ())?,
-            }
-
-            Ok(())
-        }
-    }
-
-    unsafe impl<'a, ___E> ::fidl_next::Encode<crate::wire::OnlyLlcpp, ___E> for &'a OnlyLlcpp
-    where
-        ___E: ::fidl_next::encoder::InternalHandleEncoder + ?Sized,
-    {
-        #[inline]
-        fn encode(
-            self,
-            encoder: &mut ___E,
-            out: &mut ::core::mem::MaybeUninit<crate::wire::OnlyLlcpp>,
-            _: (),
-        ) -> ::core::result::Result<(), ::fidl_next::EncodeError> {
-            ::fidl_next::munge!(let crate::wire::OnlyLlcpp { raw, _phantom: _ } = out);
-
-            match self {
-                OnlyLlcpp::X(value) => ::fidl_next::wire::Union::encode_as_static::<
-                    ___E,
-                    ::fidl_next::wire::Uint32,
-                >(value, 1, encoder, raw, ())?,
-            }
-
-            Ok(())
-        }
-    }
-
-    unsafe impl<___E> ::fidl_next::EncodeOption<crate::wire_optional::OnlyLlcpp, ___E> for OnlyLlcpp
-    where
-        ___E: ?Sized,
-        OnlyLlcpp: ::fidl_next::Encode<crate::wire::OnlyLlcpp, ___E>,
-    {
-        #[inline]
-        fn encode_option(
-            this: ::core::option::Option<Self>,
-            encoder: &mut ___E,
-            out: &mut ::core::mem::MaybeUninit<crate::wire_optional::OnlyLlcpp>,
-            _: (),
-        ) -> ::core::result::Result<(), ::fidl_next::EncodeError> {
-            ::fidl_next::munge!(let crate::wire_optional::OnlyLlcpp { raw, _phantom: _ } = &mut *out);
-
-            if let Some(inner) = this {
-                let value_out = unsafe { &mut *out.as_mut_ptr().cast() };
-                ::fidl_next::Encode::encode(inner, encoder, value_out, ())?;
-            } else {
-                ::fidl_next::wire::Union::encode_absent(raw);
-            }
-
-            Ok(())
-        }
-    }
-
-    unsafe impl<'a, ___E> ::fidl_next::EncodeOption<crate::wire_optional::OnlyLlcpp, ___E>
-        for &'a OnlyLlcpp
-    where
-        ___E: ?Sized,
-        &'a OnlyLlcpp: ::fidl_next::Encode<crate::wire::OnlyLlcpp, ___E>,
-    {
-        #[inline]
-        fn encode_option(
-            this: ::core::option::Option<Self>,
-            encoder: &mut ___E,
-            out: &mut ::core::mem::MaybeUninit<crate::wire_optional::OnlyLlcpp>,
-            _: (),
-        ) -> ::core::result::Result<(), ::fidl_next::EncodeError> {
-            ::fidl_next::munge!(let crate::wire_optional::OnlyLlcpp { raw, _phantom: _ } = &mut *out);
-
-            if let Some(inner) = this {
-                let value_out = unsafe { &mut *out.as_mut_ptr().cast() };
-                ::fidl_next::Encode::encode(inner, encoder, value_out, ())?;
-            } else {
-                ::fidl_next::wire::Union::encode_absent(raw);
-            }
-
-            Ok(())
-        }
-    }
-
-    impl ::fidl_next::FromWire<crate::wire::OnlyLlcpp> for OnlyLlcpp {
-        #[inline]
-        fn from_wire(wire: crate::wire::OnlyLlcpp) -> Self {
-            let wire = ::core::mem::ManuallyDrop::new(wire);
-            match wire.raw.ordinal() {
-                1 => Self::X(::fidl_next::FromWire::from_wire(unsafe {
-                    wire.raw.get().read_unchecked::<::fidl_next::wire::Uint32>()
-                })),
-
-                _ => unsafe { ::core::hint::unreachable_unchecked() },
-            }
-        }
-    }
-
-    impl<'a> ::fidl_next::FromWire<&'a crate::wire::OnlyLlcpp> for OnlyLlcpp {
-        #[inline]
-        fn from_wire(wire: &'a crate::wire::OnlyLlcpp) -> Self {
-            match wire.raw.ordinal() {
-                1 => Self::X(::fidl_next::FromWire::from_wire(unsafe {
-                    wire.raw.get().deref_unchecked::<::fidl_next::wire::Uint32>()
-                })),
-
-                _ => unsafe { ::core::hint::unreachable_unchecked() },
-            }
-        }
-    }
-
-    impl ::fidl_next::FromWireOption<crate::wire_optional::OnlyLlcpp> for OnlyLlcpp {
-        #[inline]
-        fn from_wire_option(wire: crate::wire_optional::OnlyLlcpp) -> ::core::option::Option<Self> {
-            if let Some(inner) = wire.into_option() {
-                Some(::fidl_next::FromWire::from_wire(inner))
-            } else {
-                None
-            }
-        }
-    }
-
-    impl ::fidl_next::FromWireOption<crate::wire_optional::OnlyLlcpp> for Box<OnlyLlcpp> {
-        #[inline]
-        fn from_wire_option(wire: crate::wire_optional::OnlyLlcpp) -> ::core::option::Option<Self> {
-            <
-            OnlyLlcpp as ::fidl_next::FromWireOption<crate::wire_optional::OnlyLlcpp>
-        >::from_wire_option(wire).map(Box::new)
-        }
-    }
-
-    impl<'a> ::fidl_next::FromWireOption<&'a crate::wire_optional::OnlyLlcpp> for Box<OnlyLlcpp> {
-        #[inline]
-        fn from_wire_option(
-            wire: &'a crate::wire_optional::OnlyLlcpp,
-        ) -> ::core::option::Option<Self> {
-            if let Some(inner) = wire.as_ref() {
-                Some(Box::new(::fidl_next::FromWire::from_wire(inner)))
-            } else {
-                None
-            }
         }
     }
 
@@ -6888,6 +6887,132 @@ pub mod wire {
         type Natural = crate::natural::OnlyAppearsInImportingLibrary;
     }
 
+    /// The wire type corresponding to [`OnlyCpp`].
+    #[repr(transparent)]
+    pub struct OnlyCpp {
+        pub(crate) raw: ::fidl_next::wire::Union,
+        pub(crate) _phantom: ::core::marker::PhantomData<()>,
+    }
+
+    impl Drop for OnlyCpp {
+        fn drop(&mut self) {
+            match self.raw.ordinal() {
+                1 => {
+                    let _ = unsafe { self.raw.get().read_unchecked::<::fidl_next::wire::Uint32>() };
+                }
+
+                _ => unsafe { ::core::hint::unreachable_unchecked() },
+            }
+        }
+    }
+
+    impl ::fidl_next::Constrained for OnlyCpp {
+        type Constraint = ();
+
+        fn validate(
+            _: ::fidl_next::Slot<'_, Self>,
+            _: Self::Constraint,
+        ) -> Result<(), ::fidl_next::ValidationError> {
+            Ok(())
+        }
+    }
+
+    unsafe impl ::fidl_next::Wire for OnlyCpp {
+        type Narrowed<'de> = OnlyCpp;
+
+        #[inline]
+        fn zero_padding(out: &mut ::core::mem::MaybeUninit<Self>) {
+            ::fidl_next::munge!(let Self { raw, _phantom: _ } = out);
+            ::fidl_next::wire::Union::zero_padding(raw);
+        }
+    }
+
+    pub mod only_cpp {
+        pub enum Ref<'de> {
+            X(&'de ::fidl_next::wire::Uint32),
+        }
+
+        pub enum Value {
+            X(::fidl_next::wire::Uint32),
+        }
+    }
+
+    impl OnlyCpp {
+        pub fn as_ref(&self) -> crate::wire::only_cpp::Ref<'_> {
+            match self.raw.ordinal() {
+                1 => crate::wire::only_cpp::Ref::X(unsafe {
+                    self.raw.get().deref_unchecked::<::fidl_next::wire::Uint32>()
+                }),
+
+                _ => unsafe { ::core::hint::unreachable_unchecked() },
+            }
+        }
+
+        pub fn into_inner(self) -> crate::wire::only_cpp::Value {
+            let this = ::core::mem::ManuallyDrop::new(self);
+
+            match this.raw.ordinal() {
+                1 => crate::wire::only_cpp::Value::X(unsafe {
+                    this.raw.get().read_unchecked::<::fidl_next::wire::Uint32>()
+                }),
+
+                _ => unsafe { ::core::hint::unreachable_unchecked() },
+            }
+        }
+    }
+
+    impl Clone for OnlyCpp {
+        fn clone(&self) -> Self {
+            match self.raw.ordinal() {
+                1 => Self {
+                    raw: unsafe { self.raw.clone_inline_unchecked::<::fidl_next::wire::Uint32>() },
+                    _phantom: ::core::marker::PhantomData,
+                },
+
+                _ => unsafe { ::core::hint::unreachable_unchecked() },
+            }
+        }
+    }
+
+    unsafe impl<___D> ::fidl_next::Decode<___D> for OnlyCpp
+    where
+        ___D: ::fidl_next::decoder::InternalHandleDecoder + ?Sized,
+    {
+        fn decode(
+            mut slot: ::fidl_next::Slot<'_, Self>,
+            decoder: &mut ___D,
+            _: (),
+        ) -> ::core::result::Result<(), ::fidl_next::DecodeError> {
+            ::fidl_next::munge!(let Self { mut raw, _phantom: _ } = slot.as_mut());
+            match ::fidl_next::wire::Union::encoded_ordinal(raw.as_mut()) {
+                1 => ::fidl_next::wire::Union::decode_as_static::<___D, ::fidl_next::wire::Uint32>(
+                    raw,
+                    decoder,
+                    (),
+                )?,
+
+                ord => return Err(::fidl_next::DecodeError::InvalidUnionOrdinal(ord as usize)),
+            }
+
+            Ok(())
+        }
+    }
+
+    impl ::core::fmt::Debug for OnlyCpp {
+        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+            match self.raw.ordinal() {
+                1 => unsafe {
+                    self.raw.get().deref_unchecked::<::fidl_next::wire::Uint32>().fmt(f)
+                },
+                _ => unsafe { ::core::hint::unreachable_unchecked() },
+            }
+        }
+    }
+
+    impl ::fidl_next::IntoNatural for OnlyCpp {
+        type Natural = crate::natural::OnlyCpp;
+    }
+
     /// The wire type corresponding to [`OnlyDart`].
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     #[repr(transparent)]
@@ -6951,132 +7076,6 @@ pub mod wire {
 
     impl ::fidl_next::IntoNatural for OnlyDart {
         type Natural = crate::natural::OnlyDart;
-    }
-
-    /// The wire type corresponding to [`OnlyLlcpp`].
-    #[repr(transparent)]
-    pub struct OnlyLlcpp {
-        pub(crate) raw: ::fidl_next::wire::Union,
-        pub(crate) _phantom: ::core::marker::PhantomData<()>,
-    }
-
-    impl Drop for OnlyLlcpp {
-        fn drop(&mut self) {
-            match self.raw.ordinal() {
-                1 => {
-                    let _ = unsafe { self.raw.get().read_unchecked::<::fidl_next::wire::Uint32>() };
-                }
-
-                _ => unsafe { ::core::hint::unreachable_unchecked() },
-            }
-        }
-    }
-
-    impl ::fidl_next::Constrained for OnlyLlcpp {
-        type Constraint = ();
-
-        fn validate(
-            _: ::fidl_next::Slot<'_, Self>,
-            _: Self::Constraint,
-        ) -> Result<(), ::fidl_next::ValidationError> {
-            Ok(())
-        }
-    }
-
-    unsafe impl ::fidl_next::Wire for OnlyLlcpp {
-        type Narrowed<'de> = OnlyLlcpp;
-
-        #[inline]
-        fn zero_padding(out: &mut ::core::mem::MaybeUninit<Self>) {
-            ::fidl_next::munge!(let Self { raw, _phantom: _ } = out);
-            ::fidl_next::wire::Union::zero_padding(raw);
-        }
-    }
-
-    pub mod only_llcpp {
-        pub enum Ref<'de> {
-            X(&'de ::fidl_next::wire::Uint32),
-        }
-
-        pub enum Value {
-            X(::fidl_next::wire::Uint32),
-        }
-    }
-
-    impl OnlyLlcpp {
-        pub fn as_ref(&self) -> crate::wire::only_llcpp::Ref<'_> {
-            match self.raw.ordinal() {
-                1 => crate::wire::only_llcpp::Ref::X(unsafe {
-                    self.raw.get().deref_unchecked::<::fidl_next::wire::Uint32>()
-                }),
-
-                _ => unsafe { ::core::hint::unreachable_unchecked() },
-            }
-        }
-
-        pub fn into_inner(self) -> crate::wire::only_llcpp::Value {
-            let this = ::core::mem::ManuallyDrop::new(self);
-
-            match this.raw.ordinal() {
-                1 => crate::wire::only_llcpp::Value::X(unsafe {
-                    this.raw.get().read_unchecked::<::fidl_next::wire::Uint32>()
-                }),
-
-                _ => unsafe { ::core::hint::unreachable_unchecked() },
-            }
-        }
-    }
-
-    impl Clone for OnlyLlcpp {
-        fn clone(&self) -> Self {
-            match self.raw.ordinal() {
-                1 => Self {
-                    raw: unsafe { self.raw.clone_inline_unchecked::<::fidl_next::wire::Uint32>() },
-                    _phantom: ::core::marker::PhantomData,
-                },
-
-                _ => unsafe { ::core::hint::unreachable_unchecked() },
-            }
-        }
-    }
-
-    unsafe impl<___D> ::fidl_next::Decode<___D> for OnlyLlcpp
-    where
-        ___D: ::fidl_next::decoder::InternalHandleDecoder + ?Sized,
-    {
-        fn decode(
-            mut slot: ::fidl_next::Slot<'_, Self>,
-            decoder: &mut ___D,
-            _: (),
-        ) -> ::core::result::Result<(), ::fidl_next::DecodeError> {
-            ::fidl_next::munge!(let Self { mut raw, _phantom: _ } = slot.as_mut());
-            match ::fidl_next::wire::Union::encoded_ordinal(raw.as_mut()) {
-                1 => ::fidl_next::wire::Union::decode_as_static::<___D, ::fidl_next::wire::Uint32>(
-                    raw,
-                    decoder,
-                    (),
-                )?,
-
-                ord => return Err(::fidl_next::DecodeError::InvalidUnionOrdinal(ord as usize)),
-            }
-
-            Ok(())
-        }
-    }
-
-    impl ::core::fmt::Debug for OnlyLlcpp {
-        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-            match self.raw.ordinal() {
-                1 => unsafe {
-                    self.raw.get().deref_unchecked::<::fidl_next::wire::Uint32>().fmt(f)
-                },
-                _ => unsafe { ::core::hint::unreachable_unchecked() },
-            }
-        }
-    }
-
-    impl ::fidl_next::IntoNatural for OnlyLlcpp {
-        type Natural = crate::natural::OnlyLlcpp;
     }
 
     /// The wire type corresponding to [`OnlyPython`].
@@ -7540,12 +7539,12 @@ pub mod wire_optional {
     }
 
     #[repr(transparent)]
-    pub struct OnlyLlcpp {
+    pub struct OnlyCpp {
         pub(crate) raw: ::fidl_next::wire::Union,
         pub(crate) _phantom: ::core::marker::PhantomData<()>,
     }
 
-    impl ::fidl_next::Constrained for OnlyLlcpp {
+    impl ::fidl_next::Constrained for OnlyCpp {
         type Constraint = ();
 
         fn validate(
@@ -7556,8 +7555,8 @@ pub mod wire_optional {
         }
     }
 
-    unsafe impl ::fidl_next::Wire for OnlyLlcpp {
-        type Narrowed<'de> = OnlyLlcpp;
+    unsafe impl ::fidl_next::Wire for OnlyCpp {
+        type Narrowed<'de> = OnlyCpp;
 
         #[inline]
         fn zero_padding(out: &mut ::core::mem::MaybeUninit<Self>) {
@@ -7566,7 +7565,7 @@ pub mod wire_optional {
         }
     }
 
-    impl OnlyLlcpp {
+    impl OnlyCpp {
         pub fn is_some(&self) -> bool {
             self.raw.is_some()
         }
@@ -7575,26 +7574,23 @@ pub mod wire_optional {
             self.raw.is_none()
         }
 
-        pub fn as_ref(&self) -> ::core::option::Option<&crate::wire::OnlyLlcpp> {
+        pub fn as_ref(&self) -> ::core::option::Option<&crate::wire::OnlyCpp> {
             if self.is_some() { Some(unsafe { &*(self as *const Self).cast() }) } else { None }
         }
 
-        pub fn into_option(self) -> ::core::option::Option<crate::wire::OnlyLlcpp> {
+        pub fn into_option(self) -> ::core::option::Option<crate::wire::OnlyCpp> {
             if self.is_some() {
-                Some(crate::wire::OnlyLlcpp {
-                    raw: self.raw,
-                    _phantom: ::core::marker::PhantomData,
-                })
+                Some(crate::wire::OnlyCpp { raw: self.raw, _phantom: ::core::marker::PhantomData })
             } else {
                 None
             }
         }
     }
 
-    impl Clone for OnlyLlcpp {
+    impl Clone for OnlyCpp {
         fn clone(&self) -> Self {
             if self.is_none() {
-                return OnlyLlcpp {
+                return OnlyCpp {
                     raw: ::fidl_next::wire::Union::absent(),
                     _phantom: ::core::marker::PhantomData,
                 };
@@ -7611,7 +7607,7 @@ pub mod wire_optional {
         }
     }
 
-    unsafe impl<___D> ::fidl_next::Decode<___D> for OnlyLlcpp
+    unsafe impl<___D> ::fidl_next::Decode<___D> for OnlyCpp
     where
         ___D: ::fidl_next::decoder::InternalHandleDecoder + ?Sized,
     {
@@ -7636,14 +7632,14 @@ pub mod wire_optional {
         }
     }
 
-    impl ::core::fmt::Debug for OnlyLlcpp {
+    impl ::core::fmt::Debug for OnlyCpp {
         fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
             self.as_ref().fmt(f)
         }
     }
 
-    impl ::fidl_next::IntoNatural for OnlyLlcpp {
-        type Natural = ::core::option::Option<crate::natural::OnlyLlcpp>;
+    impl ::fidl_next::IntoNatural for OnlyCpp {
+        type Natural = ::core::option::Option<crate::natural::OnlyCpp>;
     }
 }
 

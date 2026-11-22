@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+py_library(
+    name = "resources",
+    testonly = True,
+    # rules_python py_library only accepts .py files in srcs and takes non-Python
+    # package resource files in data, whereas GN python_library bundles them via sources.
+    srcs = ["__init__.py"],  # @bazel2gn:raw_overwrite:[ "__init__.py", "one_by_one_green.bgra", "one_by_one_green.png" ]
+    # Non-Python resource files are listed in sources in GN via the raw_overwrite above.
+    data = [
+        "one_by_one_green.bgra",
+        "one_by_one_green.png",
+    ],  # @bazel2gn:skip
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/testing/end_to_end/honeydew/honeydew/affordances/ui/screenshot/tests/unit_tests:__pkg__"],
+)

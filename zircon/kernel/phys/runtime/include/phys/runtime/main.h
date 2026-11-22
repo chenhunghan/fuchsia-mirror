@@ -8,13 +8,7 @@
 #define ZIRCON_KERNEL_PHYS_RUNTIME_INCLUDE_PHYS_RUNTIME_MAIN_H_
 
 #include <lib/arch/ticks.h>
-#include <lib/memalloc/range.h>
-#include <lib/zbi-format/memory.h>
 #include <zircon/compiler.h>
-
-#include <ktl/byte.h>
-#include <ktl/optional.h>
-#include <ktl/span.h>
 
 #include "early-boot.h"
 
@@ -22,9 +16,6 @@
 // initialized in ArchSetUp, so it can be used anywhere after earliest startup.
 struct ArchPhysInfo;
 extern ArchPhysInfo* gArchPhysInfo;
-
-// Defined in <phys/address-space.h>
-class AddressSpace;
 
 // There's never any such object but the static analysis API requires some
 // C++ object to refer to.  The PHYS_SINGLETHREAD marker on any function
@@ -48,43 +39,7 @@ constexpr Type kInstance;
 // The stack and thread pointer ABIs are fully set up for normal C++ code.
 // The first argument is passed along from the boot loader and the second
 // is the earliest possible time sample at entry.
-extern "C" [[noreturn]] void PhysMain(void*, arch::EarlyTicks) PHYS_SINGLETHREAD;
-
-// In ZBI executables, PhysMain is defined to set up the console on stdout and
-// then hand off to ZbiMain.  So ZbiMain is the main entry point that a ZBI
-// executable defines.  It can use printf (and stdout generally) freely.
-[[noreturn]] void ZbiMain(void* zbi_ptr, EarlyBootZbi zbi, arch::EarlyTicks) PHYS_SINGLETHREAD;
-
-// These are defined by the linker script and give the bounds of the memory
-// image, i.e. the load image plus the reserve_memory_size (bss).
-extern "C" __LOCAL ktl::byte PHYS_LOAD_ADDRESS[], _end[];
-
-// Apply any relocations to our binary.
-//
-// Phys binaries are position-independent, so this is required to ensure
-// pointers in data sections, vtables, etc. are updated to their correct
-// locations when loaded somewhere other than the link-time address.
-void ApplyRelocations();
-
-// Read the boot loader data to initialize memory for "allocation.h" APIs.
-// The argument is the pointer to the ZBI, Multiboot info, Device Tree, etc.
-// depending on the particular phys environment.  This panics if no memory is
-// found for the allocator.
-//
-// In the case of ZBI booting, an EarlyBootZbi should additionally be provided
-// - and consumed - as well for safe iteration if caches were left disabled on
-// boot. If caches were left disabled, they are re-enabled in this routine.
-//
-// Further, if an address space object is provided, it will be used to install
-// an identity-mapped virtual address space via ArchSetUpAddressSpace().
-void InitMemory(const void* bootloader_data, ktl::optional<EarlyBootZbi> zbi,
-                AddressSpace* aspace = nullptr);
-
-// This does most of the InitMemory() work for ZBI executables, where
-// InitMemory() calls it with the ZBI_TYPE_MEM_CONFIG payload from the ZBI.
-void ZbiInitMemory(const void* zbi_ptr, EarlyBootZbi zbi, ktl::span<zbi_mem_range_t> mem_config,
-                   ktl::optional<memalloc::Range> extra_special_range = {},
-                   AddressSpace* aspace = nullptr);
+extern "C" [[noreturn]] void CppPhysMain(void*, arch::EarlyTicks) PHYS_SINGLETHREAD;
 
 // Performs initial set-up dependent solely on CPU state. This routine should
 // be called as early as possible and before UART configuration and

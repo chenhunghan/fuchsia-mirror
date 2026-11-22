@@ -1,3 +1,4 @@
+# LINT.IfChange
 fi-0001.noformat.test.fidl
 fi-0002.noformat.test.fidl
 fi-0003.noformat.test.fidl
@@ -207,3 +208,4 @@ fi-0223.test.fidl
 fi-0224.test.fidl
 fi-0225.test.fidl
 fi-0226.test.fidl
+# LINT.ThenChange(//tools/fidl/fidlc/tests/BUILD.bazel:errcat_fidl_bad)

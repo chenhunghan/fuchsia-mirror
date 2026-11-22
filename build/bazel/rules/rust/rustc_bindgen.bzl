@@ -219,7 +219,12 @@ def _rustc_bindgen_impl(ctx):
     args.add_all(compilation_context.defines, format_each = "-D%s")
     args.add_all(compilation_context.includes, format_each = "-I%s")
     args.add_all(compilation_context.quote_includes, format_each = "-iquote%s")
-    args.add_all(compilation_context.system_includes, format_each = "-isystem%s")
+
+    # `@rules_cc` places `cc_library(includes = ...)` directories into
+    # `system_includes`, whereas GN's `{{include_dirs}}` passes them with `-I`.
+    # Passing `-isystem` would cause Clang to suppress doc comments from
+    # headers transitively discovered via `#include <...>`.
+    args.add_all(compilation_context.system_includes, format_each = "-I%s")
     args.add_all(compilation_context.external_includes, format_each = "-isystem%s")
     if cc_toolchain.sysroot:
         args.add("--sysroot=" + cc_toolchain.sysroot)

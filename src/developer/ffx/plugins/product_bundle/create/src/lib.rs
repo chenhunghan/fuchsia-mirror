@@ -388,11 +388,12 @@ async fn sanitized_product_bundle_create(
         println!("{}", dest_path);
         return Ok(());
     }
+    let delivery_blob_type = resolve_delivery_blob_type(system.delivery_blob_type)?;
     let mut builder =
         ProductBundleBuilder::new(name.clone()).system(system, Slot::A).update_package(1);
 
     if let Some(tuf_keys) = cmd.tuf_keys {
-        builder = builder.repository(DeliveryBlobType::Type1, tuf_keys);
+        builder = builder.repository(delivery_blob_type, tuf_keys);
     }
 
     // Build the recovery image if requested.
@@ -453,6 +454,20 @@ async fn sanitized_product_bundle_create(
     );
 
     Ok(())
+}
+
+fn resolve_delivery_blob_type(
+    delivery_blob_type: Option<u32>,
+) -> Result<DeliveryBlobType, ArtifactError> {
+    match delivery_blob_type {
+        Some(0) => {
+            Err(ArtifactError::new(anyhow!("Invalid delivery blob type in assembled system: 0")))
+        }
+        Some(blob_type) => Ok(blob_type.try_into().with_context(|| {
+            format!("Invalid delivery blob type in assembled system: {blob_type}")
+        })?),
+        None => Ok(DeliveryBlobType::Type1),
+    }
 }
 
 #[cfg(test)]
@@ -641,5 +656,15 @@ mod test {
                 ota_cert: None,
             })
         );
+    }
+
+    #[test]
+    fn test_resolve_delivery_blob_type() {
+        assert_eq!(resolve_delivery_blob_type(None).unwrap(), DeliveryBlobType::Type1);
+        assert_eq!(resolve_delivery_blob_type(Some(1)).unwrap(), DeliveryBlobType::Type1);
+        assert_eq!(resolve_delivery_blob_type(Some(2)).unwrap(), DeliveryBlobType::Type2);
+        assert_eq!(resolve_delivery_blob_type(Some(3)).unwrap(), DeliveryBlobType::Type3);
+        assert!(resolve_delivery_blob_type(Some(0)).is_err());
+        assert!(resolve_delivery_blob_type(Some(4)).is_err());
     }
 }

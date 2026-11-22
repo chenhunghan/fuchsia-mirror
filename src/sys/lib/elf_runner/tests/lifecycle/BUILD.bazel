@@ -6,13 +6,24 @@ load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component",
     "fx_component_manifest",
+    "fx_test_component",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":elf_runner_lifecycle_test"],
+    visibility = ["//src/sys:__pkg__"],
+)
+
+# Needs reviewer attention (bazel2gn skip): test sources and manifests hardcode `fuchsia-pkg://fuchsia.com/elf_runner_lifecycle_test#meta/...`, which fails hermetic resolution if renamed to `elf_runner_lifecycle_test-gn`.
+# @bazel2gn:skip
 rustc_test(
     name = "lifecycle_test",
     srcs = ["lifecycle.rs"],
@@ -21,13 +32,15 @@ rustc_test(
     edition = "2024",
     deps = [
         "//src/lib/fuchsia",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/sys/lib/component-events",
     ],
 )
 
+# @bazel2gn:skip
 rustc_binary(
     name = "immediate_exit",
+    testonly = True,
     srcs = ["immediate_exit_component.rs"],
     crate_root = "immediate_exit_component.rs",
     edition = "2024",
@@ -62,8 +75,10 @@ rustc_binary(
     ],
 )
 
+# @bazel2gn:skip
 rustc_binary(
     name = "rendezvous_exit",
+    testonly = True,
     srcs = ["rendezvous_exit_component.rs"],
     crate_root = "rendezvous_exit_component.rs",
     edition = "2024",
@@ -77,6 +92,8 @@ rustc_binary(
     ],
 )
 
+# Needs reviewer attention (bazel2gn skip): packaged in `elf_runner_lifecycle_test`, whose other test components hardcode `fuchsia-pkg://fuchsia.com/elf_runner_lifecycle_test#meta/...`.
+# @bazel2gn:skip
 rustc_test(
     name = "component_exit",
     srcs = ["component_exit.rs"],
@@ -85,12 +102,14 @@ rustc_test(
     edition = "2024",
     deps = [
         "//src/lib/fuchsia",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/sys/component_manager/tests/fidl:components_rust",
         "//src/sys/lib/component-events",
     ],
 )
 
+# Needs reviewer attention (bazel2gn skip): test sources and manifests hardcode `fuchsia-pkg://fuchsia.com/elf_runner_lifecycle_test#meta/...`, which fails hermetic resolution if renamed to `elf_runner_lifecycle_test-gn`.
+# @bazel2gn:skip
 rustc_test(
     name = "lifecycle_timeout",
     srcs = ["lifecycle_timeout.rs"],
@@ -99,12 +118,14 @@ rustc_test(
     edition = "2024",
     deps = [
         "//src/lib/fuchsia",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/sys/lib/component-events",
         "//third_party/rust_crates/vendor:log",
     ],
 )
 
+# Needs reviewer attention (bazel2gn skip): test sources and manifests hardcode `fuchsia-pkg://fuchsia.com/elf_runner_lifecycle_test#meta/...`, which fails hermetic resolution if renamed to `elf_runner_lifecycle_test-gn`.
+# @bazel2gn:skip
 rustc_test(
     name = "lifecycle_timeout_unresponsive",
     srcs = ["lifecycle_timeout_unresponsive.rs"],
@@ -113,12 +134,14 @@ rustc_test(
     edition = "2024",
     deps = [
         "//src/lib/fuchsia",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/sys/lib/component-events",
         "//third_party/rust_crates/vendor:log",
     ],
 )
 
+# Needs reviewer attention (bazel2gn skip): test sources hardcode `fuchsia-pkg://fuchsia.com/elf_runner_lifecycle_test#meta/...`, which fails hermetic resolution if renamed to `elf_runner_lifecycle_test-gn`.
+# @bazel2gn:skip
 rustc_test(
     name = "debug_started",
     srcs = ["debug_started.rs"],
@@ -129,14 +152,16 @@ rustc_test(
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-fs",
         "//src/sys/lib/component-events",
     ],
 )
 
+# @bazel2gn:skip
 rustc_binary(
     name = "unresponsive_component",
+    testonly = True,
     srcs = ["unresponsive_component.rs"],
     crate_root = "unresponsive_component.rs",
     edition = "2024",
@@ -165,6 +190,7 @@ fx_component_manifest(
     manifest = "meta/lifecycle_timeout_unresponsive_root.cml",
 )
 
+# @bazel2gn:skip
 fx_component(
     name = "lifecycle_timeout_unresponsive_root",
     testonly = True,
@@ -186,6 +212,7 @@ fx_component_manifest(
     manifest = "meta/lifecycle_timeout_unresponsive_node.cml",
 )
 
+# @bazel2gn:skip
 fx_component(
     name = "lifecycle_timeout_unresponsive_node",
     testonly = True,
@@ -204,6 +231,7 @@ fx_component_manifest(
     manifest = "meta/lifecycle_timeout_root.cml",
 )
 
+# @bazel2gn:skip
 fx_component(
     name = "lifecycle_timeout_root",
     testonly = True,
@@ -225,6 +253,7 @@ fx_component_manifest(
     manifest = "meta/immediate_exit_component.cml",
 )
 
+# @bazel2gn:skip
 fx_component(
     name = "immediate_exit_component",
     testonly = True,
@@ -270,9 +299,172 @@ fx_component_manifest(
     manifest = "meta/rendezvous_exit_component.cml",
 )
 
+# @bazel2gn:skip
 fx_component(
     name = "rendezvous_exit_component",
     testonly = True,
     compiled_manifest = ":rendezvous_exit_component-manifest",
     deps = [":rendezvous_exit_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "lifecycle_test_packaged_bin",
+    testonly = True,
+    binary = ":lifecycle_test",
+    binary_name = "lifecycle_integration_test",
+)
+
+fx_component_manifest(
+    name = "lifecycle_integration_test-manifest",
+    testonly = True,
+    component_name = "lifecycle_integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/lifecycle.cml",
+)
+
+fx_test_component(
+    name = "lifecycle_integration_test",
+    compiled_manifest = ":lifecycle_integration_test-manifest",
+    deps = [":lifecycle_test_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "lifecycle_timeout_packaged_bin",
+    testonly = True,
+    binary = ":lifecycle_timeout",
+    binary_name = "lifecycle_timeout_integration_test",
+)
+
+fx_component_manifest(
+    name = "lifecycle_timeout_integration_test-manifest",
+    testonly = True,
+    component_name = "lifecycle_timeout_integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/lifecycle_timeout.cml",
+)
+
+fx_test_component(
+    name = "lifecycle_timeout_integration_test",
+    compiled_manifest = ":lifecycle_timeout_integration_test-manifest",
+    deps = [":lifecycle_timeout_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "lifecycle_timeout_unresponsive_packaged_bin",
+    testonly = True,
+    binary = ":lifecycle_timeout_unresponsive",
+    binary_name = "lifecycle_timeout_unresponsive_integration_test",
+)
+
+fx_component_manifest(
+    name = "lifecycle_timeout_unresponsive_integration_test-manifest",
+    testonly = True,
+    component_name = "lifecycle_timeout_unresponsive_integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/lifecycle_timeout_unresponsive.cml",
+)
+
+fx_test_component(
+    name = "lifecycle_timeout_unresponsive_integration_test",
+    compiled_manifest = ":lifecycle_timeout_unresponsive_integration_test-manifest",
+    deps = [":lifecycle_timeout_unresponsive_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "component_exit_packaged_bin",
+    testonly = True,
+    binary = ":component_exit",
+    binary_name = "component_exit_integration_test",
+)
+
+fx_component_manifest(
+    name = "component_exit_integration_test-manifest",
+    testonly = True,
+    component_name = "component_exit_integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/component_exit.cml",
+)
+
+fx_test_component(
+    name = "component_exit_integration_test",
+    compiled_manifest = ":component_exit_integration_test-manifest",
+    deps = [":component_exit_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "debug_started_packaged_bin",
+    testonly = True,
+    binary = ":debug_started",
+    binary_name = "debug_started_integration_test",
+)
+
+fx_component_manifest(
+    name = "debug_started_integration_test-manifest",
+    testonly = True,
+    component_name = "debug_started_integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/debug_started.cml",
+)
+
+fx_test_component(
+    name = "debug_started_integration_test",
+    compiled_manifest = ":debug_started_integration_test-manifest",
+    deps = [":debug_started_packaged_bin"],
+)
+
+# Needs reviewer attention (bazel2gn skip): test sources and manifests hardcode `fuchsia-pkg://fuchsia.com/elf_runner_lifecycle_test#meta/...`, which fails hermetic resolution if renamed to `elf_runner_lifecycle_test-gn`, and `bazel2gn` does not support `parallel = 1` on `fx_test`.
+# @bazel2gn:skip
+fx_package(
+    name = "elf_runner_lifecycle_test_package",
+    package_name = "elf_runner_lifecycle_test",
+    components = [
+        ":immediate_exit_component",
+        ":lifecycle_timeout_root",
+        ":lifecycle_timeout_unresponsive_node",
+        ":lifecycle_timeout_unresponsive_root",
+        ":rendezvous_exit_component",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager/testing/lifecycle",
+    ],
+    test_components = [
+        ":lifecycle_integration_test",
+        ":lifecycle_timeout_integration_test",
+        ":lifecycle_timeout_unresponsive_integration_test",
+        ":component_exit_integration_test",
+        ":debug_started_integration_test",
+    ],
+)
+
+# Needs reviewer attention (bazel2gn skip): test sources and manifests hardcode `fuchsia-pkg://fuchsia.com/elf_runner_lifecycle_test#meta/...`, which fails hermetic resolution if renamed to `elf_runner_lifecycle_test-gn`, and `bazel2gn` does not support `parallel = 1` on `fx_test`.
+# @bazel2gn:skip
+fx_test(
+    name = "elf_runner_lifecycle_test",
+    package = ":elf_runner_lifecycle_test_package",
+    # `component_exit` fails when test cases are executed in parallel.
+    parallel = 1,
 )

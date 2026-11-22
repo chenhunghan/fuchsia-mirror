@@ -6,7 +6,7 @@
 
 #include <lib/async-loop/cpp/loop.h>
 #include <librtc.h>
-#include <librtc_llcpp.h>
+#include <librtc_wire.h>
 
 #include <ddktl/device.h>
 #include <zxtest/zxtest.h>

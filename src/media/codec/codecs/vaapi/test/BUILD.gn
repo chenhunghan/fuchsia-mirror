@@ -40,7 +40,14 @@ cc_test_executable("vaapi_tests") {
     ":vaapi_stubs",
     "..:codec_runner_vaapi",
     "../../test:test_codec_packets",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+    "//sdk/fidl/fuchsia.media:fuchsia.media_cpp",
+    "//sdk/fidl/fuchsia.mediacodec:fuchsia.mediacodec_cpp",
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/component/incoming/cpp",
+    "//sdk/lib/fdio",
     "//src/lib/files",
     "//src/lib/fxl/test:gtest_main",
     "//third_party/googletest:gtest",
@@ -85,9 +92,9 @@ source_set("decoder_fuzzer") {
     ":vaapi_stubs",
     "..:codec_runner_vaapi",
     "../../test:test_codec_packets",
-    "//sdk/fidl/fuchsia.mediacodec:fuchsia.mediacodec_hlcpp",
+    "//sdk/fidl/fuchsia.mediacodec:fuchsia.mediacodec_cpp",
   ]
-  deps = [ "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_hlcpp" ]
+  deps = [ "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp" ]
 }
 
 fuchsia_library_fuzzer("vaapi_mjpeg_decode_fuzzer") {

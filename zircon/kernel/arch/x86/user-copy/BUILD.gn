@@ -6,6 +6,7 @@
 
 import("//build/components.gni")
 import("//build/cpp/library_headers.gni")
+import("//build/rust/rustc_test.gni")
 import("//build/test.gni")
 import("//build/toolchain/toolchain_environment.gni")
 import("//zircon/kernel/lib/code-patching/code-patching.gni")
@@ -34,15 +35,9 @@ template("user_copy_alternative") {
     source_set("${target_name}_tests") {
       testonly = true
       visibility = [ ":*" ]
-      sources = [
-        "copy-tests.cc",
-        "user-copy.S",
-      ]
+      sources = [ "user-copy.S" ]
       defines = defs
-      deps = [
-        "//third_party/googletest:gtest",
-        "//zircon/kernel/lib/arch",
-      ]
+      deps = [ "//zircon/kernel/lib/arch" ]
     }
   }
 }
@@ -89,23 +84,45 @@ if (is_kernel) {
 }
 
 if (is_fuchsia) {
-  fuchsia_unittest_package("tests") {
-    component_name = "x86-user-copy-tests"
-    package_name = component_name
-    deps = [ ":x86-user-copy-tests" ]
-  }
-
   test("x86-user-copy-tests") {
     sources = [ "selection-tests.cc" ]
+    deps = [
+      ":headers",
+      "//src/lib/fxl/test:gtest_main",
+      "//third_party/googletest:gtest",
+      "//zircon/kernel/lib/arch/testing",
+    ]
+  }
+
+  rustc_test("x86-user-copy-copy-tests") {
+    edition = "2024"
+    source_root = "copy_tests.rs"
+    sources = [ "copy_tests.rs" ]
     deps = [
       # Toggling SMAP is privileged (and very non-hermetic) so we only test
       # the non-SMAP variants outside of the kernel.
       ":_x86_copy_to_or_from_user_movsb_tests",
       ":_x86_copy_to_or_from_user_movsq_tests",
-      ":headers",
-      "//src/lib/fxl/test:gtest_main",
-      "//third_party/googletest:gtest",
-      "//zircon/kernel/lib/arch/testing",
+      "//sdk/rust/zx-types",
+      "//src/lib/zr",
+    ]
+  }
+
+  fuchsia_unittest_component("x86-user-copy-selection-tests-component") {
+    component_name = "x86-user-copy-tests"
+    deps = [ ":x86-user-copy-tests" ]
+  }
+
+  fuchsia_unittest_component("x86-user-copy-copy-tests-component") {
+    component_name = "x86-user-copy-copy-tests"
+    deps = [ ":x86-user-copy-copy-tests" ]
+  }
+
+  fuchsia_test_package("tests") {
+    package_name = "x86-user-copy-tests"
+    test_components = [
+      ":x86-user-copy-copy-tests-component",
+      ":x86-user-copy-selection-tests-component",
     ]
   }
 }

@@ -420,7 +420,7 @@ fidl::internal::WireCompleterBase<::test_requestflexibleenvelope::Protocol::Requ
 
 ::fidl::internal::TransactionalRequest<::test_requestflexibleenvelope::Protocol::RequestStrictResponseFlexible>::TransactionalRequest(::test_requestflexibleenvelope::wire::StrictFoo s)
     : body(::test_requestflexibleenvelope::wire::ProtocolRequestStrictResponseFlexibleRequest{s}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_requestflexibleenvelope::kProtocol_RequestStrictResponseFlexible_Ordinal, ::test_requestflexibleenvelope::kProtocol_RequestStrictResponseFlexible_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_requestflexibleenvelope::kProtocol_RequestStrictResponseFlexible_Ordinal, ::test_requestflexibleenvelope::kProtocol_RequestStrictResponseFlexible_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -446,7 +446,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_requestflexibleenvelope::Protocol::RequestStrictResponseFlexible>::TransactionalResponse(::test_requestflexibleenvelope::wire::FlexibleFoo f)
     : body(::fidl::WireResponse<::test_requestflexibleenvelope::Protocol::RequestStrictResponseFlexible>(f)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_requestflexibleenvelope::kProtocol_RequestStrictResponseFlexible_Ordinal, ::test_requestflexibleenvelope::kProtocol_RequestStrictResponseFlexible_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_requestflexibleenvelope::kProtocol_RequestStrictResponseFlexible_Ordinal, ::test_requestflexibleenvelope::kProtocol_RequestStrictResponseFlexible_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_requestflexibleenvelope::Protocol::RequestStrictResponseFlexible>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_requestflexibleenvelope::kProtocol_RequestStrictResponseFlexible_Ordinal, ::test_requestflexibleenvelope::kProtocol_RequestStrictResponseFlexible_DynamicFlags);
@@ -491,7 +491,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalRequest<::test_requestflexibleenvelope::Protocol::RequestFlexibleResponseStrict>::TransactionalRequest(::test_requestflexibleenvelope::wire::FlexibleFoo s)
     : body(::test_requestflexibleenvelope::wire::ProtocolRequestFlexibleResponseStrictRequest{s}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_requestflexibleenvelope::kProtocol_RequestFlexibleResponseStrict_Ordinal, ::test_requestflexibleenvelope::kProtocol_RequestFlexibleResponseStrict_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_requestflexibleenvelope::kProtocol_RequestFlexibleResponseStrict_Ordinal, ::test_requestflexibleenvelope::kProtocol_RequestFlexibleResponseStrict_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -517,7 +517,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_requestflexibleenvelope::Protocol::RequestFlexibleResponseStrict>::TransactionalResponse(::test_requestflexibleenvelope::wire::StrictFoo f)
     : body(::fidl::WireResponse<::test_requestflexibleenvelope::Protocol::RequestFlexibleResponseStrict>(f)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_requestflexibleenvelope::kProtocol_RequestFlexibleResponseStrict_Ordinal, ::test_requestflexibleenvelope::kProtocol_RequestFlexibleResponseStrict_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_requestflexibleenvelope::kProtocol_RequestFlexibleResponseStrict_Ordinal, ::test_requestflexibleenvelope::kProtocol_RequestFlexibleResponseStrict_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_requestflexibleenvelope::Protocol::RequestFlexibleResponseStrict>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_requestflexibleenvelope::kProtocol_RequestFlexibleResponseStrict_Ordinal, ::test_requestflexibleenvelope::kProtocol_RequestFlexibleResponseStrict_DynamicFlags);

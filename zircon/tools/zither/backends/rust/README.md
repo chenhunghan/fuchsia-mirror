@@ -55,8 +55,10 @@ pub const STR_CONST: &str  = "string constant";
 
 ### Enums
 
+Strict enums are emitted as Rust enums:
+
 ```fidl
-type MyEnum = enum : int8 {  // Or any valid integral type
+type MyEnum = strict enum : int8 {  // Or any valid integral type
     ZERO = 0;
     ONE = 1;
 };
@@ -69,6 +71,32 @@ yields
 pub enum MyEnum {
     Zero = 0,
     One = 1,
+}
+```
+
+Flexible enums may take on any value of their underlying type, and so are
+emitted as transparent newtypes with associated constants for the known
+members:
+
+```fidl
+type MyEnum = flexible enum : int8 {  // Or any valid integral type
+    ZERO = 0;
+    ONE = 1;
+};
+```
+
+yields
+
+```rust
+#[repr(transparent)]
+pub struct MyEnum(i8);
+
+impl MyEnum {
+    pub const ZERO: Self = Self(0);
+    pub const ONE: Self = Self(1);
+
+    pub const fn from_raw(raw: i8) -> Self;
+    pub const fn as_raw(self) -> i8;
 }
 ```
 

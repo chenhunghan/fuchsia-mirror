@@ -3,8 +3,16 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":wlan-frame-writer-tests"],
+    visibility = ["//src/connectivity/wlan:__pkg__"],
+)
 
 rustc_library(
     name = "wlan-frame-writer",
@@ -20,4 +28,22 @@ rustc_library(
         "//src/connectivity/wlan/lib/common/rust:wlan-common",
         "//third_party/rust_crates/vendor:zerocopy",
     ],
+)
+
+rustc_test(
+    name = "wlan-frame-writer_test",
+    crate = ":wlan-frame-writer",
+    # Sets GN output_name via bazel2gn for fuchsia_unittest_package binary naming.
+    crate_name = "wlan_frame_writer_lib_test",
+    link_deps = ["//src/devices/bin/driver_runtime"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_rust",
+        "//src/connectivity/wlan/lib/ieee80211",
+    ],
+)
+
+fx_unittest_package(
+    name = "wlan-frame-writer-tests",
+    unit_tests = [":wlan-frame-writer_test"],
 )

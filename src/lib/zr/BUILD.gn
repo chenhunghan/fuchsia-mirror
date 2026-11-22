@@ -41,6 +41,7 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 
 rustc_library("zr") {
   sources = [
+    "src/assert.rs",
     "src/defer.rs",
     "src/inline_fn.rs",
     "src/lib.rs",
@@ -53,6 +54,7 @@ rustc_library("zr") {
     "src/string.rs",
   ]
   edition = "2024"
+  proc_macro_deps = [ "//src/lib/zr/macro:zr-macro" ]
   visibility = [
     ":*",
     "//src/lib/ksync:*",

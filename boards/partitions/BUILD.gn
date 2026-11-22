@@ -114,7 +114,13 @@ if (target_cpu == "arm64") {
     deps = [ "//src/firmware/gigaboot/cpp:fuchsia" ]
     hw_revision = "arm64"
 
+    # At most one of either a fvm or fxfs will be generated, but the board
+    # supports either configuration.
+    fvm = "fvm"
+    fxfs = "fvm"
+
     fvm_size = 17179869184  # 16 GiB
+    fxfs_size = 17179869184  # 16 GiB
   }
 
   generated_partitions_config("qemu-arm64") {

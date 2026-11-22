@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "blktest",
+    srcs = [
+        "blktest.cc",
+        "blktest.h",
+        "main.c",
+    ],
+    visibility = [
+        "//src/devices/block/drivers/ftl/tests:__pkg__",
+        "//src/devices/block/drivers/usb-mass-storage:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fdio-caller",
+        "//src/storage/lib/block_client/cpp",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/pretty",
+        "//zircon/system/ulib/sync",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)

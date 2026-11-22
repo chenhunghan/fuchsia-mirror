@@ -16,12 +16,16 @@
 
 #include <ktl/optional.h>
 #include <ktl/span.h>
-#include <phys/address-space.h>
-#include <phys/allocation.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/allocation.h>
 #include <phys/boot-zbi/boot-zbi.h>
+#include <phys/elf/image.h>
+#include <phys/memory/init.h>
+#include <phys/output/stdout.h>
+#include <phys/output/uart.h>
 #include <phys/runtime/main.h>
-#include <phys/symbolize.h>
-#include <phys/uart/driver.h>
+#include <phys/runtime/self.h>
+#include <phys/runtime/symbolize.h>
 
 #include "stdout.h"
 
@@ -57,9 +61,7 @@ uart::all::Config<> UartFromZbi(LegacyBootShim::InputZbi zbi,
 
 }  // namespace
 
-void PhysMain(void* ptr, arch::EarlyTicks boot_ticks) {
-  ApplyRelocations();
-
+void CppPhysMain(void* ptr, arch::EarlyTicks boot_ticks) {
   Symbolize symbolize(kLegacyShimName);
 
   // This also fills in gLegacyBoot.
@@ -69,11 +71,12 @@ void PhysMain(void* ptr, arch::EarlyTicks boot_ticks) {
   const ktl::span ramdisk = ktl::as_bytes(gLegacyBoot.ramdisk);
   gLegacyBoot.uart_config = UartFromZbi(LegacyBootShim::InputZbi(ramdisk), gLegacyBoot.uart_config);
   UartFromCmdLine(gLegacyBoot.cmdline, gLegacyBoot.uart_config);
-  SetUartConsole(gLegacyBoot.uart_config);
+  UartDriver& uart = SetUartDriver(gLegacyBoot.uart_config);
+  gPhysStdout.set_console(FILE{&uart});
 
   LegacyBootShim shim(symbolize.name(), gLegacyBoot);
-  shim.set_build_id(symbolize.build_id());
-  shim.Get<boot_shim::UartItem<>>().Init(GetUartDriver().config());
+  shim.set_build_id(*Self().build_id());
+  shim.Get<boot_shim::UartItem<>>().Init(uart.config());
 
   // The pool knows all the memory details, so populate the ZBI item that way.
   memalloc::Pool& memory = Allocation::GetPool();
@@ -82,7 +85,7 @@ void PhysMain(void* ptr, arch::EarlyTicks boot_ticks) {
   BootZbi boot;
   if (shim.Load(boot)) {
     memory.PrintMemoryRanges(symbolize.name());
-    boot.Log();
+    boot.Log(kLegacyShimName);
     boot.Boot();
   }
 

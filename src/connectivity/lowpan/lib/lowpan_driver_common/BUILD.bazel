@@ -11,7 +11,7 @@ package(default_applicable_licenses = ["//:license"])
 test_suite(
     name = "tests",
     tests = [":lowpan-driver-common-tests"],
-    visibility = ["//src/connectivity:__pkg__"],
+    visibility = ["//src/connectivity/lowpan:__pkg__"],
 )
 
 # TODO(https://fxbug.dev/356474618): re-enable and fix existing lints

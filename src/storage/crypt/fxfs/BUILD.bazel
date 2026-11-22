@@ -17,6 +17,12 @@ load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_compo
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":fxfs-crypt-tests"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
 rustc_library(
     name = "lib",
     srcs = [
@@ -43,6 +49,7 @@ rustc_test(
     name = "fxfs_crypt_lib_test",
     crate = ":lib",
     edition = "2024",
+    tags = ["manual"],
     deps = ["//src/lib/fuchsia"],
 )
 
@@ -95,7 +102,14 @@ fx_component_manifest(
 fx_component(
     name = "fxfs-crypt",
     compiled_manifest = ":fxfs-crypt-manifest",
+    visibility = ["//src/storage:__subpackages__"],
     deps = [":fxfs_crypt_packaged_bin"],
+)
+
+alias(
+    name = "fxfs",
+    actual = ":fxfs-crypt",
+    visibility = ["//src/storage:__subpackages__"],
 )
 
 fx_package(

@@ -2,9 +2,42 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":loop_fixture_tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "loop_fixture_unittests",
+    srcs = [
+        "real_loop_fixture_unittest.cc",
+        "test_loop_fixture_unittest.cc",
+    ],
+    deps = [
+        ":loop_fixture",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/fit-promise",
+        "//src/lib/fxl:fxl_cli",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/fxl/test:test_settings",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "loop_fixture_tests",
+    unit_tests = [":loop_fixture_unittests"],
+)
 
 # Lets dependents use the shorthand //src/lib/testing/loop_fixture label
 # instead of naming the library, which is called :gtest.
@@ -27,7 +60,7 @@ alias(
 # Deprecated - new targets should instead depend on:
 # //sdk/lib/testing/loop_fixture (for RealLoop) or
 # //src/lib/testing/loop_fixture (for TestLoop or RealLoopFixture)
-cc_library(
+fx_cc_library(
     name = "gtest",
     srcs = ["test_loop.cc"],
     hdrs = [

@@ -65,7 +65,8 @@ class FieldStorage {
   constexpr value_type get() const { return Convert(value_); }
 
  private:
-  template <typename Byte, typename = std::enable_if_t<sizeof(Byte) == 1>>
+  template <typename Byte>
+    requires(sizeof(Byte) == 1)
   static constexpr value_type Convert(std::array<Byte, sizeof(value_type)> bytes) {
     auto [first, last] = [&bytes]() {
       if constexpr (std::endian::native == std::endian::little) {

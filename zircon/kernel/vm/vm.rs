@@ -1,55 +1,489 @@
-// Copyright 2026 The Fuchsia Authors
+// Copyright 2016 The Fuchsia Authors
+// Copyright (c) 2014 Travis Geiselbrecht
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use super::vm_address_region::VmAddressRegion;
-use crate::kernel::types::PAddr;
-use core::ffi::{CStr, c_char, c_void};
+use super::arch_vm_aspace::{
+    ARCH_MMU_FLAG_CACHED, ARCH_MMU_FLAG_PERM_EXECUTE, ARCH_MMU_FLAG_PERM_READ,
+    ARCH_MMU_FLAG_PERM_WRITE, ARCH_MMU_FLAG_UNCACHED_DEVICE, ArchMmuFlags,
+};
+use super::page::VmPagePtr;
+use super::page_state::VmPageState;
+use super::physmap::{is_physmap_addr, paddr_to_physmap, physmap_to_paddr};
+use super::pmm;
+use super::vm_address_region::{VmAddressRegion, flag as vmar_flag};
+use super::vm_aspace::VmAspace;
+use crate::arch_rs::vm::is_kernel_address;
+use crate::kernel::types::{PAddr, VAddr};
+use boot_options::BootOptions;
+use core::cell::UnsafeCell;
+use core::ffi::{c_char, c_void};
+use core::hint;
+use core::mem::ManuallyDrop;
 use core::pin::Pin;
+use debug::ltrace_entry;
+use fbl::RefPtr;
+use handoff::{PhysHandoff, PhysMapping, PhysMapping_Permissions, PhysMapping_Type, PhysVmar};
 use lazy_init::{LazyInit, NoCheck};
-use vm_bindings as bindings;
+use page_bindings::vm_page_t;
 
+const LOCAL_TRACE: u32 = 0;
+
+// SAFETY: All symbols below are linker-defined boundary addresses provided by `kernel.ld` and
+// typed as 1-byte-aligned zero-sized `[c_char; 0]` statics so taking their addresses cannot
+// cause alignment or out-of-bounds UB.
+#[allow(non_upper_case_globals)]
 unsafe extern "C" {
-    fn cpp_vaddr_to_paddr(va: *const c_void) -> PAddr;
-    fn cpp_vm_using_virtual_heap() -> bool;
-    fn cpp_vm_get_kernel_heap_base() -> usize;
-    fn cpp_vm_get_kernel_heap_size() -> usize;
+    /// Start of the kernel executable image, provided by the linker script.
+    pub static __executable_start: [c_char; 0];
 }
 
-// While this method is implemented using FFI clippy cannot observer that the pointer is not
-// de-referenced and so for now squash this lint.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-/// Converts a kernel virtual address to a physical address.
-pub fn vaddr_to_paddr(va: *const c_void) -> PAddr {
-    unsafe { cpp_vaddr_to_paddr(va) }
+// SAFETY: All symbols below are linker-defined boundary addresses provided by `kernel.ld` and
+// typed as 1-byte-aligned zero-sized `[c_char; 0]` statics so taking their addresses cannot
+// cause alignment or out-of-bounds UB.
+#[cfg(ktest)]
+#[allow(non_upper_case_globals)]
+unsafe extern "C" {
+    /// Start of the kernel code segment, provided by the linker script.
+    pub static __code_start: [c_char; 0];
+    /// End of the kernel code segment, provided by the linker script.
+    pub static __code_end: [c_char; 0];
+    /// Start of the kernel read-only data segment, provided by the linker script.
+    pub static __rodata_start: [c_char; 0];
+    /// End of the kernel read-only data segment, provided by the linker script.
+    pub static __rodata_end: [c_char; 0];
+    /// Start of the kernel RELRO segment, provided by the linker script.
+    pub static __relro_start: [c_char; 0];
+    /// End of the kernel RELRO segment, provided by the linker script.
+    pub static __relro_end: [c_char; 0];
+    /// Start of the kernel data segment, provided by the linker script.
+    pub static __data_start: [c_char; 0];
+    /// End of the kernel image, provided by the linker script.
+    pub static _end: [c_char; 0];
+}
+
+#[repr(transparent)]
+struct ZeroPage(VmPagePtr);
+
+// SAFETY: `ZeroPage` wraps a pointer to the wired zero page in the PMM arena, which is initialized
+// once during single-threaded `vm_init` and never freed or mutated afterward.
+unsafe impl Sync for ZeroPage {}
+
+/// Boot time allocated page full of zeros.
+static ZERO_PAGE: LazyInit<ZeroPage, NoCheck> = LazyInit::uninit();
+/// Physical address of the boot time allocated zero page.
+static ZERO_PAGE_PADDR: LazyInit<PAddr, NoCheck> = LazyInit::uninit();
+
+#[repr(transparent)]
+struct RelocatedBasePtr(*const c_char);
+
+// SAFETY: `RelocatedBasePtr` holds an immutable linker-relocated address (`__executable_start`)
+// and is never dereferenced to mutate shared state.
+unsafe impl Sync for RelocatedBasePtr {}
+
+/// This exact symbol name is referenced by `scripts/vmzircon-gdb.py`. It will be
+/// relocated by physboot before the kernel starts.
+#[used]
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+static kernel_relocated_base: RelocatedBasePtr =
+    RelocatedBasePtr((&raw const __executable_start).cast::<c_char>());
+
+struct HandoffVmars(#[expect(dead_code)] fbl::Vector<RefPtr<VmAddressRegion>>);
+
+// SAFETY: `RefPtr<VmAddressRegion>` and `DefaultAllocator` are `Sync`, and `HandoffVmars` is
+// initialized once during single-threaded `vm_init` and never mutated afterward.
+unsafe impl Sync for HandoffVmars {}
+
+/// The initialized VMARs described in the phys hand-off.
+// TODO(https://fxbug.dev/42164859): Consider moving these to a stack- or heap-allocated object.
+static HANDOFF_VMARS: LazyInit<HandoffVmars, NoCheck> = LazyInit::uninit();
+
+struct TemporaryHandoffVmar(UnsafeCell<Option<RefPtr<VmAddressRegion>>>);
+
+// SAFETY: `TEMPORARY_HANDOFF_VMAR` is written once in `vm_init` and taken once in
+// `vm_end_handoff`, which execute sequentially without concurrent access.
+unsafe impl Sync for TemporaryHandoffVmar {}
+
+/// Temporary hand-off VMAR initialized in `vm_init` and destroyed in `vm_end_handoff`.
+static TEMPORARY_HANDOFF_VMAR: TemporaryHandoffVmar = TemporaryHandoffVmar(UnsafeCell::new(None));
+
+/// Declare storage for the kernel's heap VMAR. Maybe unused if virtual heap is disabled.
+pub(super) static KERNEL_HEAP_VMAR: LazyInit<VmAddressRegion, NoCheck> = LazyInit::uninit();
+
+/// Whether the virtual heap is enabled. Initialized once during single-threaded `vm_init_preheap`.
+static USING_VIRTUAL_HEAP: LazyInit<bool, NoCheck> = LazyInit::uninit();
+
+fn to_vmar_flags(perms: PhysMapping_Permissions) -> u32 {
+    let mut flags = vmar_flag::SPECIFIC | vmar_flag::CAN_MAP_SPECIFIC;
+    if perms.readable() {
+        flags |= vmar_flag::CAN_MAP_READ;
+    }
+    if perms.writable() {
+        flags |= vmar_flag::CAN_MAP_WRITE;
+    }
+    if perms.executable() {
+        flags |= vmar_flag::CAN_MAP_EXECUTE;
+    }
+    flags
+}
+
+fn to_arch_mmu_flags(perms: PhysMapping_Permissions, type_: PhysMapping_Type) -> ArchMmuFlags {
+    let mut flags: ArchMmuFlags = 0;
+    match type_ {
+        PhysMapping_Type::Normal => {
+            flags |= ARCH_MMU_FLAG_CACHED;
+        }
+        PhysMapping_Type::Mmio => {
+            flags |= ARCH_MMU_FLAG_UNCACHED_DEVICE;
+        }
+    }
+    if perms.readable() {
+        flags |= ARCH_MMU_FLAG_PERM_READ;
+    }
+    if perms.writable() {
+        flags |= ARCH_MMU_FLAG_PERM_WRITE;
+    }
+    if perms.executable() {
+        flags |= ARCH_MMU_FLAG_PERM_EXECUTE;
+    }
+    flags
+}
+
+/// Reserves each mapping in `mappings` within `vmar` and maps its KASAN shadow when required.
+///
+/// # Safety
+///
+/// `vmar` is in the kernel aspace, only the current CPU is online, and each entry in `mappings`
+/// has valid kernel MMU permissions and cache type for its range. Nothing may access the range of
+/// any entry of `mappings` in a way that its permissions do not permit, no Rust reference into a
+/// permissionless range (or mutable reference into a read-only range) may be live, and if
+/// splitting a partly covered large page may perform break-before-make, nothing may rely on the
+/// rest of that large page staying mapped or hold a live Rust reference into it.
+///
+/// For KASAN shadow mapping (`#[cfg(sanitize = "address")]`), the caller must ensure this is only
+/// called during single-threaded early boot (`vm_init`) with valid `physboot`-initialized kernel
+/// `PhysMapping` entries within the KASAN shadow-mapped kernel address space.
+unsafe fn register_mappings(mappings: &[PhysMapping], vmar: &VmAddressRegion) {
+    for mapping in mappings {
+        // SAFETY: Caller upholds `reserve_space`'s preconditions for `vmar`, `mapping`, its
+        // permissions and cache type, and any partly covered large page.
+        let status = unsafe {
+            vmar.reserve_space(
+                mapping.name(),
+                VAddr(mapping.vaddr),
+                mapping.size,
+                to_arch_mmu_flags(mapping.perms, mapping.type_),
+            )
+        };
+        assert!(status.is_ok());
+
+        #[cfg(sanitize = "address")]
+        if mapping.kasan_shadow {
+            // SAFETY: `[mapping.vaddr, mapping.vaddr + mapping.size)` is a valid hand-off kernel
+            // virtual mapping just reserved in `vmar` during single-threaded `vm_init`.
+            unsafe {
+                crate::instrumentation::asan::asan_map_shadow_for(mapping.vaddr, mapping.size);
+            }
+        }
+    }
+}
+
+/// Registers a hand-off VMAR and all of its mappings under the kernel root VMAR.
+///
+/// # Safety
+///
+/// Must only be called during single-threaded `vm_init` while temporary hand-off memory backing
+/// `phys_vmar` and its mappings remains mapped, with a valid `physboot`-initialized `phys_vmar`.
+/// Nothing may access the range of any mapping of `phys_vmar` in a way that its permissions do
+/// not permit, no Rust reference into a permissionless mapping (or mutable reference into a
+/// read-only mapping) may be live, and if splitting a partly covered large page may perform
+/// break-before-make, nothing may rely on the rest of that large page staying mapped or hold a
+/// live Rust reference into it.
+unsafe fn register_vmar(phys_vmar: &PhysVmar) -> RefPtr<VmAddressRegion> {
+    let root_vmar = VmAspace::kernel_aspace().root_vmar().expect("kernel root VMAR initialized");
+
+    // SAFETY: Caller guarantees `phys_vmar` is valid and temporary hand-off memory is mapped.
+    unsafe { phys_vmar.log(c"VM") };
+    // SAFETY: Caller guarantees `phys_vmar` is valid and temporary hand-off memory is mapped.
+    let perms = unsafe { phys_vmar.permissions() };
+    let vmar = root_vmar
+        .create_sub_vmar(
+            phys_vmar.base.wrapping_sub(root_vmar.base().0),
+            phys_vmar.size,
+            0,
+            to_vmar_flags(perms),
+            phys_vmar.name().to_bytes(),
+        )
+        .unwrap();
+    // SAFETY: Caller guarantees `phys_vmar` is valid and temporary hand-off memory is mapped
+    // during single-threaded `vm_init`. `vmar` is in the kernel aspace, only the current CPU is
+    // online, and caller upholds the mapping permission, live-reference, and partly-covered
+    // large-page requirements for `phys_vmar`.
+    unsafe { register_mappings(phys_vmar.mappings(), &vmar) };
+
+    vmar
+}
+
+/// Returns the physical address of `va`, a virtual address in the kernel image.
+///
+/// # Safety
+///
+/// `va` must be in `[__executable_start, __data_end)`, the physically contiguous part of the image.
+/// The bss pages are not necessarily contiguous with it.
+pub unsafe fn kernel_physical_address_of(va: usize) -> PAddr {
+    PAddr(crate::top::handoff::KernelPhysicalAddressOf(va))
 }
 
 /// Whether the virtual heap is enabled.
+///
+/// Must not be called before `vm_init_preheap` has completed.
+#[inline]
 pub fn vm_using_virtual_heap() -> bool {
-    // SAFETY: The C++ function is safe to call at any time.
-    unsafe { cpp_vm_using_virtual_heap() }
+    // SAFETY: `USING_VIRTUAL_HEAP` is initialized unconditionally during single-threaded early boot
+    // in `vm_init_preheap` before `heap_init` or any VM/heap operations, and is never mutated
+    // afterward.
+    unsafe { *USING_VIRTUAL_HEAP.get_unchecked() }
+}
+
+/// C++ FFI entry point for [`vm_using_virtual_heap`].
+#[unsafe(export_name = "vm_using_virtual_heap")]
+extern "C" fn rust_vm_using_virtual_heap() -> bool {
+    vm_using_virtual_heap()
 }
 
 /// Request the heap dimensions.
+///
+/// Must not be called before `vm_init_preheap` has completed. Panics if the virtual heap is not
+/// enabled.
+#[inline]
 pub fn vm_get_kernel_heap_base() -> usize {
-    // SAFETY: The C++ function asserts `vm_using_virtual_heap()` and returns a constant.
-    unsafe { cpp_vm_get_kernel_heap_base() }
+    assert!(vm_using_virtual_heap());
+    // SAFETY: `USING_VIRTUAL_HEAP` is only initialized to `true` in `vm_init_preheap` after
+    // `KERNEL_HEAP_VMAR` has been initialized, and `KERNEL_HEAP_VMAR` is never destroyed.
+    unsafe { KERNEL_HEAP_VMAR.get_unchecked() }.base().0
+}
+
+/// C++ FFI entry point for [`vm_get_kernel_heap_base`].
+#[unsafe(export_name = "vm_get_kernel_heap_base")]
+extern "C" fn rust_vm_get_kernel_heap_base() -> usize {
+    vm_get_kernel_heap_base()
 }
 
 /// Request the heap dimensions.
+///
+/// Must not be called before `vm_init_preheap` has completed. Panics if the virtual heap is not
+/// enabled.
+#[inline]
 pub fn vm_get_kernel_heap_size() -> usize {
-    // SAFETY: The C++ function asserts `vm_using_virtual_heap()` and returns a constant.
-    unsafe { cpp_vm_get_kernel_heap_size() }
+    assert!(vm_using_virtual_heap());
+    // SAFETY: `USING_VIRTUAL_HEAP` is only initialized to `true` in `vm_init_preheap` after
+    // `KERNEL_HEAP_VMAR` has been initialized, and `KERNEL_HEAP_VMAR` is never destroyed.
+    unsafe { KERNEL_HEAP_VMAR.get_unchecked() }.size()
+}
+
+/// C++ FFI entry point for [`vm_get_kernel_heap_size`].
+#[unsafe(export_name = "vm_get_kernel_heap_size")]
+extern "C" fn rust_vm_get_kernel_heap_size() -> usize {
+    vm_get_kernel_heap_size()
+}
+
+/// Initializes basic VM data structures and reserves the kernel virtual heap VMAR prior to heap
+/// initialization.
+///
+/// # Safety
+///
+/// Must be called at most once on the boot CPU before `heap_init`, `vm_init`, or any other thread
+/// runs, after `thread::init_early()`, `ASPACES_LIST` and PMM initialization, and
+/// `arch_prevm_init`, and before any other use of the kernel address space, while `gPhysHandoff`
+/// is valid.
+pub(crate) unsafe fn vm_init_preheap() {
+    // Initialize VMM data structures.
+    // SAFETY: The caller upholds the requirements of `kernel_aspace_init_pre_heap`.
+    unsafe { VmAspace::kernel_aspace_init_pre_heap() };
+
+    let root_vmar = VmAspace::kernel_aspace().root_vmar().expect("kernel root VMAR initialized");
+
+    let vmar: ManuallyDrop<RefPtr<VmAddressRegion>>;
+
+    // SAFETY: The caller guarantees `gPhysHandoff` is valid throughout `vm_init_preheap`.
+    let heap_vmar = unsafe { PhysHandoff::get() }.heap_vmar();
+    if let Some(heap_vmar) = heap_vmar {
+        // SAFETY: Temporary hand-off memory backing `heap_vmar` is mapped throughout
+        // `vm_init_preheap`.
+        unsafe { heap_vmar.log(c"VM") };
+        // Reserve the range for the heap.
+        let kernel_heap_base = heap_vmar.base;
+        let heap_bytes = heap_vmar.size;
+        // The heap has nothing to initialize later and we can create this from the beginning with
+        // only read and write and no execute.
+        // SAFETY: The region is initialized in the static `KERNEL_HEAP_VMAR`, whose last
+        // reference is never released: the reference adopted below is held in `ManuallyDrop` and
+        // never released.
+        let init = unsafe {
+            VmAddressRegion::new_child(
+                &root_vmar,
+                kernel_heap_base,
+                heap_bytes,
+                vmar_flag::CAN_MAP_SPECIFIC | vmar_flag::CAN_MAP_READ | vmar_flag::CAN_MAP_WRITE,
+                b"kernel heap",
+            )
+        };
+        // SAFETY: `KERNEL_HEAP_VMAR` is initialized at most once during single-threaded early boot
+        // before any access.
+        let Ok(()) = unsafe { Pin::static_ref(&KERNEL_HEAP_VMAR).init_pin(init) };
+        // SAFETY: `KERNEL_HEAP_VMAR` was just initialized and has not been adopted yet. The
+        // reference is held in `ManuallyDrop` and never released, so `VmAddressRegion::recycle` is
+        // never invoked on static storage.
+        vmar = ManuallyDrop::new(unsafe { RefPtr::adopt_raw(KERNEL_HEAP_VMAR.as_ptr()) });
+        vmar.trace_new();
+        {
+            ksync::lock!(let mut region_guard = vmar.region_lock().lock());
+            ksync::lock!(let mut guard = vmar.lock().lock());
+            // SAFETY: `vmar` is in `LifeCycleState::NotReady` with a live parent (`root_vmar`), is
+            // kept alive in static `LazyInit` storage (and `vmar`) for the duration of the call,
+            // and is the first child in the freshly initialized kernel root VMAR so no child has
+            // the same base.
+            let status = unsafe { vmar.activate(region_guard.token_mut(), guard.token_mut()) };
+            assert!(status.is_ok());
+        }
+    }
+    // SAFETY: `USING_VIRTUAL_HEAP` is initialized at most once during single-threaded early boot
+    // in `vm_init_preheap` before any access (and after `KERNEL_HEAP_VMAR` is initialized).
+    unsafe { USING_VIRTUAL_HEAP.init(heap_vmar.is_some()) };
+}
+
+/// Initializes the VM subsystem, allocating the zero page and registering hand-off VMARs.
+///
+/// # Safety
+///
+/// Must be called at most once during single-threaded early boot after `vm_init_preheap` and
+/// `heap_init` (prior to enabling break-before-make at `LK_INIT_LEVEL_VM`), while `gPhysHandoff`
+/// is a valid `physboot` hand-off whose `PhysVmar` mappings match active page-table permissions
+/// with no conflicting live Rust references.
+pub(crate) unsafe fn vm_init() {
+    ltrace_entry!();
+
+    // grab a page and mark it as the zero page
+    let (zero_page, zero_page_paddr) = pmm::alloc_page(0).unwrap();
+
+    // consider the zero page a wired page part of the kernel.
+    // SAFETY: `zero_page` was just allocated by `pmm::alloc_page` and is exclusively owned here.
+    unsafe { zero_page.set_state(VmPageState::WIRED) };
+
+    let ptr = paddr_to_physmap(zero_page_paddr);
+    debug_assert!(ptr.0 != 0);
+
+    // SAFETY: `ptr` is the valid kernel physmap virtual address of the page-aligned `zero_page`
+    // exclusively owned here before any concurrent access.
+    unsafe { crate::arch_rs::ops::zero_page(ptr) };
+
+    // SAFETY: `ZERO_PAGE` and `ZERO_PAGE_PADDR` are initialized at most once during
+    // single-threaded early boot in `vm_init` after the page is wired and zeroed.
+    unsafe {
+        ZERO_PAGE.init(ZeroPage(zero_page));
+        ZERO_PAGE_PADDR.init(zero_page_paddr);
+    }
+
+    // Register the permanent and temporary hand-off VMARs.
+    // SAFETY: The caller guarantees `gPhysHandoff` is valid throughout `vm_init`.
+    let handoff = unsafe { PhysHandoff::get() };
+    let mut handoff_vmars = fbl::Vector::new();
+    // SAFETY: Temporary hand-off memory is mapped throughout `vm_init`.
+    let phys_vmars = unsafe { handoff.vmars() };
+    let res = handoff_vmars.reserve(phys_vmars.len());
+    assert!(res.is_ok());
+    for phys_vmar in phys_vmars {
+        // SAFETY: Called during single-threaded `vm_init` prior to enabling break-before-make,
+        // while valid `physboot` hand-off mappings are mapped in place with matching
+        // `PhysMapping` permissions and no conflicting live Rust references.
+        let vmar = unsafe { register_vmar(phys_vmar) };
+        let res = handoff_vmars.push_back(vmar);
+        assert!(res.is_ok());
+    }
+    // SAFETY: `HANDOFF_VMARS` is initialized at most once during single-threaded early boot in
+    // `vm_init` and is never accessed concurrently.
+    unsafe { HANDOFF_VMARS.init(HandoffVmars(handoff_vmars)) };
+
+    // SAFETY: Called during single-threaded `vm_init` prior to enabling break-before-make, while
+    // valid `physboot` temporary hand-off memory is mapped read-write with matching `PhysMapping`
+    // permissions and no conflicting live Rust references.
+    let temporary_vmar = unsafe { register_vmar(handoff.temporary_vmar()) };
+    // SAFETY: `vm_init` runs once during single-threaded early boot before `vm_end_handoff`, so no
+    // concurrent access to `TEMPORARY_HANDOFF_VMAR` can occur.
+    unsafe { *TEMPORARY_HANDOFF_VMAR.0.get() = Some(temporary_vmar) };
+
+    super::heap::cmpct_set_fill_on_alloc_threshold(
+        BootOptions::get().heap_alloc_fill_threshold as usize,
+    );
+}
+
+/// Ends the VM's role within the context of phys handoff: it destroys the VMAR
+/// containing the mappings backing temporary hand-off data.
+///
+/// # Safety
+///
+/// Must be called at most once sequentially after `vm_init` (with no concurrent access), when
+/// ending hand-off from physboot.
+pub(crate) unsafe fn vm_end_handoff() {
+    // SAFETY: The caller guarantees `vm_end_handoff` is called at most once sequentially after
+    // `vm_init` with no concurrent access to `TEMPORARY_HANDOFF_VMAR`.
+    let temporary_handoff_vmar = unsafe { (*TEMPORARY_HANDOFF_VMAR.0.get()).take() };
+    debug_assert!(temporary_handoff_vmar.is_some());
+    drop(temporary_handoff_vmar);
+}
+
+/// Virtual to physical for kernel addresses.
+#[unsafe(no_mangle)]
+pub extern "C" fn vaddr_to_paddr(va: *const c_void) -> PAddr {
+    if is_physmap_addr(VAddr(va.addr())) {
+        return physmap_to_paddr(VAddr(va.addr()));
+    }
+
+    // It doesn't make sense to be calling this on a non-kernel address, since we would otherwise
+    // be querying some 'random' active user address space, which is unlikely to be what the caller
+    // wants.
+    if !is_kernel_address(va.addr()) {
+        hint::cold_path();
+        return PAddr(0);
+    }
+
+    let Ok((pa, _)) = VmAspace::kernel_aspace().arch_aspace().query(va.addr()) else {
+        hint::cold_path();
+        return PAddr(0);
+    };
+
+    pa
+}
+
+/// Return a pointer to the zero page.
+///
+/// Must not be called before `vm_init` has completed.
+#[inline]
+pub fn vm_get_zero_page() -> VmPagePtr {
+    // SAFETY: `ZERO_PAGE` is initialized unconditionally during single-threaded early boot in
+    // `vm_init` before any VM objects or mappings can reference the zero page, and is never
+    // mutated afterward.
+    unsafe { ZERO_PAGE.get_unchecked().0 }
+}
+
+/// C++ FFI entry point for [`vm_get_zero_page`].
+#[unsafe(export_name = "vm_get_zero_page")]
+extern "C" fn rust_vm_get_zero_page() -> *mut vm_page_t {
+    vm_get_zero_page().as_ffi()
 }
 
 /// Return the physical address of the zero page.
+///
+/// Must not be called before `vm_init` has completed.
 #[inline]
 pub fn vm_get_zero_page_paddr() -> PAddr {
-    // SAFETY: `zero_page_paddr` is written once during single-threaded early boot in `vm_init`
-    // before interrupts or secondary CPUs are enabled, and is never modified afterward.
-    PAddr(unsafe { bindings::zero_page_paddr })
+    // SAFETY: `ZERO_PAGE_PADDR` is initialized unconditionally during single-threaded early boot
+    // in `vm_init` before any VM objects or mappings can reference the zero page, and is never
+    // mutated afterward.
+    unsafe { *ZERO_PAGE_PADDR.get_unchecked() }
 }
 
 /// Evaluates whether VM ktracing is enabled at the requested level.
@@ -123,8 +557,30 @@ macro_rules! vm_ktrace_duration_end {
 }
 pub use vm_ktrace_duration_end;
 
-// In builds with verbose VM tracing enabled (VM_TRACING_LEVEL >= 1), we emit these events under the
-// "kernel:vm" category at the specified VM tracing level. In standard/production builds
+/// Emits a VM ktrace flow begin event if tracing is enabled at `$level`.
+#[macro_export]
+macro_rules! vm_ktrace_flow_begin {
+    ($level:tt, $label:tt, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        if $crate::vm::vm::vm_ktrace_level_enabled!($level) {
+            $crate::ktrace_rs::flow_begin!("kernel:vm", $label, $flow_id $(, $key => $val)*);
+        }
+    };
+}
+pub use vm_ktrace_flow_begin;
+
+/// Emits a VM ktrace flow end event if tracing is enabled at `$level`.
+#[macro_export]
+macro_rules! vm_ktrace_flow_end {
+    ($level:tt, $label:tt, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        if $crate::vm::vm::vm_ktrace_level_enabled!($level) {
+            $crate::ktrace_rs::flow_end!("kernel:vm", $label, $flow_id $(, $key => $val)*);
+        }
+    };
+}
+pub use vm_ktrace_flow_end;
+
+// In builds with verbose VM tracing enabled (VM_TRACING_LEVEL >= 1), we emit these events under
+// the "kernel:vm" category at the specified VM tracing level. In standard/production builds
 // (VM_TRACING_LEVEL = 0), we fallback to emitting under the lightweight "kernel:oom" category
 // instead.
 //
@@ -143,31 +599,6 @@ macro_rules! oom_ktrace_duration {
 }
 #[cfg(not(vm_tracing_level_at_least_1))]
 pub use oom_ktrace_duration;
-
-/// Declare storage for the kernel's heap VMAR. Maybe unused if virtual heap is disabled.
-static KERNEL_HEAP_VMAR: LazyInit<VmAddressRegion, NoCheck> = LazyInit::uninit();
-
-/// # Safety
-///
-/// Must be called at most once, before any other use of the kernel heap region. The last
-/// reference to the returned region must never be released. `name` points to a null-terminated
-/// string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_vm_address_region_kernel_heap_init(
-    parent: &VmAddressRegion,
-    base: usize,
-    size: usize,
-    vmar_flags: u32,
-    name: *const c_char,
-) -> &'static VmAddressRegion {
-    // SAFETY: `name` points to a null-terminated string.
-    let name = unsafe { CStr::from_ptr(name) };
-    let init = VmAddressRegion::new_child(parent, base, size, vmar_flags, name);
-    // SAFETY: `KERNEL_HEAP_VMAR` is initialized at most once, before any other use.
-    let Ok(()) = unsafe { Pin::static_ref(&KERNEL_HEAP_VMAR).init_pin(init) };
-    // SAFETY: `KERNEL_HEAP_VMAR` is initialized.
-    unsafe { KERNEL_HEAP_VMAR.get_unchecked() }
-}
 
 /// Kernel console `vm` command implementation.
 #[cfg(console_enabled)]

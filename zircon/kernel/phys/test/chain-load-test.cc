@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 #include <ktl/iterator.h>
-#include <phys/symbolize.h>
+#include <phys/runtime/symbolize.h>
 
 #include "turducken.h"
 

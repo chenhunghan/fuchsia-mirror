@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/cpp/library_headers.gni")
-
 if (!is_kernel) {
   import("//build/components.gni")
   import("//build/config/linker.gni")
@@ -87,6 +85,7 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 library_headers("headers") {
   public = [
     "include/lib/zircon-internal/align.h",
+    "include/lib/zircon-internal/debug.h",
     "include/lib/zircon-internal/default_stack_size.h",
     "include/lib/zircon-internal/device/cpu-trace/goldmont-pm-events.inc",
     "include/lib/zircon-internal/device/cpu-trace/intel-pm-events.inc",
@@ -107,6 +106,6 @@ library_headers("headers") {
 }
 
 source_set("zircon-internal") {
-  visibility = [ "*" ]
+  visibility = [ "//*" ]
   public_deps = [ ":headers" ]
 }

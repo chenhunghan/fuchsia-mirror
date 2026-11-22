@@ -22,8 +22,8 @@ review or consideration. For more information, see [Fuchsia RFCs](/docs/contribu
 
 ### Review completed RFCs
 
-To see a complete list of accepted and rejected RFC proposals, see [Accepted proposals](/docs/contribute/governance/rfcs#accepted)
-and [Rejected proposals](/docs/contribute/governance/rfcs#rejected).
+To see a complete list of accepted and rejected RFC proposals, see
+[List of all Fuchsia RFCs](/docs/contribute/governance/rfcs/all_rfcs.md).
 
 ### Track ongoing RFCs
 
@@ -35,7 +35,7 @@ that lists any open Gerrit change in the `rfcs` directory.
 If you want to create a proposal that you want the Fuchsia Eng Council to
 review, see [Creating an RFC.](/docs/contribute/governance/rfcs/create_rfc.md)
 
-## Join a mailing list
+## Join a mailing list {:#join-a-mailing-list}
 
 Stay informed about the Fuchsia project by joining an email list through
 Google Groups.

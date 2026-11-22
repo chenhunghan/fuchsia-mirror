@@ -63,6 +63,15 @@ type Configuration = table {
     /// or `drive_strength` can be specified, but not both.
     @available(added=33)
     9: drive_strength uint64;
+
+    /// Enable or disable the pin input buffer. `fuchsia.hardware.gpio/Gpio` methods (such as
+    /// `SetBufferMode()`) must not change this setting on controllers that support it. How a
+    /// disabled input buffer affects GPIO functionality (e.g. reading the value of the pin or
+    /// receiving pin interrupts) is controller dependent. `Configure()` returns
+    /// `ZX_ERR_NOT_SUPPORTED` if this field is set (to any value) and the controller does not
+    /// support configuring the input buffer.
+    @available(added=NEXT)
+    10: input_buffer_enabled bool;
 };
 
 open protocol Pin {

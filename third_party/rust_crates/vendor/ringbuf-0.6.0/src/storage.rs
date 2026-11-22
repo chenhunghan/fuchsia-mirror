@@ -1,0 +1,250 @@
+#[cfg(feature = "alloc")]
+use alloc::{boxed::Box, vec::Vec};
+#[cfg(feature = "alloc")]
+use core::mem::ManuallyDrop;
+use core::{cell::UnsafeCell, marker::PhantomData, mem::MaybeUninit, ops::Range, ptr::NonNull, slice};
+
+/// Abstract storage for the ring buffer.
+///
+/// Storage items must be stored as a contiguous array.
+///
+/// # Safety
+///
+/// Must not alias with its contents
+/// (it must be safe to store mutable references to storage itself and to its data at the same time).
+///
+/// [`Self::as_mut_ptr`] must point to underlying data.
+///
+/// [`Self::len`] must always return the same value.
+pub unsafe trait Storage {
+    /// Stored item.
+    type Item: Sized;
+
+    /// Length of the storage.
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Return pointer to the beginning of the storage items.
+    fn as_ptr(&self) -> *const MaybeUninit<Self::Item> {
+        self.as_mut_ptr().cast_const()
+    }
+    /// Return mutable pointer to the beginning of the storage items.
+    fn as_mut_ptr(&self) -> *mut MaybeUninit<Self::Item>;
+
+    /// Returns a mutable slice of storage in specified `range`.
+    ///
+    /// # Safety
+    ///
+    /// Slice must not overlab with existing mutable slices.
+    ///
+    /// Non-`Sync` items must not be accessed concurrently.
+    unsafe fn slice(&self, range: Range<usize>) -> &[MaybeUninit<Self::Item>] {
+        unsafe { slice::from_raw_parts(self.as_ptr().add(range.start), range.len()) }
+    }
+    /// Returns a mutable slice of storage in specified `range`.
+    ///
+    /// # Safety
+    ///
+    /// Slices must not overlap.
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn slice_mut(&self, range: Range<usize>) -> &mut [MaybeUninit<Self::Item>] {
+        unsafe { slice::from_raw_parts_mut(self.as_mut_ptr().add(range.start), range.len()) }
+    }
+}
+
+pub struct Ref<'a, T> {
+    _ghost: PhantomData<&'a mut [T]>,
+    ptr: *mut MaybeUninit<T>,
+    len: usize,
+}
+unsafe impl<T> Send for Ref<'_, T> where T: Send {}
+unsafe impl<T> Sync for Ref<'_, T> where T: Send {}
+unsafe impl<T> Storage for Ref<'_, T> {
+    type Item = T;
+    #[inline]
+    fn as_mut_ptr(&self) -> *mut MaybeUninit<T> {
+        self.ptr
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+impl<'a, T> From<&'a mut [MaybeUninit<T>]> for Ref<'a, T> {
+    fn from(value: &'a mut [MaybeUninit<T>]) -> Self {
+        Self {
+            _ghost: PhantomData,
+            ptr: value.as_mut_ptr(),
+            len: value.len(),
+        }
+    }
+}
+impl<'a, T> From<Ref<'a, T>> for &'a mut [MaybeUninit<T>] {
+    fn from(value: Ref<'a, T>) -> Self {
+        unsafe { slice::from_raw_parts_mut(value.ptr, value.len) }
+    }
+}
+
+pub struct Owning<T: ?Sized> {
+    data: UnsafeCell<T>,
+}
+unsafe impl<T: ?Sized> Sync for Owning<T> where T: Send {}
+impl<T> From<T> for Owning<T> {
+    fn from(value: T) -> Self {
+        Self {
+            data: UnsafeCell::new(value),
+        }
+    }
+}
+
+pub type Array<T, const N: usize> = Owning<[MaybeUninit<T>; N]>;
+unsafe impl<T, const N: usize> Storage for Array<T, N> {
+    type Item = T;
+    #[inline]
+    fn as_mut_ptr(&self) -> *mut MaybeUninit<T> {
+        self.data.get().cast()
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        N
+    }
+}
+impl<T, const N: usize> From<Array<T, N>> for [MaybeUninit<T>; N] {
+    fn from(value: Array<T, N>) -> Self {
+        value.data.into_inner()
+    }
+}
+
+pub type Slice<T> = Owning<[MaybeUninit<T>]>;
+unsafe impl<T> Storage for Slice<T> {
+    type Item = T;
+    #[inline]
+    fn as_mut_ptr(&self) -> *mut MaybeUninit<T> {
+        self.data.get().cast()
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        unsafe { NonNull::new_unchecked(self.data.get()) }.len()
+    }
+}
+
+#[cfg(feature = "alloc")]
+pub struct Heap<T> {
+    ptr: *mut MaybeUninit<T>,
+    len: usize,
+    allocated: usize,
+}
+#[cfg(feature = "alloc")]
+unsafe impl<T> Send for Heap<T> where T: Send {}
+#[cfg(feature = "alloc")]
+unsafe impl<T> Sync for Heap<T> where T: Send {}
+#[cfg(feature = "alloc")]
+unsafe impl<T> Storage for Heap<T> {
+    type Item = T;
+    #[inline]
+    fn as_mut_ptr(&self) -> *mut MaybeUninit<T> {
+        self.ptr
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+#[cfg(feature = "alloc")]
+impl<T> Heap<T> {
+    /// Create a new heap storage with exact capacity.
+    pub fn new(capacity: usize) -> Self {
+        let mut data = Vec::<MaybeUninit<T>>::with_capacity(capacity);
+        unsafe { data.set_len(capacity) };
+        Self::from_vec(data)
+    }
+    /// Allocate storage with the requested logical length.
+    ///
+    /// Any excess allocation is retained, so no infallible shrinking allocation is needed.
+    pub fn try_new(capacity: usize) -> Result<Self, alloc::collections::TryReserveError> {
+        let mut data = Vec::<MaybeUninit<T>>::new();
+        data.try_reserve_exact(capacity)?;
+        unsafe { data.set_len(capacity) };
+        Ok(Self::from_vec(data))
+    }
+    fn from_vec(value: Vec<MaybeUninit<T>>) -> Self {
+        let mut value = ManuallyDrop::new(value);
+        Self {
+            ptr: value.as_mut_ptr(),
+            len: value.len(),
+            allocated: value.capacity(),
+        }
+    }
+}
+#[cfg(feature = "alloc")]
+impl<T> From<Vec<MaybeUninit<T>>> for Heap<T> {
+    fn from(mut value: Vec<MaybeUninit<T>>) -> Self {
+        // Use the entire allocation as storage for non-ZSTs. For ZSTs, retain
+        // the vector length because its allocation capacity is usize::MAX.
+        if core::mem::size_of::<T>() != 0 {
+            unsafe { value.set_len(value.capacity()) };
+        }
+        Self::from_vec(value)
+    }
+}
+#[cfg(feature = "alloc")]
+impl<T> From<Box<[MaybeUninit<T>]>> for Heap<T> {
+    fn from(value: Box<[MaybeUninit<T>]>) -> Self {
+        Self::from_vec(value.into_vec())
+    }
+}
+#[cfg(feature = "alloc")]
+impl<T> From<Heap<T>> for Box<[MaybeUninit<T>]> {
+    fn from(value: Heap<T>) -> Self {
+        let value = ManuallyDrop::new(value);
+        unsafe { Vec::from_raw_parts(value.ptr, value.len, value.allocated) }.into_boxed_slice()
+    }
+}
+#[cfg(feature = "alloc")]
+impl<T> Drop for Heap<T> {
+    fn drop(&mut self) {
+        drop(unsafe { Vec::from_raw_parts(self.ptr, self.len, self.allocated) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::{cell::Cell, marker::PhantomData};
+
+    struct Check<S: Storage + Send + Sync + ?Sized>(PhantomData<S>);
+
+    #[allow(dead_code)]
+    fn check_send_sync() {
+        let _: Check<Ref<Cell<i32>>>;
+        let _: Check<Array<Cell<i32>, 4>>;
+        let _: Check<Slice<Cell<i32>>>;
+        #[cfg(feature = "alloc")]
+        let _: Check<Heap<Cell<i32>>>;
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod heap_tests {
+    use super::*;
+
+    #[test]
+    fn logical_length_can_be_smaller_than_allocation() {
+        for into_box in [false, true] {
+            let mut data = Vec::with_capacity(16);
+            data.extend([MaybeUninit::new(7u8), MaybeUninit::new(8)]);
+            let storage = Heap::from_vec(data);
+            assert_eq!(storage.len(), 2);
+            assert!(storage.allocated >= 16);
+            if into_box {
+                let data: Box<[_]> = storage.into();
+                assert_eq!(data.len(), 2);
+                assert_eq!(unsafe { data[0].assume_init() }, 7);
+                assert_eq!(unsafe { data[1].assume_init() }, 8);
+            }
+            // Both paths must deallocate using the original allocation layout.
+        }
+    }
+}
